@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import sys
+
+
+def main(argv: list[str] | None = None) -> int:
+	argv = list(sys.argv[1:] if argv is None else argv)
+	if should_use_gerber_mode(argv):
+		from stimulation_gerber_platform import main as gerber_main
+
+		return gerber_main(argv)
+
+	from stimulation_multiphysics import main as multiphysics_main
+
+	return multiphysics_main(argv)
+
+
+def should_use_gerber_mode(argv: list[str]) -> bool:
+	gerber_flags = {
+		"--gerber-scenario",
+		"--gerber-root",
+		"--layer",
+		"--anchors-file",
+		"--probes-file",
+		"--component-netlists",
+		"--sources-file",
+		"--analyses-file",
+		"--aliases-file",
+		"--emit-gerber-template",
+		"--audit-flyingprobe-path",
+		"--audit-netlists",
+		"--prepare-only",
+		"--ngspice-exe",
+	}
+	return any(flag in argv for flag in gerber_flags)
+
+
+if __name__ == "__main__":
+	raise SystemExit(main())
