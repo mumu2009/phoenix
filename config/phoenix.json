@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "source": "auto_tune_phoenix_params.py",
+  "timestamp": "2026-07-14T07:29:55",
+  "context": {
+    "enableSemanticSearch": true,
+    "enableHierarchical": true,
+    "hierarchicalLevels": {
+      "global": 1024,
+      "workspace": 2048,
+      "file": 4096,
+      "function": 512
+    },
+    "maxTokens": 8192,
+    "reservedSystemTokens": 768,
+    "importanceThreshold": 0.2,
+    "similarityThreshold": 0.8,
+    "semanticChunkSize": 512,
+    "attentionSink": {
+      "sinkTokens": 512,
+      "sinkImportance": 0.2
+    }
+  },
+  "scenarios": {
+    "short_dialogue_max_turns": 4,
+    "long_dialogue_min_turns": 6,
+    "long_dialogue_max_turns": 15,
+    "ultra_long_dialogue_min_turns": 18,
+    "ultra_long_dialogue_max_turns": 22
+  },
+  "llama_server": {
+    "threads": 12,
+    "parallel": 1,
+    "ctx_size": 2048
+  },
+  "memebarrier": {
+    "scanIntervalMs": 10000,
+    "maliciousThreshold": 0.7,
+    "minThreshold": 0.35,
+    "maxThreshold": 0.95,
+    "thresholdMomentum": 0.15,
+    "minIsolationMargin": 0.05,
+    "minConsecutiveHits": 2,
+    "maxIsolatePerScan": 5,
+    "adaptiveEnabled": true,
+    "anomalyEnabled": true,
+    "scoreWindowSize": 512,
+    "useTextCNN": true,
+    "useRecommender": true,
+    "useTorchModels": true,
+    "disableRateTarget": 0.01,
+    "recommenderTopics": 24,
+    "recommenderDim": 16,
+    "weights": {
+      "growth": 0.5,
+      "outSkew": 0.25,
+      "selfSkew": 0.15,
+      "anomaly": 0.1
+    },
+    "torch": {
+      "maxLen": 48,
+      "embDim": 64,
+      "hidDim": 64,
+      "adamLR": 0.001,
+      "epochs": 2,
+      "batch": 32,
+      "lrDecay": 0.5,
+      "patience": 1
+    }
+  },
+  "summary_model": {
+    "vocabSize": 4096,
+    "dModel": 64,
+    "nHeads": 2,
+    "nLayers": 1,
+    "dFF": 128,
+    "maxLen": 128,
+    "maxTokens": 32,
+    "lr": 0.001,
+    "tokenizerMode": "bpe"
+  },
+  "model_defaults": {
+    "decayFactor": 0.5,
+    "maxMemeWords": 100,
+    "minOverlapThreshold": 2,
+    "memeNgramMin": 3,
+    "memeNgramMax": 14,
+    "maliciousThreshold": 0.7,
+    "learningIterations": 3,
+    "iteration": 5,
+    "threshold": 3.0,
+    "decay": 1.0,
+    "decayK": 1.0,
+    "maxLen": 16,
+    "edgeWeight": 1.0,
+    "activationType": "relu",
+    "transferType": "linear",
+    "activationCustom": "",
+    "transferCustom": "",
+    "mappingDepth": 1,
+    "reflectionTopMemes": 18,
+    "reflectionTopWords": 24,
+    "reflectionMinScore": 1e-06
+  }
+}

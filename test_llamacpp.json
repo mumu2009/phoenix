@@ -1,0 +1,7 @@
+{
+  "model": "llama-3.1-8b-instruct",
+  "messages": [
+    {"role": "user", "content": "你好"}
+  ],
+  "max_tokens": 100
+}

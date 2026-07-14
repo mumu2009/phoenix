@@ -1,0 +1,112 @@
+# ─── Build artifacts ───────────────────────────────────────────────────────────
+build/
+dist/
+*.exe
+*.dll
+*.lib
+*.a
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.map
+compile_output.txt
+build_success_flag.txt
+
+# ─── Conan / CMake ─────────────────────────────────────────────────────────────
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+!conanfile.txt
+conan_provider.cmake
+conanbuildinfo.*
+conaninfo.txt
+graph_info.json
+
+# ─── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.venv/
+venv/
+env/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Runtime data (generated at runtime, not source) ───────────────────────────
+runtime_store/
+auth/
+snapshots/
+lmdb/
+uploads/
+checkpoints/
+GGUF_models/
+dump.rdb
+*.pid
+*.log
+*.rdb
+
+# ─── Bundled third-party binaries / large vendor trees ─────────────────────────
+Python314/
+Redis-8.0.3-Windows-x64-cygwin-with-Service/
+poppler-25.12.0/
+OpenClaw-2026.2.17.zip
+openclaw-2026.2.17.tar.gz
+outsides/
+# ─── Frontend node_modules ─────────────────────────────────────────────────────
+079project_frontend/node_modules/
+079project_frontend/dist/
+079project_frontend/build/
+
+# ─── IDE / Editor ──────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.suo
+*.user
+*.sln.docstates
+.vs/
+
+# ─── Playwright / test artefacts ───────────────────────────────────────────────
+.playwright-mcp/
+test-results/
+playwright-report/
+
+# ─── OS ────────────────────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ─── Temporary / scratch ───────────────────────────────────────────────────────
+*.tmp
+*.bak
+*.swp
+*.dupfix
+*.dupfix2
+*.dupfix3
+temp_prompt_line.txt
+proxy_prompt.log
+tools/generated/
+tools/__pycache__/
+
+# ─── Hardware design files (not part of the software package) ─────────────────
+catastrophe/
+
+# ─── Corpus / test data (too large; user must provide locally) ────────────────
+robots/
+test/
+test-tools/
+tests/
+hacktests/
+# NOTE: robots/ corpus seeds must be provided by the user before first run.
+# the robots/ dir is recommended to contain a wikitext-103-all.txt file,which is from wikitext
+# the robots/ dir's file is all seen as input during the training process of tiny transformer model,which serve the context module.
+# the  hacktests folder provide the input for security module.It is a must for the running of security module.
+# The patterns above only exclude generated/binary/runtime content.

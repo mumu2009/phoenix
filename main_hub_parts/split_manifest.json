@@ -1,0 +1,946 @@
+{
+  "source": "main.cpp",
+  "sourceWasHub": false,
+  "originalLineCount": 21164,
+  "hubLineCount": 121,
+  "totalChunkLines": 21164,
+  "chunkCount": 117,
+  "chunks": [
+    {
+      "file": "000_section_before_config.inc",
+      "kind": "section",
+      "label": "section_before_Config",
+      "startLine": 1,
+      "endLine": 990,
+      "lineCount": 990
+    },
+    {
+      "file": "001_struct_config.inc",
+      "kind": "struct",
+      "label": "struct_Config",
+      "startLine": 991,
+      "endLine": 1060,
+      "lineCount": 70
+    },
+    {
+      "file": "002_section_before_sharedmemoryslice.inc",
+      "kind": "section",
+      "label": "section_before_SharedMemorySlice",
+      "startLine": 1061,
+      "endLine": 1627,
+      "lineCount": 567
+    },
+    {
+      "file": "003_struct_sharedmemoryslice.inc",
+      "kind": "struct",
+      "label": "struct_SharedMemorySlice",
+      "startLine": 1628,
+      "endLine": 1649,
+      "lineCount": 22
+    },
+    {
+      "file": "004_section_before_processreservedarena.inc",
+      "kind": "section",
+      "label": "section_before_ProcessReservedArena",
+      "startLine": 1650,
+      "endLine": 1684,
+      "lineCount": 35
+    },
+    {
+      "file": "005_class_processreservedarena.inc",
+      "kind": "class",
+      "label": "class_ProcessReservedArena",
+      "startLine": 1685,
+      "endLine": 1714,
+      "lineCount": 30
+    },
+    {
+      "file": "006_section_before_hotmatrixcache.inc",
+      "kind": "section",
+      "label": "section_before_HotMatrixCache",
+      "startLine": 1715,
+      "endLine": 1873,
+      "lineCount": 159
+    },
+    {
+      "file": "007_class_hotmatrixcache.inc",
+      "kind": "class",
+      "label": "class_HotMatrixCache",
+      "startLine": 1874,
+      "endLine": 1986,
+      "lineCount": 113
+    },
+    {
+      "file": "008_section_before_fetchresult.inc",
+      "kind": "section",
+      "label": "section_before_FetchResult",
+      "startLine": 1987,
+      "endLine": 2093,
+      "lineCount": 107
+    },
+    {
+      "file": "009_struct_fetchresult.inc",
+      "kind": "struct",
+      "label": "struct_FetchResult",
+      "startLine": 2094,
+      "endLine": 2100,
+      "lineCount": 7
+    },
+    {
+      "file": "010_section_before_curlwritectx.inc",
+      "kind": "section",
+      "label": "section_before_CurlWriteCtx",
+      "startLine": 2101,
+      "endLine": 2109,
+      "lineCount": 9
+    },
+    {
+      "file": "011_struct_curlwritectx.inc",
+      "kind": "struct",
+      "label": "struct_CurlWriteCtx",
+      "startLine": 2110,
+      "endLine": 2113,
+      "lineCount": 4
+    },
+    {
+      "file": "012_section_before_torchtextembedder.inc",
+      "kind": "section",
+      "label": "section_before_TorchTextEmbedder",
+      "startLine": 2114,
+      "endLine": 2491,
+      "lineCount": 378
+    },
+    {
+      "file": "013_struct_torchtextembedder.inc",
+      "kind": "struct",
+      "label": "struct_TorchTextEmbedder",
+      "startLine": 2492,
+      "endLine": 2621,
+      "lineCount": 130
+    },
+    {
+      "file": "014_section_before_rng32.inc",
+      "kind": "section",
+      "label": "section_before_Rng32",
+      "startLine": 2622,
+      "endLine": 2752,
+      "lineCount": 131
+    },
+    {
+      "file": "015_class_rng32.inc",
+      "kind": "class",
+      "label": "class_Rng32",
+      "startLine": 2753,
+      "endLine": 2765,
+      "lineCount": 13
+    },
+    {
+      "file": "016_section_before_surfacephrase.inc",
+      "kind": "section",
+      "label": "section_before_SurfacePhrase",
+      "startLine": 2766,
+      "endLine": 2949,
+      "lineCount": 184
+    },
+    {
+      "file": "017_struct_surfacephrase.inc",
+      "kind": "struct",
+      "label": "struct_SurfacePhrase",
+      "startLine": 2950,
+      "endLine": 2953,
+      "lineCount": 4
+    },
+    {
+      "file": "018_section_before_lmdbstore.inc",
+      "kind": "section",
+      "label": "section_before_LmdbStore",
+      "startLine": 2954,
+      "endLine": 3015,
+      "lineCount": 62
+    },
+    {
+      "file": "019_class_lmdbstore.inc",
+      "kind": "class",
+      "label": "class_LmdbStore",
+      "startLine": 3016,
+      "endLine": 3136,
+      "lineCount": 121
+    },
+    {
+      "file": "020_section_before_jsonfilestore.inc",
+      "kind": "section",
+      "label": "section_before_JsonFileStore",
+      "startLine": 3137,
+      "endLine": 3143,
+      "lineCount": 7
+    },
+    {
+      "file": "021_class_jsonfilestore.inc",
+      "kind": "class",
+      "label": "class_JsonFileStore",
+      "startLine": 3144,
+      "endLine": 3353,
+      "lineCount": 210
+    },
+    {
+      "file": "022_section_before_namespacedstore.inc",
+      "kind": "section",
+      "label": "section_before_NamespacedStore",
+      "startLine": 3354,
+      "endLine": 3360,
+      "lineCount": 7
+    },
+    {
+      "file": "023_class_namespacedstore.inc",
+      "kind": "class",
+      "label": "class_NamespacedStore",
+      "startLine": 3361,
+      "endLine": 3402,
+      "lineCount": 42
+    },
+    {
+      "file": "024_section_before_runtimebase.inc",
+      "kind": "section",
+      "label": "section_before_RuntimeBase",
+      "startLine": 3403,
+      "endLine": 3414,
+      "lineCount": 12
+    },
+    {
+      "file": "025_class_runtimebase.inc",
+      "kind": "class",
+      "label": "class_RuntimeBase",
+      "startLine": 3415,
+      "endLine": 3440,
+      "lineCount": 26
+    },
+    {
+      "file": "026_section_before_searchconfig.inc",
+      "kind": "section",
+      "label": "section_before_SearchConfig",
+      "startLine": 3441,
+      "endLine": 3447,
+      "lineCount": 7
+    },
+    {
+      "file": "027_struct_searchconfig.inc",
+      "kind": "struct",
+      "label": "struct_SearchConfig",
+      "startLine": 3448,
+      "endLine": 3457,
+      "lineCount": 10
+    },
+    {
+      "file": "028_section_before_modeldefaults.inc",
+      "kind": "section",
+      "label": "section_before_ModelDefaults",
+      "startLine": 3458,
+      "endLine": 3464,
+      "lineCount": 7
+    },
+    {
+      "file": "029_struct_modeldefaults.inc",
+      "kind": "struct",
+      "label": "struct_ModelDefaults",
+      "startLine": 3465,
+      "endLine": 3487,
+      "lineCount": 23
+    },
+    {
+      "file": "030_section_before_onlineresearcher.inc",
+      "kind": "section",
+      "label": "section_before_OnlineResearcher",
+      "startLine": 3488,
+      "endLine": 3496,
+      "lineCount": 9
+    },
+    {
+      "file": "031_class_onlineresearcher.inc",
+      "kind": "class",
+      "label": "class_OnlineResearcher",
+      "startLine": 3497,
+      "endLine": 3565,
+      "lineCount": 69
+    },
+    {
+      "file": "032_section_before_exprtoken.inc",
+      "kind": "section",
+      "label": "section_before_ExprToken",
+      "startLine": 3566,
+      "endLine": 3602,
+      "lineCount": 37
+    },
+    {
+      "file": "033_struct_exprtoken.inc",
+      "kind": "struct",
+      "label": "struct_ExprToken",
+      "startLine": 3603,
+      "endLine": 3618,
+      "lineCount": 16
+    },
+    {
+      "file": "034_section_before_csrmatrix.inc",
+      "kind": "section",
+      "label": "section_before_CSRMatrix",
+      "startLine": 3619,
+      "endLine": 3981,
+      "lineCount": 363
+    },
+    {
+      "file": "035_struct_csrmatrix.inc",
+      "kind": "struct",
+      "label": "struct_CSRMatrix",
+      "startLine": 3982,
+      "endLine": 3988,
+      "lineCount": 7
+    },
+    {
+      "file": "036_section_before_tensorengine.inc",
+      "kind": "section",
+      "label": "section_before_TensorEngine",
+      "startLine": 3989,
+      "endLine": 3995,
+      "lineCount": 7
+    },
+    {
+      "file": "037_class_tensorengine.inc",
+      "kind": "class",
+      "label": "class_TensorEngine",
+      "startLine": 3996,
+      "endLine": 4081,
+      "lineCount": 86
+    },
+    {
+      "file": "038_section_before_kvmstore.inc",
+      "kind": "section",
+      "label": "section_before_KVMStore",
+      "startLine": 4082,
+      "endLine": 4088,
+      "lineCount": 7
+    },
+    {
+      "file": "039_class_kvmstore.inc",
+      "kind": "class",
+      "label": "class_KVMStore",
+      "startLine": 4089,
+      "endLine": 4240,
+      "lineCount": 152
+    },
+    {
+      "file": "040_section_before_memegraph.inc",
+      "kind": "section",
+      "label": "section_before_MemeGraph",
+      "startLine": 4241,
+      "endLine": 4247,
+      "lineCount": 7
+    },
+    {
+      "file": "041_class_memegraph.inc",
+      "kind": "class",
+      "label": "class_MemeGraph",
+      "startLine": 4248,
+      "endLine": 4725,
+      "lineCount": 478
+    },
+    {
+      "file": "042_section_before_graphexportbuilder.inc",
+      "kind": "section",
+      "label": "section_before_GraphExportBuilder",
+      "startLine": 4726,
+      "endLine": 4726,
+      "lineCount": 1
+    },
+    {
+      "file": "043_class_graphexportbuilder.inc",
+      "kind": "class",
+      "label": "class_GraphExportBuilder",
+      "startLine": 4727,
+      "endLine": 4772,
+      "lineCount": 46
+    },
+    {
+      "file": "044_section_before_graphtensorbridge.inc",
+      "kind": "section",
+      "label": "section_before_GraphTensorBridge",
+      "startLine": 4773,
+      "endLine": 4773,
+      "lineCount": 1
+    },
+    {
+      "file": "045_class_graphtensorbridge.inc",
+      "kind": "class",
+      "label": "class_GraphTensorBridge",
+      "startLine": 4774,
+      "endLine": 4927,
+      "lineCount": 154
+    },
+    {
+      "file": "046_section_before_dimreducer.inc",
+      "kind": "section",
+      "label": "section_before_DimReducer",
+      "startLine": 4928,
+      "endLine": 4928,
+      "lineCount": 1
+    },
+    {
+      "file": "047_class_dimreducer.inc",
+      "kind": "class",
+      "label": "class_DimReducer",
+      "startLine": 4929,
+      "endLine": 5228,
+      "lineCount": 300
+    },
+    {
+      "file": "048_section_before_patternmatrix.inc",
+      "kind": "section",
+      "label": "section_before_PatternMatrix",
+      "startLine": 5229,
+      "endLine": 5229,
+      "lineCount": 1
+    },
+    {
+      "file": "049_class_patternmatrix.inc",
+      "kind": "class",
+      "label": "class_PatternMatrix",
+      "startLine": 5230,
+      "endLine": 5259,
+      "lineCount": 30
+    },
+    {
+      "file": "050_section_before_memesurfacelexicon.inc",
+      "kind": "section",
+      "label": "section_before_MemeSurfaceLexicon",
+      "startLine": 5260,
+      "endLine": 5266,
+      "lineCount": 7
+    },
+    {
+      "file": "051_class_memesurfacelexicon.inc",
+      "kind": "class",
+      "label": "class_MemeSurfaceLexicon",
+      "startLine": 5267,
+      "endLine": 5381,
+      "lineCount": 115
+    },
+    {
+      "file": "052_section_before_dialogmemory.inc",
+      "kind": "section",
+      "label": "section_before_DialogMemory",
+      "startLine": 5382,
+      "endLine": 5388,
+      "lineCount": 7
+    },
+    {
+      "file": "053_class_dialogmemory.inc",
+      "kind": "class",
+      "label": "class_DialogMemory",
+      "startLine": 5389,
+      "endLine": 5544,
+      "lineCount": 156
+    },
+    {
+      "file": "054_section_before_robotsdocument.inc",
+      "kind": "section",
+      "label": "section_before_RobotsDocument",
+      "startLine": 5545,
+      "endLine": 5556,
+      "lineCount": 12
+    },
+    {
+      "file": "055_struct_robotsdocument.inc",
+      "kind": "struct",
+      "label": "struct_RobotsDocument",
+      "startLine": 5557,
+      "endLine": 5563,
+      "lineCount": 7
+    },
+    {
+      "file": "056_section_before_sessionmanager.inc",
+      "kind": "section",
+      "label": "section_before_SessionManager",
+      "startLine": 5564,
+      "endLine": 5850,
+      "lineCount": 287
+    },
+    {
+      "file": "057_class_sessionmanager.inc",
+      "kind": "class",
+      "label": "class_SessionManager",
+      "startLine": 5851,
+      "endLine": 6043,
+      "lineCount": 193
+    },
+    {
+      "file": "058_section_before_lemmacacheentry.inc",
+      "kind": "section",
+      "label": "section_before_LemmaCacheEntry",
+      "startLine": 6044,
+      "endLine": 6044,
+      "lineCount": 1
+    },
+    {
+      "file": "059_struct_lemmacacheentry.inc",
+      "kind": "struct",
+      "label": "struct_LemmaCacheEntry",
+      "startLine": 6045,
+      "endLine": 6048,
+      "lineCount": 4
+    },
+    {
+      "file": "060_section_before_lemmaworkerpool.inc",
+      "kind": "section",
+      "label": "section_before_LemmaWorkerPool",
+      "startLine": 6049,
+      "endLine": 6144,
+      "lineCount": 96
+    },
+    {
+      "file": "061_class_lemmaworkerpool.inc",
+      "kind": "class",
+      "label": "class_LemmaWorkerPool",
+      "startLine": 6145,
+      "endLine": 6236,
+      "lineCount": 92
+    },
+    {
+      "file": "062_section_before_studyengine.inc",
+      "kind": "section",
+      "label": "section_before_StudyEngine",
+      "startLine": 6237,
+      "endLine": 6237,
+      "lineCount": 1
+    },
+    {
+      "file": "063_class_studyengine.inc",
+      "kind": "class",
+      "label": "class_StudyEngine",
+      "startLine": 6238,
+      "endLine": 6264,
+      "lineCount": 27
+    },
+    {
+      "file": "064_section_before_runtimestate.inc",
+      "kind": "section",
+      "label": "section_before_RuntimeState",
+      "startLine": 6265,
+      "endLine": 6267,
+      "lineCount": 3
+    },
+    {
+      "file": "065_class_runtimestate.inc",
+      "kind": "class",
+      "label": "class_RuntimeState",
+      "startLine": 6268,
+      "endLine": 7994,
+      "lineCount": 1727
+    },
+    {
+      "file": "066_section_before_memebarrier.inc",
+      "kind": "section",
+      "label": "section_before_MemeBarrier",
+      "startLine": 7995,
+      "endLine": 8003,
+      "lineCount": 9
+    },
+    {
+      "file": "067_class_memebarrier.inc",
+      "kind": "class",
+      "label": "class_MemeBarrier",
+      "startLine": 8004,
+      "endLine": 8831,
+      "lineCount": 828
+    },
+    {
+      "file": "068_section_before_crawlitem.inc",
+      "kind": "section",
+      "label": "section_before_CrawlItem",
+      "startLine": 8832,
+      "endLine": 9330,
+      "lineCount": 499
+    },
+    {
+      "file": "069_struct_crawlitem.inc",
+      "kind": "struct",
+      "label": "struct_CrawlItem",
+      "startLine": 9331,
+      "endLine": 9335,
+      "lineCount": 5
+    },
+    {
+      "file": "070_section_before_crawlitem.inc",
+      "kind": "section",
+      "label": "section_before_CrawlItem",
+      "startLine": 9336,
+      "endLine": 9520,
+      "lineCount": 185
+    },
+    {
+      "file": "071_struct_crawlitem.inc",
+      "kind": "struct",
+      "label": "struct_CrawlItem",
+      "startLine": 9521,
+      "endLine": 9526,
+      "lineCount": 6
+    },
+    {
+      "file": "072_section_before_controllerpoolbase.inc",
+      "kind": "section",
+      "label": "section_before_ControllerPoolBase",
+      "startLine": 9527,
+      "endLine": 9881,
+      "lineCount": 355
+    },
+    {
+      "file": "073_class_controllerpoolbase.inc",
+      "kind": "class",
+      "label": "class_ControllerPoolBase",
+      "startLine": 9882,
+      "endLine": 9904,
+      "lineCount": 23
+    },
+    {
+      "file": "074_section_before_controller.inc",
+      "kind": "section",
+      "label": "section_before_Controller",
+      "startLine": 9905,
+      "endLine": 9911,
+      "lineCount": 7
+    },
+    {
+      "file": "075_class_controller.inc",
+      "kind": "class",
+      "label": "class_Controller",
+      "startLine": 9912,
+      "endLine": 9922,
+      "lineCount": 11
+    },
+    {
+      "file": "076_section_before_sharddescriptor.inc",
+      "kind": "section",
+      "label": "section_before_ShardDescriptor",
+      "startLine": 9923,
+      "endLine": 9929,
+      "lineCount": 7
+    },
+    {
+      "file": "077_class_sharddescriptor.inc",
+      "kind": "class",
+      "label": "class_ShardDescriptor",
+      "startLine": 9930,
+      "endLine": 9991,
+      "lineCount": 62
+    },
+    {
+      "file": "078_section_before_shardmanager.inc",
+      "kind": "section",
+      "label": "section_before_ShardManager",
+      "startLine": 9992,
+      "endLine": 9992,
+      "lineCount": 1
+    },
+    {
+      "file": "079_class_shardmanager.inc",
+      "kind": "class",
+      "label": "class_ShardManager",
+      "startLine": 9993,
+      "endLine": 10068,
+      "lineCount": 76
+    },
+    {
+      "file": "080_section_before_inferenceprocesspool.inc",
+      "kind": "section",
+      "label": "section_before_InferenceProcessPool",
+      "startLine": 10069,
+      "endLine": 10071,
+      "lineCount": 3
+    },
+    {
+      "file": "081_class_inferenceprocesspool.inc",
+      "kind": "class",
+      "label": "class_InferenceProcessPool",
+      "startLine": 10072,
+      "endLine": 10097,
+      "lineCount": 26
+    },
+    {
+      "file": "082_section_before_proxyruntime.inc",
+      "kind": "section",
+      "label": "section_before_ProxyRuntime",
+      "startLine": 10098,
+      "endLine": 10100,
+      "lineCount": 3
+    },
+    {
+      "file": "083_class_proxyruntime.inc",
+      "kind": "class",
+      "label": "class_ProxyRuntime",
+      "startLine": 10101,
+      "endLine": 10132,
+      "lineCount": 32
+    },
+    {
+      "file": "084_section_before_proxycontroller.inc",
+      "kind": "section",
+      "label": "section_before_ProxyController",
+      "startLine": 10133,
+      "endLine": 10133,
+      "lineCount": 1
+    },
+    {
+      "file": "085_class_proxycontroller.inc",
+      "kind": "class",
+      "label": "class_ProxyController",
+      "startLine": 10134,
+      "endLine": 10152,
+      "lineCount": 19
+    },
+    {
+      "file": "086_section_before_localcontroller.inc",
+      "kind": "section",
+      "label": "section_before_LocalController",
+      "startLine": 10153,
+      "endLine": 10153,
+      "lineCount": 1
+    },
+    {
+      "file": "087_class_localcontroller.inc",
+      "kind": "class",
+      "label": "class_LocalController",
+      "startLine": 10154,
+      "endLine": 10183,
+      "lineCount": 30
+    },
+    {
+      "file": "088_section_before_controllerpool.inc",
+      "kind": "section",
+      "label": "section_before_ControllerPool",
+      "startLine": 10184,
+      "endLine": 10184,
+      "lineCount": 1
+    },
+    {
+      "file": "089_class_controllerpool.inc",
+      "kind": "class",
+      "label": "class_ControllerPool",
+      "startLine": 10185,
+      "endLine": 10364,
+      "lineCount": 180
+    },
+    {
+      "file": "090_section_before_groupprocesspool.inc",
+      "kind": "section",
+      "label": "section_before_GroupProcessPool",
+      "startLine": 10365,
+      "endLine": 10469,
+      "lineCount": 105
+    },
+    {
+      "file": "091_class_groupprocesspool.inc",
+      "kind": "class",
+      "label": "class_GroupProcessPool",
+      "startLine": 10470,
+      "endLine": 10875,
+      "lineCount": 406
+    },
+    {
+      "file": "092_section_before_personaforestaverager.inc",
+      "kind": "section",
+      "label": "section_before_PersonaForestAverager",
+      "startLine": 10876,
+      "endLine": 11051,
+      "lineCount": 176
+    },
+    {
+      "file": "093_class_personaforestaverager.inc",
+      "kind": "class",
+      "label": "class_PersonaForestAverager",
+      "startLine": 11052,
+      "endLine": 11388,
+      "lineCount": 337
+    },
+    {
+      "file": "094_section_before_sparkarray.inc",
+      "kind": "section",
+      "label": "section_before_SparkArray",
+      "startLine": 11389,
+      "endLine": 11389,
+      "lineCount": 1
+    },
+    {
+      "file": "095_class_sparkarray.inc",
+      "kind": "class",
+      "label": "class_SparkArray",
+      "startLine": 11390,
+      "endLine": 11765,
+      "lineCount": 376
+    },
+    {
+      "file": "096_section_before_reinforcementlearner.inc",
+      "kind": "section",
+      "label": "section_before_ReinforcementLearner",
+      "startLine": 11766,
+      "endLine": 11774,
+      "lineCount": 9
+    },
+    {
+      "file": "097_class_reinforcementlearner.inc",
+      "kind": "class",
+      "label": "class_ReinforcementLearner",
+      "startLine": 11775,
+      "endLine": 12128,
+      "lineCount": 354
+    },
+    {
+      "file": "098_section_before_adversariallearner.inc",
+      "kind": "section",
+      "label": "section_before_AdversarialLearner",
+      "startLine": 12129,
+      "endLine": 12129,
+      "lineCount": 1
+    },
+    {
+      "file": "099_class_adversariallearner.inc",
+      "kind": "class",
+      "label": "class_AdversarialLearner",
+      "startLine": 12130,
+      "endLine": 12294,
+      "lineCount": 165
+    },
+    {
+      "file": "100_section_before_gnngalearner.inc",
+      "kind": "section",
+      "label": "section_before_GnnGaLearner",
+      "startLine": 12295,
+      "endLine": 12295,
+      "lineCount": 1
+    },
+    {
+      "file": "101_class_gnngalearner.inc",
+      "kind": "class",
+      "label": "class_GnnGaLearner",
+      "startLine": 12296,
+      "endLine": 12626,
+      "lineCount": 331
+    },
+    {
+      "file": "102_section_before_redissynchronizer.inc",
+      "kind": "section",
+      "label": "section_before_RedisSynchronizer",
+      "startLine": 12627,
+      "endLine": 12635,
+      "lineCount": 9
+    },
+    {
+      "file": "103_class_redissynchronizer.inc",
+      "kind": "class",
+      "label": "class_RedisSynchronizer",
+      "startLine": 12636,
+      "endLine": 12682,
+      "lineCount": 47
+    },
+    {
+      "file": "104_section_before_rotationmanager.inc",
+      "kind": "section",
+      "label": "section_before_RotationManager",
+      "startLine": 12683,
+      "endLine": 12683,
+      "lineCount": 1
+    },
+    {
+      "file": "105_class_rotationmanager.inc",
+      "kind": "class",
+      "label": "class_RotationManager",
+      "startLine": 12684,
+      "endLine": 12790,
+      "lineCount": 107
+    },
+    {
+      "file": "106_section_before_snapshotmanager.inc",
+      "kind": "section",
+      "label": "section_before_SnapshotManager",
+      "startLine": 12791,
+      "endLine": 12908,
+      "lineCount": 118
+    },
+    {
+      "file": "107_class_snapshotmanager.inc",
+      "kind": "class",
+      "label": "class_SnapshotManager",
+      "startLine": 12909,
+      "endLine": 12983,
+      "lineCount": 75
+    },
+    {
+      "file": "108_section_before_gatewaycontextservice.inc",
+      "kind": "section",
+      "label": "section_before_GatewayContextService",
+      "startLine": 12984,
+      "endLine": 12988,
+      "lineCount": 5
+    },
+    {
+      "file": "109_class_gatewaycontextservice.inc",
+      "kind": "class",
+      "label": "class_GatewayContextService",
+      "startLine": 12989,
+      "endLine": 13027,
+      "lineCount": 39
+    },
+    {
+      "file": "110_section_before_gatewayserver.inc",
+      "kind": "section",
+      "label": "section_before_GatewayServer",
+      "startLine": 13028,
+      "endLine": 13036,
+      "lineCount": 9
+    },
+    {
+      "file": "111_class_gatewayserver.inc",
+      "kind": "class",
+      "label": "class_GatewayServer",
+      "startLine": 13037,
+      "endLine": 13883,
+      "lineCount": 847
+    },
+    {
+      "file": "112_section_before_contexthint.inc",
+      "kind": "section",
+      "label": "section_before_ContextHint",
+      "startLine": 13884,
+      "endLine": 14002,
+      "lineCount": 119
+    },
+    {
+      "file": "113_struct_contexthint.inc",
+      "kind": "struct",
+      "label": "struct_ContextHint",
+      "startLine": 14003,
+      "endLine": 14007,
+      "lineCount": 5
+    },
+    {
+      "file": "114_section_before_gnnhintsummary.inc",
+      "kind": "section",
+      "label": "section_before_GnnHintSummary",
+      "startLine": 14008,
+      "endLine": 14136,
+      "lineCount": 129
+    },
+    {
+      "file": "115_struct_gnnhintsummary.inc",
+      "kind": "struct",
+      "label": "struct_GnnHintSummary",
+      "startLine": 14137,
+      "endLine": 14141,
+      "lineCount": 5
+    },
+    {
+      "file": "116_section_tail.inc",
+      "kind": "section",
+      "label": "section_tail",
+      "startLine": 14142,
+      "endLine": 21164,
+      "lineCount": 7023
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "message": "你好",
+  "sessionId": "test-session-123",
+  "maxTokens": 500,
+  "temperature": 0.7
+}

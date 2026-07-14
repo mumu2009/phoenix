@@ -1,0 +1,38 @@
+{
+  "scope": {
+    "include": [
+      "."
+    ],
+    "exclude": [
+      "build/**",
+      "OpenClaw-2026.2.17/**",
+      "poppler-25.12.0/**",
+      "Redis-8.0.3-Windows-x64-cygwin-with-Service/**",
+      "lmdb/**",
+      "079project_frontend/**"
+    ],
+    "note": "仅统计自研业务模块，不含第三方依赖与构建产物"
+  },
+  "mappings": [
+    {"cpp": "main.cpp", "python": "main.py"},
+    {"cpp": "frontend_server.cpp", "python": "frontend_server.py"},
+    {"cpp": "DATABASE_079.cpp", "python": "DATABASE_079.py"},
+    {"cpp": "autonomy_stack.cpp", "python": "autonomy_stack.py"},
+    {"cpp": "model_lifecycle.cpp", "python": "model_lifecycle.py"},
+    {"cpp": "transformer_main.cpp", "python": "transformer_main.py"},
+    {"cpp": "loggerCXX.cpp", "python": "loggerCXX.py"},
+    {"cpp": "speak_io.cpp", "python": "speak_io.py"},
+    {"cpp": "addon.cpp", "python": "addon.py"},
+    {"cpp": "addons/builtin_registry.cpp", "python": "addons/builtin_registry.py"},
+    {"cpp": "addons/math_addon.cpp", "python": "addons/math_addon.py"},
+    {"cpp": "addons/search_addon.cpp", "python": "addons/search_addon.py"}
+  ],
+  "extended_python_modules": [
+    "runtime_context.py",
+    "runtime_app.py",
+    "auth_store.py",
+    "online_researcher.py",
+    "study_engine.py",
+    "transformer.py"
+  ]
+}

@@ -1,0 +1,227 @@
+// Auto-generated from main.cpp
+// Segment: section_before_ContextHint
+// Original lines: 13884-14002
+
+    out["provider"] = provider;
+    try {
+      std::string selectedModel = trimCopy(model);
+      if (selectedModel.empty())
+        selectedModel = provider;
+      out["model"] = selectedModel;
+
+      // If the gateway already prepended the context hint to the user text
+      // (via applyContextHintToText), split it out so llama_proxy can inject it
+      // as a system prompt rather than duplicating it inside the user message.
+      std::string contextHintText;
+      std::string prompt = text;
+      if (!text.empty()) {
+        const std::string prefix = "[Context hint ";
+        if (text.compare(0, prefix.size(), prefix) == 0) {
+          auto wrapperEnd = text.find(']', prefix.size());
+          if (wrapperEnd != std::string::npos) {
+            auto summaryEnd = text.find("]\n", wrapperEnd);
+            if (summaryEnd != std::string::npos) {
+              contextHintText =
+                  text.substr(wrapperEnd + 1, summaryEnd - wrapperEnd);
+              prompt = text.substr(summaryEnd + 2);
+            }
+          }
+        }
+      }
+
+      if (contextHintText.empty() && !graphContext.empty())
+        prompt =
+            std::string("Context:\n") + graphContext + "\n\nUser:\n" + text;
+
+      json payload = {
+          {"model", selectedModel},
+          {"stream", false},
+          {"messages",
+           json::array({json{{"role", "user"}, {"content", prompt}}})},
+          {"options", json{{"num_predict", std::max(1, maxTokens)}}}};
+      if (!contextHintText.empty())
+        payload["contextHint"] = contextHintText;
+
+      auto endpoint = trimCopy(baseUrl);
+      if (endpoint.empty())
+        endpoint = "http://127.0.0.1:8080";
+
+      // Parse endpoint: http://host:port
+      std::string host = "127.0.0.1";
+      int port = 8080;
+      {
+        std::string ep = endpoint;
+        if (ep.substr(0, 7) == "http://") ep = ep.substr(7);
+        auto col = ep.find(':');
+        if (col != std::string::npos) {
+          host = ep.substr(0, col);
+          port = std::stoi(ep.substr(col + 1));
+        } else {
+          host = ep;
+          port = 80;
+        }
+      }
+
+      std::string bodyStr = payload.dump();
+      std::ostringstream httpReq;
+      httpReq << "POST /api/chat HTTP/1.1\r\n"
+              << "Host: " << host << ":" << port << "\r\n"
+              << "Content-Type: application/json\r\n"
+              << "Content-Length: " << bodyStr.size() << "\r\n"
+              << "Connection: close\r\n"
+              << "\r\n"
+              << bodyStr;
+      std::string reqStr = httpReq.str();
+
+      // Synchronous TCP send/recv using Winsock with full connect() timeout
+      std::string rawResponse;
+      {
+        WSADATA wsa;
+        WSAStartup(MAKEWORD(2,2), &wsa);
+        SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock == INVALID_SOCKET) {
+          out["ok"] = false; out["error"] = provider + " socket create failed"; out["reply"] = "";
+          return out;
+        }
+        int timeoutVal = std::max(1000, timeoutMs);
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons((u_short)port);
+        inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+
+        // Non-blocking connect with select() timeout so connect() never hangs forever
+        u_long nonblk = 1;
+        ioctlsocket(sock, FIONBIO, &nonblk);
+        int cr = connect(sock, (struct sockaddr*)&addr, sizeof(addr));
+        bool connected = false;
+        if (cr == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+          fd_set wfds;
+          FD_ZERO(&wfds);
+          FD_SET(sock, &wfds);
+          struct timeval tv;
+          tv.tv_sec  = timeoutVal / 1000;
+          tv.tv_usec = (timeoutVal % 1000) * 1000;
+          if (select(0, nullptr, &wfds, nullptr, &tv) == 1) {
+            int err = 0; int errlen = sizeof(err);
+            getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&err, &errlen);
+            connected = (err == 0);
+          }
+        } else if (cr == 0) {
+          connected = true;
+        }
+        if (!connected) {
+          closesocket(sock);
+          out["ok"] = false; out["error"] = provider + " connect timeout"; out["reply"] = "";
+          return out;
+        }
+        // Restore blocking mode and set send/recv timeouts
+        u_long blk = 0;
+        ioctlsocket(sock, FIONBIO, &blk);
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutVal, sizeof(timeoutVal));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeoutVal, sizeof(timeoutVal));
+
+        int sent = 0;
+        while (sent < (int)reqStr.size()) {
+          int n = send(sock, reqStr.c_str() + sent, (int)reqStr.size() - sent, 0);
+          if (n <= 0) break;
+          sent += n;
+        }
+        char buf[4096];
+        while (true) {
+          int n = recv(sock, buf, sizeof(buf), 0);
+          if (n <= 0) break;
+          rawResponse.append(buf, n);
+        }
+        closesocket(sock);
+      }
+
+      // Split HTTP response: headers + body
+      auto hdrEnd = rawResponse.find("\r\n\r\n");
+      std::string httpBody;
+      int httpStatus = 0;
+      if (hdrEnd != std::string::npos) {
+        httpBody = rawResponse.substr(hdrEnd + 4);
+        // Parse status line: HTTP/1.1 200 OK
+        auto sp1 = rawResponse.find(' ');
+        if (sp1 != std::string::npos) {
+          auto sp2 = rawResponse.find(' ', sp1 + 1);
+          try { httpStatus = std::stoi(rawResponse.substr(sp1 + 1, sp2 - sp1 - 1)); } catch(...) {}
+        }
+        // Handle chunked transfer encoding
+        if (rawResponse.find("Transfer-Encoding: chunked") != std::string::npos ||
+            rawResponse.find("transfer-encoding: chunked") != std::string::npos) {
+          std::string decoded;
+          size_t pos = 0;
+          while (pos < httpBody.size()) {
+            auto crlf = httpBody.find("\r\n", pos);
+            if (crlf == std::string::npos) break;
+            size_t chunkSize = 0;
+            try { chunkSize = std::stoul(httpBody.substr(pos, crlf - pos), nullptr, 16); } catch(...) { break; }
+            if (chunkSize == 0) break;
+            pos = crlf + 2;
+            if (pos + chunkSize > httpBody.size()) break;
+            decoded.append(httpBody, pos, chunkSize);
+            pos += chunkSize + 2;
+          }
+          httpBody = decoded;
+        }
+      } else if (!rawResponse.empty()) {
+        httpBody = rawResponse;
+        httpStatus = 200;
+      }
+
+      if (httpStatus < 200 || httpStatus >= 300) {
+        out["ok"] = false;
+        out["status"] = httpStatus;
+        out["error"] = provider + " bad status " + std::to_string(httpStatus);
+        out["reply"] = "";
+        return out;
+      }
+
+      json doc = json::parse(httpBody, nullptr, false);
+      if (doc.is_discarded()) {
+        out["ok"] = false;
+        out["error"] = provider + " invalid json";
+        out["reply"] = "";
+        return out;
+      }
+
+      std::string reply;
+      if (doc.contains("message") && doc["message"].is_object() &&
+          doc["message"].contains("content") &&
+          doc["message"]["content"].is_string())
+        reply = doc["message"]["content"].get<std::string>();
+      else if (doc.contains("response") && doc["response"].is_string())
+        reply = doc["response"].get<std::string>();
+
+      out["ok"] = !reply.empty();
+      out["reply"] = reply;
+      return out;
+    } catch (const std::exception &e) {
+      out["ok"] = false;
+      out["error"] = e.what();
+      out["reply"] = "";
+      return out;
+    } catch (...) {
+      out["ok"] = false;
+      out["error"] = provider + " unknown error";
+      out["reply"] = "";
+      return out;
+    }
+  }
+
+  json chatWithLlamaCpp(const std::string &text,
+                        const std::string &graphContext, int maxTokens) {
+    return chatWithExternalAdapter(
+        "llamacpp", config_.llamaCppBaseUrl, config_.llamaCppModel,
+        config_.llamaCppRequestTimeoutMs, text, graphContext, maxTokens);
+  }
+
+  json chatWithBitNet(const std::string &text, const std::string &graphContext,
+                      int maxTokens) {
+    return chatWithExternalAdapter(
+        "bitnet", config_.bitnetBaseUrl, config_.bitnetModel,
+        config_.bitnetRequestTimeoutMs, text, graphContext, maxTokens);
+  }
+

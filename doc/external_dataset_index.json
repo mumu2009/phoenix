@@ -1,0 +1,43 @@
+{
+  "activeDataset": "mix-large-v2026-02",
+  "cleaningProfile": {
+    "dropIllegalUtf8": true,
+    "enabled": true,
+    "maxChars": 3072,
+    "normalizeSpace": true,
+    "removeControlChars": true
+  },
+  "collection": {
+    "lastAdded": 660,
+    "lastCollectAt": "2026-06-21T20:35:03",
+    "lastSources": [
+      "tests",
+      "robots",
+      "external-index"
+    ]
+  },
+  "datasets": [
+    {
+      "checksum": "sha256:placeholder-demo",
+      "domain": "general+code+math",
+      "id": "mix-large-v2026-02",
+      "registeredAt": "2026-02-20T15:30:00",
+      "size": "2.8TB",
+      "uri": "external-index://datasets/mix-large-v2026-02"
+    },
+    {
+      "checksum": "sha256:placeholder-demo-2",
+      "domain": "zh-legal+finance",
+      "id": "zh-legal-finance-v1",
+      "registeredAt": "2026-02-20T15:31:00",
+      "size": "640GB",
+      "uri": "external-index://datasets/zh-legal-finance-v1"
+    }
+  ],
+  "internalCorpus": {
+    "robotsDir": "robots",
+    "sampleCount": 21120,
+    "testsDir": "tests"
+  },
+  "updatedAt": "2026-06-21T20:35:03"
+}

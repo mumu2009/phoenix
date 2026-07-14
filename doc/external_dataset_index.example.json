@@ -1,0 +1,33 @@
+{
+  "schema": "v3.0-external-dataset-index",
+  "updatedAt": "2026-02-20T00:00:00Z",
+  "authority": {
+    "owner": "ml-team",
+    "reviewers": ["data-governance", "security"],
+    "approvalTicket": "DG-0000"
+  },
+  "datasets": [
+    {
+      "name": "external_general_dialogue",
+      "version": "2026.02",
+      "license": "custom-evaluation",
+      "source": "s3://example-bucket/general_dialogue/2026.02/",
+      "manifest": "s3://example-bucket/general_dialogue/2026.02/manifest.json",
+      "sha256": "replace-with-real-sha256",
+      "samples": 1200000,
+      "purpose": "pretrain",
+      "notes": "repo stores index+checksum only"
+    },
+    {
+      "name": "external_code_instruction",
+      "version": "2026.02",
+      "license": "internal",
+      "source": "s3://example-bucket/code_instruction/2026.02/",
+      "manifest": "s3://example-bucket/code_instruction/2026.02/manifest.json",
+      "sha256": "replace-with-real-sha256",
+      "samples": 480000,
+      "purpose": "instruction-tune",
+      "notes": "repo stores index+checksum only"
+    }
+  ]
+}
