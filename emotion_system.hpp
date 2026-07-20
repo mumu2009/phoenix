@@ -25,6 +25,15 @@
 #include <chrono>
 #include <mutex>
 #include <functional>
+#include <array>
+#include <unordered_map>
+#include <optional>
+#include <cmath>
+#include <fstream>
+#include <filesystem>
+#include <sstream>
+#include <algorithm>
+#include <cctype>
 #include <nlohmann/json.hpp>
 
 namespace phoenix {
@@ -65,14 +74,26 @@ struct EmotionTensor {
     /* Load from JSON */
     static EmotionTensor fromJson(const nlohmann::json& j) {
         EmotionTensor t;
-        if (j.contains("valence")) t.valence = j["valence"].get<float>();
-        if (j.contains("arousal")) t.arousal = j["arousal"].get<float>();
-        if (j.contains("dominance")) t.dominance = j["dominance"].get<float>();
-        if (j.contains("trust")) t.trust = j["trust"].get<float>();
-        if (j.contains("joy")) t.joy = j["joy"].get<float>();
-        if (j.contains("fear")) t.fear = j["fear"].get<float>();
-        if (j.contains("anger")) t.anger = j["anger"].get<float>();
-        if (j.contains("surprise")) t.surprise = j["surprise"].get<float>();
+        if (!j.is_object()) return t;
+        auto getFloat = [&j](const std::string& key, float fallback) -> float {
+            auto it = j.find(key);
+            if (it == j.end()) return fallback;
+            if (it->is_number()) {
+                try { return it->get<float>(); } catch (...) { return fallback; }
+            }
+            if (it->is_string()) {
+                try { return std::stof(it->get<std::string>()); } catch (...) { return fallback; }
+            }
+            return fallback;
+        };
+        t.valence   = getFloat("valence", t.valence);
+        t.arousal   = getFloat("arousal", t.arousal);
+        t.dominance = getFloat("dominance", t.dominance);
+        t.trust     = getFloat("trust", t.trust);
+        t.joy       = getFloat("joy", t.joy);
+        t.fear      = getFloat("fear", t.fear);
+        t.anger     = getFloat("anger", t.anger);
+        t.surprise  = getFloat("surprise", t.surprise);
         return t;
     }
 
@@ -117,9 +138,7 @@ struct EmotionState {
     }
 
     /* Calculate emotional stability (how much current deviates from baseline) */
-    float stability() const {
-        return 1.0f - (current.distance(baseline) / 4.0f); /* Normalize to 0-1 */
-    }
+    float stability() const;
 
     /* Get emotional intensity (magnitude of emotion vector) */
     float intensity() const {
@@ -190,6 +209,35 @@ public:
                                          const std::vector<float>& weights) = 0;
 };
 
+class EmotionVocabWeightTable; // forward declaration
+
+/* Stage configuration for the vocabulary-level emotion weight table. */
+struct EmotionVocabWeightTableStageConfig {
+    float influence{1.0f};
+    int halfLifeTurns{1};
+    float decay{0.95f};
+};
+
+/* Configuration for the vocabulary-level emotion weight table.
+   Declared outside the class so EmotionSystem::Config can reference it
+   before EmotionVocabWeightTable is defined. */
+struct EmotionVocabWeightTableConfig {
+    bool enabled{true};
+    float learningRate{0.05f};
+    float maxBias{2.0f};
+    float minBias{-2.0f};
+    float decay{0.95f};
+    float momentum{0.9f};
+    float tokenBoostExponent{1.2f};
+    float minTokenScore{0.05f};
+    std::array<EmotionVocabWeightTableStageConfig, 4> stageConfigs;
+    std::unordered_map<std::string, std::vector<std::string>> seedLexicon;
+    std::string vocabTablePath;
+    std::string vocabCachePath;
+    bool applyToPrompt{true};
+    bool applyLogitBias{true};
+};
+
 /* Main emotion system class */
 class EmotionSystem {
 public:
@@ -201,6 +249,7 @@ public:
         float emotionInfluence{0.3f};            /* How much emotion affects LLM */
         bool enableRuntimeFineTuning{true};       /* Enable runtime fine-tuning */
         int historyLength{10};                    /* How many emotion states to keep */
+        EmotionVocabWeightTableConfig vocabTableConfig; /* Vocabulary-level weight table */
     };
 
     explicit EmotionSystem(const Config& config);
@@ -226,6 +275,28 @@ public:
     /* Enable/disable the system */
     void setEnabled(bool enabled);
     bool isEnabled() const;
+
+    /* Vocabulary-level weight table accessors */
+    std::shared_ptr<EmotionVocabWeightTable> vocabTable();
+    std::shared_ptr<const EmotionVocabWeightTable> vocabTable() const;
+
+    /* Observe tokens for the vocabulary weight table (uses the last emotion state). */
+    void observeVocab(const std::string& sessionId,
+                    const std::vector<std::string>& tokens, int turnNumber);
+
+    /* Get logit_bias JSON and prompt modulation for a session/input. */
+    nlohmann::json getVocabLogitBias(const std::string& sessionId,
+                                     const std::vector<std::string>& inputTokens,
+                                     int turnNumber) const;
+    std::string getVocabPromptModulation(const std::string& sessionId,
+                                         const std::vector<std::string>& inputTokens,
+                                         int turnNumber) const;
+
+    /* Update the vocabulary table from a (prompt, reply, reward) triple. */
+    void updateVocabFromResponse(const std::string& sessionId,
+                                 const std::vector<std::string>& promptTokens,
+                                 const std::vector<std::string>& replyTokens,
+                                 float reward, int turnNumber);
 
 private:
     struct Impl;
@@ -256,6 +327,84 @@ public:
                                            const EmotionState& state) {
         return "";
     }
+};
+
+/* Vocabulary-level emotion weight table.
+   Maintains per-session, per-stage sparse biases over tokens.
+   Four stages correspond to different context ranges:
+     Immediate: current utterance
+     Short:     recent session history (few turns)
+     Context:   session-level baseline/persona
+     Long:      cross-session persistent profile
+   The table can be applied to prompts (soft modulation) or exported as
+   logit_bias maps for external llama-server backends. */
+class EmotionVocabWeightTable {
+public:
+    enum class Stage { Immediate = 0, Short = 1, Context = 2, Long = 3, Count = 4 };
+
+    struct TokenWeight {
+        float bias{0.0f};
+        float momentum{0.0f};
+        int lastUpdateTurn{0};
+    };
+
+    using StageConfig = EmotionVocabWeightTableStageConfig;
+    using Config = EmotionVocabWeightTableConfig;
+
+    explicit EmotionVocabWeightTable(const Config& cfg = Config{});
+    ~EmotionVocabWeightTable() = default;
+
+    /* Observe a set of tokens under a given emotional signal. */
+    void observe(Stage stage, const std::string& sessionId,
+                 const std::vector<std::string>& tokens,
+                 const EmotionTensor& emotion, int turnNumber);
+
+    /* Compute per-token bias for the current input across all stages. */
+    std::unordered_map<std::string, float> computeTokenBias(
+        const std::string& sessionId,
+        const std::vector<std::string>& inputTokens,
+        int turnNumber) const;
+
+    /* Learn from (prompt, reply, reward). Positive reward reinforces
+       co-occurring tokens; negative reward suppresses them. */
+    void updateFromResponse(const std::string& sessionId,
+                            const std::vector<std::string>& promptTokens,
+                            const std::vector<std::string>& replyTokens,
+                            float reward, int turnNumber);
+
+    /* Build a short prompt-modulation string from the strongest biases. */
+    std::string buildPromptModulation(const std::string& sessionId,
+                                      const std::vector<std::string>& inputTokens,
+                                      int turnNumber) const;
+
+    /* Export biases as a JSON object suitable for logit_bias payloads. */
+    nlohmann::json getLogitBiasJson(const std::string& sessionId,
+                                    const std::vector<std::string>& inputTokens,
+                                    int turnNumber) const;
+
+    nlohmann::json toJson() const;
+    void fromJson(const nlohmann::json& j);
+
+    bool load();
+    bool save() const;
+
+    bool enabled() const { return cfg_.enabled; }
+
+private:
+    Config cfg_;
+    mutable std::mutex mu_;
+    std::unordered_map<std::string, std::array<std::unordered_map<std::string, TokenWeight>,
+        static_cast<size_t>(Stage::Count)>> sessionWeights_;
+    std::unordered_map<std::string, TokenWeight> longTermWeights_;
+    std::unordered_map<std::string, int> sessionLastTurn_;
+
+    float decayFactor(int stageIdx, int deltaTurns) const;
+    void applyDecay(TokenWeight& w, int stageIdx, int deltaTurns) const;
+    float emotionToSignal(const EmotionTensor& e, const std::string& token) const;
+    std::vector<std::string> expandWithEmotion(const std::vector<std::string>& tokens,
+                                               const EmotionTensor& emotion) const;
+    std::vector<std::pair<std::string, float>> rankBiases(
+        const std::unordered_map<std::string, float>& biases, size_t topN) const;
 };
 
 /* Plugin manager */

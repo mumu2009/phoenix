@@ -241,6 +241,27 @@ def default_fixed_params() -> dict[str, Any]:
             "reflectionTopWords": 24,
             "reflectionMinScore": 1e-6,
         },
+        "dialog": {
+            "rlEvery": 20,
+            "advEvery": 30,
+            "gnnEvery": 40,
+            "dialogAsyncLimit": 2,
+        },
+        "learning": {
+            "rlMaxDocs": 64,
+            "rlTopKWords": 30,
+            "rlImprovementThreshold": 0.01,
+            "rlCoverageWeight": 0.7,
+            "rlUniquenessWeight": 0.3,
+            "advMaxAdversaries": 64,
+            "advNoiseLevel": 0.2,
+            "advAttackRounds": 3,
+            "advDefenseRounds": 3,
+            "advBenchLimit": 50,
+            "gnnGaMaxDocs": 32,
+            "gnnGaPopulation": 6,
+            "gnnGaGenerations": 1,
+        },
     }
 
 

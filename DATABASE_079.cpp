@@ -482,9 +482,15 @@ Database079::Database079(fs::path dbPath,
 // 调用方式：服务启动时先调用，成功返回 true。
 // 实现思路：连接 SQLite、执行 PRAGMA、建表并初始化热缓存。
 // 注意事项：在未启用 SQLite 编译选项时会返回 false。
+Database079::~Database079()
+{
+    close();
+}
+
 bool Database079::open()
 {
 #ifdef HAVE_SQLITE
+    close();
     handle_ = std::make_shared<DbHandle>();
     if (sqlite3_open(dbPath_.string().c_str(), &handle_->db) != SQLITE_OK)
     {
@@ -701,7 +707,6 @@ bool Database079::getInferenceCache(const std::string &key, json &out)
         promoteToHot = touch >= inferencePromoteHits_;
     }
     {
-        std::lock_guard<std::mutex> lock(handle_->mu);
         if (ok && loadedCold)
         {
             sqlite3_stmt *statStmt = nullptr;

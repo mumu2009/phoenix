@@ -1,0 +1,81 @@
+{
+  "conversion": {
+    "focus": "token-to-unit-many-to-many",
+    "gradientFit": {
+      "convergence": {
+        "generatedAtMs": 1784480709496,
+        "reached": false,
+        "reason": "insufficient-semantic-units",
+        "sampleCount": 0
+      },
+      "epochs": 8,
+      "loss": 0.0,
+      "parameterSnapshot": {
+        "lifAverages": {
+          "I_reset": 0.0,
+          "I_th": 0.0,
+          "tau": 0.0
+        },
+        "modelType": "lif"
+      },
+      "validationError": 0.0
+    },
+    "mode": "gguf-to-brain-manifest",
+    "personalityScheduler": {
+      "enabled": true,
+      "phaseBuckets": 3,
+      "refreshEveryMs": 12000
+    },
+    "structuredExport": {
+      "files": [
+        "structured_exports\\gguf\\model.json",
+        "structured_exports\\vocab\\tokens.json",
+        "structured_exports\\mapping\\semantic_mapping.json",
+        "structured_exports\\dynamics\\neuro_dynamics.json",
+        "structured_exports\\fit\\fit_result.json",
+        "structured_exports\\runtime\\runtime_config.json",
+        "structured_exports\\manifest.json"
+      ],
+      "root": "structured_exports\\",
+      "written": true
+    },
+    "tokenSplitPolicy": "semantic-dense"
+  },
+  "generatedAtMs": 1784480709496,
+  "inspection": {
+    "error": "gguf file not found",
+    "exists": false,
+    "path": "",
+    "valid": false
+  },
+  "model": {
+    "fileSizeBytes": 0,
+    "semanticBands": 3,
+    "shards": 4,
+    "slidingWindow": {
+      "evictThreshold": 0.17,
+      "loadAhead": 2,
+      "mergeThreshold": 0.63
+    },
+    "spikeLattice": {
+      "decay": 0.82,
+      "neurons": 1024,
+      "plasticity": 0.11,
+      "refractorySteps": 3
+    },
+    "windowTokens": 1024
+  },
+  "modelPath": "",
+  "provider": "",
+  "source": "heuristic-fallback",
+  "toolBridges": {
+    "calculator": {
+      "available": false,
+      "path": "main.exe"
+    },
+    "divingAgreement": {
+      "available": false,
+      "path": "main.exe"
+    }
+  }
+}

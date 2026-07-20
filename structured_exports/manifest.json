@@ -1,0 +1,73 @@
+{
+  "fitResult": {
+    "convergence": {
+      "generatedAtMs": 1784480709496,
+      "reached": false,
+      "reason": "insufficient-semantic-units",
+      "sampleCount": 0
+    },
+    "epochs": 8,
+    "loss": 0.0,
+    "parameterSnapshot": {
+      "lifAverages": {
+        "I_reset": 0.0,
+        "I_th": 0.0,
+        "tau": 0.0
+      },
+      "modelType": "lif"
+    },
+    "validationError": 0.0
+  },
+  "generatedAtMs": 1784480709496,
+  "ggufModel": {
+    "architecture": "transformer",
+    "metadata": {
+      "n_ctx": 0,
+      "n_embd": 0,
+      "n_layers": 0,
+      "tokenizer": "unknown"
+    },
+    "modelPath": "",
+    "tensorIndex": {
+      "attention": [],
+      "embedding": [],
+      "mlp": [],
+      "norm": [],
+      "output": []
+    }
+  },
+  "inspection": {
+    "error": "gguf file not found",
+    "exists": false,
+    "path": "",
+    "valid": false
+  },
+  "neuroDynamicsTable": [],
+  "provider": "",
+  "runtimeConfig": {
+    "personaPool": {
+      "enabled": true,
+      "phaseBuckets": 1,
+      "refreshEveryMs": 12000
+    },
+    "summaryStateDim": 32,
+    "toolBindings": {
+      "calculator": "calculator/main.exe",
+      "divingAgreement": "DivingPact/main.exe"
+    },
+    "windowSize": 256
+  },
+  "semanticMapping": [],
+  "vocabulary": {
+    "exportedTokenCount": 0,
+    "sourceTokenCount": 0,
+    "specialTokens": {
+      "bos": 0,
+      "eos": 0,
+      "pad": 0,
+      "unk": 0
+    },
+    "tokenizerType": "unknown",
+    "tokens": []
+  }
+}

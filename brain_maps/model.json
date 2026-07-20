@@ -1,0 +1,81 @@
+{
+  "conversion": {
+    "focus": "token-to-unit-many-to-many",
+    "gradientFit": {
+      "convergence": {
+        "generatedAtMs": 1784480706307,
+        "reached": false,
+        "reason": "insufficient-semantic-units",
+        "sampleCount": 0
+      },
+      "epochs": 8,
+      "loss": 0.0,
+      "parameterSnapshot": {
+        "lifAverages": {
+          "I_reset": 0.0,
+          "I_th": 0.0,
+          "tau": 0.0
+        },
+        "modelType": "lif"
+      },
+      "validationError": 0.0
+    },
+    "mode": "gguf-to-brain-manifest",
+    "personalityScheduler": {
+      "enabled": true,
+      "phaseBuckets": 3,
+      "refreshEveryMs": 12000
+    },
+    "structuredExport": {
+      "files": [
+        "structured_exports\\model\\gguf\\model.json",
+        "structured_exports\\model\\vocab\\tokens.json",
+        "structured_exports\\model\\mapping\\semantic_mapping.json",
+        "structured_exports\\model\\dynamics\\neuro_dynamics.json",
+        "structured_exports\\model\\fit\\fit_result.json",
+        "structured_exports\\model\\runtime\\runtime_config.json",
+        "structured_exports\\model\\manifest.json"
+      ],
+      "root": "structured_exports\\model",
+      "written": true
+    },
+    "tokenSplitPolicy": "semantic-dense"
+  },
+  "generatedAtMs": 1784480706307,
+  "inspection": {
+    "error": "gguf file not found",
+    "exists": false,
+    "path": "D:\\models\\model.gguf",
+    "valid": false
+  },
+  "model": {
+    "fileSizeBytes": 0,
+    "semanticBands": 3,
+    "shards": 4,
+    "slidingWindow": {
+      "evictThreshold": 0.17,
+      "loadAhead": 2,
+      "mergeThreshold": 0.63
+    },
+    "spikeLattice": {
+      "decay": 0.82,
+      "neurons": 1024,
+      "plasticity": 0.11,
+      "refractorySteps": 3
+    },
+    "windowTokens": 1024
+  },
+  "modelPath": "D:\\models\\model.gguf",
+  "provider": "",
+  "source": "heuristic-fallback",
+  "toolBridges": {
+    "calculator": {
+      "available": false,
+      "path": "main.exe"
+    },
+    "divingAgreement": {
+      "available": false,
+      "path": "main.exe"
+    }
+  }
+}

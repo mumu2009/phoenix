@@ -126,6 +126,9 @@ json ModelLifecycleManager::status() const
 json ModelLifecycleManager::compressPlan(const json &payload)
 {
     std::lock_guard<std::mutex> lock(mu_);
+    if (!payload.is_object()) {
+        return json{{"ok", false}, {"error", "payload must be an object"}};
+    }
     static const std::unordered_set<std::string> kMethod = {"prune", "quant", "prune+quant", "distill+quant"};
     static const std::unordered_set<std::string> kQuant = {"fp32", "fp16", "int8", "int4"};
 
@@ -171,6 +174,9 @@ json ModelLifecycleManager::compressPlan(const json &payload)
 json ModelLifecycleManager::explainOutput(const json &payload)
 {
     std::lock_guard<std::mutex> lock(mu_);
+    if (!payload.is_object()) {
+        return json{{"ok", false}, {"error", "payload must be an object"}};
+    }
     std::string text = payload.value("text", "");
     std::string reply = payload.value("reply", "");
     std::string graph = payload.value("graphContext", "");

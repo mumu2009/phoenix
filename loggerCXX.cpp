@@ -64,6 +64,8 @@ void LoggerCXX::initialize(const std::string &mode, const std::filesystem::path 
     bool needStart = false;
     {
         std::lock_guard<std::mutex> lock(mu_);
+        if (out_.is_open() && dir_ != dir)
+            out_.close();
         dir_ = dir;
         std::string m = mode;
         for (auto &c : m)
@@ -81,7 +83,7 @@ void LoggerCXX::initialize(const std::string &mode, const std::filesystem::path 
             mode_ = Mode::Release;
         }
         const char *rawInterval = std::getenv("AI_LOG_MEMORY_INTERVAL_SEC");
-        int interval = 30;
+        int interval = 0;
         if (rawInterval && *rawInterval)
         {
             try
@@ -90,7 +92,7 @@ void LoggerCXX::initialize(const std::string &mode, const std::filesystem::path 
             }
             catch (...)
             {
-                interval = 30;
+                interval = 0;
             }
         }
         if (interval < 0)
@@ -253,6 +255,20 @@ std::string LoggerCXX::buildMemorySample() const
     }
 #endif
     return oss.str();
+}
+
+void LoggerCXX::shutdown()
+{
+    stopMemorySamplerLocked();
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (out_.is_open())
+            out_.close();
+        initialized_ = false;
+        mode_ = Mode::Off;
+        dir_.clear();
+        filePath_.clear();
+    }
 }
 
 void LoggerCXX::startMemorySamplerLocked()

@@ -282,6 +282,9 @@ public:
     std::vector<std::string> getConfiguredPlugins() const; /* Get configured plugin names */
 
 private:
+    bool loadConfigUnlocked(); /* Load configuration while mutex is already held */
+    bool saveConfigUnlocked(); /* Save configuration while mutex is already held */
+
     std::string configPath_; /* Configuration file path */
     nlohmann::json config_;  /* Configuration data */
     mutable std::mutex mutex_; /* Mutex for thread safety */

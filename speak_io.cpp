@@ -18,6 +18,7 @@
 
 #include "speak_io.hpp"
 #include "loggerCXXH.hpp"
+#include "phoenix_config.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -180,6 +181,31 @@ Json::Value SpeakIO::analyzePcm(const AudioData &audio)
         out["ok"] = false;
         out["error"] = "empty audio";
         return out;
+    }
+
+    // Runtime-tunable speech gating (configurable VAD).
+    float rms = computeRms(audio.mono);
+    float durationMs = 1000.0f * static_cast<float>(audio.mono.size()) /
+                       std::max(1, audio.sampleRate);
+    bool speechEnhance = true;
+    float noiseFloorDb = -45.0f;
+    float minSpeechMs = 250.0f;
+    try { speechEnhance = phoenix::cfgOr<bool>("speech.enhanceEnabled", true); } catch (...) {}
+    try { noiseFloorDb = phoenix::cfgOr<float>("speech.noiseFloorDb", -45.0f); } catch (...) {}
+    try { minSpeechMs = phoenix::cfgOr<float>("speech.minSpeechDurationMs", 250.0f); } catch (...) {}
+    if (speechEnhance)
+    {
+        float noiseLinear = std::pow(10.0f, noiseFloorDb / 20.0f);
+        if (rms < noiseLinear || durationMs < minSpeechMs)
+        {
+            out["ok"] = true;
+            out["text"] = "";
+            out["skipped"] = true;
+            out["skipReason"] = (rms < noiseLinear) ? "below_noise_floor" : "too_short";
+            out["rms"] = rms;
+            out["durationMs"] = durationMs;
+            return out;
+        }
     }
 
     Json::Value asrMeta;

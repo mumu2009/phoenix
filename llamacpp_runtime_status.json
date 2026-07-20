@@ -1,0 +1,14 @@
+{
+  "binaryFound": false,
+  "binaryPath": "",
+  "brainMapPath": "brain_maps\\.json",
+  "brainMapReady": true,
+  "checkedAtMs": 1784480706290,
+  "commandLine": "",
+  "error": "invalid base url: ",
+  "launchAttempted": false,
+  "pid": 0,
+  "ready": false,
+  "status": "invalid_base_url",
+  "statusFile": "llamacpp_runtime_status.json"
+}

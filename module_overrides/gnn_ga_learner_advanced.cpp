@@ -2447,6 +2447,9 @@ namespace
 			return history_.empty() ? json::object() : history_.back();
 		}
 
+		int population() const override { return 6; }
+		int generations() const override { return 1; }
+
 	private:
 		void loadCorpus()
 		{

@@ -18,6 +18,9 @@
 
 #include "v51_runtime.hpp"
 
+#include "partial_matrix_cache.hpp"
+#include "phoenix_config.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -180,6 +183,30 @@ static double jaccard(const std::unordered_set<std::string> &a, const std::unord
         return 0.0;
     }
     return static_cast<double>(inter) / static_cast<double>(uni);
+}
+
+static std::string fingerprintTokenSet(const std::unordered_set<std::string> &tokens) {
+    std::vector<std::string> sorted(tokens.begin(), tokens.end());
+    std::sort(sorted.begin(), sorted.end());
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < sorted.size(); ++i) {
+        if (i > 0) oss << ',';
+        oss << sorted[i];
+    }
+    return oss.str();
+}
+
+static phoenix::cache::PartialMatrixCacheConfig gnnEdgeCacheConfig() {
+    phoenix::cache::PartialMatrixCacheConfig cfg;
+    cfg.enabled = phoenix::cfgOr<bool>("partial_cache.gnnEnabled", cfg.enabled);
+    cfg.maxEntries = static_cast<std::size_t>(
+        phoenix::cfgOr<std::uint64_t>("partial_cache.maxEntries", cfg.maxEntries));
+    cfg.ttlMs = static_cast<std::size_t>(
+        phoenix::cfgOr<std::uint64_t>("partial_cache.ttlMs", cfg.ttlMs));
+    cfg.tolerance = phoenix::cfgOr<double>("partial_cache.tolerance", cfg.tolerance);
+    cfg.correctionScale =
+        phoenix::cfgOr<double>("partial_cache.correctionScale", cfg.correctionScale);
+    return cfg;
 }
 
 static bool hasNegationConflict(const std::string &text) {
@@ -671,9 +698,22 @@ struct V51RuntimeEngine::Impl {
         const std::size_t n = fragments.size();
         std::vector<std::vector<double>> adj(n, std::vector<double>(n, 0.0));
         std::vector<double> centralityRaw(n, 0.0);
+        static phoenix::cache::PartialMatrixCache<double> s_edgeCache(gnnEdgeCacheConfig());
         for (std::size_t i = 0; i < n; ++i) {
             for (std::size_t j = i + 1; j < n; ++j) {
-                double w = jaccard(fragments[i].tokens, fragments[j].tokens);
+                double w = 0.0;
+                const std::string fpI = fingerprintTokenSet(fragments[i].tokens);
+                const std::string fpJ = fingerprintTokenSet(fragments[j].tokens);
+                const std::string pairFp = (fpI < fpJ) ? (fpI + "|" + fpJ) : (fpJ + "|" + fpI);
+                const std::string key =
+                    phoenix::cache::PartialMatrixCache<double>::makeKey(
+                        "gnn_edge", static_cast<int>(i), static_cast<int>(j), pairFp);
+                if (!s_edgeCache.get(key, w)) {
+                    w = jaccard(fragments[i].tokens, fragments[j].tokens);
+                    // The cache key is independent of proximity/domain bonuses,
+                    // so store only the raw Jaccard value.
+                    s_edgeCache.set(key, w);
+                }
                 if (std::abs(static_cast<int>(fragments[i].index) - static_cast<int>(fragments[j].index)) <= 1) {
                     w += 0.2;
                 }

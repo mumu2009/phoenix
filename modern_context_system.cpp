@@ -70,14 +70,14 @@ bool ModernContextManager::addEntry(const ContextEntry& entry) {
     
     impl_->contextEntries.push_back(entryWithTokens);
     
-    // Prune if exceeding max tokens
+    // Prune if exceeding max tokens (already under impl_->mutex, use locked helper)
     if (impl_->config.maxTokens > 0) {
         size_t totalTokens = TokenCounter::estimateTokens(
             std::vector<ContextEntry>(impl_->contextEntries.begin(), impl_->contextEntries.end())
         );
         
         if (totalTokens > impl_->config.maxTokens) {
-            pruneContext();
+            pruneContextLocked();
         }
     }
     
@@ -197,11 +197,16 @@ bool ModernContextManager::updateImportance(const std::string& contentId, float 
     return false;
 }
 
-bool ModernContextManager::pruneContext() {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    
+void ModernContextManager::pruneContextLocked() {
     if (impl_->contextEntries.empty()) {
-        return true;
+        return;
+    }
+
+    // Sanitize NaN / invalid importance values to avoid std::sort UB.
+    for (auto& entry : impl_->contextEntries) {
+        if (std::isnan(entry.importance) || std::isinf(entry.importance)) {
+            entry.importance = 0.5f;
+        }
     }
     
     // Sort by importance (lower importance first)
@@ -227,7 +232,11 @@ bool ModernContextManager::pruneContext() {
         totalTokens -= impl_->contextEntries[idxToRemove].estimatedTokens;
         impl_->contextEntries.erase(impl_->contextEntries.begin() + idxToRemove);
     }
-    
+}
+
+bool ModernContextManager::pruneContext() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    pruneContextLocked();
     return true;
 }
 
@@ -403,10 +412,11 @@ void AttentionSinkManager::setConfig(const SinkConfig& config) {
 // Hierarchical context manager implementation
 HierarchicalContextManager::HierarchicalContextManager() {
     // Load level capacities from the single authoritative config.
-    updateLevel("global", 1, phoenix::cfg<size_t>("context.hierarchicalLevels.global"));
-    updateLevel("workspace", 2, phoenix::cfg<size_t>("context.hierarchicalLevels.workspace"));
-    updateLevel("file", 3, phoenix::cfg<size_t>("context.hierarchicalLevels.file"));
-    updateLevel("function", 4, phoenix::cfg<size_t>("context.hierarchicalLevels.function"));
+    // Defaults allow the manager to work when config/phoenix.json is not loaded (unit tests).
+    updateLevel("global", 1, phoenix::cfgOr<size_t>("context.hierarchicalLevels.global", 1024));
+    updateLevel("workspace", 2, phoenix::cfgOr<size_t>("context.hierarchicalLevels.workspace", 512));
+    updateLevel("file", 3, phoenix::cfgOr<size_t>("context.hierarchicalLevels.file", 256));
+    updateLevel("function", 4, phoenix::cfgOr<size_t>("context.hierarchicalLevels.function", 128));
 }
 
 bool HierarchicalContextManager::addContext(const std::string& level, const ContextEntry& entry) {

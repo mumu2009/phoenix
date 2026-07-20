@@ -1032,14 +1032,16 @@ json buildStructuredExportBundle(const std::string &provider,
 json writeStructuredExportFiles(const json &bundle,
                                 const fs::path &outputRoot,
                                 std::string *error) {
+    json bundleObj = bundle.is_object() ? bundle : json::object();
+
     const std::vector<std::pair<fs::path, json>> files = {
-        {outputRoot / "gguf" / "model.json", bundle.value("ggufModel", json::object())},
-        {outputRoot / "vocab" / "tokens.json", bundle.value("vocabulary", json::object())},
-        {outputRoot / "mapping" / "semantic_mapping.json", bundle.value("semanticMapping", json::array())},
-        {outputRoot / "dynamics" / "neuro_dynamics.json", bundle.value("neuroDynamicsTable", json::array())},
-        {outputRoot / "fit" / "fit_result.json", bundle.value("fitResult", json::object())},
-        {outputRoot / "runtime" / "runtime_config.json", bundle.value("runtimeConfig", json::object())},
-        {outputRoot / "manifest.json", bundle}};
+        {outputRoot / "gguf" / "model.json", bundleObj.value("ggufModel", json::object())},
+        {outputRoot / "vocab" / "tokens.json", bundleObj.value("vocabulary", json::object())},
+        {outputRoot / "mapping" / "semantic_mapping.json", bundleObj.value("semanticMapping", json::array())},
+        {outputRoot / "dynamics" / "neuro_dynamics.json", bundleObj.value("neuroDynamicsTable", json::array())},
+        {outputRoot / "fit" / "fit_result.json", bundleObj.value("fitResult", json::object())},
+        {outputRoot / "runtime" / "runtime_config.json", bundleObj.value("runtimeConfig", json::object())},
+        {outputRoot / "manifest.json", bundleObj}};
 
     json manifest = {
         {"root", outputRoot.string()},

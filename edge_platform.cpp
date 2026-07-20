@@ -70,6 +70,22 @@ std::string lowerCopy(std::string value) {
     return value;
 }
 
+template <typename T>
+T safeJsonValue(const json &j, const std::string &key, const T &fallback) {
+    if (!j.is_object()) {
+        return fallback;
+    }
+    auto it = j.find(key);
+    if (it == j.end() || it->is_null()) {
+        return fallback;
+    }
+    try {
+        return it->get<T>();
+    } catch (...) {
+        return fallback;
+    }
+}
+
 std::string upperCopy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
         return static_cast<char>(std::toupper(ch));
@@ -103,7 +119,7 @@ std::string normalizePlatformTaskKind(const std::string &raw, const std::string 
 
 std::string platformTaskOperation(const json &payload, const std::string &fallback) {
     return normalizePlatformTaskKind(
-        payload.value("operation", payload.value("opType", payload.value("kind", fallback))),
+        safeJsonValue(payload, "operation", safeJsonValue(payload, "opType", safeJsonValue(payload, "kind", fallback))),
         fallback);
 }
 
@@ -120,7 +136,7 @@ json buildPeripheralPlanSummary(const PlatformManager::TopologyCache &topology,
                                 const std::string &taskClass,
                                 const std::string &defaultOperation) {
     const std::string operation = platformTaskOperation(payload, defaultOperation);
-    const int latencyBudgetMs = std::max(0, payload.value("latencyBudgetMs", payload.value("deadlineMs", 80)));
+    const int latencyBudgetMs = std::max(0, safeJsonValue(payload, "latencyBudgetMs", safeJsonValue(payload, "deadlineMs", 80)));
     const bool schedulingEnabled = config.enabled && config.peripheralSchedulingEnabled;
     const bool topologyReady = topology.loaded;
     std::vector<std::string> reasons;
@@ -227,11 +243,11 @@ std::string normalizeBackend(const std::string &raw) {
 }
 
 int resolveWeightBlockId(const json &payload) {
-    return std::max(0, payload.value("weightBlockId", payload.value("weightBlock", 0)));
+    return std::max(0, safeJsonValue(payload, "weightBlockId", safeJsonValue(payload, "weightBlock", 0)));
 }
 
 std::size_t resolveWeightBytes(const json &payload, int tensorBytes) {
-    const int declared = std::max(0, payload.value("weightBytes", payload.value("weightsBytes", 0)));
+    const int declared = std::max(0, safeJsonValue(payload, "weightBytes", safeJsonValue(payload, "weightsBytes", 0)));
     if (declared > 0) {
         return static_cast<std::size_t>(declared);
     }
@@ -400,7 +416,7 @@ bool parseSpiFrames(const json &payload, std::vector<std::vector<uint8_t>> &fram
     };
 
     frames.clear();
-    if (payload.contains("transportFrames") && payload["transportFrames"].is_array()) {
+    if (payload.is_object() && payload.contains("transportFrames") && payload["transportFrames"].is_array()) {
         for (const auto &item : payload["transportFrames"]) {
             if (!item.is_string()) {
                 continue;
@@ -412,7 +428,7 @@ bool parseSpiFrames(const json &payload, std::vector<std::vector<uint8_t>> &fram
             }
             frames.push_back(std::move(bytes));
         }
-    } else if (payload.contains("spiTxHex") && payload["spiTxHex"].is_string()) {
+    } else if (payload.is_object() && payload.contains("spiTxHex") && payload["spiTxHex"].is_string()) {
         auto bytes = parseOne(payload["spiTxHex"].get<std::string>());
         if (bytes.empty()) {
             error = "invalid spiTxHex payload";
@@ -459,7 +475,7 @@ std::string firstWeightConfigIrqSignal(const PlatformManager::TopologyCache &top
 
 std::string resolveWeightControllerFaultMode(const json &payload) {
     std::string mode;
-    if (payload.contains("faultInjection") && payload["faultInjection"].is_object()) {
+    if (payload.is_object() && payload.contains("faultInjection") && payload["faultInjection"].is_object()) {
         const json &faultInjection = payload["faultInjection"];
         if (faultInjection.contains("weightControllerFaultMode") && faultInjection["weightControllerFaultMode"].is_string()) {
             mode = faultInjection["weightControllerFaultMode"].get<std::string>();
@@ -469,10 +485,10 @@ std::string resolveWeightControllerFaultMode(const json &payload) {
             mode = faultInjection["mcu"].get<std::string>();
         }
     }
-    if (mode.empty() && payload.contains("weightControllerFaultMode") && payload["weightControllerFaultMode"].is_string()) {
+    if (mode.empty() && payload.is_object() && payload.contains("weightControllerFaultMode") && payload["weightControllerFaultMode"].is_string()) {
         mode = payload["weightControllerFaultMode"].get<std::string>();
     }
-    if (mode.empty() && payload.contains("mcuFaultMode") && payload["mcuFaultMode"].is_string()) {
+    if (mode.empty() && payload.is_object() && payload.contains("mcuFaultMode") && payload["mcuFaultMode"].is_string()) {
         mode = payload["mcuFaultMode"].get<std::string>();
     }
     mode = lowerCopy(trimCopy(mode));
@@ -633,11 +649,11 @@ json buildNpuProtocolEnvelope(const PlatformManager::TopologyCache &topology,
     const std::string weightCfgSclSignal = firstPresentSignal(topology, {"GPIO3_WEIGHT_CFG_I2C_SCL"});
     const std::string irqSignal = firstWeightConfigIrqSignal(topology);
     const bool directAsync = hasDirectAsyncBoundary(topology);
-    const bool rawTransportProvided = (payload.contains("transportFrames") && payload["transportFrames"].is_array()) ||
-                                      (payload.contains("spiTxHex") && payload["spiTxHex"].is_string());
-    const bool autoBuildFrames = payload.value("autoBuildTransportFrames", true) && !rawTransportProvided;
-    const int requestId = clampProtocolValue(payload.value("requestId", payload.value("dispatchTag", 1)), 1, 65535);
-    const int weightBlockId = clampProtocolValue(payload.value("weightBlockId", payload.value("weightBlock", 0)), 0, 255);
+    const bool rawTransportProvided = (payload.is_object() && payload.contains("transportFrames") && payload["transportFrames"].is_array()) ||
+                                      (payload.is_object() && payload.contains("spiTxHex") && payload["spiTxHex"].is_string());
+    const bool autoBuildFrames = safeJsonValue(payload, "autoBuildTransportFrames", true) && !rawTransportProvided;
+    const int requestId = clampProtocolValue(safeJsonValue(payload, "requestId", safeJsonValue(payload, "dispatchTag", 1)), 1, 65535);
+    const int weightBlockId = clampProtocolValue(safeJsonValue(payload, "weightBlockId", safeJsonValue(payload, "weightBlock", 0)), 0, 255);
     // 硬件常量——来自网表 eext_netlist.json 实际信号绑定
     // 比较器：8路载波（CARRA~CARRH，GPIO5/12/13/16/20/21/14/15）+ 2路slice（GPIO4/26）
     const int hardwareComparatorCount = 10;
@@ -651,47 +667,47 @@ json buildNpuProtocolEnvelope(const PlatformManager::TopologyCache &topology,
     //   由板载GD32F427 MCU管理NPU_SAMPLE_SYNC脉冲时序，RC时间常数(101ns)由MCU侧控制。
     //   Pi侧只负责以最快速度驱动DAC线和读回比较器结果，流水线由overlapSlots实现。
     const int maxPipelineDepth = hardwareComparatorCount; // 全部10路比较器流水线
-    const int queueDepth = clampProtocolValue(payload.value("queueDepth", std::min(config.maxComputeInflight, directAsync ? maxPipelineDepth : 1)), 1, std::max(1, config.maxComputeInflight));
-    const int pipelineDepth = clampProtocolValue(payload.value("pipelineDepth", directAsync ? std::min(queueDepth, maxPipelineDepth) : 1), 1, queueDepth);
+    const int queueDepth = clampProtocolValue(safeJsonValue(payload, "queueDepth", std::min(config.maxComputeInflight, directAsync ? maxPipelineDepth : 1)), 1, std::max(1, config.maxComputeInflight));
+    const int pipelineDepth = clampProtocolValue(safeJsonValue(payload, "pipelineDepth", directAsync ? std::min(queueDepth, maxPipelineDepth) : 1), 1, queueDepth);
     // 读回通道：全部10路比较器并行读回
     const int defaultReadChannels = static_cast<int>(std::max<std::size_t>(1, std::min<std::size_t>(hardwareComparatorCount, rxDataSignals.size())));
-    const int readChannels = clampProtocolValue(payload.value("readChannels", directAsync ? defaultReadChannels : 1), 1, hardwareComparatorCount);
+    const int readChannels = clampProtocolValue(safeJsonValue(payload, "readChannels", directAsync ? defaultReadChannels : 1), 1, hardwareComparatorCount);
     // sampleWindowUs=0（directAsync）：Pi不插入软件等待，RC时序完全由MCU NPU_SAMPLE_SYNC控制
     // sampleWindowUs>0（同步模式）：Pi自己等待窗口后读回，需至少1µs
     const int minSampleWindowUs = directAsync ? 0 : 1;
-    const int sampleWindowUs = clampProtocolValue(payload.value("sampleWindowUs", payload.value("integrationWindowUs", 0)), minSampleWindowUs, 60000);
-    const int timeoutUs = clampProtocolValue(payload.value("readTimeoutUs", std::max(1, sampleWindowUs * 4)), 1, 65535);
+    const int sampleWindowUs = clampProtocolValue(safeJsonValue(payload, "sampleWindowUs", safeJsonValue(payload, "integrationWindowUs", 0)), minSampleWindowUs, 60000);
+    const int timeoutUs = clampProtocolValue(safeJsonValue(payload, "readTimeoutUs", std::max(1, sampleWindowUs * 4)), 1, 65535);
     // DAC并行字数：默认驱动全部12路DAC线（每个GPIO对应一路模拟输入权重）
     const int dacParallelWords = dacChannelCount;
     const int inputWords = clampProtocolValue(
-        payload.value("inputVectorWords",
+        safeJsonValue(payload, "inputVectorWords",
                       std::max(dacParallelWords, std::min(255, tokens > 0 ? (tokens + 15) / 16 : std::max(1, tensorBytes / 4096)))),
         1,
         255);
-    const int outputWords = clampProtocolValue(payload.value("outputVectorWords", std::max(1, readChannels)), 1, 255);
-    const bool streamWeights = payload.value("streamWeights", false);
+    const int outputWords = clampProtocolValue(safeJsonValue(payload, "outputVectorWords", std::max(1, readChannels)), 1, 255);
+    const bool streamWeights = safeJsonValue(payload, "streamWeights", false);
     const int overlapSlots = directAsync ? pipelineDepth : 1;
     const std::string executionModel = directAsync ? "async-overlapped" : "ordered-sync";
     const std::string queueDiscipline = directAsync ? "tagged-overlap-readback" : "in-order-readback";
     const bool separateTxRx = directAsync && !txDataSignals.empty() && !rxDataSignals.empty();
-    const json requestedWeightConfig = (payload.contains("weightConfig") && payload["weightConfig"].is_object())
+    const json requestedWeightConfig = (payload.is_object() && payload.contains("weightConfig") && payload["weightConfig"].is_object())
                                            ? payload["weightConfig"]
                                            : json::object();
     const json requestedWeightTargets = (requestedWeightConfig.contains("targets") && requestedWeightConfig["targets"].is_array())
                                             ? requestedWeightConfig["targets"]
-                                            : ((payload.contains("weightTargets") && payload["weightTargets"].is_array())
+                                            : ((payload.is_object() && payload.contains("weightTargets") && payload["weightTargets"].is_array())
                                                    ? payload["weightTargets"]
                                                    : json::array());
     const bool weightControlAvailable = weightCfgBusSignals.size() == 2;
     const std::string weightControllerFaultMode = resolveWeightControllerFaultMode(payload);
     const bool weightControllerHealthy = !weightControllerFaulted(weightControllerFaultMode);
     const bool weightConfigRequested = !requestedWeightConfig.empty() || !requestedWeightTargets.empty();
-    const json requestedCycles = (payload.contains("inputCycles") && payload["inputCycles"].is_array())
+    const json requestedCycles = (payload.is_object() && payload.contains("inputCycles") && payload["inputCycles"].is_array())
                                      ? payload["inputCycles"]
-                                     : ((payload.contains("inputWindows") && payload["inputWindows"].is_array())
+                                     : ((payload.is_object() && payload.contains("inputWindows") && payload["inputWindows"].is_array())
                                             ? payload["inputWindows"]
                                             : json::array());
-    const bool legacyWindowAliasUsed = !payload.contains("inputCycles") && payload.contains("inputWindows") && payload["inputWindows"].is_array();
+    const bool legacyWindowAliasUsed = payload.is_object() && !payload.contains("inputCycles") && payload.contains("inputWindows") && payload["inputWindows"].is_array();
     const int cycleCount = clampProtocolValue(
         !requestedCycles.empty() ? static_cast<int>(requestedCycles.size()) : shardCount,
         1,
@@ -2083,14 +2099,14 @@ json PlatformManager::buildFleetScheduleLocked(int shardCount, int preferredBatc
 }
 
 json PlatformManager::buildWeightVirtualizationViewLocked(const json &payload) const {
-    const int tensorBytes = std::max(0, payload.value("tensorBytes", payload.value("bytes", payload.value("activationBytes", 0))));
+    const int tensorBytes = std::max(0, safeJsonValue(payload, "tensorBytes", safeJsonValue(payload, "bytes", safeJsonValue(payload, "activationBytes", 0))));
     const int weightBlockId = resolveWeightBlockId(payload);
     const std::size_t weightBytes = resolveWeightBytes(payload, tensorBytes);
     const auto found = weightResidency_.find(weightBlockId);
     const bool hot = found != weightResidency_.end() && found->second.hot;
     const uint64_t totalHits = found != weightResidency_.end() ? found->second.totalHits : 0;
     const bool presentOnSd = found != weightResidency_.end() ? found->second.presentOnSd : true;
-    const bool streamWeights = payload.contains("streamWeights") ? payload.value("streamWeights", false) : !hot;
+    const bool streamWeights = payload.is_object() && payload.contains("streamWeights") ? safeJsonValue(payload, "streamWeights", false) : !hot;
 
     const int advertisedMb = std::max(1024, config_.npuAdvertisedMemoryMb);
     const int requiredMb = static_cast<int>((weightBytes + (1024 * 1024 - 1)) / (1024 * 1024));
@@ -2446,6 +2462,7 @@ json PlatformManager::buildStatusLocked() const {
     const bool efficiencyAnomaly = config_.npuEfficiencyProbeEnabled && metrics_.accelEfficiencyScore < config_.npuEfficiencyAnomalyThreshold;
 
     return json{{"ok", true},
+                {"enabled", config_.enabled},
                 {"result",
                  json{{"config",
                        json{{"enabled", config_.enabled},
@@ -2676,31 +2693,31 @@ json PlatformManager::applyPatch(const json &patch) {
 
 json PlatformManager::buildComputePlanLocked(const json &payload) {
     ensureNpuLanesLocked();
-    const std::string op = lowerCopy(trimCopy(payload.value("operation", payload.value("opType", payload.value("kind", std::string("chat-inference"))))));
-    const int tokens = std::max(0, payload.value("tokens", payload.value("promptTokens", payload.value("sequenceLength", 0))));
-    const int tensorBytes = std::max(0, payload.value("tensorBytes", payload.value("bytes", payload.value("activationBytes", 0))));
-    const int latencyBudgetMs = std::max(0, payload.value("latencyBudgetMs", 120));
-    const bool controlHeavy = payload.value("controlHeavy", false) || containsAny(op, {"tool", "routing", "json", "control", "planner"});
-    const bool postProcess = payload.value("postProcessOnCpu", payload.value("needsPostProcess", false));
-    const bool streaming = payload.value("streaming", false);
-    const bool allowCpu = payload.value("allowCpu", true);
-    const bool allowNpu = payload.value("allowNpu", true) && config_.enabled && config_.npuEnabled && topology_.npuAvailable;
-    const bool rawTransportProvided = (payload.contains("transportFrames") && payload["transportFrames"].is_array()) ||
-                                      (payload.contains("spiTxHex") && payload["spiTxHex"].is_string());
+    const std::string op = lowerCopy(trimCopy(safeJsonValue(payload, "operation", safeJsonValue(payload, "opType", safeJsonValue(payload, "kind", std::string("chat-inference"))))));
+    const int tokens = std::max(0, safeJsonValue(payload, "tokens", safeJsonValue(payload, "promptTokens", safeJsonValue(payload, "sequenceLength", 0))));
+    const int tensorBytes = std::max(0, safeJsonValue(payload, "tensorBytes", safeJsonValue(payload, "bytes", safeJsonValue(payload, "activationBytes", 0))));
+    const int latencyBudgetMs = std::max(0, safeJsonValue(payload, "latencyBudgetMs", 120));
+    const bool controlHeavy = safeJsonValue(payload, "controlHeavy", false) || containsAny(op, {"tool", "routing", "json", "control", "planner"});
+    const bool postProcess = safeJsonValue(payload, "postProcessOnCpu", safeJsonValue(payload, "needsPostProcess", false));
+    const bool streaming = safeJsonValue(payload, "streaming", false);
+    const bool allowCpu = safeJsonValue(payload, "allowCpu", true);
+    const bool allowNpu = safeJsonValue(payload, "allowNpu", true) && config_.enabled && config_.npuEnabled && topology_.npuAvailable;
+    const bool rawTransportProvided = (payload.is_object() && payload.contains("transportFrames") && payload["transportFrames"].is_array()) ||
+                                      (payload.is_object() && payload.contains("spiTxHex") && payload["spiTxHex"].is_string());
     const bool directAsyncBoundary = hasDirectAsyncBoundary(topology_);
     const bool weightControlAvailable = collectWeightConfigBusSignals(topology_).size() == 2;
     const std::string weightControllerFaultMode = resolveWeightControllerFaultMode(payload);
-    const std::string preferredTransport = lowerCopy(trimCopy(payload.value("preferredTransport", payload.value("transportHint", std::string("auto")))));
+    const std::string preferredTransport = lowerCopy(trimCopy(safeJsonValue(payload, "preferredTransport", safeJsonValue(payload, "transportHint", std::string("auto")))));
     const json virtualMemory = buildWeightVirtualizationViewLocked(payload);
     const bool memoryAdmitted = virtualMemory.value("admitted", true);
     std::string preferred = config_.preferredComputeBackend;
-    if (payload.contains("preferredBackend") && payload["preferredBackend"].is_string()) {
+    if (payload.is_object() && payload.contains("preferredBackend") && payload["preferredBackend"].is_string()) {
         preferred = normalizeBackend(payload["preferredBackend"].get<std::string>());
     }
 
     // 矩阵维度感知优化：检测32×16矩阵适配性
-    const int matrixRows = payload.value("matrixRows", 0);
-    const int matrixCols = payload.value("matrixCols", 0);
+    const int matrixRows = safeJsonValue(payload, "matrixRows", 0);
+    const int matrixCols = safeJsonValue(payload, "matrixCols", 0);
     const bool isMatrixCompatible = (matrixRows > 0 && matrixCols > 0) ?
                                     (matrixRows % 32 == 0 && matrixCols % 16 == 0) :
                                     (tensorBytes % 512 == 0); // 512交叉点对齐
@@ -2709,9 +2726,9 @@ json PlatformManager::buildComputePlanLocked(const json &payload) {
                                   0;
 
     // 二值网络检测优化
-    const bool isBinaryNetwork = payload.value("isBinaryNetwork", false) ||
-                                 payload.value("weightPrecision", std::string("")) == "binary" ||
-                                 payload.value("weightPrecision", std::string("")) == "ternary" ||
+    const bool isBinaryNetwork = safeJsonValue(payload, "isBinaryNetwork", false) ||
+                                 safeJsonValue(payload, "weightPrecision", std::string("")) == "binary" ||
+                                 safeJsonValue(payload, "weightPrecision", std::string("")) == "ternary" ||
                                  containsAny(op, {"binary", "ternary", "bnn", "xnor"});
 
     const bool dense = containsAny(op, {"matmul", "attention", "conv", "embedding", "tensor", "analog", "npu", "vector", "decode"}) || tensorBytes >= 65536 || tokens >= 128;
@@ -2790,9 +2807,9 @@ json PlatformManager::buildComputePlanLocked(const json &payload) {
         }
     }
     const bool hardwareReady = mode == "cpu" ? true : (transport == "spi0" ? pathLooksAvailable(config_.npuSpiDevice) : directAsyncBoundary);
-    const bool localAsyncGpioRequested = payload.value("executeGpioAsync", config_.npuAsyncGpioExecuteLocally) ||
-                              (payload.contains("inputCycles") && payload["inputCycles"].is_array()) ||
-                              (payload.contains("inputWindows") && payload["inputWindows"].is_array());
+    const bool localAsyncGpioRequested = safeJsonValue(payload, "executeGpioAsync", config_.npuAsyncGpioExecuteLocally) ||
+                              (payload.is_object() && payload.contains("inputCycles") && payload["inputCycles"].is_array()) ||
+                              (payload.is_object() && payload.contains("inputWindows") && payload["inputWindows"].is_array());
     const std::string localAsyncDriver = preferredAsyncGpioExecutionDriver(config_);
     const std::string driver = mode == "cpu"
                                    ? "host-cpu"
@@ -2803,7 +2820,7 @@ json PlatformManager::buildComputePlanLocked(const json &payload) {
                                                   : "async-gpio-envelope")
                                 : "scheduled-envelope"));
     const int shardCount = std::max(1, std::min(8, std::max(tokens / 256, tensorBytes / 262144) + ((mode == "hybrid") ? 1 : 0)));
-    const int preferredBatch = std::max(1, std::min(16, payload.value("batch", dense ? 4 : 1)));
+    const int preferredBatch = std::max(1, std::min(16, safeJsonValue(payload, "batch", dense ? 4 : 1)));
     const json fleetPlan = buildFleetScheduleLocked(shardCount, preferredBatch);
     const bool streamWeights = virtualMemory.value("streamWeights", !virtualMemory.value("hot", false));
 
@@ -2846,7 +2863,7 @@ json PlatformManager::buildComputePlanLocked(const json &payload) {
                       {"anomalyThreshold", config_.npuEfficiencyAnomalyThreshold},
                       {"anomalyDetected", config_.npuEfficiencyProbeEnabled && metrics_.accelEfficiencyScore < config_.npuEfficiencyAnomalyThreshold}}}};
     if (mode != "cpu" && mode != "rejected") {
-        json protocolPayload = payload;
+        json protocolPayload = payload.is_object() ? payload : json::object();
         if (!protocolPayload.contains("streamWeights")) {
             protocolPayload["streamWeights"] = streamWeights;
         }
@@ -2923,9 +2940,9 @@ json PlatformManager::dispatchCompute(const json &payload) {
     const bool wantsLocalAsyncGpio = accepted &&
                                      mode != "cpu" &&
                                      plan["route"].value("transport", std::string()) == "gpio-async" &&
-                                     (payload.value("executeGpioAsync", config_.npuAsyncGpioExecuteLocally) ||
-                                      (payload.contains("inputCycles") && payload["inputCycles"].is_array()) ||
-                                      (payload.contains("inputWindows") && payload["inputWindows"].is_array()));
+                                     (safeJsonValue(payload, "executeGpioAsync", config_.npuAsyncGpioExecuteLocally) ||
+                                      (payload.is_object() && payload.contains("inputCycles") && payload["inputCycles"].is_array()) ||
+                                      (payload.is_object() && payload.contains("inputWindows") && payload["inputWindows"].is_array()));
     if (wantsLocalAsyncGpio && plan.contains("protocol") && plan["protocol"].is_object() &&
         plan["protocol"].contains("gpioPlan") && plan["protocol"]["gpioPlan"].is_array()) {
         std::string gpioError;
@@ -2973,7 +2990,7 @@ json PlatformManager::dispatchCompute(const json &payload) {
 #endif
     } else if (accepted && mode != "cpu" && plan.contains("protocol") && plan["protocol"].is_object() &&
                plan["protocol"].contains("transportFrames") && plan["protocol"]["transportFrames"].is_array() &&
-               payload.value("autoBuildTransportFrames", true)) {
+               safeJsonValue(payload, "autoBuildTransportFrames", true)) {
         json framePayload{{"transportFrames", plan["protocol"]["transportFrames"]}};
         if (parseSpiFrames(framePayload, frames, frameError) && !frames.empty()) {
             autoBuiltFrames = true;
@@ -3067,7 +3084,7 @@ json PlatformManager::dispatchMobility(const json &payload) {
 json PlatformManager::runSelfTest(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
     decayBacklogLocked(nowMs());
-    const bool refreshTopologyNow = payload.value("refreshTopology", false) || !topology_.loaded;
+    const bool refreshTopologyNow = safeJsonValue(payload, "refreshTopology", false) || !topology_.loaded;
     if (refreshTopologyNow) {
         topology_ = buildTopologyLocked();
         metrics_.refreshCount += 1;

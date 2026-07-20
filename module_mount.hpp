@@ -115,6 +115,8 @@ public:
                                   double mutationRate,
                                   double mutationScale) = 0; /* Evolve */
     virtual nlohmann::json latest() const = 0;                  /* Get latest results */
+    virtual int population() const { return 6; }                 /* Default population */
+    virtual int generations() const { return 1; }                /* Default generations */
 };
 
 /* Gateway server interface */

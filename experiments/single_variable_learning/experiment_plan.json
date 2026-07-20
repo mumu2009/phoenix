@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "created_at": 1784130491.0641358,
+  "schema_sha256": "c95f20630629d61eaf3b4d2bb0ce28e59a3927abf9a459f4a7e9ac480e6ecf58",
+  "baseline_sha256": "8a22e4603374d3a56193eb50304ff3cd297376c4aa7a6056d0ed40b90f707384",
+  "parameters": [
+    {
+      "module": "learning",
+      "path": "learning.advAttackRounds",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 10,
+      "default": 3
+    },
+    {
+      "module": "learning",
+      "path": "learning.advBenchLimit",
+      "type": "int",
+      "tuned": false,
+      "min": 10,
+      "max": 100,
+      "default": 50
+    },
+    {
+      "module": "learning",
+      "path": "learning.advDefenseRounds",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 10,
+      "default": 3
+    },
+    {
+      "module": "learning",
+      "path": "learning.advMaxAdversaries",
+      "type": "int",
+      "tuned": false,
+      "min": 8,
+      "max": 128,
+      "default": 64
+    },
+    {
+      "module": "learning",
+      "path": "learning.advNoiseLevel",
+      "type": "float",
+      "tuned": false,
+      "min": 0.05,
+      "max": 0.5,
+      "default": 0.2
+    },
+    {
+      "module": "learning",
+      "path": "learning.gnnGaGenerations",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 10,
+      "default": 1
+    },
+    {
+      "module": "learning",
+      "path": "learning.gnnGaMaxDocs",
+      "type": "int",
+      "tuned": false,
+      "min": 8,
+      "max": 64,
+      "default": 32
+    },
+    {
+      "module": "learning",
+      "path": "learning.gnnGaPopulation",
+      "type": "int",
+      "tuned": false,
+      "min": 4,
+      "max": 32,
+      "default": 6
+    },
+    {
+      "module": "learning",
+      "path": "learning.rlCoverageWeight",
+      "type": "float",
+      "tuned": false,
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.7
+    },
+    {
+      "module": "learning",
+      "path": "learning.rlImprovementThreshold",
+      "type": "float",
+      "tuned": false,
+      "min": 0.001,
+      "max": 0.1,
+      "default": 0.01
+    },
+    {
+      "module": "learning",
+      "path": "learning.rlMaxDocs",
+      "type": "int",
+      "tuned": false,
+      "min": 8,
+      "max": 128,
+      "default": 64
+    },
+    {
+      "module": "learning",
+      "path": "learning.rlTopKWords",
+      "type": "int",
+      "tuned": false,
+      "min": 10,
+      "max": 100,
+      "default": 30
+    },
+    {
+      "module": "learning",
+      "path": "learning.rlUniquenessWeight",
+      "type": "float",
+      "tuned": false,
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.3
+    }
+  ],
+  "settings": {
+    "max_evals": 12,
+    "latency_budget": 120000.0,
+    "run_timeout": 1800.0,
+    "timeout": 90.0,
+    "warmup_timeout": 120.0,
+    "warmup_retries": 3,
+    "stall_seconds": 180,
+    "samples": 5,
+    "rounds": 1,
+    "providers": "phoenix",
+    "scenarios": "short_dialogue,long_dialogue_5_15,ultra_long_dialogue_15_plus"
+  }
+}

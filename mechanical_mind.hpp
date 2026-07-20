@@ -31,6 +31,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "emotion_system.hpp"
 
 namespace mechanical_mind {
 
@@ -48,6 +49,16 @@ struct Options {
     double textThreshold{0.58};           /* Text-level threshold */
     double tokenThreshold{0.60};           /* Token-level threshold */
     std::string placeholder{"[mechanized]"}; /* Replacement placeholder */
+    bool emotionAware{true};              /* Enable emotion-aware threshold adjustment */
+    double emotionInfluence{0.30};        /* How much emotion can shift thresholds [0,1] */
+    bool positiveRelaxes{true};           /* Positive emotion raises thresholds (less filtering) */
+};
+
+/* Emotion context for adaptive filtering */
+struct EmotionContext {
+    phoenix::emotion::EmotionTensor current;  /* Current session emotion */
+    phoenix::emotion::EmotionTensor baseline; /* Baseline emotion for this session */
+    bool enabled{false};                      /* Whether emotion context is active */
 };
 
 /* Analysis result */
@@ -108,6 +119,47 @@ public:
     }
     /* Get placeholder */
     const std::string &placeholder() const { return options_.placeholder; }
+
+    /* Set emotion-aware adjustment */
+    void setEmotionAware(bool on) { options_.emotionAware = on; }
+    /* Get emotion-aware adjustment */
+    bool emotionAware() const { return options_.emotionAware; }
+
+    /* Set emotion influence on thresholds [0,1] */
+    void setEmotionInfluence(double value) { options_.emotionInfluence = clamp01(value); }
+    /* Get emotion influence on thresholds */
+    double emotionInfluence() const { return options_.emotionInfluence; }
+
+    /* Set whether positive emotion raises thresholds (less filtering) */
+    void setPositiveRelaxes(bool on) { options_.positiveRelaxes = on; }
+    /* Get whether positive emotion raises thresholds */
+    bool positiveRelaxes() const { return options_.positiveRelaxes; }
+
+    /* Set the current emotion context for adaptive filtering */
+    void setEmotionContext(const phoenix::emotion::EmotionTensor &current,
+                           const phoenix::emotion::EmotionTensor &baseline,
+                           bool on = true) {
+        emotionContext_.current = current;
+        emotionContext_.baseline = baseline;
+        emotionContext_.enabled = on;
+    }
+
+    /* Analyze and sanitize using the currently registered emotion context */
+    Analysis analyzeAndSanitize(const std::string &text, bool force = false) const {
+        return analyzeAndSanitizeWithEmotion(text, emotionContext_, force);
+    }
+
+    /* Analyze and sanitize with an explicit emotion snapshot */
+    Analysis analyzeAndSanitize(const std::string &text,
+                                const phoenix::emotion::EmotionTensor &currentEmotion,
+                                const phoenix::emotion::EmotionTensor &baselineEmotion = {},
+                                bool force = false) const {
+        EmotionContext ctx;
+        ctx.current = currentEmotion;
+        ctx.baseline = baselineEmotion;
+        ctx.enabled = true;
+        return analyzeAndSanitizeWithEmotion(text, ctx, force);
+    }
 
     /* Warmup filter with documents */
     void warmup(const std::vector<Document> &docs) {
@@ -171,13 +223,22 @@ public:
         }
     }
 
-    /* Analyze and sanitize text */
-    Analysis analyzeAndSanitize(const std::string &text, bool force = false) const {
+    /* Analyze and sanitize text using explicit emotion context */
+    Analysis analyzeAndSanitizeWithEmotion(const std::string &text, const EmotionContext &ctx, bool force = false) const {
+        Options effective = options_;
+        if (options_.emotionAware && ctx.enabled) {
+            effective = emotionAdjustedOptions(effective, ctx);
+        }
+        return analyzeAndSanitizeImpl(text, effective, force);
+    }
+
+    /* Internal analyze/sanitize implementation using resolved options */
+    Analysis analyzeAndSanitizeImpl(const std::string &text, const Options &opts, bool force = false) const {
         Analysis out;
-        out.enabled = options_.enabled;
+        out.enabled = opts.enabled;
         out.warmed = warmed_;
         out.sanitized = text;
-        if ((!options_.enabled && !force) || text.empty()) {
+        if ((!opts.enabled && !force) || text.empty()) {
             return out;
         }
 
@@ -195,7 +256,7 @@ public:
 
         for (std::size_t index = 0; index < spans.size(); ++index) {
             weights[index] = tokenWeight(spans[index].lower);
-            if (weights[index] + 1e-9 >= options_.tokenThreshold) {
+            if (weights[index] + 1e-9 >= opts.tokenThreshold) {
                 flagged[index] = true;
                 uniqueFlaggedTokens.insert(spans[index].lower);
             }
@@ -236,12 +297,12 @@ public:
         bool emotionalSeen = false;
         for (std::size_t index = 0; index < spans.size(); ++index) {
             pronounSeen = pronounSeen || isPronoun(spans[index].lower);
-            emotionalSeen = emotionalSeen || weights[index] >= options_.tokenThreshold;
+            emotionalSeen = emotionalSeen || weights[index] >= opts.tokenThreshold;
             if (!flagged[index]) {
                 continue;
             }
             ++flaggedCount;
-            flaggedSum += std::max(weights[index], options_.tokenThreshold);
+            flaggedSum += std::max(weights[index], opts.tokenThreshold);
         }
 
         out.lexicalScore = flaggedCount > 0 ? clamp01(flaggedSum / static_cast<double>(flaggedCount)) : 0.0;
@@ -262,7 +323,7 @@ public:
         std::sort(out.flaggedPhrases.begin(), out.flaggedPhrases.end());
 
         const bool phraseTriggered = !out.flaggedPhrases.empty();
-        out.triggered = phraseTriggered || out.score + 1e-9 >= options_.textThreshold || (force && (flaggedCount > 0 || phraseTriggered));
+        out.triggered = phraseTriggered || out.score + 1e-9 >= opts.textThreshold || (force && (flaggedCount > 0 || phraseTriggered));
         if (!out.triggered) {
             return out;
         }
@@ -277,7 +338,7 @@ public:
             }
             std::string replacement = replacementFor(spans[index].lower);
             if (replacement.empty()) {
-                replacement = options_.placeholder;
+                replacement = opts.placeholder;
             }
             replacements.push_back(Replacement{spans[index].start, spans[index].end, matchCase(spans[index].token, replacement)});
         }
@@ -333,6 +394,40 @@ private:
             return 1.0;
         }
         return value;
+    }
+
+    /* Clamp value to [-1, 1] */
+    static double clamp11(double value) {
+        if (value < -1.0) {
+            return -1.0;
+        }
+        if (value > 1.0) {
+            return 1.0;
+        }
+        return value;
+    }
+
+    /* Summarize EmotionTensor into a single affect polarity in [-1, 1] */
+    static double emotionNetAffect(const phoenix::emotion::EmotionTensor &e) {
+        double v = 0.30 * static_cast<double>(e.valence)
+                 + 0.30 * static_cast<double>(e.joy)
+                 + 0.20 * static_cast<double>(e.trust)
+                 - 0.20 * static_cast<double>(e.anger)
+                 - 0.20 * static_cast<double>(e.fear);
+        return clamp11(v);
+    }
+
+    /* Adjust filter thresholds according to the current emotion context */
+    static Options emotionAdjustedOptions(const Options &base, const EmotionContext &ctx) {
+        Options out = base;
+        double net = emotionNetAffect(ctx.current);
+        if (!out.positiveRelaxes) {
+            net = -net;
+        }
+        double shift = out.emotionInfluence * net;
+        out.textThreshold = clamp01(out.textThreshold + shift);
+        out.tokenThreshold = clamp01(out.tokenThreshold + shift);
+        return out;
     }
 
     /* Convert string to lowercase */
@@ -556,6 +651,7 @@ private:
     std::unordered_map<std::string, double> tokenWeights_; /* Token weights */
     std::unordered_map<std::string, std::string> replacements_; /* Replacements */
     std::vector<PhraseRule> phraseRules_;             /* Phrase rules */
+    EmotionContext emotionContext_;                   /* Current emotion context */
 };
 
 } // namespace mechanical_mind

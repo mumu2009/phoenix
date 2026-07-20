@@ -35,6 +35,8 @@
 #include <cstring>
 #include "frontend_server.hpp"
 #include "phoenix_config.hpp"
+#include "emotion_system.hpp"
+#include "mechanical_mind.hpp"
 #include "transformer.hpp"
 #include "loggerCXXH.hpp"
 #include <jwt-cpp/jwt.h>
@@ -2451,9 +2453,11 @@ namespace
             yoloModel_ = getEnv("VISION_YOLO_MODEL", "");
             yoloLabels_ = getEnv("VISION_YOLO_LABELS", "");
             yoloInput_ = std::max(128, std::stoi(getEnv("VISION_YOLO_INPUT", "640")));
-            yoloScore_ = std::stof(getEnv("VISION_YOLO_SCORE", "0.25"));
-            yoloNms_ = std::stof(getEnv("VISION_YOLO_NMS", "0.45"));
-            yoloMax_ = std::max(1, std::stoi(getEnv("VISION_YOLO_MAX", "80")));
+            // Runtime-tunable thresholds from config/phoenix.json
+            try { yoloScore_ = phoenix::cfgOr<float>("vision.confidenceThreshold", 0.35f); } catch (...) { yoloScore_ = 0.35f; }
+            try { yoloNms_ = phoenix::cfgOr<float>("vision.nmsThreshold", 0.45f); } catch (...) { yoloNms_ = 0.45f; }
+            try { yoloMax_ = phoenix::cfgOr<int>("vision.maxBoxes", 80); } catch (...) { yoloMax_ = 80; }
+            try { minBoxAreaRatio_ = phoenix::cfgOr<float>("vision.minBoxAreaRatio", 0.001f); } catch (...) { minBoxAreaRatio_ = 0.001f; }
 
             cnnModel_ = getEnv("VISION_CNN_MODEL", "");
             cnnLabels_ = getEnv("VISION_CNN_LABELS", "");
@@ -2637,7 +2641,7 @@ namespace
             {
                 cv::Rect r = cv::boundingRect(c);
                 float area = static_cast<float>(r.area());
-                if (area < imgArea * 0.002f)
+                if (area < imgArea * minBoxAreaRatio_)
                     continue;
                 if (r.width < 6 || r.height < 6)
                     continue;
@@ -2779,9 +2783,10 @@ namespace
         std::string yoloModel_;
         std::string yoloLabels_;
         int yoloInput_{640};
-        float yoloScore_{0.25f};
+        float yoloScore_{0.35f};
         float yoloNms_{0.45f};
         int yoloMax_{80};
+        float minBoxAreaRatio_{0.001f};
         std::string cnnModel_;
         std::string cnnLabels_;
         int cnnInput_{224};
@@ -4060,7 +4065,7 @@ namespace
         {
             transformer::TransformerParams params;
             std::unique_ptr<transformer::TransformerModel> model;
-            transformer::Tokenizer tokenizer{phoenix::cfg<int>("summary_model.vocabSize")};
+            transformer::Tokenizer tokenizer{phoenix::cfgOr<int>("summary_model.vocabSize", 32000)};
             std::atomic<bool> ready{false};
             std::atomic<bool> failed{false};
             std::mutex mu;
@@ -4070,23 +4075,23 @@ namespace
             SummaryModel()
             {
                 params.vocabSize =
-                    phoenix::cfg<int>("summary_model.vocabSize");
+                    phoenix::cfgOr<int>("summary_model.vocabSize", 32000);
                 params.dModel =
-                    phoenix::cfg<int>("summary_model.dModel");
+                    phoenix::cfgOr<int>("summary_model.dModel", 512);
                 params.nHeads =
-                    phoenix::cfg<int>("summary_model.nHeads");
+                    phoenix::cfgOr<int>("summary_model.nHeads", 8);
                 params.nLayers =
-                    phoenix::cfg<int>("summary_model.nLayers");
+                    phoenix::cfgOr<int>("summary_model.nLayers", 6);
                 params.dFF =
-                    phoenix::cfg<int>("summary_model.dFF");
+                    phoenix::cfgOr<int>("summary_model.dFF", 2048);
                 params.maxLen =
-                    phoenix::cfg<int>("summary_model.maxLen");
+                    phoenix::cfgOr<int>("summary_model.maxLen", 2048);
                 params.maxTokens =
-                    phoenix::cfg<int>("summary_model.maxTokens");
+                    phoenix::cfgOr<int>("summary_model.maxTokens", 1024);
                 params.lr =
-                    phoenix::cfg<float>("summary_model.lr");
+                    phoenix::cfgOr<float>("summary_model.lr", 0.001f);
                 params.tokenizerMode =
-                    phoenix::cfg<std::string>("summary_model.tokenizerMode");
+                    phoenix::cfgOr<std::string>("summary_model.tokenizerMode", std::string("bpe"));
                 try { maxSummaryTokens = std::max(8, std::stoi(getEnv("FRONTEND_SUMMARY_MAX_TOKENS", "32"))); } catch (...) { maxSummaryTokens = 32; }
                 checkpointPath = getEnv("FRONTEND_SUMMARY_CHECKPOINT", "runtime_store/summary_model.json");
             }
@@ -4283,6 +4288,22 @@ std::string getEnv(const std::string &name, const std::string &fallback)
     return (value == nullptr || std::string(value).empty()) ? fallback : std::string(value);
 }
 
+static std::vector<std::string> emotionTokenize(const std::string &text)
+{
+    std::vector<std::string> tokens;
+    std::string cur;
+    for (char ch : text) {
+        if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '\'') {
+            cur.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        } else if (!cur.empty()) {
+            tokens.push_back(cur);
+            cur.clear();
+        }
+    }
+    if (!cur.empty()) tokens.push_back(cur);
+    return tokens;
+}
+
 void setupFrontendServer()
 {
     ensureFrontendArena();
@@ -4365,6 +4386,62 @@ void setupFrontendServer()
         worldModelDb ? worldModelDb->createStore("meme_graph") : nullptr,
         worldModelDb ? worldModelDb->createStore("session") : nullptr);
     static UserStore userStore(fs::path(getEnv("AUTH_DB", "./auth/users.json")));
+    static phoenix::emotion::EmotionSystem emotionSystem = []() {
+        phoenix::emotion::EmotionSystem::Config cfg;
+        cfg.enabled = phoenix::cfgOr<bool>("emotion.enabled", true);
+        cfg.storageBackend = "sqlite";
+        cfg.storagePath = "./runtime_store/emotion_states.db";
+        cfg.emotionDecayRate = phoenix::cfgOr<float>("emotion.decay", 0.95f);
+        cfg.emotionInfluence = 0.3f;
+        cfg.enableRuntimeFineTuning = true;
+        cfg.historyLength = 10;
+        auto &vcfg = cfg.vocabTableConfig;
+        vcfg.enabled = cfg.enabled;
+        vcfg.vocabTablePath = phoenix::cfgOr<std::string>("emotion.vocabTablePath", "./runtime_store/emotion_vocab_weight_table.json");
+        vcfg.vocabCachePath = phoenix::cfgOr<std::string>("emotion.vocabCachePath", "./runtime_store/emotion_vocab_cache.json");
+        vcfg.learningRate = phoenix::cfgOr<float>("emotion.learningRate", 0.05f);
+        vcfg.maxBias = phoenix::cfgOr<float>("emotion.maxBias", 2.0f);
+        vcfg.minBias = phoenix::cfgOr<float>("emotion.minBias", -2.0f);
+        vcfg.decay = phoenix::cfgOr<float>("emotion.decay", 0.95f);
+        vcfg.momentum = phoenix::cfgOr<float>("emotion.momentum", 0.9f);
+        vcfg.tokenBoostExponent = phoenix::cfgOr<float>("emotion.tokenBoostExponent", 1.2f);
+        vcfg.minTokenScore = phoenix::cfgOr<float>("emotion.minTokenScore", 0.05f);
+        vcfg.applyToPrompt = phoenix::cfgOr<bool>("emotion.applyToPrompt", true);
+        vcfg.applyLogitBias = phoenix::cfgOr<bool>("emotion.applyLogitBias", true);
+        vcfg.stageConfigs[0].influence = phoenix::cfgOr<float>("emotion.stageWeights.immediate", 1.0f);
+        vcfg.stageConfigs[0].halfLifeTurns = phoenix::cfgOr<int>("emotion.stageHalfLifeTurns.immediate", 1);
+        vcfg.stageConfigs[1].influence = phoenix::cfgOr<float>("emotion.stageWeights.short", 0.7f);
+        vcfg.stageConfigs[1].halfLifeTurns = phoenix::cfgOr<int>("emotion.stageHalfLifeTurns.short", 5);
+        vcfg.stageConfigs[2].influence = phoenix::cfgOr<float>("emotion.stageWeights.context", 0.4f);
+        vcfg.stageConfigs[2].halfLifeTurns = phoenix::cfgOr<int>("emotion.stageHalfLifeTurns.context", 20);
+        vcfg.stageConfigs[3].influence = phoenix::cfgOr<float>("emotion.stageWeights.long", 0.2f);
+        vcfg.stageConfigs[3].halfLifeTurns = phoenix::cfgOr<int>("emotion.stageHalfLifeTurns.long", 200);
+        try {
+            vcfg.seedLexicon = phoenix::cfg<std::unordered_map<std::string, std::vector<std::string>>>("emotion.seedLexicon");
+        } catch (...) {
+            vcfg.seedLexicon = {
+                {"positive", {"happy", "great", "love", "wonderful", "glad", "excellent"}},
+                {"negative", {"sad", "bad", "hate", "terrible", "angry", "awful"}},
+                {"fear", {"afraid", "scared", "fear", "worried", "anxious"}},
+                {"trust", {"trust", "believe", "confident", "reliable"}}
+            };
+        }
+        return phoenix::emotion::EmotionSystem(cfg);
+    }();
+    static mechanical_mind::Filter mechanicalMindFilter = []() {
+        mechanical_mind::Filter f;
+        try { f.setEnabled(phoenix::cfgOr<bool>("mechanical_mind.enabled", false)); } catch (...) {}
+        try { f.setTextThreshold(phoenix::cfgOr<double>("mechanical_mind.textThreshold", 0.58)); } catch (...) {}
+        try { f.setTokenThreshold(phoenix::cfgOr<double>("mechanical_mind.tokenThreshold", 0.60)); } catch (...) {}
+        try {
+            std::string ph = phoenix::cfgOr<std::string>("mechanical_mind.placeholder", "[mechanized]");
+            f.setPlaceholder(ph);
+        } catch (...) {}
+        try { f.setEmotionAware(phoenix::cfgOr<bool>("mechanical_mind.emotionAware", true)); } catch (...) {}
+        try { f.setEmotionInfluence(phoenix::cfgOr<double>("mechanical_mind.emotionInfluence", 0.30)); } catch (...) {}
+        try { f.setPositiveRelaxes(phoenix::cfgOr<bool>("mechanical_mind.positiveRelaxes", true)); } catch (...) {}
+        return f;
+    }();
     const bool allowRegister = boolEnv(getEnv("AUTH_ALLOW_REGISTER", "true"), true);
     const bool requireEmailVerify = boolEnv(getEnv("AUTH_REQUIRE_EMAIL_VERIFY", "true"), true);
     const bool devReturnToken = boolEnv(getEnv("AUTH_DEV_RETURN_TOKEN", "false"), false);
@@ -6895,7 +6972,7 @@ void setupFrontendServer()
         }
         cb(resp); }, {drogon::Post});
 
-    drogon::app().registerHandler("/speech/analyze", [&speakIO](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+    drogon::app().registerHandler("/speech/analyze", [&speakIO, &emotionSystem](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
                                   {
         auto resp = drogon::HttpResponse::newHttpResponse();
         try {
@@ -6914,6 +6991,26 @@ void setupFrontendServer()
             thread_local std::vector<uint8_t> audioBuf;
             base64DecodeTo(b64, audioBuf);
             auto result = speakIO.analyzeWavBytes(audioBuf);
+
+            std::string sessionId = json->isMember("sessionId") ? (*json)["sessionId"].asString() : "";
+            std::string spokenText = result.isMember("text") ? result["text"].asString() : "";
+            int turnNumber = 1;
+            if (json->isMember("turnNumber"))
+                turnNumber = (*json)["turnNumber"].asInt();
+            if (!sessionId.empty() && !spokenText.empty()) {
+                auto state = emotionSystem.processMessage(sessionId, spokenText, turnNumber);
+                Json::Value emo(Json::objectValue);
+                emo["valence"] = state.current.valence;
+                emo["arousal"] = state.current.arousal;
+                emo["dominance"] = state.current.dominance;
+                emo["trust"] = state.current.trust;
+                emo["joy"] = state.current.joy;
+                emo["fear"] = state.current.fear;
+                emo["anger"] = state.current.anger;
+                emo["surprise"] = state.current.surprise;
+                result["emotion"] = emo;
+            }
+
             resp->setStatusCode(drogon::k200OK);
             resp->setContentTypeString("application/json");
             resp->setBody(result.toStyledString());
@@ -6948,7 +7045,7 @@ void setupFrontendServer()
         }
         cb(resp); }, {drogon::Post});
 
-    drogon::app().registerHandler("/speech/ingest", [&speakIO, &contextService, &v51Runtime, &worldModel, shouldRunV51, buildV51Request](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+    drogon::app().registerHandler("/speech/ingest", [&speakIO, &contextService, &v51Runtime, &worldModel, &emotionSystem, shouldRunV51, buildV51Request](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
                                   {
         auto resp = drogon::HttpResponse::newHttpResponse();
         try {
@@ -6981,6 +7078,10 @@ void setupFrontendServer()
                 if (!combined.empty()) combined += "\n";
                 combined += stage05;
             }
+            int turnNumber = 1;
+            if (json->isMember("turnNumber")) turnNumber = (*json)["turnNumber"].asInt();
+            if (!text.empty())
+                emotionSystem.processMessage(sessionId, text, turnNumber);
             auto context = contextService.ingest(sessionId, combined, mode);
 
             Json::Value out;
@@ -7090,6 +7191,228 @@ void setupFrontendServer()
             resp->setBody(out.toStyledString());
         }
         cb(resp); }, {drogon::Get});
+
+    // Emotion system endpoints (four-stage vocabulary weight table)
+    auto makeError = [](const std::string& msg) {
+        Json::Value out;
+        out["ok"] = false;
+        out["error"] = msg;
+        return out;
+    };
+
+    auto emotionStateToJson = [](const phoenix::emotion::EmotionState& s) {
+        Json::Value out;
+        out["sessionId"] = s.sessionId;
+        out["turnNumber"] = static_cast<Json::Int64>(s.turnNumber);
+        out["timestampMs"] = static_cast<Json::Int64>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                s.timestamp.time_since_epoch()).count());
+        out["current"]["valence"] = s.current.valence;
+        out["current"]["arousal"] = s.current.arousal;
+        out["current"]["dominance"] = s.current.dominance;
+        out["current"]["trust"] = s.current.trust;
+        out["current"]["joy"] = s.current.joy;
+        out["current"]["fear"] = s.current.fear;
+        out["current"]["anger"] = s.current.anger;
+        out["current"]["surprise"] = s.current.surprise;
+        out["baseline"] = out["current"];
+        out["stability"] = s.stability();
+        out["intensity"] = s.intensity();
+        return out;
+    };
+
+    drogon::app().registerHandler("/emotion/observe",
+                                  [&emotionSystem, &makeError, &emotionStateToJson](
+                                      const drogon::HttpRequestPtr& req,
+                                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setContentTypeString("application/json");
+        try {
+            auto json = req->getJsonObject();
+            if (!json || !json->isMember("sessionId") || !json->isMember("text")) {
+                resp->setStatusCode(drogon::k400BadRequest);
+                resp->setBody(makeError("sessionId and text required").toStyledString());
+                cb(resp);
+                return;
+            }
+            std::string sessionId = (*json)["sessionId"].asString();
+            std::string text = (*json)["text"].asString();
+            int turnNumber = json->isMember("turnNumber") ? (*json)["turnNumber"].asInt() : 1;
+            auto state = emotionSystem.processMessage(sessionId, text, turnNumber);
+            Json::Value out;
+            out["ok"] = true;
+            out["emotionState"] = emotionStateToJson(state);
+            resp->setStatusCode(drogon::k200OK);
+            resp->setBody(out.toStyledString());
+        } catch (const std::exception& e) {
+            resp->setStatusCode(drogon::k500InternalServerError);
+            resp->setBody(makeError(e.what()).toStyledString());
+        }
+        cb(resp);
+    }, {drogon::Post});
+
+    drogon::app().registerHandler("/emotion/bias",
+                                  [&emotionSystem, &makeError, &emotionStateToJson](
+                                      const drogon::HttpRequestPtr& req,
+                                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setContentTypeString("application/json");
+        try {
+            auto json = req->getJsonObject();
+            if (!json || !json->isMember("sessionId") || !json->isMember("text")) {
+                resp->setStatusCode(drogon::k400BadRequest);
+                resp->setBody(makeError("sessionId and text required").toStyledString());
+                cb(resp);
+                return;
+            }
+            std::string sessionId = (*json)["sessionId"].asString();
+            std::string text = (*json)["text"].asString();
+            int turnNumber = json->isMember("turnNumber") ? (*json)["turnNumber"].asInt() : 1;
+            auto toks = emotionTokenize(text);
+            auto logitBias = emotionSystem.getVocabLogitBias(sessionId, toks, turnNumber);
+            auto modulation = emotionSystem.getVocabPromptModulation(sessionId, toks, turnNumber);
+            auto emotionCtx = emotionSystem.getEmotionContext(sessionId);
+            Json::Value out;
+            out["ok"] = true;
+            out["logitBias"] = nlohmannToJsonCpp(logitBias);
+            out["promptModulation"] = modulation;
+            out["emotionContext"] = emotionCtx;
+            auto stateOpt = emotionSystem.getEmotionState(sessionId);
+            if (stateOpt) out["emotionState"] = emotionStateToJson(*stateOpt);
+            resp->setStatusCode(drogon::k200OK);
+            resp->setBody(out.toStyledString());
+        } catch (const std::exception& e) {
+            resp->setStatusCode(drogon::k500InternalServerError);
+            resp->setBody(makeError(e.what()).toStyledString());
+        }
+        cb(resp);
+    }, {drogon::Post});
+
+    drogon::app().registerHandler("/emotion/feedback",
+                                  [&emotionSystem, &makeError](
+                                      const drogon::HttpRequestPtr& req,
+                                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setContentTypeString("application/json");
+        try {
+            auto json = req->getJsonObject();
+            if (!json || !json->isMember("sessionId") || !json->isMember("prompt") ||
+                !json->isMember("reply") || !json->isMember("reward")) {
+                resp->setStatusCode(drogon::k400BadRequest);
+                resp->setBody(makeError("sessionId, prompt, reply and reward required").toStyledString());
+                cb(resp);
+                return;
+            }
+            std::string sessionId = (*json)["sessionId"].asString();
+            std::string prompt = (*json)["prompt"].asString();
+            std::string reply = (*json)["reply"].asString();
+            float reward = static_cast<float>((*json)["reward"].asDouble());
+            int turnNumber = json->isMember("turnNumber") ? (*json)["turnNumber"].asInt() : 1;
+            auto promptToks = emotionTokenize(prompt);
+            auto replyToks = emotionTokenize(reply);
+            emotionSystem.updateVocabFromResponse(sessionId, promptToks, replyToks, reward, turnNumber);
+            Json::Value out;
+            out["ok"] = true;
+            resp->setStatusCode(drogon::k200OK);
+            resp->setBody(out.toStyledString());
+        } catch (const std::exception& e) {
+            resp->setStatusCode(drogon::k500InternalServerError);
+            resp->setBody(makeError(e.what()).toStyledString());
+        }
+        cb(resp);
+    }, {drogon::Post});
+
+    drogon::app().registerHandler("/emotion/state",
+                                  [&emotionSystem, &makeError, &emotionStateToJson](
+                                      const drogon::HttpRequestPtr& req,
+                                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setContentTypeString("application/json");
+        try {
+            std::string sessionId = req->getParameter("sessionId");
+            if (sessionId.empty()) {
+                resp->setStatusCode(drogon::k400BadRequest);
+                resp->setBody(makeError("sessionId required").toStyledString());
+                cb(resp);
+                return;
+            }
+            auto stateOpt = emotionSystem.getEmotionState(sessionId);
+            if (!stateOpt) {
+                resp->setStatusCode(drogon::k404NotFound);
+                resp->setBody(makeError("session not found").toStyledString());
+                cb(resp);
+                return;
+            }
+            Json::Value out;
+            out["ok"] = true;
+            out["emotionState"] = emotionStateToJson(*stateOpt);
+            resp->setStatusCode(drogon::k200OK);
+            resp->setBody(out.toStyledString());
+        } catch (const std::exception& e) {
+            resp->setStatusCode(drogon::k500InternalServerError);
+            resp->setBody(makeError(e.what()).toStyledString());
+        }
+        cb(resp);
+    }, {drogon::Get});
+
+    drogon::app().registerHandler("/mechanical_mind/analyze",
+                                  [&mechanicalMindFilter, &emotionSystem, &makeError, &emotionStateToJson](
+                                      const drogon::HttpRequestPtr& req,
+                                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setContentTypeString("application/json");
+        try {
+            auto json = req->getJsonObject();
+            if (!json || !json->isMember("text")) {
+                resp->setStatusCode(drogon::k400BadRequest);
+                resp->setBody(makeError("text required").toStyledString());
+                cb(resp);
+                return;
+            }
+            std::string text = (*json)["text"].asString();
+            std::string sessionId = json->isMember("sessionId") ? (*json)["sessionId"].asString() : "";
+            bool force = json->isMember("force") ? (*json)["force"].asBool() : false;
+            bool updateEmotion = json->isMember("updateEmotion") ? (*json)["updateEmotion"].asBool() : false;
+            int turnNumber = json->isMember("turnNumber") ? (*json)["turnNumber"].asInt() : 1;
+
+            phoenix::emotion::EmotionTensor current;
+            phoenix::emotion::EmotionTensor baseline;
+            if (!sessionId.empty()) {
+                if (updateEmotion && !text.empty()) {
+                    emotionSystem.processMessage(sessionId, text, turnNumber);
+                }
+                auto stateOpt = emotionSystem.getEmotionState(sessionId);
+                if (stateOpt) {
+                    current = stateOpt->current;
+                    baseline = stateOpt->baseline;
+                }
+            }
+
+            mechanical_mind::Analysis analysis;
+            if (sessionId.empty()) {
+                analysis = mechanicalMindFilter.analyzeAndSanitize(text, force);
+            } else {
+                analysis = mechanicalMindFilter.analyzeAndSanitize(text, current, baseline, force);
+            }
+
+            Json::Value out;
+            out["ok"] = true;
+            out["analysis"] = nlohmannToJsonCpp(analysis.toJson());
+            out["text"] = text;
+            out["sanitized"] = analysis.sanitized;
+            out["triggered"] = analysis.triggered;
+            if (!sessionId.empty()) {
+                auto stateOpt2 = emotionSystem.getEmotionState(sessionId);
+                if (stateOpt2) out["emotionState"] = emotionStateToJson(*stateOpt2);
+            }
+            resp->setStatusCode(drogon::k200OK);
+            resp->setBody(out.toStyledString());
+        } catch (const std::exception& e) {
+            resp->setStatusCode(drogon::k500InternalServerError);
+            resp->setBody(makeError(e.what()).toStyledString());
+        }
+        cb(resp);
+    }, {drogon::Post});
 
     drogon::app().addListener(host, port);
 

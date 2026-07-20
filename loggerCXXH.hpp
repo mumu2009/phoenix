@@ -61,6 +61,8 @@ public:
 
     void log(Type type, const std::string &value); /* Log a message */
 
+    void shutdown(); /* Stop sampler, close file, and reset logger for test cleanup */
+
     ~LoggerCXX();
 
 private:
@@ -81,7 +83,7 @@ private:
     std::ofstream out_;                 /* Output file stream */
     Mode mode_{Mode::Release};          /* Current logging mode */
     bool initialized_{false};           /* Initialization flag */
-    int memoryIntervalSec_{30};        /* Memory sampling interval in seconds */
+    int memoryIntervalSec_{0};         /* Memory sampling interval in seconds (0 = disabled by default) */
     std::atomic<bool> memorySamplerRunning_{false}; /* Memory sampler running flag */
     std::thread memorySampler_;         /* Memory sampler thread */
 };

@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "signature": "5441463b338b68e8b15d99c5fc3d904b7f11824859986aac7210d4525ce043f1",
+  "created_at": 1784130491.0822015,
+  "last_updated": 1784381017.074286,
+  "baseline": "baseline_phoenix.json",
+  "plan": "experiment_plan.json",
+  "entries": {
+    "learning.advAttackRounds": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 85.428,
+      "best_value": "8",
+      "log": "logs\\learning_advAttackRounds.log",
+      "completed_at": 1784176814.3465343,
+      "host": "mumu"
+    },
+    "learning.advBenchLimit": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 85.484,
+      "best_value": "10",
+      "log": "logs\\learning_advBenchLimit.log",
+      "completed_at": 1784198895.323275,
+      "host": "mumu"
+    },
+    "learning.advDefenseRounds": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 85.124,
+      "best_value": "9",
+      "log": "logs\\learning_advDefenseRounds.log",
+      "completed_at": 1784214452.8483622,
+      "host": "mumu"
+    },
+    "learning.advMaxAdversaries": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 84.792,
+      "best_value": "8",
+      "log": "logs\\learning_advMaxAdversaries.log",
+      "completed_at": 1784231662.60479,
+      "host": "mumu"
+    },
+    "learning.advNoiseLevel": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 84.426,
+      "best_value": "0.35000000000000003",
+      "log": "logs\\learning_advNoiseLevel.log",
+      "completed_at": 1784247386.407529,
+      "host": "mumu"
+    },
+    "learning.gnnGaGenerations": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 85.251,
+      "best_value": "9",
+      "log": "logs\\learning_gnnGaGenerations.log",
+      "completed_at": 1784263775.535082,
+      "host": "mumu"
+    },
+    "learning.gnnGaMaxDocs": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 81.885,
+      "best_value": "23",
+      "log": "logs\\learning_gnnGaMaxDocs.log",
+      "completed_at": 1784286761.6348112,
+      "host": "mumu"
+    },
+    "learning.gnnGaPopulation": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 85.333,
+      "best_value": "16",
+      "log": "logs\\learning_gnnGaPopulation.log",
+      "completed_at": 1784309823.6856508,
+      "host": "mumu"
+    },
+    "learning.rlCoverageWeight": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 85.603,
+      "best_value": "0.3333333333333333",
+      "log": "logs\\learning_rlCoverageWeight.log",
+      "completed_at": 1784324700.071227,
+      "host": "mumu"
+    },
+    "learning.rlImprovementThreshold": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 85.485,
+      "best_value": "0.1",
+      "log": "logs\\learning_rlImprovementThreshold.log",
+      "completed_at": 1784329179.1992807,
+      "host": "mumu"
+    },
+    "learning.rlMaxDocs": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 85.223,
+      "best_value": "104",
+      "log": "logs\\learning_rlMaxDocs.log",
+      "completed_at": 1784345675.2520745,
+      "host": "mumu"
+    },
+    "learning.rlTopKWords": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 85.594,
+      "best_value": "28",
+      "log": "logs\\learning_rlTopKWords.log",
+      "completed_at": 1784364393.2806544,
+      "host": "mumu"
+    },
+    "learning.rlUniquenessWeight": {
+      "status": "completed",
+      "exit_code": 0,
+      "best_score": 82.826,
+      "best_value": "0.0",
+      "log": "logs\\learning_rlUniquenessWeight.log",
+      "completed_at": 1784381017.064899,
+      "host": "mumu"
+    }
+  },
+  "runs": [
+    {
+      "host": "mumu",
+      "platform": "Windows-11-10.0.22631-SP0",
+      "started_at": 1784130491.1703126
+    },
+    {
+      "host": "mumu",
+      "platform": "Windows-11-10.0.22631-SP0",
+      "resumed_at": 1784161931.4902425
+    },
+    {
+      "host": "mumu",
+      "platform": "Windows-11-10.0.22631-SP0",
+      "resumed_at": 1784182595.715673
+    }
+  ]
+}

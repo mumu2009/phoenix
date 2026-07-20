@@ -1840,13 +1840,33 @@
             if (gnnModuleDisabled)
               gnnHint = GnnHintSummary{};
             std::string sparkAnn;
-            (void)sparkAnn;
+            bool sparkGnnScheduler = false;
+            try {
+              sparkGnnScheduler = phoenix::cfgOr<bool>("spark.gnnScheduler.enabled", false);
+            } catch (...) {}
+            if (sparkGnnScheduler && spark_) {
+              try {
+                json sparkPayload;
+                sparkPayload["sessionId"] = body.value("sessionId", "");
+                sparkPayload["text"] = text;
+                sparkPayload["graphResult"] = graphResult;
+                sparkPayload["gnnAlign"] = gnnHint.align;
+                json sparkOptions;
+                sparkOptions["perturbations"] = phoenix::cfgOr<int>("spark.gnnScheduler.perturbations", 2);
+                sparkOptions["multiLayer"] = phoenix::cfgOr<bool>("spark.gnnScheduler.useHistory", false);
+                auto sparkResult = spark_->dispatch(sparkPayload, sparkOptions);
+                sparkAnn = sparkResult.value("aggregate", json::object()).value("annotation", "");
+              } catch (...) {}
+            }
             if (!sparkAnn.empty()) {
               if (graphContext.empty())
                 graphContext = sparkAnn;
               else
                 graphContext = graphContext + "\n" + sparkAnn;
             }
+            // Preserve the original user message for the emotion system.
+            std::string userText = text;
+
             // Always apply session-level context hint; only mix graph context when context module is enabled.
             if (!contextModuleDisabled) {
               text = applyContextHintToText(text, hint);
@@ -1868,6 +1888,79 @@
               graphContext = attachAddonToolContract(graphContext);
             }
             std::string sessionId = body.value("sessionId", "");
+
+            // Fetch emotion prompt modulation from the frontend service.
+            std::string emotionModulation;
+            nlohmann::json emotionLogitBias;
+            std::string emotionContextStr;
+            bool emotionEnabled = true;
+            try {
+              emotionEnabled = phoenix::cfgOr<bool>("emotion.enabled", true);
+            } catch (...) {
+              emotionEnabled = true;
+            }
+            if (emotionEnabled && !sessionId.empty()) {
+              try {
+                auto emotionClient = drogon::HttpClient::newHttpClient("http://127.0.0.1:5081");
+                if (emotionClient) {
+                  json emotionReq;
+                  emotionReq["sessionId"] = sessionId;
+                  emotionReq["text"] = userText;
+                  emotionReq["turnNumber"] = body.value("turnNumber", 1);
+                  auto emotionHttpReq = drogon::HttpRequest::newHttpRequest();
+                  emotionHttpReq->setMethod(drogon::Post);
+                  emotionHttpReq->setPath("/emotion/bias");
+                  emotionHttpReq->addHeader("Authorization", "Bearer local-dev");
+                  emotionHttpReq->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+                  emotionHttpReq->setBody(emotionReq.dump());
+                  auto sharedPromise = std::make_shared<
+                      std::promise<std::pair<drogon::ReqResult, drogon::HttpResponsePtr>>>();
+                  auto future = sharedPromise->get_future();
+                  emotionClient->sendRequest(emotionHttpReq,
+                    [sharedPromise](drogon::ReqResult result,
+                                    const drogon::HttpResponsePtr &resp) {
+                      try { sharedPromise->set_value({result, resp}); } catch (...) {}
+                    });
+                  if (future.wait_for(std::chrono::milliseconds(1200)) ==
+                      std::future_status::ready) {
+                    auto result = future.get();
+                    if (result.first == drogon::ReqResult::Ok && result.second) {
+                      auto bodyStr = result.second->getBody();
+                      if (!bodyStr.empty()) {
+                        json emotionResult = json::parse(bodyStr, nullptr, false);
+                        if (emotionResult.is_object() &&
+                            emotionResult.value("ok", false)) {
+                          if (emotionResult.contains("promptModulation") &&
+                              emotionResult["promptModulation"].is_string())
+                            emotionModulation = emotionResult["promptModulation"].get<std::string>();
+                          if (emotionResult.contains("emotionContext") &&
+                              emotionResult["emotionContext"].is_string())
+                            emotionContextStr = emotionResult["emotionContext"].get<std::string>();
+                          if (emotionResult.contains("logitBias") &&
+                              emotionResult["logitBias"].is_object())
+                            emotionLogitBias = emotionResult["logitBias"];
+                        }
+                      }
+                    }
+                  }
+                }
+              } catch (...) {
+              }
+            }
+
+            if (!emotionModulation.empty()) {
+              if (graphContext.empty())
+                graphContext = emotionModulation;
+              else
+                graphContext = emotionModulation + "\n" + graphContext;
+            }
+            if (!emotionContextStr.empty() && contextModuleDisabled) {
+              if (graphContext.empty())
+                graphContext = emotionContextStr;
+              else
+                graphContext = emotionContextStr + "\n" + graphContext;
+            }
+
             std::string providerTag = std::string("provider:") + backendMode;
             std::string cacheKey = buildInferenceCacheKey(
                 sessionId, text, providerTag + "\n" + graphContext, maxTokens);
@@ -2101,6 +2194,10 @@
             result["transformerMode"] = backendMode;
             result["modelElapsedMs"] = (Json::Int64)modelElapsedMs;
             result["verifyElapsedMs"] = (Json::Int64)verifyElapsedMs;
+            if (!emotionModulation.empty())
+              result["emotionModulation"] = emotionModulation;
+            if (!emotionLogitBias.empty())
+              result["emotionLogitBias"] = emotionLogitBias;
             if (usingOllama)
               result["provider"] =
                   json{{"id", (config_.ollamaFineTuning ? "ollama+fine-tuning"
@@ -2305,7 +2402,24 @@
             if (gnnModuleDisabled)
               gnnHint = GnnHintSummary{};
             std::string sparkAnn;
-            (void)sparkAnn;
+            bool sparkGnnScheduler = false;
+            try {
+              sparkGnnScheduler = phoenix::cfgOr<bool>("spark.gnnScheduler.enabled", false);
+            } catch (...) {}
+            if (sparkGnnScheduler && spark_) {
+              try {
+                json sparkPayload;
+                sparkPayload["sessionId"] = body.value("sessionId", "");
+                sparkPayload["text"] = text;
+                sparkPayload["graphResult"] = graphResult;
+                sparkPayload["gnnAlign"] = gnnHint.align;
+                json sparkOptions;
+                sparkOptions["perturbations"] = phoenix::cfgOr<int>("spark.gnnScheduler.perturbations", 2);
+                sparkOptions["multiLayer"] = phoenix::cfgOr<bool>("spark.gnnScheduler.useHistory", false);
+                auto sparkResult = spark_->dispatch(sparkPayload, sparkOptions);
+                sparkAnn = sparkResult.value("aggregate", json::object()).value("annotation", "");
+              } catch (...) {}
+            }
             if (!sparkAnn.empty()) {
               if (graphContext.empty())
                 graphContext = sparkAnn;
@@ -6106,7 +6220,8 @@
         }
         launchDialogTask([this, samples]() {
           try {
-            ensureGnnGa()->evolve(1, 6, samples, 0.35, 0.25, 0.30);
+            ensureGnnGa()->evolve(gnnGa_->generations(), gnnGa_->population(),
+                                 samples, 0.35, 0.25, 0.30);
           } catch (...) {
           }
         });

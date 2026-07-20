@@ -61,6 +61,8 @@ public:
                 int redisDb,
                 std::string redisPrefix);
 
+    ~Database079(); /* Close database connection on destruction */
+
     bool open(); /* Open database connection */
     void close(); /* Close database connection */
 

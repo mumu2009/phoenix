@@ -72,14 +72,15 @@ struct ContextEntry {
 
     static ContextEntry fromJson(const nlohmann::json& j) {
         ContextEntry entry;
-        if (j.contains("content")) entry.content = j["content"].get<std::string>();
-        if (j.contains("role")) entry.role = j["role"].get<std::string>();
-        if (j.contains("turnNumber")) entry.turnNumber = j["turnNumber"].get<int64_t>();
-        if (j.contains("importance")) entry.importance = j["importance"].get<float>();
-        if (j.contains("estimatedTokens")) entry.estimatedTokens = j["estimatedTokens"].get<size_t>();
-        if (j.contains("metadata")) entry.metadata = j["metadata"].get<std::map<std::string, std::string>>();
+        if (!j.is_object()) return entry;
+        if (j.contains("content") && j["content"].is_string()) entry.content = j["content"].get<std::string>();
+        if (j.contains("role") && j["role"].is_string()) entry.role = j["role"].get<std::string>();
+        if (j.contains("turnNumber") && j["turnNumber"].is_number_integer()) entry.turnNumber = j["turnNumber"].get<int64_t>();
+        if (j.contains("importance") && j["importance"].is_number()) entry.importance = j["importance"].get<float>();
+        if (j.contains("estimatedTokens") && j["estimatedTokens"].is_number_integer()) entry.estimatedTokens = j["estimatedTokens"].get<size_t>();
+        if (j.contains("metadata") && j["metadata"].is_object()) entry.metadata = j["metadata"].get<std::map<std::string, std::string>>();
 
-        if (j.contains("timestamp")) {
+        if (j.contains("timestamp") && j["timestamp"].is_number_integer()) {
             int64_t ts = j["timestamp"].get<int64_t>();
             entry.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(ts));
         }
@@ -148,6 +149,7 @@ public:
     ContextWindowConfig getConfig() const;
 
 private:
+    void pruneContextLocked();
     struct Impl;
     std::unique_ptr<Impl> impl_;
 
