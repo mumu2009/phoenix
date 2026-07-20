@@ -213,9 +213,77 @@
 
   json chatWithLlamaCpp(const std::string &text,
                         const std::string &graphContext, int maxTokens) {
-    return chatWithExternalAdapter(
-        "llamacpp", config_.llamaCppBaseUrl, config_.llamaCppModel,
-        config_.llamaCppRequestTimeoutMs, text, graphContext, maxTokens);
+    bool voterEnabled = false;
+    int numPasses = 5;
+    double maskRate = 0.05;
+    try {
+      voterEnabled = phoenix::cfgOr<bool>("llama_voter.enabled", false);
+    } catch (...) {}
+    if (voterEnabled) {
+      try { numPasses = phoenix::cfgOr<int>("llama_voter.numPasses", 5); } catch (...) {}
+      try { maskRate = phoenix::cfgOr<double>("llama_voter.maskRate", 0.05); } catch (...) {}
+    }
+    if (!voterEnabled || numPasses <= 1 || maskRate <= 0.0) {
+      return chatWithExternalAdapter(
+          "llamacpp", config_.llamaCppBaseUrl, config_.llamaCppModel,
+          config_.llamaCppRequestTimeoutMs, text, graphContext, maxTokens);
+    }
+
+    auto maskTokens = [&](const std::string &s,
+                          std::mt19937 &rng) -> std::string {
+      auto toks = tokenize(s);
+      if (toks.empty()) return s;
+      std::vector<std::string> out;
+      out.reserve(toks.size());
+      std::uniform_real_distribution<double> dist(0.0, 1.0);
+      for (auto &t : toks) {
+        if (dist(rng) >= maskRate) out.push_back(t);
+      }
+      if (out.empty()) out.push_back(toks[rng() % toks.size()]);
+      std::string joined;
+      for (size_t i = 0; i < out.size(); ++i) {
+        if (i) joined += ' ';
+        joined += out[i];
+      }
+      return joined;
+    };
+
+    std::vector<json> candidates;
+    candidates.reserve(numPasses);
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    auto reqEmb = textToMiniEmbedding(text, 64);
+    json best;
+    double bestScore = -1e9;
+    for (int i = 0; i < numPasses; ++i) {
+      std::string mtext = (i == 0) ? text : maskTokens(text, rng);
+      std::string mctx = (i == 0) ? graphContext : maskTokens(graphContext, rng);
+      json r = chatWithExternalAdapter(
+          "llamacpp", config_.llamaCppBaseUrl, config_.llamaCppModel,
+          config_.llamaCppRequestTimeoutMs, mtext, mctx, maxTokens);
+      if (!r.is_object()) continue;
+      std::string reply = r.value("reply", "");
+      if (reply.empty()) continue;
+      auto repEmb = textToMiniEmbedding(reply, 64);
+      double affinity = cosineSim(reqEmb, repEmb);
+      double lenNorm = 1.0 / (1.0 + std::abs((double)reply.size() - (double)text.size()) / 100.0);
+      double score = 0.7 * clamp01((affinity + 1.0) * 0.5) + 0.3 * lenNorm;
+      if (score > bestScore) {
+        bestScore = score;
+        best = r;
+      }
+      candidates.push_back(std::move(r));
+    }
+
+    if (!best.is_object()) {
+      return chatWithExternalAdapter(
+          "llamacpp", config_.llamaCppBaseUrl, config_.llamaCppModel,
+          config_.llamaCppRequestTimeoutMs, text, graphContext, maxTokens);
+    }
+    best["rfVotes"] = static_cast<int>(candidates.size());
+    best["rfBestScore"] = bestScore;
+    best["rfMethod"] = "llama-server-random-forest-micro-mask";
+    return best;
   }
 
   json chatWithBitNet(const std::string &text, const std::string &graphContext,

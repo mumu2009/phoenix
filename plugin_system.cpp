@@ -432,11 +432,20 @@ void PluginManager::stopHealthCheck() {
 bool PluginManager::registerPlugin(std::shared_ptr<Plugin> plugin) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     
+    if (!plugin) {
+        std::cerr << "[PluginManager] Cannot register null plugin" << std::endl;
+        return false;
+    }
+    
     auto metadata = plugin->getMetadata();
     std::string pluginName = metadata.name;
     
-    if (impl_->plugins.find(pluginName) != impl_->plugins.end()) {
-        return false;
+    bool alreadyRegistered = impl_->plugins.find(pluginName) != impl_->plugins.end();
+    if (!alreadyRegistered) {
+        if (impl_->config.maxPlugins >= 0 && impl_->plugins.size() >= static_cast<size_t>(impl_->config.maxPlugins)) {
+            std::cerr << "[PluginManager] Maximum plugin count (" << impl_->config.maxPlugins << ") reached, cannot register " << pluginName << std::endl;
+            return false;
+        }
     }
     
     impl_->plugins[pluginName] = plugin;
@@ -513,7 +522,10 @@ PluginConfigManager::PluginConfigManager(const std::string& configPath)
 
 bool PluginConfigManager::loadConfig() {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+    return loadConfigUnlocked();
+}
+
+bool PluginConfigManager::loadConfigUnlocked() {
     try {
         std::ifstream file(configPath_);
         if (file.is_open()) {
@@ -523,7 +535,7 @@ bool PluginConfigManager::loadConfig() {
     } catch (const std::exception& e) {
         std::cerr << "[PluginConfigManager] Error loading config: " << e.what() << std::endl;
     }
-    
+
     // Initialize empty config
     config_ = nlohmann::json::object();
     return false;
@@ -531,7 +543,10 @@ bool PluginConfigManager::loadConfig() {
 
 bool PluginConfigManager::saveConfig() {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+    return saveConfigUnlocked();
+}
+
+bool PluginConfigManager::saveConfigUnlocked() {
     try {
         std::ofstream file(configPath_);
         if (file.is_open()) {
@@ -541,7 +556,7 @@ bool PluginConfigManager::saveConfig() {
     } catch (const std::exception& e) {
         std::cerr << "[PluginConfigManager] Error saving config: " << e.what() << std::endl;
     }
-    
+
     return false;
 }
 
@@ -557,9 +572,9 @@ nlohmann::json PluginConfigManager::getPluginConfig(const std::string& pluginNam
 
 bool PluginConfigManager::setPluginConfig(const std::string& pluginName, const nlohmann::json& config) {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
     config_[pluginName] = config;
-    return saveConfig();
+    return saveConfigUnlocked();
 }
 
 std::vector<std::string> PluginConfigManager::getConfiguredPlugins() const {

@@ -1,0 +1,13 @@
+{
+  "personaPool": {
+    "enabled": true,
+    "phaseBuckets": 1,
+    "refreshEveryMs": 12000
+  },
+  "summaryStateDim": 32,
+  "toolBindings": {
+    "calculator": "calculator/main.exe",
+    "divingAgreement": "DivingPact/main.exe"
+  },
+  "windowSize": 256
+}

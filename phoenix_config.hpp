@@ -51,6 +51,19 @@ class PhoenixConfig {
     }
   }
 
+  template <typename T>
+  T getOr(const std::string& dotPath, const T& fallback) const {
+    const nlohmann::json* p = getPath(dotPath);
+    if (!p) {
+      return fallback;
+    }
+    try {
+      return p->get<T>();
+    } catch (...) {
+      return fallback;
+    }
+  }
+
  private:
   PhoenixConfig() = default;
 
@@ -79,6 +92,11 @@ class PhoenixConfig {
 template <typename T>
 inline T cfg(const std::string& dotPath) {
   return PhoenixConfig::instance().get<T>(dotPath);
+}
+
+template <typename T>
+inline T cfgOr(const std::string& dotPath, const T& fallback) {
+  return PhoenixConfig::instance().getOr<T>(dotPath, fallback);
 }
 
 }  // namespace phoenix

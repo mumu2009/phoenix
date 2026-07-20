@@ -101,5 +101,138 @@
     "reflectionTopMemes": 18,
     "reflectionTopWords": 24,
     "reflectionMinScore": 1e-06
+  },
+  "dialog": {
+    "rlEvery": 20,
+    "advEvery": 30,
+    "gnnEvery": 40,
+    "dialogAsyncLimit": 2
+  },
+  "learning": {
+    "rlMaxDocs": 64,
+    "rlTopKWords": 30,
+    "rlImprovementThreshold": 0.01,
+    "rlCoverageWeight": 0.7,
+    "rlUniquenessWeight": 0.3,
+    "advMaxAdversaries": 64,
+    "advNoiseLevel": 0.2,
+    "advAttackRounds": 3,
+    "advDefenseRounds": 3,
+    "advBenchLimit": 50,
+    "gnnGaMaxDocs": 32,
+    "gnnGaPopulation": 6,
+    "gnnGaGenerations": 1
+  },
+  "universal_optimizer": {
+    "enabled": true,
+    "modules": {
+      "context": true,
+      "scenarios": false,
+      "llama_server": false,
+      "memebarrier": true,
+      "summary_model": true,
+      "model_defaults": true,
+      "dialog": true,
+      "learning": true
+    },
+    "strategy": "single",
+    "max_evals": 12,
+    "latency_budget_ms": 120000,
+    "run_timeout": 1800,
+    "samples": 5,
+    "rounds": 1,
+    "providers": "phoenix",
+    "scenarios": "short_dialogue,long_dialogue_5_15,ultra_long_dialogue_15_plus"
+  },
+  "emotion": {
+    "enabled": true,
+    "vocabTablePath": "./runtime_store/emotion_vocab_weight_table.json",
+    "vocabCachePath": "./runtime_store/emotion_vocab_cache.json",
+    "learningRate": 0.05,
+    "maxBias": 2.0,
+    "minBias": -2.0,
+    "decay": 0.95,
+    "momentum": 0.9,
+    "applyToPrompt": true,
+    "applyLogitBias": true,
+    "tokenBoostExponent": 1.2,
+    "minTokenScore": 0.05,
+    "stageWeights": {
+      "immediate": 1.0,
+      "short": 0.7,
+      "context": 0.4,
+      "long": 0.2
+    },
+    "stageHalfLifeTurns": {
+      "immediate": 1,
+      "short": 5,
+      "context": 20,
+      "long": 200
+    },
+    "seedLexicon": {
+      "positive": ["happy", "great", "love", "wonderful", "glad", "excellent"],
+      "negative": ["sad", "bad", "hate", "terrible", "angry", "awful"],
+      "fear": ["afraid", "scared", "fear", "worried", "anxious"],
+      "trust": ["trust", "believe", "confident", "reliable"]
+    }
+  },
+  "spark": {
+    "gnnScheduler": {
+      "enabled": true,
+      "minAffinity": 0.3,
+      "maxLayers": 3,
+      "perturbations": 2,
+      "useHistory": false
+    },
+    "llamaVoter": {
+      "enabled": false,
+      "rfInstances": 5,
+      "maxMasks": 3,
+      "maskRatio": 0.1,
+      "temperature": 0.7,
+      "topK": 40,
+      "topP": 0.9,
+      "voteBudget": 20,
+      "maxNewTokens": 256,
+      "timeoutMs": 60000
+    }
+  },
+  "speech": {
+    "enhanceEnabled": true,
+    "noiseFloorDb": -45.0,
+    "minSpeechDurationMs": 250,
+    "vadFrameMs": 30,
+    "maxTracks": 3,
+    "asrConfidenceThreshold": 0.6,
+    "featureWindowMs": 25,
+    "featureHopMs": 10
+  },
+  "vision": {
+    "enhanceEnabled": true,
+    "confidenceThreshold": 0.35,
+    "nmsThreshold": 0.45,
+    "minBoxAreaRatio": 0.001,
+    "maxBoxes": 80,
+    "embeddingDim": 18,
+    "useTorchWhenAvailable": true,
+    "fallbackColorAnalysis": true
+  },
+  "mechanical_mind": {
+    "enabled": false,
+    "textThreshold": 0.58,
+    "tokenThreshold": 0.60,
+    "placeholder": "[mechanized]",
+    "emotionAware": true,
+    "emotionInfluence": 0.30,
+    "positiveRelaxes": true
+  },
+  "partial_cache": {
+    "enabled": false,
+    "tolerance": 0.0,
+    "maxEntries": 2048,
+    "ttlMs": 120000,
+    "correctionScale": 1.0,
+    "gnnEnabled": false,
+    "transformerEnabled": false
   }
 }

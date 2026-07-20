@@ -1,0 +1,19 @@
+{
+  "convergence": {
+    "generatedAtMs": 1784480709496,
+    "reached": false,
+    "reason": "insufficient-semantic-units",
+    "sampleCount": 0
+  },
+  "epochs": 8,
+  "loss": 0.0,
+  "parameterSnapshot": {
+    "lifAverages": {
+      "I_reset": 0.0,
+      "I_th": 0.0,
+      "tau": 0.0
+    },
+    "modelType": "lif"
+  },
+  "validationError": 0.0
+}

@@ -45,6 +45,7 @@ public:
     dialogLearnGraphContext_ =
         boolFrom(getEnv("AI_DIALOG_LEARN_GRAPH_CONTEXT", "false"), false);
     retrainTrace_ = boolFrom(getEnv("AI_RETRAIN_TRACE", "false"), false);
+    loadDialogConfig();
     logger_.initialize(config_.logMode, config_.exportDir / "logs");
     if (logger_.enabled())
       logger_.log(LoggerCXX::Type::LOG,
@@ -392,6 +393,17 @@ private:
     double gnnEvery{40};
   } dialogThresholds_;
   bool releaseSnapshotLogged_{false};
+
+  void loadDialogConfig() {
+    dialogThresholds_.rlEvery =
+        phoenix::cfgOr<double>("dialog.rlEvery", dialogThresholds_.rlEvery);
+    dialogThresholds_.advEvery =
+        phoenix::cfgOr<double>("dialog.advEvery", dialogThresholds_.advEvery);
+    dialogThresholds_.gnnEvery =
+        phoenix::cfgOr<double>("dialog.gnnEvery", dialogThresholds_.gnnEvery);
+    dialogAsyncLimit_ =
+        phoenix::cfgOr<int>("dialog.dialogAsyncLimit", dialogAsyncLimit_);
+  }
   struct AuthError {
     std::string error;
     std::string message;

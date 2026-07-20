@@ -1,0 +1,14 @@
+{
+  "binaryFound": false,
+  "binaryPath": "",
+  "brainMapPath": "brain_maps\\.json",
+  "brainMapReady": true,
+  "checkedAtMs": 1784480709496,
+  "commandLine": "",
+  "error": "invalid base url: ",
+  "launchAttempted": false,
+  "pid": 0,
+  "ready": false,
+  "status": "invalid_base_url",
+  "statusFile": "_runtime_status.json"
+}

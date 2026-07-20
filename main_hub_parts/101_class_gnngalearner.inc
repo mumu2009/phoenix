@@ -5,7 +5,16 @@
 class GnnGaLearner : public IGnnGaLearner {
 public:
   GnnGaLearner(std::shared_ptr<ControllerPoolBase> pool, fs::path testsDir)
-      : pool_(std::move(pool)), testsDir_(std::move(testsDir)) {}
+      : pool_(std::move(pool)), testsDir_(std::move(testsDir)) {
+    loadLearningConfig();
+  }
+
+  void loadLearningConfig() {
+    maxDocs_ = phoenix::cfgOr<int>("learning.gnnGaMaxDocs", maxDocs_);
+    population_ = phoenix::cfgOr<int>("learning.gnnGaPopulation", population_);
+    generations_ =
+        phoenix::cfgOr<int>("learning.gnnGaGenerations", generations_);
+  }
 
   json evolve(int generations, int population,
               const std::vector<std::string> &samples, double residualWeight,
@@ -95,6 +104,9 @@ public:
     return history_.empty() ? json() : history_.back();
   }
 
+  int population() const override { return population_; }
+  int generations() const override { return generations_; }
+
   json refreshTests(const fs::path &testsDir) {
     testsDir_ = testsDir;
     return json{{"ok", true}, {"testsDir", testsDir_.string()}};
@@ -125,6 +137,8 @@ private:
   std::shared_ptr<ControllerPoolBase> pool_;
   fs::path testsDir_;
   int maxDocs_{32};
+  int population_{6};
+  int generations_{1};
   std::mt19937 rng_{0xC0FFEEu};
   std::vector<json> history_;
   json latest_ = json::object();

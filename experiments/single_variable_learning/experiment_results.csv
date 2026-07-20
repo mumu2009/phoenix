@@ -1,0 +1,14 @@
+path,status,exit_code,best_score,best_value,log,host,started_at,completed_at
+learning.advAttackRounds,completed,0,85.428,8,logs\learning_advAttackRounds.log,mumu,,1784176814.3465343
+learning.advBenchLimit,completed,0,85.484,10,logs\learning_advBenchLimit.log,mumu,,1784198895.323275
+learning.advDefenseRounds,completed,0,85.124,9,logs\learning_advDefenseRounds.log,mumu,,1784214452.8483622
+learning.advMaxAdversaries,completed,0,84.792,8,logs\learning_advMaxAdversaries.log,mumu,,1784231662.60479
+learning.advNoiseLevel,completed,0,84.426,0.35000000000000003,logs\learning_advNoiseLevel.log,mumu,,1784247386.407529
+learning.gnnGaGenerations,completed,0,85.251,9,logs\learning_gnnGaGenerations.log,mumu,,1784263775.535082
+learning.gnnGaMaxDocs,completed,0,81.885,23,logs\learning_gnnGaMaxDocs.log,mumu,,1784286761.6348112
+learning.gnnGaPopulation,completed,0,85.333,16,logs\learning_gnnGaPopulation.log,mumu,,1784309823.6856508
+learning.rlCoverageWeight,completed,0,85.603,0.3333333333333333,logs\learning_rlCoverageWeight.log,mumu,,1784324700.071227
+learning.rlImprovementThreshold,completed,0,85.485,0.1,logs\learning_rlImprovementThreshold.log,mumu,,1784329179.1992807
+learning.rlMaxDocs,completed,0,85.223,104,logs\learning_rlMaxDocs.log,mumu,,1784345675.2520745
+learning.rlTopKWords,completed,0,85.594,28,logs\learning_rlTopKWords.log,mumu,,1784364393.2806544
+learning.rlUniquenessWeight,completed,0,82.826,0.0,logs\learning_rlUniquenessWeight.log,mumu,,1784381017.064899

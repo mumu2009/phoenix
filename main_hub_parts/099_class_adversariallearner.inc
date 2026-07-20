@@ -5,7 +5,22 @@
 class AdversarialLearner : public IAdversarialLearner {
 public:
   explicit AdversarialLearner(std::shared_ptr<ControllerPoolBase> pool)
-      : pool_(std::move(pool)), rng_(0x12345678u) {}
+      : pool_(std::move(pool)), rng_(0x12345678u) {
+    loadLearningConfig();
+  }
+
+  void loadLearningConfig() {
+    maxAdversaries_ =
+        phoenix::cfgOr<int>("learning.advMaxAdversaries", maxAdversaries_);
+    noiseLevel_ =
+        phoenix::cfgOr<double>("learning.advNoiseLevel", noiseLevel_);
+    attackRounds_ =
+        phoenix::cfgOr<int>("learning.advAttackRounds", attackRounds_);
+    defenseRounds_ =
+        phoenix::cfgOr<int>("learning.advDefenseRounds", defenseRounds_);
+    benchLimit_ =
+        phoenix::cfgOr<int>("learning.advBenchLimit", benchLimit_);
+  }
 
   json attackAndDefend(const json &samples) override {
     auto bench = samples.is_array() ? samples : json::array();

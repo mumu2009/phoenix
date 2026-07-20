@@ -94531,6 +94531,8 @@ static int __Pyx_State_RemoveModule(CYTHON_UNUSED void* dummy) {
 
 // ===== Bridge window (append-only): keep Cython body intact, expose transformer::* APIs for main.cpp =====
 #include "transformer.hpp"
+#include "partial_matrix_cache.hpp"
+#include "phoenix_config.hpp"
 #include <sstream>
 #include <filesystem>
 
@@ -94812,10 +94814,85 @@ static void patchParams(TransformerParams &p, const json &x) {
 
 } // namespace
 
+static phoenix::cache::PartialMatrixCacheConfig transformerPartialCacheConfig() {
+    phoenix::cache::PartialMatrixCacheConfig cfg;
+    cfg.enabled = phoenix::cfgOr<bool>("partial_cache.transformerEnabled", cfg.enabled);
+    cfg.maxEntries = static_cast<std::size_t>(
+        phoenix::cfgOr<std::uint64_t>("partial_cache.maxEntries", cfg.maxEntries));
+    cfg.ttlMs = static_cast<std::size_t>(
+        phoenix::cfgOr<std::uint64_t>("partial_cache.ttlMs", cfg.ttlMs));
+    cfg.tolerance = phoenix::cfgOr<double>("partial_cache.tolerance", cfg.tolerance);
+    cfg.correctionScale =
+        phoenix::cfgOr<double>("partial_cache.correctionScale", cfg.correctionScale);
+    /* Correction is disabled by default for Transformer partial caches: the
+       generic delta correction is only safe when the cached value is in the
+       same vector space as the input fingerprint.  Outputs of Linear /
+       MultiHeadAttention / LayerNorm do not satisfy that identity
+       assumption, so we default to exact (or tolerance-quantised) reuse. */
+    cfg.enableCorrection =
+        phoenix::cfgOr<bool>("partial_cache.enableCorrection", false);
+    cfg.maxBlockSamples = static_cast<std::size_t>(
+        phoenix::cfgOr<std::uint64_t>("partial_cache.maxBlockSamples", cfg.maxBlockSamples));
+    return cfg;
+}
+
+static const phoenix::cache::PartialMatrixCacheConfig &transformerPartialCacheConfigCached() {
+    static const auto cfg = transformerPartialCacheConfig();
+    return cfg;
+}
+
+static phoenix::cache::PartialMatrixCache<std::vector<float>> &linearOutCache() {
+    static phoenix::cache::PartialMatrixCache<std::vector<float>> cache(
+        transformerPartialCacheConfigCached());
+    return cache;
+}
+
+static phoenix::cache::PartialMatrixCache<std::vector<float>> &lnOutCache() {
+    static phoenix::cache::PartialMatrixCache<std::vector<float>> cache(
+        transformerPartialCacheConfigCached());
+    return cache;
+}
+
+static phoenix::cache::PartialMatrixCache<std::vector<float>> &attnOutCache() {
+    static phoenix::cache::PartialMatrixCache<std::vector<float>> cache(
+        transformerPartialCacheConfigCached());
+    return cache;
+}
+
+static std::vector<double> toDoubleFingerprint(const std::vector<float> &v) {
+    std::vector<double> fp;
+    fp.reserve(v.size());
+    for (float x : v) fp.push_back(static_cast<double>(x));
+    return fp;
+}
+
 void setAttentionCacheConfig(const std::string &, int, const std::string &, int, int, size_t) {}
 
 Linear::Linear(int in, int out) : w(out, in), b((size_t)out, 0.0f), mW(w.data.size(), 0.0f), vW(w.data.size(), 0.0f), mB((size_t)out, 0.0f), vB((size_t)out, 0.0f), gW(w.data.size(), 0.0f), gB((size_t)out, 0.0f) {}
 std::vector<float> Linear::forward(const std::vector<float> &x) const {
+  auto &cache = linearOutCache();
+  if (cache.enabled()) {
+    const auto &cfg = cache.config();
+    const std::string op = "linear|" + std::to_string(reinterpret_cast<uintptr_t>(this)) +
+                           "|" + std::to_string(step);
+    const std::string fp =
+        phoenix::cache::PartialMatrixCache<std::vector<float>>::fingerprintVector(
+            x, cfg.tolerance, cfg.maxBlockSamples);
+    const std::string key =
+        phoenix::cache::PartialMatrixCache<std::vector<float>>::makeKey(op, 0, 0, fp);
+    std::vector<float> y;
+    if (cache.get(key, y)) {
+      return y;
+    }
+    y.assign((size_t)w.rows, 0.0f);
+    for (int r = 0; r < w.rows; ++r) {
+      float acc = (r < (int)b.size()) ? b[(size_t)r] : 0.0f;
+      for (int c = 0; c < w.cols; ++c) acc += w(r, c) * (c < (int)x.size() ? x[(size_t)c] : 0.0f);
+      y[(size_t)r] = acc;
+    }
+    cache.set(key, y, {});
+    return y;
+  }
   std::vector<float> y((size_t)w.rows, 0.0f);
   for (int r = 0; r < w.rows; ++r) {
     float acc = (r < (int)b.size()) ? b[(size_t)r] : 0.0f;
@@ -94828,6 +94905,35 @@ std::vector<float> Linear::forward(const std::vector<float> &x) const {
 LayerNorm::LayerNorm(int d) : gamma((size_t)d, 1.0f), beta((size_t)d, 0.0f), mGamma((size_t)d, 0.0f), vGamma((size_t)d, 0.0f), mBeta((size_t)d, 0.0f), vBeta((size_t)d, 0.0f), gGamma((size_t)d, 0.0f), gBeta((size_t)d, 0.0f) {}
 std::vector<float> LayerNorm::forward(const std::vector<float> &x) const {
   if (x.empty()) return {};
+  auto &cache = lnOutCache();
+  if (cache.enabled()) {
+    const auto &cfg = cache.config();
+    std::ostringstream prefix;
+    prefix << "ln|" << static_cast<const void*>(this) << '|' << step;
+    std::string key = phoenix::cache::PartialMatrixCache<std::vector<float>>::makeKey(
+        prefix.str(), 0, 0,
+        phoenix::cache::PartialMatrixCache<std::vector<float>>::fingerprintVector(
+            x, cfg.tolerance, cfg.maxBlockSamples));
+    std::vector<float> y;
+    std::vector<double> currentFp = toDoubleFingerprint(x);
+    if (cache.get(key, y, cfg.enableCorrection ? &currentFp : nullptr)) {
+      return y;
+    }
+    float mean = 0.0f;
+    for (float v : x) mean += v;
+    mean /= (float)x.size();
+    float var = 0.0f;
+    for (float v : x) {
+      float d = v - mean;
+      var += d * d;
+    }
+    var /= (float)x.size();
+    float inv = 1.0f / std::sqrt(var + eps);
+    y.assign(x.size(), 0.0f);
+    for (size_t i = 0; i < x.size(); ++i) y[i] = ((x[i] - mean) * inv) * (i < gamma.size() ? gamma[i] : 1.0f) + (i < beta.size() ? beta[i] : 0.0f);
+    cache.set(key, y, currentFp);
+    return y;
+  }
   float mean = 0.0f;
   for (float v : x) mean += v;
   mean /= (float)x.size();
@@ -94850,12 +94956,40 @@ std::vector<std::vector<float>> MultiHeadAttention::forward(const std::vector<st
   std::vector<float> avg((size_t)dModel, 0.0f);
   for (const auto &r : src) for (size_t i = 0; i < avg.size() && i < r.size(); ++i) avg[i] += r[i];
   for (auto &v : avg) v /= (float)src.size();
+
+  auto &cache = attnOutCache();
+  const bool useCache = cache.enabled();
+  const auto &cfg = cache.config();
+  std::string opBase;
+  if (useCache) {
+    std::ostringstream op;
+    op << "mha|" << reinterpret_cast<uintptr_t>(this) << '|' << dModel << '|' << nHeads << '|'
+       << wq.step << ',' << wk.step << ',' << wv.step << ',' << wo.step;
+    opBase = op.str();
+  }
+
   std::vector<std::vector<float>> out;
   out.reserve(x.size());
   for (const auto &r : x) {
     std::vector<float> m((size_t)dModel, 0.0f);
     for (size_t i = 0; i < m.size(); ++i) m[i] = 0.7f * (i < r.size() ? r[i] : 0.0f) + 0.3f * avg[i];
-    out.push_back(wo.forward(m));
+    if (useCache) {
+      const std::string fp =
+          phoenix::cache::PartialMatrixCache<std::vector<float>>::fingerprintVector(
+              m, cfg.tolerance, cfg.maxBlockSamples);
+      const std::string key =
+          phoenix::cache::PartialMatrixCache<std::vector<float>>::makeKey(opBase, 0, 0, fp);
+      std::vector<float> cached;
+      if (cache.get(key, cached)) {
+        out.push_back(std::move(cached));
+        continue;
+      }
+      cached = wo.forward(m);
+      cache.set(key, cached, {});
+      out.push_back(std::move(cached));
+    } else {
+      out.push_back(wo.forward(m));
+    }
   }
   return out;
 }

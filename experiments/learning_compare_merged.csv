@@ -1,0 +1,14 @@
+path,type,min,max,local_best_value,local_score,remote_best_value,remote_score,normalized_diff,conflict_note,chosen_best_value,chosen_source
+learning.advAttackRounds,int,1,10,8,85.428,,,,REMOTE_MISSING,8,local
+learning.advBenchLimit,int,10,100,10,85.484,,,,REMOTE_MISSING,10,local
+learning.advDefenseRounds,int,1,10,9,85.124,1,93.038,0.8888888888888888,LARGE_DIFF,,CONFLICT
+learning.advMaxAdversaries,int,8,128,8,84.792,92,93.081,0.7,LARGE_DIFF,,CONFLICT
+learning.advNoiseLevel,float,0.05,0.5,0.35000000000000003,84.426,0.1,93.089,0.5555555555555556,LARGE_DIFF,,CONFLICT
+learning.gnnGaGenerations,int,1,10,9,85.251,10,92.926,0.1111111111111111,NEAR,,CONFLICT
+learning.gnnGaMaxDocs,int,8,64,23,81.885,23,93.252,0.0,NEAR,,CONFLICT
+learning.gnnGaPopulation,int,4,32,16,85.333,18,93.21,0.07142857142857142,NEAR,,CONFLICT
+learning.rlCoverageWeight,float,0.0,1.0,0.3333333333333333,85.603,0.7777777777777778,92.553,0.4444444444444445,MODERATE_DIFF,,CONFLICT
+learning.rlImprovementThreshold,float,0.001,0.1,0.1,85.485,0.0505,92.385,0.5,LARGE_DIFF,,CONFLICT
+learning.rlMaxDocs,int,8,128,104,85.223,116,93.321,0.1,NEAR,,CONFLICT
+learning.rlTopKWords,int,10,100,28,85.594,10,92.943,0.2,MODERATE_DIFF,,CONFLICT
+learning.rlUniquenessWeight,float,0.0,1.0,0.0,82.826,0.2222222222222222,93.941,0.2222222222222222,MODERATE_DIFF,,CONFLICT

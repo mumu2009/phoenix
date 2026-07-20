@@ -1,0 +1,11 @@
+{
+  "checkedAtMs": 1784480709663,
+  "enabled": true,
+  "error": "bug_shooter executable not found",
+  "executableFound": false,
+  "launchAttempted": false,
+  "pid": 0,
+  "running": false,
+  "status": "binary_missing",
+  "statusFile": "bug_shooter_status.json"
+}

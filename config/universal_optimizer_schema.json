@@ -1,0 +1,719 @@
+{
+  "version": 1,
+  "description": "Registry of all remaining tunable parameters for the Universal Optimizer. Each entry defines the module, dot-path, type, bounds, and default value.",
+  "modules": [
+    "context",
+    "scenarios",
+    "llama_server",
+    "memebarrier",
+    "summary_model",
+    "model_defaults",
+    "dialog",
+    "learning"
+  ],
+  "parameters": [
+    {
+      "module": "context",
+      "path": "context.enableSemanticSearch",
+      "type": "bool",
+      "tuned": false,
+      "default": true
+    },
+    {
+      "module": "context",
+      "path": "context.enableHierarchical",
+      "type": "bool",
+      "tuned": false,
+      "default": true
+    },
+    {
+      "module": "context",
+      "path": "context.hierarchicalLevels.global",
+      "type": "int",
+      "tuned": false,
+      "min": 256,
+      "max": 4096,
+      "default": 1024
+    },
+    {
+      "module": "context",
+      "path": "context.hierarchicalLevels.workspace",
+      "type": "int",
+      "tuned": false,
+      "min": 512,
+      "max": 8192,
+      "default": 2048
+    },
+    {
+      "module": "context",
+      "path": "context.hierarchicalLevels.file",
+      "type": "int",
+      "tuned": false,
+      "min": 1024,
+      "max": 8192,
+      "default": 4096
+    },
+    {
+      "module": "context",
+      "path": "context.hierarchicalLevels.function",
+      "type": "int",
+      "tuned": false,
+      "min": 128,
+      "max": 2048,
+      "default": 512
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.scanIntervalMs",
+      "type": "int",
+      "tuned": false,
+      "min": 1000,
+      "max": 60000,
+      "default": 10000
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.maliciousThreshold",
+      "type": "float",
+      "tuned": false,
+      "min": 0.3,
+      "max": 0.9,
+      "default": 0.7
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.minThreshold",
+      "type": "float",
+      "tuned": false,
+      "min": 0.1,
+      "max": 0.5,
+      "default": 0.35
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.maxThreshold",
+      "type": "float",
+      "tuned": false,
+      "min": 0.8,
+      "max": 1.0,
+      "default": 0.95
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.thresholdMomentum",
+      "type": "float",
+      "tuned": false,
+      "min": 0.0,
+      "max": 0.5,
+      "default": 0.15
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.minIsolationMargin",
+      "type": "float",
+      "tuned": false,
+      "min": 0.0,
+      "max": 0.2,
+      "default": 0.05
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.minConsecutiveHits",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 10,
+      "default": 2
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.maxIsolatePerScan",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 20,
+      "default": 5
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.adaptiveEnabled",
+      "type": "bool",
+      "tuned": false,
+      "default": true
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.anomalyEnabled",
+      "type": "bool",
+      "tuned": false,
+      "default": true
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.scoreWindowSize",
+      "type": "int",
+      "tuned": false,
+      "min": 64,
+      "max": 2048,
+      "default": 512
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.useTextCNN",
+      "type": "bool",
+      "tuned": false,
+      "default": true
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.useRecommender",
+      "type": "bool",
+      "tuned": false,
+      "default": true
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.useTorchModels",
+      "type": "bool",
+      "tuned": false,
+      "default": true
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.disableRateTarget",
+      "type": "float",
+      "tuned": false,
+      "min": 0.001,
+      "max": 0.2,
+      "default": 0.01
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.recommenderTopics",
+      "type": "int",
+      "tuned": false,
+      "min": 4,
+      "max": 64,
+      "default": 24
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.recommenderDim",
+      "type": "int",
+      "tuned": false,
+      "min": 8,
+      "max": 128,
+      "default": 16
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.weights.growth",
+      "type": "float",
+      "tuned": false,
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.5
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.weights.outSkew",
+      "type": "float",
+      "tuned": false,
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.25
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.weights.selfSkew",
+      "type": "float",
+      "tuned": false,
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.15
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.weights.anomaly",
+      "type": "float",
+      "tuned": false,
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.1
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.torch.maxLen",
+      "type": "int",
+      "tuned": false,
+      "min": 16,
+      "max": 128,
+      "default": 48
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.torch.embDim",
+      "type": "int",
+      "tuned": false,
+      "min": 16,
+      "max": 256,
+      "default": 64
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.torch.hidDim",
+      "type": "int",
+      "tuned": false,
+      "min": 16,
+      "max": 256,
+      "default": 64
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.torch.adamLR",
+      "type": "float",
+      "tuned": false,
+      "min": 1e-05,
+      "max": 0.01,
+      "default": 0.001
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.torch.epochs",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 10,
+      "default": 2
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.torch.batch",
+      "type": "int",
+      "tuned": false,
+      "min": 8,
+      "max": 128,
+      "default": 32
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.torch.lrDecay",
+      "type": "float",
+      "tuned": false,
+      "min": 0.1,
+      "max": 0.9,
+      "default": 0.5
+    },
+    {
+      "module": "memebarrier",
+      "path": "memebarrier.torch.patience",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 5,
+      "default": 1
+    },
+    {
+      "module": "summary_model",
+      "path": "summary_model.vocabSize",
+      "type": "int",
+      "tuned": false,
+      "min": 1024,
+      "max": 16384,
+      "default": 4096
+    },
+    {
+      "module": "summary_model",
+      "path": "summary_model.dModel",
+      "type": "int",
+      "tuned": false,
+      "min": 32,
+      "max": 256,
+      "default": 64
+    },
+    {
+      "module": "summary_model",
+      "path": "summary_model.nHeads",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 8,
+      "default": 2
+    },
+    {
+      "module": "summary_model",
+      "path": "summary_model.nLayers",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 4,
+      "default": 1
+    },
+    {
+      "module": "summary_model",
+      "path": "summary_model.dFF",
+      "type": "int",
+      "tuned": false,
+      "min": 64,
+      "max": 512,
+      "default": 128
+    },
+    {
+      "module": "summary_model",
+      "path": "summary_model.maxLen",
+      "type": "int",
+      "tuned": false,
+      "min": 64,
+      "max": 512,
+      "default": 128
+    },
+    {
+      "module": "summary_model",
+      "path": "summary_model.maxTokens",
+      "type": "int",
+      "tuned": false,
+      "min": 8,
+      "max": 128,
+      "default": 32
+    },
+    {
+      "module": "summary_model",
+      "path": "summary_model.lr",
+      "type": "float",
+      "tuned": false,
+      "min": 1e-05,
+      "max": 0.01,
+      "default": 0.001
+    },
+    {
+      "module": "summary_model",
+      "path": "summary_model.tokenizerMode",
+      "type": "enum",
+      "tuned": false,
+      "choices": ["bpe", "char", "word"],
+      "default": "bpe"
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.decayFactor",
+      "type": "float",
+      "tuned": false,
+      "min": 0.1,
+      "max": 0.9,
+      "default": 0.5
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.maxMemeWords",
+      "type": "int",
+      "tuned": false,
+      "min": 50,
+      "max": 500,
+      "default": 100
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.minOverlapThreshold",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 10,
+      "default": 2
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.memeNgramMin",
+      "type": "int",
+      "tuned": false,
+      "min": 2,
+      "max": 8,
+      "default": 3
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.memeNgramMax",
+      "type": "int",
+      "tuned": false,
+      "min": 6,
+      "max": 20,
+      "default": 14
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.maliciousThreshold",
+      "type": "float",
+      "tuned": false,
+      "min": 0.4,
+      "max": 0.9,
+      "default": 0.7
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.learningIterations",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 10,
+      "default": 3
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.iteration",
+      "type": "int",
+      "tuned": false,
+      "min": 3,
+      "max": 12,
+      "default": 5
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.threshold",
+      "type": "float",
+      "tuned": false,
+      "min": 1.0,
+      "max": 6.0,
+      "default": 3.0
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.decay",
+      "type": "float",
+      "tuned": false,
+      "min": 0.5,
+      "max": 2.0,
+      "default": 1.0
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.decayK",
+      "type": "float",
+      "tuned": false,
+      "min": 0.5,
+      "max": 2.0,
+      "default": 1.0
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.maxLen",
+      "type": "int",
+      "tuned": false,
+      "min": 8,
+      "max": 32,
+      "default": 16
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.edgeWeight",
+      "type": "float",
+      "tuned": false,
+      "min": 0.5,
+      "max": 2.0,
+      "default": 1.0
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.activationType",
+      "type": "enum",
+      "tuned": false,
+      "choices": ["relu", "tanh", "sigmoid", "linear"],
+      "default": "relu"
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.transferType",
+      "type": "enum",
+      "tuned": false,
+      "choices": ["linear", "tanh", "sigmoid"],
+      "default": "linear"
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.mappingDepth",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 4,
+      "default": 1
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.reflectionTopMemes",
+      "type": "int",
+      "tuned": false,
+      "min": 4,
+      "max": 48,
+      "default": 18
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.reflectionTopWords",
+      "type": "int",
+      "tuned": false,
+      "min": 4,
+      "max": 64,
+      "default": 24
+    },
+    {
+      "module": "model_defaults",
+      "path": "model_defaults.reflectionMinScore",
+      "type": "float",
+      "tuned": false,
+      "min": 1e-08,
+      "max": 1e-04,
+      "default": 1e-06
+    },
+    {
+      "module": "dialog",
+      "path": "dialog.rlEvery",
+      "type": "int",
+      "tuned": false,
+      "min": 5,
+      "max": 100,
+      "default": 20
+    },
+    {
+      "module": "dialog",
+      "path": "dialog.advEvery",
+      "type": "int",
+      "tuned": false,
+      "min": 5,
+      "max": 100,
+      "default": 30
+    },
+    {
+      "module": "dialog",
+      "path": "dialog.gnnEvery",
+      "type": "int",
+      "tuned": false,
+      "min": 5,
+      "max": 100,
+      "default": 40
+    },
+    {
+      "module": "dialog",
+      "path": "dialog.dialogAsyncLimit",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 8,
+      "default": 2
+    },
+    {
+      "module": "learning",
+      "path": "learning.rlMaxDocs",
+      "type": "int",
+      "tuned": false,
+      "min": 8,
+      "max": 128,
+      "default": 64
+    },
+    {
+      "module": "learning",
+      "path": "learning.rlTopKWords",
+      "type": "int",
+      "tuned": false,
+      "min": 10,
+      "max": 100,
+      "default": 30
+    },
+    {
+      "module": "learning",
+      "path": "learning.rlImprovementThreshold",
+      "type": "float",
+      "tuned": false,
+      "min": 0.001,
+      "max": 0.1,
+      "default": 0.01
+    },
+    {
+      "module": "learning",
+      "path": "learning.rlCoverageWeight",
+      "type": "float",
+      "tuned": false,
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.7
+    },
+    {
+      "module": "learning",
+      "path": "learning.rlUniquenessWeight",
+      "type": "float",
+      "tuned": false,
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.3
+    },
+    {
+      "module": "learning",
+      "path": "learning.advMaxAdversaries",
+      "type": "int",
+      "tuned": false,
+      "min": 8,
+      "max": 128,
+      "default": 64
+    },
+    {
+      "module": "learning",
+      "path": "learning.advNoiseLevel",
+      "type": "float",
+      "tuned": false,
+      "min": 0.05,
+      "max": 0.5,
+      "default": 0.2
+    },
+    {
+      "module": "learning",
+      "path": "learning.advAttackRounds",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 10,
+      "default": 3
+    },
+    {
+      "module": "learning",
+      "path": "learning.advDefenseRounds",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 10,
+      "default": 3
+    },
+    {
+      "module": "learning",
+      "path": "learning.advBenchLimit",
+      "type": "int",
+      "tuned": false,
+      "min": 10,
+      "max": 100,
+      "default": 50
+    },
+    {
+      "module": "learning",
+      "path": "learning.gnnGaMaxDocs",
+      "type": "int",
+      "tuned": false,
+      "min": 8,
+      "max": 64,
+      "default": 32
+    },
+    {
+      "module": "learning",
+      "path": "learning.gnnGaPopulation",
+      "type": "int",
+      "tuned": false,
+      "min": 4,
+      "max": 32,
+      "default": 6
+    },
+    {
+      "module": "learning",
+      "path": "learning.gnnGaGenerations",
+      "type": "int",
+      "tuned": false,
+      "min": 1,
+      "max": 10,
+      "default": 1
+    }
+  ]
+}

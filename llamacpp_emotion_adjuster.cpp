@@ -16,6 +16,10 @@ bool EmotionWeightCache::storeBaseline(const std::string& layerName,
                                      const std::vector<float>& weights) {
     std::lock_guard<std::mutex> lock(mutex_);
     
+    if (weights.empty() || weights.size() != maxEntries_) {
+        return false;
+    }
+    
     if (cache_.size() >= maxEntries_) {
         // Evict oldest entry
         auto oldest = std::min_element(cache_.begin(), cache_.end(),
@@ -97,7 +101,7 @@ void EmotionWeightCache::resetAll() {
     std::lock_guard<std::mutex> lock(mutex_);
     
     for (auto& pair : cache_) {
-        pair.second.current = pair.second.baseline;
+        pair.second.current.assign(pair.second.baseline.size(), 0.0f);
         pair.second.lastUpdateTurn = 0;
     }
 }
@@ -112,10 +116,8 @@ float EmotionWeightCache::getTotalAdjustmentMagnitude() const {
     
     float totalMagnitude = 0.0f;
     for (const auto& pair : cache_) {
-        const auto& entry = pair.second;
-        for (size_t i = 0; i < entry.baseline.size() && i < entry.current.size(); ++i) {
-            float diff = entry.current[i] - entry.baseline[i];
-            totalMagnitude += std::abs(diff);
+        for (float v : pair.second.current) {
+            totalMagnitude += std::abs(v);
         }
     }
     return totalMagnitude;
@@ -217,6 +219,10 @@ bool LlamaCppEmotionWeightAdjuster::applyEmotionWeights(const EmotionTensor& emo
     std::lock_guard<std::mutex> lock(impl_->mutex);
     
     if (!impl_->weightCache) {
+        return false;
+    }
+    
+    if (!impl_->weightCache->getBaseline(layerPattern).has_value()) {
         return false;
     }
     

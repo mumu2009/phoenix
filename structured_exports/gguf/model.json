@@ -1,0 +1,17 @@
+{
+  "architecture": "transformer",
+  "metadata": {
+    "n_ctx": 0,
+    "n_embd": 0,
+    "n_layers": 0,
+    "tokenizer": "unknown"
+  },
+  "modelPath": "",
+  "tensorIndex": {
+    "attention": [],
+    "embedding": [],
+    "mlp": [],
+    "norm": [],
+    "output": []
+  }
+}

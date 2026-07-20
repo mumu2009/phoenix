@@ -6,7 +6,22 @@ class ReinforcementLearner : public IReinforcementLearner {
 public:
   ReinforcementLearner(std::shared_ptr<ControllerPoolBase> pool,
                        fs::path testsDir)
-      : pool_(std::move(pool)), testsDir_(std::move(testsDir)) {}
+      : pool_(std::move(pool)), testsDir_(std::move(testsDir)) {
+    loadLearningConfig();
+  }
+
+  void loadLearningConfig() {
+    maxDocs_ = phoenix::cfgOr<int>("learning.rlMaxDocs", maxDocs_);
+    topKWords_ = phoenix::cfgOr<int>("learning.rlTopKWords", topKWords_);
+    improvementThreshold_ =
+        phoenix::cfgOr<double>("learning.rlImprovementThreshold",
+                               improvementThreshold_);
+    iterations_ = phoenix::cfgOr<int>("learning.rlIterations", iterations_);
+    coverageWeight_ =
+        phoenix::cfgOr<double>("learning.rlCoverageWeight", coverageWeight_);
+    uniquenessWeight_ =
+        phoenix::cfgOr<double>("learning.rlUniquenessWeight", uniquenessWeight_);
+  }
 
   json learn(int cycles) override {
     (void)cycles;
@@ -79,6 +94,8 @@ private:
   double improvementThreshold_{0.01};
   int iterations_{5};
   bool useUmap_{true};
+  double coverageWeight_{0.7};
+  double uniquenessWeight_{0.3};
   std::vector<json> history_;
   json latest_ = json::object();
 
@@ -131,7 +148,11 @@ private:
         (double)std::unordered_set<std::string>(words.begin(), words.end())
             .size() /
         std::max(1.0, (double)words.size());
-    return 0.7 * coverage + 0.3 * uniq;
+    double total = coverageWeight_ + uniquenessWeight_;
+    if (total < 1e-9)
+      return coverage;
+    return (coverageWeight_ / total) * coverage +
+           (uniquenessWeight_ / total) * uniq;
   }
 
   std::vector<float> buildFeatureForDoc(const std::string &text) const {
