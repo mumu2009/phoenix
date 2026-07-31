@@ -11,12 +11,16 @@
 #include "jpea_v2_image_world_model.hpp"
 #include "model_deployment.hpp"
 #include "rdk_x5_bpu.hpp"
+#include "semantic_unit.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <numeric>
+#include <random>
 #include <sstream>
 #include <string>
 
@@ -332,55 +336,301 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
  * prediction are not supported by a remote inference-only model.
  */
 /**
- * @brief Deterministic fallback image world model.
+ * @brief JEPA-style deterministic fallback image world model.
  *
- * Used when edge image inference (BPU or remote) is disabled at compile time
- * or when the selected backend is unavailable.  encode() returns an empty
- * vector so the multimodal concept bridge can use its media-concept fallback.
+ * When no BPU/remote backend is available, this fallback still implements the
+ * full JEPA v2 contract: it decodes the image, splits it into a patch grid,
+ * computes patch statistics, and can run an SGD-based linear predictor for
+ * self-supervised adaptation.  This makes the image <-> concept unit
+ * conversion functional and testable even without a real I-JEPA checkpoint.
  */
 class JpeaV2ImageFallbackModel : public JpeaV2ImageWorldModel {
  public:
   JpeaV2ImageFallbackModel(JpeaV2ImageWorldModelConfig cfg, int targetDim)
-      : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128) {}
-
-  std::vector<float> encode(const std::vector<uint8_t> &, int, int,
-                            const std::string &) override {
-    lastError_ = "edge image inference disabled";
-    return {};
+      : cfg_(std::move(cfg)),
+        targetDim_(targetDim > 0 ? targetDim : 128),
+        predictorWeights_(static_cast<size_t>(targetDim_ * targetDim_), 0.0f),
+        predictorBias_(static_cast<size_t>(targetDim_), 0.0f) {
+    for (int i = 0; i < targetDim_; ++i) {
+      predictorWeights_[static_cast<size_t>(i * targetDim_ + i)] = 1.0f;
+    }
   }
+
+  std::vector<float> encode(const std::vector<uint8_t> &imageBytes, int width, int height,
+                            const std::string &mimeType) override {
+    auto grid = preprocessImage(imageBytes, width, height, mimeType);
+    if (grid.empty()) {
+      if (lastError_.empty()) lastError_ = "image preprocessing failed";
+      return {};
+    }
+    return patchStatsToConcept(grid, {});
+  }
+
   std::vector<float> encodeContext(const std::vector<uint8_t> &imageBytes, int width, int height,
                                    const std::string &mimeType,
-                                   const std::vector<bool> &) override {
-    return encode(imageBytes, width, height, mimeType);
+                                   const std::vector<bool> &mask) override {
+    auto grid = preprocessImage(imageBytes, width, height, mimeType);
+    if (grid.empty()) {
+      if (lastError_.empty()) lastError_ = "image preprocessing failed";
+      return {};
+    }
+    return patchStatsToConcept(grid, mask);
   }
+
   std::vector<float> encodeTarget(const std::vector<uint8_t> &imageBytes, int width, int height,
                                   const std::string &mimeType,
-                                  const std::vector<int> &) override {
-    return encode(imageBytes, width, height, mimeType);
+                                  const std::vector<int> &blockIndices) override {
+    auto grid = preprocessImage(imageBytes, width, height, mimeType);
+    if (grid.empty()) {
+      if (lastError_.empty()) lastError_ = "image preprocessing failed";
+      return {};
+    }
+    const int totalPatches = countPatches();
+    std::vector<bool> mask;
+    if (!blockIndices.empty()) {
+      mask.assign(static_cast<size_t>(totalPatches), false);
+      for (int idx : blockIndices) {
+        if (idx >= 0 && idx < totalPatches) mask[static_cast<size_t>(idx)] = true;
+      }
+    }
+    return patchStatsToConcept(grid, mask);
   }
+
   std::vector<float> predictTarget(const std::vector<float> &contextRepr,
                                    const std::vector<int> &) override {
-    return std::vector<float>(contextRepr.begin(), contextRepr.end());
+    if (contextRepr.size() != static_cast<size_t>(targetDim_)) {
+      lastError_ = "predictor input dimension mismatch";
+      return {};
+    }
+    std::vector<float> out(static_cast<size_t>(targetDim_), 0.0f);
+    for (int i = 0; i < targetDim_; ++i) {
+      float v = predictorBias_[static_cast<size_t>(i)];
+      for (int j = 0; j < targetDim_; ++j) {
+        v += predictorWeights_[static_cast<size_t>(i * targetDim_ + j)] * contextRepr[static_cast<size_t>(j)];
+      }
+      out[static_cast<size_t>(i)] = v;
+    }
+    return out;
   }
-  float adapt(const std::vector<uint8_t> &, int, int, const std::string &, int, float) override {
-    lastError_ = "runtime adaptation is not supported";
-    return -1.0f;
+
+  float adapt(const std::vector<uint8_t> &imageBytes, int width, int height,
+              const std::string &mimeType, int steps, float lr) override {
+    if (imageBytes.empty() || steps < 1) {
+      lastError_ = "empty image or non-positive steps";
+      return -1.0f;
+    }
+    if (lr < 0.0f) lr = 0.0f;
+
+    auto grid = preprocessImage(imageBytes, width, height, mimeType);
+    if (grid.empty()) {
+      if (lastError_.empty()) lastError_ = "image preprocessing failed";
+      return -1.0f;
+    }
+    const int totalPatches = countPatches();
+    if (totalPatches < 2) {
+      lastError_ = "not enough patches for JEPA adaptation";
+      return -1.0f;
+    }
+
+    float totalLoss = 0.0f;
+    std::mt19937 rng(0x1DEA);
+    for (int step = 0; step < steps; ++step) {
+      std::vector<int> patchOrder(totalPatches);
+      std::iota(patchOrder.begin(), patchOrder.end(), 0);
+      std::shuffle(patchOrder.begin(), patchOrder.end(), rng);
+
+      const int targetCount = std::max(1, totalPatches / 3);
+      std::vector<int> targetIndices(patchOrder.begin(), patchOrder.begin() + targetCount);
+
+      std::vector<bool> contextMask(static_cast<size_t>(totalPatches), true);
+      for (int t : targetIndices) contextMask[static_cast<size_t>(t)] = false;
+
+      auto context = encodeContext(imageBytes, width, height, mimeType, contextMask);
+      auto target = encodeTarget(imageBytes, width, height, mimeType, targetIndices);
+      if (context.size() != static_cast<size_t>(targetDim_) ||
+          target.size() != static_cast<size_t>(targetDim_)) {
+        lastError_ = "context/target dimension mismatch";
+        return -1.0f;
+      }
+
+      auto pred = predictTarget(context, targetIndices);
+      if (pred.size() != target.size()) {
+        lastError_ = "predictor output dimension mismatch";
+        return -1.0f;
+      }
+
+      double loss = 0.0;
+      std::vector<float> error(pred.size());
+      for (size_t i = 0; i < pred.size(); ++i) {
+        error[i] = pred[i] - target[i];
+        loss += static_cast<double>(error[i]) * static_cast<double>(error[i]);
+      }
+      loss /= static_cast<double>(pred.size());
+      totalLoss += static_cast<float>(loss);
+
+      const float stepSize = lr;
+      for (int i = 0; i < targetDim_; ++i) {
+        for (int j = 0; j < targetDim_; ++j) {
+          predictorWeights_[static_cast<size_t>(i * targetDim_ + j)] -=
+              stepSize * error[static_cast<size_t>(i)] * context[static_cast<size_t>(j)];
+        }
+        predictorBias_[static_cast<size_t>(i)] -= stepSize * error[static_cast<size_t>(i)];
+      }
+    }
+
+    ++samples_;
+    lastError_.clear();
+    return totalLoss / static_cast<float>(steps);
   }
-  std::vector<uint8_t> decode(const std::vector<float> &, const std::string &) override {
-    lastError_ = "edge image decoding disabled";
+
+  std::vector<uint8_t> decode(const std::vector<float> &conceptVector,
+                              const std::string &mimeType) override {
+#if !JPEA_HAVE_OPENCV
+    (void)conceptVector;
+    (void)mimeType;
+    lastError_ = "OpenCV image decoding is unavailable in this build";
     return {};
+#else
+    if (static_cast<int>(conceptVector.size()) != targetDim_) {
+      lastError_ = "decode concept dimension mismatch";
+      return {};
+    }
+    const int patchGrid = std::max(1, cfg_.resolution / std::max(1, cfg_.patchSize));
+    cv::Mat patchImg(patchGrid, patchGrid, CV_32FC3, cv::Scalar(0, 0, 0));
+    for (int p = 0; p < patchGrid * patchGrid && p < targetDim_; ++p) {
+      int y = p / patchGrid;
+      int x = p % patchGrid;
+      float v = std::max(-1.0f, std::min(1.0f, conceptVector[static_cast<size_t>(p)]));
+      cv::Vec3f &pix = patchImg.at<cv::Vec3f>(y, x);
+      pix[0] = v;
+      pix[1] = -v;
+      pix[2] = std::abs(v);
+    }
+    cv::Mat fullImg;
+    cv::resize(patchImg, fullImg, cv::Size(cfg_.resolution, cfg_.resolution), 0, 0, cv::INTER_NEAREST);
+    cv::max(cv::min(fullImg, 1.0f), -1.0f, fullImg);
+    fullImg = (fullImg + 1.0f) * 127.5f;
+    cv::Mat uint8Img;
+    fullImg.convertTo(uint8Img, CV_8UC3);
+    std::vector<uchar> encoded;
+    if (!cv::imencode(mimeType == "image/png" ? ".png" : ".jpg", uint8Img, encoded)) {
+      lastError_ = "OpenCV failed to encode fallback image";
+      return {};
+    }
+    lastError_.clear();
+    return {encoded.begin(), encoded.end()};
+#endif
   }
+
   nlohmann::json status() const override {
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "disabled"},
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "fallback-jepa"},
                           {"resolution", cfg_.resolution}, {"patchSize", cfg_.patchSize},
-                          {"targetDim", targetDim_}, {"samples", 0u}, {"ready", false},
+                          {"targetDim", targetDim_}, {"samples", samples_}, {"ready", true},
                           {"error", lastError_}};
   }
+
   const JpeaV2ImageWorldModelConfig &config() const override { return cfg_; }
 
  private:
+  int countPatches() const {
+    const int grid = cfg_.resolution / std::max(1, cfg_.patchSize);
+    return grid * grid;
+  }
+
+  std::vector<float> preprocessImage(const std::vector<uint8_t> &imageBytes, int width, int height,
+                                     const std::string &mimeType) {
+#if !JPEA_HAVE_OPENCV
+    (void)imageBytes;
+    (void)width;
+    (void)height;
+    (void)mimeType;
+    lastError_ = "OpenCV unavailable in this build";
+    return {};
+#else
+    cv::Mat image;
+    if (mimeType == "application/x-bgr") {
+      if (width <= 0 || height <= 0 ||
+          imageBytes.size() != static_cast<size_t>(width) * static_cast<size_t>(height) * 3U) {
+        lastError_ = "direct BGR frame does not match its declared dimensions";
+        return {};
+      }
+      image = cv::Mat(height, width, CV_8UC3, const_cast<uint8_t *>(imageBytes.data())).clone();
+    } else {
+      if (imageBytes.empty()) {
+        lastError_ = "empty image payload";
+        return {};
+      }
+      std::vector<uchar> compressed(imageBytes.begin(), imageBytes.end());
+      image = cv::imdecode(compressed, cv::IMREAD_COLOR);
+      if (image.empty()) {
+        lastError_ = "unable to decode image payload";
+        return {};
+      }
+    }
+    cv::resize(image, image, cv::Size(cfg_.resolution, cfg_.resolution), 0, 0, cv::INTER_AREA);
+    cv::Mat gray;
+    if (image.channels() == 3) {
+      cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+    } else if (image.channels() == 1) {
+      gray = image;
+    } else {
+      lastError_ = "unsupported image channel count";
+      return {};
+    }
+    cv::Mat floatGray;
+    gray.convertTo(floatGray, CV_32F, 1.0 / 255.0);
+    std::vector<float> grid(static_cast<size_t>(cfg_.resolution * cfg_.resolution));
+    std::memcpy(grid.data(), floatGray.ptr<float>(), grid.size() * sizeof(float));
+    lastError_.clear();
+    return grid;
+#endif
+  }
+
+  std::vector<float> patchStatsToConcept(const std::vector<float> &grid,
+                                         const std::vector<bool> &mask) const {
+    using namespace phoenix::multimodal;
+    const int patchGrid = cfg_.resolution / std::max(1, cfg_.patchSize);
+    if (patchGrid <= 0) return std::vector<float>(static_cast<size_t>(targetDim_), 0.0f);
+    std::vector<float> stats;
+    stats.reserve(2 * patchGrid * patchGrid);
+    for (int py = 0; py < patchGrid; ++py) {
+      for (int px = 0; px < patchGrid; ++px) {
+        const int patchIdx = py * patchGrid + px;
+        if (!mask.empty() && !mask[static_cast<size_t>(patchIdx)]) continue;
+        float mean = 0.0f;
+        float sq = 0.0f;
+        int count = 0;
+        const int y0 = py * cfg_.patchSize;
+        const int x0 = px * cfg_.patchSize;
+        for (int y = 0; y < cfg_.patchSize; ++y) {
+          for (int x = 0; x < cfg_.patchSize; ++x) {
+            const int gy = y0 + y;
+            const int gx = x0 + x;
+            const size_t idx = static_cast<size_t>(gy * cfg_.resolution + gx);
+            if (idx >= grid.size()) continue;
+            float v = grid[idx];
+            mean += v;
+            sq += v * v;
+            ++count;
+          }
+        }
+        if (count == 0) continue;
+        mean /= static_cast<float>(count);
+        float var = (sq / static_cast<float>(count)) - (mean * mean);
+        stats.push_back(mean);
+        stats.push_back(std::sqrt(std::max(0.0f, var)));
+      }
+    }
+    if (stats.empty()) stats.assign(2, 0.0f);
+    auto projected = projectToDimension(stats, static_cast<size_t>(targetDim_), 0x1DEA);
+    return normalizeVector(projected);
+  }
+
   JpeaV2ImageWorldModelConfig cfg_;
   int targetDim_;
+  size_t samples_ = 0;
+  std::vector<float> predictorWeights_;
+  std::vector<float> predictorBias_;
   std::string lastError_;
 };
 
@@ -496,11 +746,13 @@ class JpeaV2ImageRemoteModel : public JpeaV2ImageWorldModel {
 }  // namespace
 
 /**
- * @brief Factory that selects a local HBDNN or remote image world model.
+ * @brief Factory that selects the best available image world model.
  *
- * The decision is driven by the global ModelDeploymentConfig singleton.  When
- * vision is configured as remote and a URL is present, a JpeaV2ImageRemoteModel
- * is returned; otherwise the local HBDNN-backed implementation is used.
+ * Preference order: remote edge endpoint (when configured), local HBDNN BPU
+ * model (when the runtime and compiled model are both available), and finally
+ * the JEPA-style deterministic fallback.  The fallback is also used for
+ * ServerClient placement, disabled edge builds, or any situation where the
+ * HBDNN backend is not ready.
  */
 std::unique_ptr<JpeaV2ImageWorldModel> createJpeaV2ImageWorldModel(
     const std::string &variantId, int targetDim, const std::string & /*backend*/) {
@@ -511,6 +763,10 @@ std::unique_ptr<JpeaV2ImageWorldModel> createJpeaV2ImageWorldModel(
 
   const auto &deployment = phoenix::deployment::ModelDeploymentConfig::instance().vision();
 
+  if (deployment.placement == phoenix::deployment::ModelPlacement::ServerClient) {
+    return std::make_unique<JpeaV2ImageFallbackModel>(*v, targetDim);
+  }
+
 #if PHOENIX_EDGE_IMAGE_ENABLED
   const bool useRemote =
       (deployment.placement == phoenix::deployment::ModelPlacement::Remote ||
@@ -519,9 +775,14 @@ std::unique_ptr<JpeaV2ImageWorldModel> createJpeaV2ImageWorldModel(
   if (useRemote) {
     return std::make_unique<JpeaV2ImageRemoteModel>(*v, targetDim, deployment.remote);
   }
-  // Local path: use the HBDNN model.  If no BPU / no model is configured it
-  // will return empty vectors and the concept bridge will fall back.
-  return std::make_unique<JpeaV2ImageHbdnnModel>(*v, targetDim);
+
+  // Local path: prefer HBDNN when BPU runtime + compiled model are present.
+  auto hbdnn = std::make_unique<JpeaV2ImageHbdnnModel>(*v, targetDim);
+  if (hbdnn->status().value("ready", false)) {
+    return hbdnn;
+  }
+  // Otherwise the JEPA fallback keeps image -> concept unit conversion alive.
+  return std::make_unique<JpeaV2ImageFallbackModel>(*v, targetDim);
 #else
   (void)deployment;
   return std::make_unique<JpeaV2ImageFallbackModel>(*v, targetDim);

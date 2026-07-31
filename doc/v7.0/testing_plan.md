@@ -20,12 +20,14 @@ components that it touches.
 
 | Component | Files | Unit Tests | Penetration / Error Tests | Status |
 |-----------|-------|------------|---------------------------|--------|
-| Model deployment topology | `model_deployment.{hpp,cpp}` | `tests/gtest/unit/autonomy/test_model_deployment.cpp` (15 tests) | JSON round-trips, invalid inputs, empty URLs, `auto` placement | done |
-| Remote vision / speech models | `jpea_v2_image_world_model.cpp`, `jpea_v2_speech_world_model.cpp` | `MixedModalIOTest.*` (runtime) | Local fallback, remote dispatch | done |
+| Model deployment topology | `model_deployment.{hpp,cpp}` | `tests/gtest/unit/autonomy/test_model_deployment.cpp` (17 tests) | JSON round-trips, invalid inputs, empty URLs, `auto` placement, `server-client` placement | done |
+| Remote vision / speech models | `jpea_v2_image_world_model.cpp`, `jpea_v2_speech_world_model.cpp` | `MixedModalIOTest.*` (runtime) | Local fallback, remote dispatch, `server-client` fallback | done |
 | Config loading | `main_hub_parts/002_section_before_sharedmemoryslice.inc` | `ModelDeployment.ConfigLoadFromArgs` | CLI / env / JSON precedence | done |
-| Multimodal concept bridge | `external_mixed_modal_io.cpp` | `MixedModalIOTest.*` (runtime) | Empty-payload fallbacks, audio decode, out-of-bounds guards | done |
+| Multimodal concept bridge | `external_mixed_modal_io.cpp` | `MixedModalIOTest.*` (runtime) | Empty-payload fallbacks, audio decode, out-of-bounds guards, client-supplied concept vectors | done |
 | Graph diffusion summarizer | `graph_diffusion_summarizer.{hpp,cpp}` | `test_graph_diffusion_summarizer.cpp` | Empty graph, malformed JSON | done |
 | Hierarchical memory | `hierarchical_memory.{hpp,cpp}` | `test_hierarchical_memory.cpp` | Tier promotion, deletion, snapshots | done |
+| BPU concept head training | `tools/train_bpu_jepa_head.py` | `tools/train_bpu_jepa_head.py` run on `runtime_store/calibration/golden` | VICReg loss convergence, ONNX export, manifest update | done |
+| 649 deployment generator | `tools/generate_model_deployment_matrix.py` | `--non-interactive` smoke tests | JSON output, compile env script, server-client mode | done |
 
 ## Test Commands
 

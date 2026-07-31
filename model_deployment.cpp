@@ -30,6 +30,7 @@ namespace fs = std::filesystem;
 std::string placementToString(ModelPlacement p) {
   if (p == ModelPlacement::Remote) return "remote";
   if (p == ModelPlacement::Auto) return "auto";
+  if (p == ModelPlacement::ServerClient) return "server-client";
   return "local";
 }
 
@@ -47,6 +48,10 @@ ModelPlacement parsePlacement(const std::string &s) {
   if (t == "auto" || t == "automatic" || t == "default" || t == "best" ||
       t == "adaptive") {
     return ModelPlacement::Auto;
+  }
+  if (t == "serverclient" || t == "server_client" || t == "server-client" ||
+      t == "web" || t == "browser" || t == "client") {
+    return ModelPlacement::ServerClient;
   }
   return ModelPlacement::Local;
 }

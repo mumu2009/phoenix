@@ -28,11 +28,15 @@ namespace deployment {
  *   network via an HTTP/JSON endpoint.
  * - Auto: let the model factory decide.  Typically remote is chosen when a
  *   remote URL is configured, otherwise a local backend is used.
+ * - ServerClient: the client (e.g. a web browser) runs the pre-processing and
+ *   model, and sends pre-computed concept vectors to the Phoenix backend.  The
+ *   backend only consumes the concept and never runs the model itself.
  */
 enum class ModelPlacement {
   Local = 0,
   Remote = 1,
   Auto = 2,
+  ServerClient = 3,
 };
 
 /**

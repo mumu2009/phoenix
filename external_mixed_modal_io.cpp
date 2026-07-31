@@ -232,6 +232,196 @@ struct SpeechConceptModel {
 std::mutex gSpeechModelMutex;
 SpeechConceptModel gSpeechModel;
 
+/**
+ * @brief A persistent concept matrix for multimodal SemanticUnits.
+ *
+ * Implements a residual-driven associative memory:
+ *   - Inference computes the residual between a new concept and the nearest
+ *     stored prototype.  If the residual is below the add threshold the
+ *     prototype is updated (moving average); otherwise the new concept is
+ *     added as a new prototype.  This is the "reasoning optimizes the matrix"
+ *     step.
+ *   - Pretraining uses the same path but forces an immediate save.
+ */
+class PersistentConceptMatrix {
+ public:
+    struct Result {
+        phoenix::multimodal::SemanticUnit unit;
+        float residual = 0.0f;
+        std::string action;
+    };
+
+    PersistentConceptMatrix() = default;
+
+    Result addOrUpdate(const phoenix::multimodal::SemanticUnit &query, bool pretrain) {
+        if (query.semanticVector.empty()) return {query, 0.0f, "empty"};
+        load();
+        std::lock_guard<std::mutex> lock(mu_);
+
+        size_t nearestIdx = 0;
+        float sim = 0.0f;
+        const bool hasNearest = findNearestLocked(query, nearestIdx, sim);
+        const float residual = hasNearest ? (1.0f - sim) : 1.0f;
+
+        Result result;
+        result.residual = residual;
+
+        if (!hasNearest || residual > addThreshold_) {
+            if (entries_.size() >= maxEntries_) evictOldestLocked();
+            phoenix::multimodal::SemanticUnit u = query;
+            if (u.timestampMs == 0) u.timestampMs = nowMs();
+            entries_.push_back({u, 1, residual});
+            result.unit = std::move(u);
+            result.action = "added";
+            ++additions_;
+        } else {
+            auto &entry = entries_[nearestIdx];
+            const size_t n = entry.count;
+            std::vector<float> &stored = entry.unit.semanticVector;
+            const size_t dim = std::min(stored.size(), query.semanticVector.size());
+            for (size_t i = 0; i < dim; ++i) {
+                stored[i] = (stored[i] * static_cast<float>(n) + query.semanticVector[i]) / static_cast<float>(n + 1);
+            }
+            stored = phoenix::multimodal::normalizeVector(stored);
+            entry.unit.timestampMs = nowMs();
+            entry.unit.metadata["lastResidual"] = std::to_string(residual);
+            ++entry.count;
+            entry.residual = residual;
+            result.unit = entry.unit;
+            result.action = "updated";
+            ++updates_;
+        }
+
+        if (pretrain || ++inferenceSaves_ % 32 == 0) save();
+        return result;
+    }
+
+    nlohmann::json status() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        nlohmann::json j;
+        j["count"] = entries_.size();
+        j["maxEntries"] = maxEntries_;
+        j["additions"] = additions_;
+        j["updates"] = updates_;
+        j["addThreshold"] = addThreshold_;
+        j["learnThreshold"] = learnThreshold_;
+        j["path"] = path_;
+        j["loaded"] = loaded_;
+        return j;
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(mu_);
+        entries_.clear();
+        loaded_ = true;
+        additions_ = 0;
+        updates_ = 0;
+        inferenceSaves_ = 0;
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+
+ private:
+    struct Entry {
+        phoenix::multimodal::SemanticUnit unit;
+        size_t count = 1;
+        float residual = 0.0f;
+    };
+
+    bool findNearestLocked(const phoenix::multimodal::SemanticUnit &query, size_t &idx, float &sim) const {
+        const size_t dim = query.semanticVector.size();
+        float best = -1.0f;
+        bool found = false;
+        for (size_t i = 0; i < entries_.size(); ++i) {
+            if (entries_[i].unit.semanticVector.size() != dim) continue;
+            const float s = phoenix::multimodal::cosineSimilarity(query.semanticVector, entries_[i].unit.semanticVector);
+            if (s > best) {
+                best = s;
+                idx = i;
+                found = true;
+            }
+        }
+        sim = best;
+        return found;
+    }
+
+    void evictOldestLocked() {
+        if (entries_.empty()) return;
+        size_t idx = 0;
+        uint64_t oldest = entries_[0].unit.timestampMs;
+        for (size_t i = 1; i < entries_.size(); ++i) {
+            if (entries_[i].unit.timestampMs < oldest) {
+                oldest = entries_[i].unit.timestampMs;
+                idx = i;
+            }
+        }
+        entries_.erase(entries_.begin() + idx);
+    }
+
+    uint64_t nowMs() const {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+    }
+
+    void load() {
+        if (loaded_) return;
+        loaded_ = true;
+        std::ifstream in(path_);
+        if (!in) return;
+        try {
+            nlohmann::json j;
+            in >> j;
+            if (!j.is_array()) return;
+            std::lock_guard<std::mutex> lock(mu_);
+            for (const auto &item : j) {
+                if (!item.is_object() || !item.contains("unit")) continue;
+                Entry e;
+                e.unit = phoenix::multimodal::SemanticUnit::fromJson(item["unit"]);
+                e.count = item.value("count", 1u);
+                e.residual = item.value("residual", 0.0f);
+                entries_.push_back(std::move(e));
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(mu_);
+            entries_.clear();
+        }
+    }
+
+    bool save() const {
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(path_).parent_path(), ec);
+        nlohmann::json j = nlohmann::json::array();
+        // Caller (addOrUpdate) already holds mu_, so do not re-lock.
+        for (const auto &e : entries_) {
+            nlohmann::json item;
+            item["unit"] = e.unit.toJson();
+            item["count"] = e.count;
+            item["residual"] = e.residual;
+            j.push_back(item);
+        }
+        std::ofstream out(path_, std::ios::trunc);
+        if (!out) return false;
+        out << j.dump(2);
+        return static_cast<bool>(out);
+    }
+
+    mutable std::mutex mu_;
+    std::vector<Entry> entries_;
+    size_t maxEntries_ = 4096;
+    float addThreshold_ = 0.5f;
+    float learnThreshold_ = 0.2f;
+    std::string path_ = "runtime_store/concept_matrix.json";
+    bool loaded_ = false;
+    size_t additions_ = 0;
+    size_t updates_ = 0;
+    mutable size_t inferenceSaves_ = 0;
+};
+
+std::mutex gConceptMatrixMutex;
+PersistentConceptMatrix gConceptMatrix;
+
 constexpr const char *kDefaultTextEncoderCheckpoint = "runtime_store/transformer_text_encoder.json";
 
 struct TransformerTextEncoder {
@@ -376,6 +566,10 @@ phoenix::multimodal::Modality semanticModality(MixedModalModality modality) {
  *      a persistent speech concept model is available and the embedding is valid,
  *      it is aligned and normalised.
  *   5. Structured/sensor payloads fall back to a generic hashed concept.
+ *   6. The resulting SemanticUnit is submitted to the persistent ConceptMatrix.
+ *      The residual to the nearest prototype is used to either add a new prototype
+ *      (large residual) or refine an existing one (small residual).  The returned
+ *      unit carries the matrix-corrected concept vector.
  */
 phoenix::multimodal::SemanticUnit MixedModalConceptBridge::encode(const MixedModalPacket &packet,
                                                                    size_t targetDim,
@@ -454,16 +648,25 @@ phoenix::multimodal::SemanticUnit MixedModalConceptBridge::encode(const MixedMod
         unit.metadata["conceptEncoder"] = "structured-concept-adapter";
     }
 
+    // Concept-matrix reasoning: residual to nearest prototype decides whether
+    // to add a new concept or refine an existing one.  The returned vector is
+    // the (possibly corrected) matrix prototype.
+    auto matrixResult = gConceptMatrix.addOrUpdate(unit, false);
+    unit.semanticVector = std::move(matrixResult.unit.semanticVector);
+    unit.metadata["conceptMatrixResidual"] = std::to_string(matrixResult.residual);
+    unit.metadata["conceptMatrixAction"] = matrixResult.action;
+
     return unit;
 }
 
 /**
- * @brief Persistently align an audio concept vector with its transcript.
+ * @brief Pre-train the speech world model and the shared concept matrix.
  *
- * Computes the per-element offset between the acoustic concept vector and the
- * text-encoder vector of the transcript, then updates a running mean alignment
- * stored in runtime_store/speech_concept_model.json.  This model is loaded on
- * demand by encode() and is not part of the mutable runtime session state.
+ * Runs one JEPA self-supervised adaptation step on the audio, aligns the
+ * resulting acoustic concept with the transcript text concept, and stores the
+ * aligned concept in the persistent concept matrix (with the text concept as
+ * an associated unit).  This is the training-time path that only adds or
+ * modifies the matrix.
  */
 bool MixedModalConceptBridge::pretrainSpeech(const MixedModalPacket &audio,
                                              const std::string &transcript,
@@ -473,24 +676,147 @@ bool MixedModalConceptBridge::pretrainSpeech(const MixedModalPacket &audio,
     const auto variant = speechVariantFromMetadata(audio.metadata);
     const int sampleRate = sampleRateFromMetadata(audio.metadata);
     auto &model = speechWorldModel(variant, static_cast<int>(dim));
-    const auto acoustic = model.encode(audio.payload, sampleRate, audio.mimeType);
+
+    // 1. JEPA self-supervised adaptation (predict masked windows from context).
+    model.adapt(audio.payload, sampleRate, audio.mimeType, 1, 1e-3f);
+
+    // 2. Contrastive speech -> text alignment.
+    auto acoustic = model.encode(audio.payload, sampleRate, audio.mimeType);
     const auto linguistic = transformerTextEncoderConcept(transcript, dim, kDefaultTextEncoderCheckpoint);
     if (acoustic.size() != dim || linguistic.size() != dim) return false;
     model.contrastiveAdapt(audio.payload, sampleRate, audio.mimeType, linguistic, 0.1f);
+
+    // 3. Re-encode with the updated alignment.
+    acoustic = model.encode(audio.payload, sampleRate, audio.mimeType);
+    if (acoustic.size() != dim) return false;
+
+    // 4. Update persistent mean speech-text alignment.
+    {
+        std::lock_guard<std::mutex> lock(gSpeechModelMutex);
+        gSpeechModel.load();
+        if (gSpeechModel.dimension != dim) {
+            gSpeechModel.dimension = dim;
+            gSpeechModel.samples = 0;
+            gSpeechModel.meanAlignment.assign(dim, 0.0f);
+        }
+        const float previous = static_cast<float>(gSpeechModel.samples);
+        for (size_t i = 0; i < dim; ++i) {
+            const float alignment = linguistic[i] - acoustic[i];
+            gSpeechModel.meanAlignment[i] = (gSpeechModel.meanAlignment[i] * previous + alignment) / (previous + 1.0f);
+        }
+        ++gSpeechModel.samples;
+        if (!gSpeechModel.save()) return false;
+    }
+
+    // 5. Add both acoustic and linguistic concepts to the shared matrix.
+    const auto correlationId = phoenix::multimodal::generateSemanticId(transcript);
+    phoenix::multimodal::SemanticUnit audioUnit;
+    audioUnit.id = audio.id.empty() ? correlationId + "-audio" : audio.id;
+    audioUnit.modality = phoenix::multimodal::Modality::Audio;
+    audioUnit.semanticVector = std::move(acoustic);
+    audioUnit.confidence = 1.0f;
+    audioUnit.timestampMs = audio.timestampMs;
+    audioUnit.metadata["source"] = audio.source;
+    audioUnit.metadata["mimeType"] = audio.mimeType;
+    audioUnit.metadata["conceptEncoder"] = "jpea-v2-speech-world-model";
+    audioUnit.metadata["transcript"] = transcript;
+    audioUnit.associationIds.push_back(correlationId);
+    gConceptMatrix.addOrUpdate(audioUnit, true);
+
+    phoenix::multimodal::SemanticUnit textUnit;
+    textUnit.id = correlationId + "-text";
+    textUnit.modality = phoenix::multimodal::Modality::Text;
+    textUnit.semanticVector = linguistic;
+    textUnit.content = transcript;
+    textUnit.confidence = 1.0f;
+    textUnit.timestampMs = audio.timestampMs;
+    textUnit.metadata["source"] = "transcript";
+    textUnit.metadata["conceptEncoder"] = "transformer-text-encoder";
+    textUnit.associationIds.push_back(correlationId);
+    gConceptMatrix.addOrUpdate(textUnit, true);
+
+    return true;
+}
+
+/**
+ * @brief Pre-train the image world model and the shared concept matrix.
+ *
+ * Runs one JEPA self-supervised adaptation step on the image, optionally aligns
+ * the visual concept with a caption text concept, and stores the concept(s) in
+ * the persistent concept matrix.  This is the training-time path that only adds
+ * or modifies the matrix.
+ */
+bool MixedModalConceptBridge::pretrainImage(const MixedModalPacket &image,
+                                            const std::string &caption,
+                                            size_t targetDim) {
+    if ((image.modality != MixedModalModality::Image && image.modality != MixedModalModality::Video) ||
+        image.payload.empty())
+        return false;
+    const size_t dim = conceptDimension(targetDim);
+    int width = 0, height = 0;
+    if (image.metadata.contains("width") && image.metadata["width"].is_number()) {
+        width = image.metadata["width"].get<int>();
+    }
+    if (image.metadata.contains("height") && image.metadata["height"].is_number()) {
+        height = image.metadata["height"].get<int>();
+    }
+    const auto variant = imageVariantFromMetadata(image.metadata);
+    auto &model = imageWorldModel(variant, static_cast<int>(dim));
+
+    // JEPA self-supervised adaptation (predict masked patches from context).
+    model.adapt(image.payload, width, height, image.mimeType, 1, 1e-3f);
+
+    auto visual = model.encode(image.payload, width, height, image.mimeType);
+    if (visual.empty()) visual = mediaConcept(image.payload, dim, 0x494D4147U);
+    if (visual.size() != dim) return false;
+
+    const auto correlationId = phoenix::multimodal::generateSemanticId(caption);
+    phoenix::multimodal::SemanticUnit imageUnit;
+    imageUnit.id = image.id.empty() ? (caption.empty() ? phoenix::multimodal::generateSemanticId()
+                                                       : correlationId + "-image")
+                                    : image.id;
+    imageUnit.modality = phoenix::multimodal::Modality::Image;
+    imageUnit.semanticVector = std::move(visual);
+    imageUnit.confidence = 1.0f;
+    imageUnit.timestampMs = image.timestampMs;
+    imageUnit.metadata["source"] = image.source;
+    imageUnit.metadata["mimeType"] = image.mimeType;
+    imageUnit.metadata["conceptEncoder"] = "jpea-v2-image-world-model";
+    imageUnit.metadata["jpeaVariant"] = variant;
+    if (!caption.empty()) {
+        imageUnit.metadata["caption"] = caption;
+        imageUnit.associationIds.push_back(correlationId);
+    }
+    gConceptMatrix.addOrUpdate(imageUnit, true);
+
+    if (!caption.empty()) {
+        const auto textConcept = transformerTextEncoderConcept(caption, dim, kDefaultTextEncoderCheckpoint);
+        if (!textConcept.empty() && textConcept.size() == dim) {
+            phoenix::multimodal::SemanticUnit textUnit;
+            textUnit.id = correlationId + "-text";
+            textUnit.modality = phoenix::multimodal::Modality::Text;
+            textUnit.semanticVector = textConcept;
+            textUnit.content = caption;
+            textUnit.confidence = 1.0f;
+            textUnit.timestampMs = image.timestampMs;
+            textUnit.metadata["source"] = "caption";
+            textUnit.metadata["conceptEncoder"] = "transformer-text-encoder";
+            textUnit.associationIds.push_back(correlationId);
+            gConceptMatrix.addOrUpdate(textUnit, true);
+        }
+    }
+
+    return true;
+}
+
+/** Reset all persistent concept state. */
+void MixedModalConceptBridge::reset() {
     std::lock_guard<std::mutex> lock(gSpeechModelMutex);
-    gSpeechModel.load();
-    if (gSpeechModel.dimension != dim) {
-        gSpeechModel.dimension = dim;
-        gSpeechModel.samples = 0;
-        gSpeechModel.meanAlignment.assign(dim, 0.0f);
-    }
-    const float previous = static_cast<float>(gSpeechModel.samples);
-    for (size_t i = 0; i < dim; ++i) {
-        const float alignment = linguistic[i] - acoustic[i];
-        gSpeechModel.meanAlignment[i] = (gSpeechModel.meanAlignment[i] * previous + alignment) / (previous + 1.0f);
-    }
-    ++gSpeechModel.samples;
-    return gSpeechModel.save();
+    gSpeechModel = SpeechConceptModel{};
+    gSpeechModel.loaded = true;
+    std::error_code ec;
+    std::filesystem::remove("runtime_store/speech_concept_model.json", ec);
+    gConceptMatrix.clear();
 }
 
 /**
@@ -572,7 +898,8 @@ MixedModalPacket MixedModalConceptBridge::decode(const phoenix::multimodal::Sema
 }
 
 /**
- * @brief Report the state of the persistent speech concept model.
+ * @brief Report the state of the persistent speech concept model,
+ *        the shared concept matrix, and the active world models.
  */
 nlohmann::json MixedModalConceptBridge::status() {
     nlohmann::json j;
@@ -592,6 +919,7 @@ nlohmann::json MixedModalConceptBridge::status() {
     } catch (...) {
         j["jpeaSpeechWorldModel"] = {{"error", "speech world model not available"}};
     }
+    j["conceptMatrix"] = gConceptMatrix.status();
     return j;
 }
 

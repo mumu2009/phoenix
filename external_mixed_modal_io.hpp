@@ -72,10 +72,15 @@ public:
     static bool pretrainSpeech(const MixedModalPacket &audio,
                                const std::string &transcript,
                                size_t targetDim = 0);
+    static bool pretrainImage(const MixedModalPacket &image,
+                              const std::string &caption,
+                              size_t targetDim = 0);
     static MixedModalPacket decode(const phoenix::multimodal::SemanticUnit &unit,
                                    MixedModalModality target,
                                    const std::string &source = "");
     static nlohmann::json status();
+    /** Reset all persistent concept state (speech alignment + concept matrix). */
+    static void reset();
 };
 
 /**

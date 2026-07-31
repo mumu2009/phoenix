@@ -509,6 +509,10 @@ std::unique_ptr<JpeaV2SpeechWorldModel> createJpeaV2SpeechWorldModel(
 
   const auto &deployment = phoenix::deployment::ModelDeploymentConfig::instance().speech();
 
+  if (deployment.placement == phoenix::deployment::ModelPlacement::ServerClient) {
+    return std::make_unique<JpeaV2SpeechFallbackModel>(*v, targetDim);
+  }
+
 #if PHOENIX_EDGE_SPEECH_ENABLED
   const bool useRemote =
       (deployment.placement == phoenix::deployment::ModelPlacement::Remote ||

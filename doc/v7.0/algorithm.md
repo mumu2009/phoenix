@@ -171,8 +171,10 @@ patchStatsToConcept(grid, mask):
 
 `MixedModalConceptBridge::pretrainSpeech(audio, transcript, targetDim)`：
 1. 用 `transformer::TransformerModel` 编码 transcript 得到 textEmbedding。
-2. 调用 `speechModel.contrastiveAdapt(audio.payload, textEmbedding, lr)`。
-3. 更新并持久化 `runtime_store/speech_concept_model.json`。
+2. 调用 `speechModel.adapt(audio.payload, sampleRate, mimeType, ...)` 做一次 JEPA 自监督适应。
+3. 调用 `speechModel.contrastiveAdapt(audio.payload, sampleRate, mimeType, textEmbedding, ...)` 做语音-文本对比对齐。
+4. 用新对齐重新编码 audio 得到 acoustic；更新 `SpeechConceptModel.meanAlignment` 并持久化到 `runtime_store/speech_concept_model.json`。
+5. 将 audio 和 text 构建为 `SemanticUnit`（共享 correlationId），并调用 `PersistentConceptMatrix::addOrUpdate(unit, true)` 加入/更新共享 ConceptMatrix。
 
 ---
 
@@ -207,15 +209,27 @@ encode(packet, targetDim, contentHint):
     else if image or video:
         variant = metadata["jpeaVariant"] or "ijepa_vith14_1k"
         semanticVector = imageWorldModel(variant, targetDim).encode(payload)
+        if empty: semanticVector = mediaConcept(payload, targetDim, 0x494D4147U)
     else if audio:
         variant = metadata["jpeaSpeechVariant"] or "jpea_v2_speech_16k"
         semanticVector = speechWorldModel(variant, targetDim).encode(payload)
+        if empty: semanticVector = mediaConcept(payload, targetDim, 0x41554449U)
+        if SpeechConceptModel.meanAlignment 存在且同维度：
+            semanticVector += meanAlignment
+            semanticVector = normalize(semanticVector)
     else:
         semanticVector = mediaConcept(payload, targetDim, modalitySeed)
-    返回 SemanticUnit
+    unit.semanticVector = semanticVector
+    result = PersistentConceptMatrix::addOrUpdate(unit, false)
+    unit.semanticVector = result.unit.semanticVector  // 可能是最邻近原型修正
+    unit.metadata["conceptMatrixResidual"] = result.residual
+    unit.metadata["conceptMatrixAction"] = result.action
+    返回 unit
 ```
 
 `mediaConcept` 对未知模态使用基于字节哈希的确定性特征映射。
+
+audio 路径在得到 world-model 向量后叠加 `SpeechConceptModel.meanAlignment` 进行对比对齐修正；随后 `PersistentConceptMatrix` 执行 `addOrUpdate(unit, false)`，根据与已有概念的距离决定新增、更新或返回原型，实现编码时的残差记忆。
 
 ### 6.3 `MixedModalConceptBridge::decode`
 
@@ -225,10 +239,70 @@ decode(unit, target, source):
         packet.payload = unit.content 的 UTF-8 字节
     else if target == Image or Video:
         packet.payload = imageWorldModel.decode(unit.semanticVector, "image/png")
+        if empty: 使用 1x1 PNG 占位图并标记 imageDecodeFallback
+    else if target == Audio:
+        packet.payload = speechWorldModel.decode(unit.semanticVector, "audio/pcm")
+        if empty: packet.payload = JSON({semanticVector, sourceModality, lengthHint})
     else:
         packet.payload = JSON({semanticVector, sourceModality, content})
         metadata["requiresModalityDecoder"] = true
 ```
+
+### 6.4 `PersistentConceptMatrix`
+
+实现：`external_mixed_modal_io.cpp` 中的 `PersistentConceptMatrix`。
+
+- 持久化文件：`runtime_store/concept_matrix.json`。
+- 最大容量 4096 条；使用余弦相似度与残差阈值（`addThreshold_=0.5`，`learnThreshold_=0.2`）判断新概念或更新原型。
+- `addOrUpdate(query, pretrain)`:
+  1. 加载持久化 entries。
+  2. 在现有条目中寻找最相似原型；计算 `cosineSimilarity(query, prototype)`。
+  3. 若相似度低于 `addThreshold`，新增条目；否则按残差对原型做残差校正并增加访问计数。
+  4. 若 `pretrain==true`（或推理次数累计到 32 次）则保存到 `runtime_store/concept_matrix.json`。
+  5. 返回 `Result{action, residual, refinedUnit}`，其中 `action` 为 `"added"`、`"updated"` 或 `"retrieved"`。
+- `status()` 报告 entries 数量、add/learn 阈值、持久化路径、加载状态。
+- `reset()` 清空矩阵并删除持久化文件。
+
+### 6.5 `MixedModalConceptBridge::pretrainImage`
+
+```text
+pretrainImage(image, caption, targetDim):
+    if 不是 image/video 或 payload 空：返回 false
+    dim = conceptDimension(targetDim)
+    variant = image.metadata["jpeaVariant"] or "ijepa_vith14_1k"
+    model = imageWorldModel(variant, dim)
+    model.adapt(image.payload, width, height, mimeType, steps=1, lr=1e-3)
+    visual = model.encode(image.payload, width, height, mimeType)
+    if visual 空: visual = mediaConcept(image.payload, dim, 0x494D4147U)
+    if visual.size != dim: 返回 false
+    imageUnit = SemanticUnit(..., visual, conceptEncoder="jpea-v2-image-world-model")
+    PersistentConceptMatrix::addOrUpdate(imageUnit, true)
+    if caption 非空:
+        textConcept = transformerTextEncoderConcept(caption, dim)
+        if textConcept 非空且维度匹配:
+            textUnit = SemanticUnit(..., textConcept, conceptEncoder="transformer-text-encoder")
+            textUnit.associationIds.push_back(correlationId)
+            PersistentConceptMatrix::addOrUpdate(textUnit, true)
+    返回 true
+```
+
+### 6.6 `MixedModalConceptBridge::reset`
+
+```text
+reset():
+    在 gSpeechModelMutex 保护下重置 SpeechConceptModel 为默认值
+    删除 runtime_store/speech_concept_model.json
+    gConceptMatrix.clear()  // 清空并删除 runtime_store/concept_matrix.json
+```
+
+### 6.7 `MixedModalConceptBridge::status`
+
+`status()` 返回一个 JSON，包括：
+- `speechWorldModel`：persistent、dimension、samples。
+- `imageWorldModel`：当前图像 world model 的 `status()`。
+- `jpeaSpeechWorldModel`：当前语音 world model 的 `status()`。
+- `textEncoder`：`TransformerTextEncoder` 的加载/错误状态。
+- `conceptMatrix`：`PersistentConceptMatrix::status()` 的结果。
 
 ---
 
