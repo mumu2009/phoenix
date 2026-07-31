@@ -14,6 +14,9 @@ configuration file.
   configured the factory uses that remote endpoint; otherwise it falls back to
   the local backend, which is fail-closed and will use deterministic fallbacks
   if no local accelerator is available.
+- **ServerClient** (web-only): the client (browser, mobile app, etc.) runs the
+  pre-processing and the model itself.  The client sends pre-computed concept
+  vectors to the Phoenix backend, which never runs the vision/speech model.
 
 Each of the three model types has its own record:
 
@@ -174,6 +177,24 @@ With `auto`, Phoenix will use the configured remote URL when it is present.  If 
 remote is unreachable the factories fall back to the local backends (which are
 fail-closed and use deterministic fallbacks if no local accelerator is present).
 
+### 6. Server-client architecture
+
+In this mode the client (browser / edge UI) runs the vision and/or speech
+pre-processing and model, and sends pre-computed concept vectors to the Phoenix
+backend.  The backend is typically a single powerful LLM host or cluster.
+
+```bash
+python tools/generate_model_deployment_matrix.py --non-interactive \
+  --current-role host --gateway-role host --target-arch x86_64 \
+  --llm-placement local --vision-placement server-client --speech-placement server-client
+
+phoenix_main.exe --model-deployment-config config/model_deployment.json
+```
+
+Set `vision` and/or `speech` placement to `server-client` so the factories return
+the deterministic fallback and the mixed-modal bridge uses the client-supplied
+concept vector.
+
 ## Remote HTTP/JSON Protocol for Vision and Speech
 
 When `method` is `http-json`, Phoenix `POST`s a JSON body to the configured URL.
@@ -264,10 +285,18 @@ On failure the remote service should return `{"ok":false,"error":"..."}`.
 
 - `tools/generate_model_deployment_config.py` — writes a JSON deployment config
   from command-line arguments.
+- `tools/generate_model_deployment_matrix.py` — interactive generator for the
+  full 649-endpoint deployment space.  Hardcodes the option lists, asks for the
+  current machine, external gateway, target architecture, per-modality placement,
+  and connection type, then writes `config/model_deployment.json` and
+  `compile_env_model_deployment.bat`.
 - `tools/model_deployment_edge_example.py` — a minimal Python HTTP/JSON edge
   inference server that returns deterministic embeddings and decode payloads for
   vision/speech.  Replace the stub embedding/synthesis with a real model on the
   edge device.
+- `tools/train_bpu_jepa_head.py` — trains the 1x1 Conv2d concept head on the
+  frozen BPU encoder (`model_encoder.onnx`) using a VICReg-style loss.  Output
+  is a new `model_encoder_head.onnx` and an updated `model.manifest.json`.
 
 ```bash
 # Generate a three-device config

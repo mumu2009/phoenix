@@ -174,6 +174,30 @@ phoenix_main.exe --transformer-mode=llamacpp --llamacpp-model=GGUF_models/your_m
 phoenix_main.exe --transformer-mode=ollama --ollama-model=llama3.1:8b
 ```
 
+## BPU JEPA Concept-Head Training
+
+The ResNet18-based BPU JEPA encoder (`runtime_store/models/bpu_jepa/resnet18_224`)
+stores the 1x1 concept head in a separate CPU-side ONNX file.  To train it on the
+frozen ImageNet-pretrained encoder with a VICReg-style loss:
+
+```powershell
+python tools/train_bpu_jepa_head.py --model-dir runtime_store/models/bpu_jepa/resnet18_224
+```
+
+This overwrites `model_encoder_head.onnx` and updates `model.manifest.json`.
+Use `--variance-target` to make the concept values larger (default `2.0`).
+
+## Deployment Matrix Generator
+
+The 649-endpoint deployment space can be generated interactively:
+
+```powershell
+python tools/generate_model_deployment_matrix.py
+# source the generated env before compiling when edge devices should be disabled
+compile_env_model_deployment.bat
+compile.bat
+```
+
 ---
 
 ## Architecture
