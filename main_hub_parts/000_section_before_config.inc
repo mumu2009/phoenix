@@ -23,6 +23,10 @@
 #include <nlohmann/json.hpp>
 #include <trantor/utils/Utilities.h>
 
+#ifndef HAVE_LMDB
+#define HAVE_LMDB 1
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -59,6 +63,8 @@
 #include <vector>
 
 #include "../phoenix_config.hpp"
+#include "../runtime_tuned_config.hpp"
+#include "../version.hpp"
 
 #include "../DATABASE_079.hpp"
 #include "../addon.hpp"
@@ -76,6 +82,9 @@
 #include "../llamacpp_emotion_adjuster.hpp"
 #include "../plugin_system.hpp"
 #include "../modern_context_system.hpp"
+#include "../graph_diffusion_summarizer.hpp"
+#include "../hierarchical_memory.hpp"
+#include "../model_deployment.hpp"
 
 #ifndef AI_OUTSIDES_LINK_MODE
 #define AI_OUTSIDES_LINK_MODE "headers-only"
@@ -715,6 +724,38 @@ static std::string trimCopy(const std::string &s) {
     return "";
   auto end = s.find_last_not_of(" \t\r\n");
   return s.substr(start, end - start + 1);
+}
+
+// Extract the host part from an HTTP(S) URL. IPv6 hosts are returned without brackets.
+static std::string urlHost(const std::string &url) {
+  size_t schemeEnd = url.find("://");
+  if (schemeEnd == std::string::npos)
+    return "";
+  size_t hostStart = schemeEnd + 3;
+  if (hostStart >= url.size())
+    return "";
+  if (url[hostStart] == '[') {
+    size_t hostEnd = url.find(']', hostStart + 1);
+    if (hostEnd == std::string::npos)
+      return "";
+    return url.substr(hostStart + 1, hostEnd - hostStart - 1);
+  }
+  size_t hostEnd = url.find_first_of(":/", hostStart);
+  if (hostEnd == std::string::npos)
+    return url.substr(hostStart);
+  return url.substr(hostStart, hostEnd - hostStart);
+}
+
+static bool isLoopbackHost(const std::string &host) {
+  std::string h = trimCopy(host);
+  std::transform(h.begin(), h.end(), h.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return h.empty() || h == "127.0.0.1" || h == "localhost" || h == "::1";
+}
+
+// A llama.cpp backend that talks to a remote llama-server does not need a local .gguf file.
+static bool isRemoteLlamacppUrl(const std::string &url) {
+  return !isLoopbackHost(urlHost(url));
 }
 
 // 按 JavaScript 风格解析数字文本。

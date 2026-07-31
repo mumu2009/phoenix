@@ -632,7 +632,10 @@ json OptimizerAutonomyManager::modernizeTransformer(const json &payload, const j
                                  {"transformerPatch", patch}}}};
 }
 
-CognitionAutonomyManager::CognitionAutonomyManager() = default;
+CognitionAutonomyManager::CognitionAutonomyManager()
+    : promptComposer_(phoenix::prompt::SystemPrompt::arthurDefault(),
+                      phoenix::prompt::MemoryPrompt::empty()),
+      instinctEngine_(phoenix::instinct::InstinctEngine::defaultEngine()) {}
 
 json CognitionAutonomyManager::status() const {
     std::lock_guard<std::mutex> lock(mu_);
@@ -664,6 +667,12 @@ json CognitionAutonomyManager::status() const {
                                  {"reflectionThreshold", reflectionThreshold_},
                                  {"lastIterAtMs", lastIterAtMs_},
                                  {"sessionsTracked", sessions_.size()},
+                                 {"sensations", sensationEngine_.toJson()},
+                                 {"instincts", instinctEngine_.toJson()},
+                                 {"lastBenefitHarmBias", lastBenefitHarmBias_},
+                                 {"mixedModalInputSize", inputBuffer_.size()},
+                                 {"mixedModalOutputSize", outputQueue_.size()},
+                                 {"channels", channelRegistry_.toJson()},
                                  {"sessions", sessions}}}};
 }
 
@@ -674,6 +683,18 @@ json CognitionAutonomyManager::observe(const json &payload, const json &worldSta
     backgroundEvery_ = clampInt(payload.value("backgroundEvery", backgroundEvery_), 1, 128);
     uncertaintyThreshold_ = clampDouble(payload.value("uncertaintyThreshold", uncertaintyThreshold_), 0.0, 1.0);
     reflectionThreshold_ = clampDouble(payload.value("reflectionThreshold", reflectionThreshold_), 0.0, 1.0);
+
+    /* v7.0 primal sensation / mixed-modal I/O ingestion */
+    if (payload.contains("sensation") && payload["sensation"].is_object()) {
+        sensationEngine_.add(phoenix::primal::PrimalSensation::fromJson(payload["sensation"]));
+    }
+    if (payload.contains("mixedModalPacket") && payload["mixedModalPacket"].is_object()) {
+        auto packet = phoenix::io::MixedModalPacket::fromJson(payload["mixedModalPacket"]);
+        inputBuffer_.push(packet);
+        if (!packet.source.empty()) {
+            channelRegistry_.registerSource(packet.source, packet.mimeType);
+        }
+    }
 
     std::string sessionId = trimLocal(payload.value("sessionId", std::string()));
     if (sessionId.empty() && worldState.is_object()) {
@@ -1181,6 +1202,43 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
         record["lastScheduledHeads"] = scheduledHeads;
     }
 
+    /* v7.0 instinct / benefit-harm evaluation and prompt split update */
+    float dtSec = 1.0f;
+    if (lastIterAtMs_ > 0) {
+        dtSec = static_cast<float>(std::max<int64_t>(0, nowMs() - lastIterAtMs_)) / 1000.0f;
+        if (dtSec <= 0.0f) dtSec = 1.0f;
+    }
+    instinctEngine_.update(sensationEngine_.active(), dtSec);
+    auto bh = instinctEngine_.evaluate(sensationEngine_.active());
+
+    /* v7.0 affect signal: export the emotion operation weight vector as a
+       numeric matrix rather than an explicit action word or emotional label. */
+    std::string driveWeights = json(bh.driveVector).dump();
+    lastBenefitHarmBias_ = driveWeights;
+
+    phoenix::prompt::MemoryPrompt memory;
+    memory.driveVector = bh.driveVector;
+    memory.emotionTensor = phoenix::instinct::InstinctEngine::driveToEmotion(bh);
+    memory.inferenceOptions = memory.emotionTensor.inferenceOptions();
+    memory.benefitHarmBias = bh.recommendedAction;  // human-readable action label
+    if (memory.benefitHarmBias.empty())
+        memory.benefitHarmBias = memory.emotionTensor.modulationHint();
+    memory.summary = "Benefit=" + std::to_string(bh.benefitScore) +
+                     " Harm=" + std::to_string(bh.harmScore) +
+                     " Net=" + std::to_string(bh.netUtility);
+    promptComposer_.setMemory(memory);
+
+    std::string composedPrompt;
+    std::string cognitionModulation;
+    if (payload.contains("userPrompt") && payload["userPrompt"].is_string()) {
+        composedPrompt = promptComposer_.compose(payload["userPrompt"].get<std::string>(), true);
+        cognitionModulation = promptComposer_.modulationHint();
+    }
+
+    auto outbound = outputQueue_.drain(0);
+    nlohmann::json mixedModalOutputs = nlohmann::json::array();
+    for (const auto &p : outbound) mixedModalOutputs.push_back(p.toJson());
+
     iteration_ += 1;
     lastIterAtMs_ = nowMs();
     return json{{"ok", true},
@@ -1188,7 +1246,14 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
                                  {"sessions", sessions},
                                  {"scheduledHeads", sessions.empty() ? json::array() : sessions.front().value("scheduledHeads", json::array())},
                                  {"worldEvidence", worldEvidence},
-                                 {"runtimeFeaturePatch", runtimeFeaturePatch}}}};
+                                 {"runtimeFeaturePatch", runtimeFeaturePatch},
+                                 {"benefitHarm", bh.toJson()},
+                                 {"emotionTensor", memory.emotionTensor.toJson()},
+                                 {"driveVector", memory.driveVector},
+                                 {"inferenceOptions", memory.inferenceOptions},
+                                 {"cognitionModulation", cognitionModulation},
+                                 {"mixedModalOutputs", mixedModalOutputs},
+                                 {"composedPrompt", composedPrompt}}}};
 }
 
 json CognitionAutonomyManager::session(const std::string &sessionId) const {
@@ -1245,6 +1310,96 @@ json CognitionAutonomyManager::importState(const json &state) {
                 {"result", json{{"sessionsLoaded", sessionsLoaded},
                                  {"iteration", iteration_},
                                  {"observations", observations_}}}};
+}
+
+json CognitionAutonomyManager::ingestSensation(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    phoenix::primal::PrimalSensation s = phoenix::primal::PrimalSensation::fromJson(payload);
+    sensationEngine_.add(s);
+    return json{{"ok", true}, {"result", s.toJson()}};
+}
+
+json CognitionAutonomyManager::evaluateInstincts() {
+    std::lock_guard<std::mutex> lock(mu_);
+    instinctEngine_.update(sensationEngine_.active(), 1.0f);
+    auto bh = instinctEngine_.evaluate(sensationEngine_.active());
+    return json{{"ok", true}, {"result", bh.toJson()}};
+}
+
+json CognitionAutonomyManager::composePrompt(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::string userPrompt = payload.value("userPrompt", std::string());
+    bool includeMemory = payload.value("includeMemory", true);
+    std::string composed = promptComposer_.compose(userPrompt, includeMemory);
+    return json{{"ok", true},
+                {"result", json{{"prompt", composed},
+                                 {"messages", promptComposer_.composeMessages(userPrompt, includeMemory)}}}};
+}
+
+/**
+ * Ingest a MixedModalPacket, convert it to a SemanticUnit, and buffer the raw packet.
+ * The packet is also registered in the channel registry when it carries a source.
+ */
+json CognitionAutonomyManager::ingestMixedModalPacket(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto packet = phoenix::io::MixedModalPacket::fromJson(payload);
+    const size_t targetDim = payload.value("targetDim", static_cast<size_t>(64));
+    const std::string contentHint = payload.value("contentHint", std::string());
+    auto unit = phoenix::io::MixedModalConceptBridge::encode(packet, targetDim, contentHint);
+    inputBuffer_.push(packet);
+    if (!packet.source.empty()) {
+        channelRegistry_.registerSource(packet.source, packet.mimeType);
+    }
+    return json{{"ok", true},
+                {"result", json{{"packet", packet.toJson()},
+                                 {"semanticUnit", unit.toJson()},
+                                 {"conceptBridge", phoenix::io::MixedModalConceptBridge::status()}}}};
+}
+
+/**
+ * Pretrain the persistent speech concept model from an audio packet and transcript.
+ * Returns whether alignment was updated and persisted.
+ */
+json CognitionAutonomyManager::pretrainSpeechConcept(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!payload.contains("audio") || !payload["audio"].is_object()) {
+        return json{{"ok", false}, {"error", "missing audio packet"}};
+    }
+    const auto audio = phoenix::io::MixedModalPacket::fromJson(payload["audio"]);
+    const std::string transcript = payload.value("transcript", std::string());
+    const size_t targetDim = payload.value("targetDim", static_cast<size_t>(64));
+    const bool trained = phoenix::io::MixedModalConceptBridge::pretrainSpeech(audio, transcript, targetDim);
+    return json{{"ok", trained}, {"result", phoenix::io::MixedModalConceptBridge::status()}};
+}
+
+/**
+ * Convert a SemanticUnit to a target-modality MixedModalPacket and enqueue it.
+ */
+json CognitionAutonomyManager::emitMixedModalOutput(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!payload.contains("semanticUnit") || !payload["semanticUnit"].is_object()) {
+        return json{{"ok", false}, {"error", "missing semanticUnit"}};
+    }
+    const auto unit = phoenix::multimodal::SemanticUnit::fromJson(payload["semanticUnit"]);
+    const auto target = phoenix::io::MixedModalPacket::stringToModality(payload.value("targetModality", std::string("text")));
+    if (target == phoenix::io::MixedModalModality::Unknown) {
+        return json{{"ok", false}, {"error", "unknown target modality"}};
+    }
+    auto packet = phoenix::io::MixedModalConceptBridge::decode(unit, target, payload.value("source", std::string()));
+    outputQueue_.push(packet);
+    return json{{"ok", true}, {"result", packet.toJson()}};
+}
+
+/**
+ * Drain up to `max` outbound mixed-modal packets (0 = all) and return them as JSON.
+ */
+json CognitionAutonomyManager::drainMixedModalOutputs(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    size_t max = payload.value("max", 0);
+    auto packets = outputQueue_.drain(max);
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto &p : packets) arr.push_back(p.toJson());
+    return json{{"ok", true}, {"result", arr}};
 }
 
 DatasetCatalogManager::DatasetCatalogManager() {

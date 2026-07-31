@@ -48,7 +48,7 @@ struct Options {
     bool enabled{false};                   /* Filter enabled */
     double textThreshold{0.58};           /* Text-level threshold */
     double tokenThreshold{0.60};           /* Token-level threshold */
-    std::string placeholder{"[mechanized]"}; /* Replacement placeholder */
+    std::string placeholder{"[mechanized]"}; /* Replacement marker for flagged tokens */
     bool emotionAware{true};              /* Enable emotion-aware threshold adjustment */
     double emotionInfluence{0.30};        /* How much emotion can shift thresholds [0,1] */
     bool positiveRelaxes{true};           /* Positive emotion raises thresholds (less filtering) */
@@ -111,13 +111,13 @@ public:
     /* Get token threshold */
     double tokenThreshold() const { return options_.tokenThreshold; }
 
-    /* Set placeholder */
+    /* Set replacement marker */
     void setPlaceholder(std::string value) {
         if (!value.empty()) {
             options_.placeholder = std::move(value);
         }
     }
-    /* Get placeholder */
+    /* Get replacement marker */
     const std::string &placeholder() const { return options_.placeholder; }
 
     /* Set emotion-aware adjustment */

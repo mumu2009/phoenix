@@ -28,8 +28,14 @@
 #include <functional>
 #include <nlohmann/json.hpp>
 
+#include "semantic_unit.hpp"
+
 namespace phoenix {
 namespace context {
+
+/* Convenience alias for multimodal semantic unit type. */
+using SemanticUnit = phoenix::multimodal::SemanticUnit;
+using SemanticMemory = phoenix::multimodal::SemanticMemory;
 
 /* Context window management strategies (inspired by Claude, Copilot, Ollama) */
 enum class ContextStrategy {
@@ -48,6 +54,7 @@ struct ContextEntry {
     int64_t turnNumber;                                     /* Turn number */
     float importance;                                       /* Importance score for retention */
     std::vector<float> embedding;                           /* Semantic embedding */
+    std::vector<SemanticUnit> semanticUnits;               /* Multimodal semantic units for v7.0 fusion */
     std::map<std::string, std::string> metadata;           /* Additional metadata */
 
     /* Token count estimation */
@@ -66,6 +73,12 @@ struct ContextEntry {
             {"turnNumber", turnNumber},
             {"importance", importance},
             {"estimatedTokens", estimatedTokens},
+            {"embedding", embedding},
+            {"semanticUnits", [this]() {
+                nlohmann::json arr = nlohmann::json::array();
+                for (const auto &u : semanticUnits) arr.push_back(u.toJson());
+                return arr;
+            }()},
             {"metadata", metadata}
         };
     }
@@ -78,6 +91,12 @@ struct ContextEntry {
         if (j.contains("turnNumber") && j["turnNumber"].is_number_integer()) entry.turnNumber = j["turnNumber"].get<int64_t>();
         if (j.contains("importance") && j["importance"].is_number()) entry.importance = j["importance"].get<float>();
         if (j.contains("estimatedTokens") && j["estimatedTokens"].is_number_integer()) entry.estimatedTokens = j["estimatedTokens"].get<size_t>();
+        if (j.contains("embedding") && j["embedding"].is_array()) entry.embedding = j["embedding"].get<std::vector<float>>();
+        if (j.contains("semanticUnits") && j["semanticUnits"].is_array()) {
+            for (const auto &item : j["semanticUnits"]) {
+                entry.semanticUnits.push_back(SemanticUnit::fromJson(item));
+            }
+        }
         if (j.contains("metadata") && j["metadata"].is_object()) entry.metadata = j["metadata"].get<std::map<std::string, std::string>>();
 
         if (j.contains("timestamp") && j["timestamp"].is_number_integer()) {
@@ -98,6 +117,8 @@ struct ContextWindowConfig {
     bool enableSemanticSearch{true};    /* Enable semantic similarity search */
     bool enableAttentionSink{true};      /* Enable attention sink mechanism */
     bool enableHierarchical{true};       /* Enable hierarchical organization */
+    bool enableMultimodal{true};         /* Enable semantic unit fusion in v7.0 */
+    size_t multimodalEmbeddingDim{1024}; /* Target unified embedding dimension */
     size_t semanticChunkSize{512};       /* Size of semantic chunks */
     float similarityThreshold{0.7f};     /* Minimum similarity for retrieval */
 };
@@ -120,12 +141,20 @@ public:
     /* Add context entry */
     bool addEntry(const ContextEntry& entry);
 
+    /* Add a multimodal semantic unit directly (v7.0) */
+    bool addSemanticUnit(const phoenix::multimodal::SemanticUnit& unit, const std::string& role = "user");
+
     /* Get context for LLM (optimized for current strategy) */
     std::vector<ContextEntry> getContext(size_t maxTokens = 0);
 
     /* Semantic search in context */
     std::vector<SemanticSearchResult> semanticSearch(
         const std::string& query,
+        size_t topK = 5);
+
+    /* Multimodal semantic search by semantic unit (v7.0) */
+    std::vector<SemanticSearchResult> semanticSearch(
+        const phoenix::multimodal::SemanticUnit& query,
         size_t topK = 5);
 
     /* Update importance scores */
@@ -355,6 +384,9 @@ public:
 
     /* Add custom context entry */
     ContextBuilder& addEntry(const ContextEntry& entry);
+
+    /* Add multimodal semantic unit (v7.0) */
+    ContextBuilder& addSemanticUnit(const phoenix::multimodal::SemanticUnit& unit, const std::string& role = "user");
 
     /* Build final context */
     std::vector<ContextEntry> build();

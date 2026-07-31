@@ -18,9 +18,6 @@
    You should have received a copy of the GNU Lesser General Public License
    along with 079 Project.  If not, see <http://www.gnu.org/licenses/>. */
 
-// Disabled due to pre-existing compilation errors unrelated to LoRA integration
-#if 0
-
 class LmdbStore : public KeyValueStore {
 public:
   LmdbStore(const std::string &name, const fs::path &rootDir,
@@ -142,4 +139,3 @@ private:
   MDB_env *env_{nullptr};
   MDB_dbi dbi_{0};
 };
-#endif

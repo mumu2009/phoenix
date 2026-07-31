@@ -17,6 +17,7 @@
    along with 079 Project.  If not, see <http://www.gnu.org/licenses/>. */
 
 #include "edge_platform.hpp"
+#include "rdk_x5_bpu.hpp"
 
 #include <algorithm>
 #include <array>
@@ -109,6 +110,8 @@ fs::path resolvePath(const fs::path &candidate, const fs::path &baseDir) {
 std::string pathText(const fs::path &path) {
     return path.generic_string();
 }
+
+bool pathLooksAvailable(const std::string &path);
 
 json stringListToJson(const std::vector<std::string> &values);
 
@@ -324,7 +327,7 @@ std::string runtimeLabel() {
 #ifdef __linux__
     return "linux";
 #else
-    return "stub";
+    return "host";
 #endif
 }
 
@@ -2701,7 +2704,9 @@ json PlatformManager::buildComputePlanLocked(const json &payload) {
     const bool postProcess = safeJsonValue(payload, "postProcessOnCpu", safeJsonValue(payload, "needsPostProcess", false));
     const bool streaming = safeJsonValue(payload, "streaming", false);
     const bool allowCpu = safeJsonValue(payload, "allowCpu", true);
-    const bool allowNpu = safeJsonValue(payload, "allowNpu", true) && config_.enabled && config_.npuEnabled && topology_.npuAvailable;
+    const bool horizonDnnRequested = rdk_x5_bpu::requested(payload);
+    const bool horizonDnnAvailable = horizonDnnRequested && rdk_x5_bpu::available();
+    const bool allowNpu = safeJsonValue(payload, "allowNpu", true) && config_.enabled && config_.npuEnabled && (topology_.npuAvailable || horizonDnnAvailable);
     const bool rawTransportProvided = (payload.is_object() && payload.contains("transportFrames") && payload["transportFrames"].is_array()) ||
                                       (payload.is_object() && payload.contains("spiTxHex") && payload["spiTxHex"].is_string());
     const bool directAsyncBoundary = hasDirectAsyncBoundary(topology_);
@@ -2738,6 +2743,12 @@ json PlatformManager::buildComputePlanLocked(const json &payload) {
     if (!config_.enabled) {
         mode = "cpu";
         reasons.push_back("platform disabled; fall back to local CPU path");
+    } else if (horizonDnnRequested && !horizonDnnAvailable) {
+        mode = allowCpu ? "cpu" : "rejected";
+        reasons.push_back("RDK X5 hbDNN model was requested but the BPU runtime is unavailable");
+    } else if (horizonDnnAvailable) {
+        mode = postProcess || streaming ? "hybrid" : "npu";
+        reasons.push_back("explicit RDK X5 hbDNN model uses the native BPU runtime");
     } else if (!memoryAdmitted && !config_.npuVirtualMemoryEnabled) {
         mode = allowCpu ? "cpu" : "rejected";
         reasons.push_back("insufficient physical memory and virtual memory management disabled");
@@ -2790,7 +2801,10 @@ json PlatformManager::buildComputePlanLocked(const json &payload) {
 
     std::string transport = "local-cpu";
     if (mode != "cpu") {
-        if ((preferredTransport == "spi0" || rawTransportProvided) && interfaceAvailable(topology_, "spi0")) {
+        if (horizonDnnAvailable) {
+            transport = "horizon-dnn";
+            reasons.push_back("using the RDK X5 libdnn runtime and CMA-backed BPU buffers");
+        } else if ((preferredTransport == "spi0" || rawTransportProvided) && interfaceAvailable(topology_, "spi0")) {
             transport = "spi0";
             reasons.push_back("using spi0 because raw transport frames were supplied or spi0 was explicitly requested");
         } else if ((preferredTransport == "gpio-async" || (preferredTransport == "auto" && directAsyncBoundary)) && directAsyncBoundary) {
@@ -2806,19 +2820,21 @@ json PlatformManager::buildComputePlanLocked(const json &payload) {
             transport = "unavailable";
         }
     }
-    const bool hardwareReady = mode == "cpu" ? true : (transport == "spi0" ? pathLooksAvailable(config_.npuSpiDevice) : directAsyncBoundary);
+    const bool hardwareReady = mode == "cpu" ? true : (transport == "horizon-dnn" ? horizonDnnAvailable : (transport == "spi0" ? pathLooksAvailable(config_.npuSpiDevice) : directAsyncBoundary));
     const bool localAsyncGpioRequested = safeJsonValue(payload, "executeGpioAsync", config_.npuAsyncGpioExecuteLocally) ||
                               (payload.is_object() && payload.contains("inputCycles") && payload["inputCycles"].is_array()) ||
                               (payload.is_object() && payload.contains("inputWindows") && payload["inputWindows"].is_array());
     const std::string localAsyncDriver = preferredAsyncGpioExecutionDriver(config_);
     const std::string driver = mode == "cpu"
                                    ? "host-cpu"
-                                   : (transport == "spi0"
-                                          ? (hardwareReady ? "linux-spidev" : "scheduled-envelope")
-                            : (transport == "gpio-async"
-                                ? (localAsyncGpioRequested ? localAsyncDriver
-                                                  : "async-gpio-envelope")
-                                : "scheduled-envelope"));
+                                   : (transport == "horizon-dnn"
+                                          ? "horizon-hbdnn"
+                                          : (transport == "spi0"
+                                                 ? (hardwareReady ? "linux-spidev" : "scheduled-envelope")
+                                                 : (transport == "gpio-async"
+                                                        ? (localAsyncGpioRequested ? localAsyncDriver
+                                                                                   : "async-gpio-envelope")
+                                                        : "scheduled-envelope")));
     const int shardCount = std::max(1, std::min(8, std::max(tokens / 256, tensorBytes / 262144) + ((mode == "hybrid") ? 1 : 0)));
     const int preferredBatch = std::max(1, std::min(16, safeJsonValue(payload, "batch", dense ? 4 : 1)));
     const json fleetPlan = buildFleetScheduleLocked(shardCount, preferredBatch);
@@ -2862,7 +2878,7 @@ json PlatformManager::buildComputePlanLocked(const json &payload) {
                       {"score", metrics_.accelEfficiencyScore},
                       {"anomalyThreshold", config_.npuEfficiencyAnomalyThreshold},
                       {"anomalyDetected", config_.npuEfficiencyProbeEnabled && metrics_.accelEfficiencyScore < config_.npuEfficiencyAnomalyThreshold}}}};
-    if (mode != "cpu" && mode != "rejected") {
+    if (mode != "cpu" && mode != "rejected" && transport != "horizon-dnn") {
         json protocolPayload = payload.is_object() ? payload : json::object();
         if (!protocolPayload.contains("streamWeights")) {
             protocolPayload["streamWeights"] = streamWeights;
@@ -2943,7 +2959,9 @@ json PlatformManager::dispatchCompute(const json &payload) {
                                      (safeJsonValue(payload, "executeGpioAsync", config_.npuAsyncGpioExecuteLocally) ||
                                       (payload.is_object() && payload.contains("inputCycles") && payload["inputCycles"].is_array()) ||
                                       (payload.is_object() && payload.contains("inputWindows") && payload["inputWindows"].is_array()));
-    if (wantsLocalAsyncGpio && plan.contains("protocol") && plan["protocol"].is_object() &&
+    if (accepted && rdk_x5_bpu::requested(payload)) {
+        execution = rdk_x5_bpu::execute(payload);
+    } else if (wantsLocalAsyncGpio && plan.contains("protocol") && plan["protocol"].is_object() &&
         plan["protocol"].contains("gpioPlan") && plan["protocol"]["gpioPlan"].is_array()) {
         std::string gpioError;
         if (executeAsyncGpioPlan(config_, plan["protocol"], execution, gpioError)) {
@@ -2979,7 +2997,7 @@ json PlatformManager::dispatchCompute(const json &payload) {
                              {"scheduled", true},
                              {"frameCount", frames.size()},
                              {"driver", plan["route"].value("driver", std::string("async-gpio-envelope"))},
-                             {"note", "async gpio frames prepared for a board-side controller; host-side direct gpio execution is not implemented in this process"}};
+                             {"note", "async gpio frames prepared for a board-side controller; host-side direct gpio execution is not available in this process"}};
         }
 #else
         execution = json{{"executed", false},

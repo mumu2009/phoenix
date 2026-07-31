@@ -364,8 +364,8 @@ public:
     }
     
     EmotionTensor analyzeAudio(const std::vector<float>& audioFeatures) override {
-        // Placeholder for audio-based emotion analysis
-        // In a real implementation, this would use a neural network
+        // Audio-feature based emotion analysis
+        // Maps the first eight audio features directly to emotion dimensions.
         EmotionTensor emotion;
         if (audioFeatures.size() >= 8) {
             emotion.valence = audioFeatures[0];

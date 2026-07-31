@@ -1,7 +1,11 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
+
+:: Clear leftover gcc temporary object files; stale ones can cause collect2 ICEs.
+if not exist "build\tmp" mkdir "build\tmp"
+del /q "build\tmp\cc*" 2>nul
 
 REM Quick check: if phoenix_main.exe exists and is recent, skip compilation
 ::  if exist "%SCRIPT_DIR%phoenix_main.exe" (
@@ -136,7 +140,7 @@ set "PY_LIB=%PY_LOCAL_ROOT%\libs"
 set "PY_LINK_NAME="
 if not exist "%PY_INC%\Python.h" (
   echo [ERROR] missing Python header: %PY_INC%\Python.h
-  echo [ERROR] 请确认已将 Python314 复制到项目根目录。
+  echo [ERROR] 请确认已将 Python314 复制到项目根目录.
   exit /b 1
 )
 if exist "%PY_LIB%\python314.lib" set "PY_LINK_NAME=python314"
@@ -181,6 +185,13 @@ if exist "%BULLET3_ROOT%\src\btBulletDynamicsCommon.h" set "OUTSIDES_CFLAGS=%OUT
 
 set "BULLET3_EMBEDDED_SOURCES="
 if exist "%BULLET3_ROOT%\src\btLinearMathAll.cpp" set "BULLET3_EMBEDDED_SOURCES=outsides\bullet3\src\btLinearMathAll.cpp outsides\bullet3\src\btBulletCollisionAll.cpp outsides\bullet3\src\btBulletDynamicsAll.cpp"
+
+set "PHOENIX_EDGE_IMAGE=1"
+if /I "%PHOENIX_DISABLE_EDGE_IMAGE%"=="1" set "PHOENIX_EDGE_IMAGE=0"
+set "PHOENIX_EDGE_SPEECH=1"
+if /I "%PHOENIX_DISABLE_EDGE_SPEECH%"=="1" set "PHOENIX_EDGE_SPEECH=0"
+set "EDGE_CFLAGS=-DPHOENIX_EDGE_IMAGE_ENABLED=%PHOENIX_EDGE_IMAGE% -DPHOENIX_EDGE_SPEECH_ENABLED=%PHOENIX_EDGE_SPEECH%"
+echo [INFO] Edge device compile flags: image=%PHOENIX_EDGE_IMAGE%, speech=%PHOENIX_EDGE_SPEECH%
 
 echo [STEP] Probe outsides native source compilation
 if exist "%LLAMACPP_ROOT%\ggml\src\gguf.cpp" (
@@ -253,13 +264,30 @@ echo [STEP] Compile phoenix_main.exe
 set "OVERRIDE_SOURCES="
 if exist "module_overrides\*.cpp" set "OVERRIDE_SOURCES=module_overrides\*.cpp"
 set "COMPILE_CMD_FILE=%CD%\runtime_store\compile_last_command.txt"
-set "COMMON_SOURCES=transformer_main.cpp transformer_ollama_fine_tuning.cpp addon.cpp addons\builtin_registry.cpp addons\math_addon.cpp addons\search_addon.cpp addons\computer_shell_addon.cpp loggerCXX.cpp DATABASE_079.cpp frontend_server.cpp speak_io.cpp model_lifecycle.cpp autonomy_stack.cpp v51_runtime.cpp external_runtime.cpp edge_platform.cpp gguf_tensor_parser.cpp physics_world_runtime.cpp emotion_system.cpp llamacpp_emotion_adjuster.cpp plugin_system.cpp modern_context_system.cpp %BULLET3_EMBEDDED_SOURCES%"
-echo [CMD] "%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% main.cpp %COMMON_SOURCES% %OVERRIDE_SOURCES% -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
+set "COMPILE_SOURCES_FILE=%CD%\build\compile_sources.txt"
+set "COMMON_SOURCES=transformer_main.cpp transformer_ollama_fine_tuning.cpp addon.cpp addons\builtin_registry.cpp addons\math_addon.cpp addons\search_addon.cpp addons\computer_shell_addon.cpp loggerCXX.cpp DATABASE_079.cpp frontend_server.cpp speak_io.cpp model_lifecycle.cpp autonomy_stack.cpp v51_runtime.cpp external_runtime.cpp edge_platform.cpp gguf_tensor_parser.cpp physics_world_runtime.cpp emotion_system.cpp llamacpp_emotion_adjuster.cpp plugin_system.cpp modern_context_system.cpp semantic_unit.cpp primal_sensation.cpp instinct.cpp prompt_split.cpp external_mixed_modal_io.cpp jpea_v2_image_world_model.cpp jpea_v2_speech_world_model.cpp graph_diffusion_summarizer.cpp hierarchical_memory.cpp model_deployment.cpp rdk_x5_bpu.cpp %BULLET3_EMBEDDED_SOURCES%"
+:: Build a response file of source files to avoid Windows command-line length limits.
+:: GCC response files treat '\' as an escape character, so paths must use '/'.
+if not exist "%CD%\build" mkdir "%CD%\build"
+if exist "%COMPILE_SOURCES_FILE%" del /q "%COMPILE_SOURCES_FILE%" 2>nul
+for %%a in (%COMMON_SOURCES%) do (
+    set "src=%%a"
+    set "src=!src:\=/!"
+    echo !src! >> "%COMPILE_SOURCES_FILE%"
+)
+if not "%OVERRIDE_SOURCES%"=="" (
+    for %%f in (%OVERRIDE_SOURCES%) do (
+        set "src=%%f"
+        set "src=!src:\=/!"
+        echo !src! >> "%COMPILE_SOURCES_FILE%"
+    )
+)
+echo [CMD] "%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% main.cpp @"%COMPILE_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
 (
-  echo "%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% main.cpp %COMMON_SOURCES% %OVERRIDE_SOURCES% -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
+  echo "%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% main.cpp @"%COMPILE_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
 ) > "%COMPILE_CMD_FILE%"
 echo [INFO] compile command saved: %COMPILE_CMD_FILE%
-"%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% main.cpp %COMMON_SOURCES% %OVERRIDE_SOURCES% -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
+"%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% main.cpp @"%COMPILE_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
 set "PHOENIX_COMPILE_RESULT=%errorlevel%"
 set "PHOENIX_NEW_BUILD=0"
 if %PHOENIX_COMPILE_RESULT% neq 0 (
@@ -312,17 +340,17 @@ if defined OUTSIDES_DLL_COPY_LIST (
 )
 
 if not exist "%SCRIPT_DIR%phoenix_main.exe" (
-  echo [ERROR] 编译流程结束但未生成 phoenix_main.exe。
+  echo [ERROR] 编译流程结束但未生成 phoenix_main.exe.
   echo [ERROR] Cannot continue without phoenix_main.exe.
   echo [ERROR] Build failed.
   set "BUILD_STATUS=FAILED"
   goto :end_of_script
 )
 if not exist "%SCRIPT_DIR%bug_shooter.exe" (
-  echo [WARN] bug_shooter.exe not generated (optional tool).
+  echo [WARN] bug_shooter.exe not generated ^(optional tool^).
 )
 if not exist "%SCRIPT_DIR%phoenix_sql_cli.exe" (
-  echo [WARN] phoenix_sql_cli.exe not generated (optional tool).
+  echo [WARN] phoenix_sql_cli.exe not generated ^(optional tool^).
 )
 
 echo [STEP] Validate runtime DLLs
@@ -336,16 +364,16 @@ if defined MISSING_DLLS (
 
 set "BUILD_STATUS=SUCCESS"
 for %%F in ("%SCRIPT_DIR%phoenix_main.exe") do (
-  echo [SUCCESS] phoenix_main.exe 已生成。size=%%~zF bytes time=%%~tF
+  echo [SUCCESS] phoenix_main.exe 已生成 size=%%~zF bytes time=%%~tF
 )
 if exist "%SCRIPT_DIR%bug_shooter.exe" (
   for %%F in ("%SCRIPT_DIR%bug_shooter.exe") do (
-    echo [SUCCESS] bug_shooter.exe 已生成。size=%%~zF bytes time=%%~tF
+    echo [SUCCESS] bug_shooter.exe 已生成 size=%%~zF bytes time=%%~tF
   )
 )
 if exist "%SCRIPT_DIR%phoenix_sql_cli.exe" (
   for %%F in ("%SCRIPT_DIR%phoenix_sql_cli.exe") do (
-    echo [SUCCESS] phoenix_sql_cli.exe 已生成。size=%%~zF bytes time=%%~tF
+    echo [SUCCESS] phoenix_sql_cli.exe 已生成 size=%%~zF bytes time=%%~tF
   )
 )
 

@@ -29,7 +29,7 @@
     "ultra_long_dialogue_max_turns": 22
   },
   "llama_server": {
-    "threads": 12,
+    "threads": 6,
     "parallel": 1,
     "ctx_size": 2048
   },
@@ -170,10 +170,35 @@
       "long": 200
     },
     "seedLexicon": {
-      "positive": ["happy", "great", "love", "wonderful", "glad", "excellent"],
-      "negative": ["sad", "bad", "hate", "terrible", "angry", "awful"],
-      "fear": ["afraid", "scared", "fear", "worried", "anxious"],
-      "trust": ["trust", "believe", "confident", "reliable"]
+      "positive": [
+        "happy",
+        "great",
+        "love",
+        "wonderful",
+        "glad",
+        "excellent"
+      ],
+      "negative": [
+        "sad",
+        "bad",
+        "hate",
+        "terrible",
+        "angry",
+        "awful"
+      ],
+      "fear": [
+        "afraid",
+        "scared",
+        "fear",
+        "worried",
+        "anxious"
+      ],
+      "trust": [
+        "trust",
+        "believe",
+        "confident",
+        "reliable"
+      ]
     }
   },
   "spark": {
@@ -220,10 +245,10 @@
   "mechanical_mind": {
     "enabled": false,
     "textThreshold": 0.58,
-    "tokenThreshold": 0.60,
+    "tokenThreshold": 0.6,
     "placeholder": "[mechanized]",
     "emotionAware": true,
-    "emotionInfluence": 0.30,
+    "emotionInfluence": 0.3,
     "positiveRelaxes": true
   },
   "partial_cache": {

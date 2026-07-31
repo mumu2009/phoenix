@@ -289,15 +289,18 @@ bool LlamaCppEmotionWeightAdjuster::setBaselineWeights(const std::string& layerP
         return false;
     }
     
-    // In a real implementation, this would extract actual weights from llamacpp
-    // For now, we simulate with placeholder weights
+    // In a real implementation, this would extract actual weights from llamacpp.
+    // The fallback below synthesizes a deterministic baseline using the layer name as a seed.
     
-    std::vector<float> placeholderWeights(1000, 0.0f);
-    for (size_t i = 0; i < placeholderWeights.size(); ++i) {
-        placeholderWeights[i] = (static_cast<float>(rand()) / RAND_MAX) * 2.0f - 1.0f;
+    std::seed_seq seed(layerPattern.begin(), layerPattern.end());
+    std::mt19937 gen(seed);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::vector<float> syntheticWeights(1000, 0.0f);
+    for (size_t i = 0; i < syntheticWeights.size(); ++i) {
+        syntheticWeights[i] = dist(gen);
     }
     
-    return impl_->weightCache->storeBaseline(layerPattern, placeholderWeights);
+    return impl_->weightCache->storeBaseline(layerPattern, syntheticWeights);
 }
 
 std::map<std::string, float> LlamaCppEmotionWeightAdjuster::getCurrentAdjustments() const {

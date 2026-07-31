@@ -140,7 +140,7 @@ public:
                 } else {
                     it->second.hits += 1;
                     it->second.lastAccessMs = now;
-                    return it->second.value;
+                    return std::make_optional<json>(it->second.value);
                 }
             }
         }
@@ -167,7 +167,7 @@ public:
                 trimHotLocked();
             }
         }
-        return payload;
+        return std::make_optional<json>(payload);
     }
 
     void put(const std::string &key, const json &value, const HotspotAnalysis &analysis = {}) {
@@ -4464,7 +4464,7 @@ public:
         if (it == memory_.end()) {
             return std::nullopt;
         }
-        return it->second;
+        return std::make_optional<json>(it->second);
     }
 
     void put(const std::string &key, const json &value) {

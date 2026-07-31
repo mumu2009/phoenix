@@ -61,6 +61,7 @@
 #include "physics_world_runtime.hpp"
 #include "world_model.hpp"
 #include "edge_platform.hpp"
+#include "jpea_v2_image_world_model.hpp"
 
 #ifdef HAVE_CURL
 #include <curl/curl.h>
@@ -4312,7 +4313,7 @@ void setupFrontendServer()
     const int port = std::stoi(getEnv("FRONTEND_PORT", "5081"));
     const std::string robotsDir = getEnv("ROBOTS_DIR", "./robots");
 
-    auto boolEnv = [](const std::string &value, bool fallback)
+    static auto boolEnv = [](const std::string &value, bool fallback)
     {
         if (value.empty())
             return fallback;
@@ -4320,7 +4321,7 @@ void setupFrontendServer()
         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
         return !(v == "0" || v == "false" || v == "off" || v == "no");
     };
-    auto parseWorldModelInt = [](const std::string &value, int fallback)
+    static auto parseWorldModelInt = [](const std::string &value, int fallback)
     {
         try
         {
@@ -4331,7 +4332,7 @@ void setupFrontendServer()
             return fallback;
         }
     };
-    auto parseWorldModelDouble = [](const std::string &value, double fallback)
+    static auto parseWorldModelDouble = [](const std::string &value, double fallback)
     {
         try
         {
@@ -4372,7 +4373,11 @@ void setupFrontendServer()
     if (!worldModelLegacyDir.empty())
         fs::create_directories(worldModelLegacyDir);
     static ContextService contextService(fs::path(robotsDir), useTorch);
-    static VisionPipeline visionPipeline;
+    static std::unique_ptr<phoenix::io::JpeaV2ImageWorldModel> imageWorldModel =
+        phoenix::io::createJpeaV2ImageWorldModel(
+            getEnv("JPEA_IMAGE_VARIANT", "ijepa_vith14_1k"),
+            std::max(1, parseWorldModelInt(getEnv("JPEA_IMAGE_CONCEPT_DIM", "128"), 128)),
+            getEnv("JPEA_IMAGE_BACKEND", "auto"));
     static SpeakIO speakIO;
     static V51RuntimeEngine v51Runtime;
     static std::shared_ptr<Database079> worldModelDb = [worldModelDbPath, worldModelLegacyDir, worldModelRedisUrl, worldModelRedisDb, worldModelRedisPrefix]()
@@ -4766,17 +4771,6 @@ void setupFrontendServer()
 
         std::string routePath = req->path();
         std::cout << "[proxyApiCall] routePath=" << routePath << std::endl;
-        // Compatibility bridge: some frontend builds may route OpenClaw provider calls
-        // through /openclaw/* paths. Map them to core chat APIs when OpenClaw backend
-        // is not mounted as a separate route.
-        if (routePath == "/openclaw/chat")
-        {
-            routePath = "/api/chat";
-        }
-        else if (routePath == "/openclaw/transformer/chat")
-        {
-            routePath = "/api/transformer/chat";
-        }
         if (routePath.size() > 1 && routePath.back() == '/')
         {
             bool apiPath = routePath.rfind("/api/", 0) == 0;
@@ -5271,6 +5265,20 @@ void setupFrontendServer()
     drogon::app().registerHandler("/favicon.ico", [serveStaticFile](const drogon::HttpRequestPtr &, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
                                   {
         serveStaticFile("favicon.ico", "image/x-icon", std::move(cb)); }, {drogon::Get});
+
+    drogon::app().registerHandler("/api/health", [](const drogon::HttpRequestPtr &, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+                                  {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k200OK);
+        resp->setContentTypeString("application/json");
+        Json::Value out;
+        out["ok"] = true;
+        out["service"] = "phoenix-frontend";
+        out["timestamp"] = static_cast<Json::UInt64>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        resp->setBody(out.toStyledString());
+        cb(resp); }, {drogon::Get, drogon::Post});
 
     drogon::app().registerHandler("/auth/config", [&userStore, allowRegister, enableEmailVerifyFlow, allowLocalAuthFallback, preferLocalAuthToken, devReturnToken](const drogon::HttpRequestPtr &, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
                                   {
@@ -5870,10 +5878,6 @@ void setupFrontendServer()
 
     drogon::app().registerHandlerViaRegex("^/api/.*$", [proxyApiCall](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
                                           {
-        proxyApiCall(req, std::move(cb)); });
-
-    drogon::app().registerHandlerViaRegex("^/openclaw/.*$", [proxyApiCall](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
-                                    {
         proxyApiCall(req, std::move(cb)); });
 
     drogon::app().registerHandlerViaRegex("^/robots/.*$", [proxyApiCall](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
@@ -6898,7 +6902,7 @@ void setupFrontendServer()
         }
         cb(resp); }, {drogon::Post});
 
-    drogon::app().registerHandler("/vision/analyze", [&visionPipeline, &worldModel](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+    drogon::app().registerHandler("/vision/analyze", [&imageWorldModel, &worldModel](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
                                   {
         auto resp = drogon::HttpResponse::newHttpResponse();
         try {
@@ -6909,9 +6913,9 @@ void setupFrontendServer()
                 cb(resp);
                 return;
             }
-            if (!visionPipeline.ready()) {
+            if (!imageWorldModel) {
                 resp->setStatusCode(drogon::k500InternalServerError);
-                resp->setBody("Vision pipeline not ready. Provide VISION_YOLO_MODEL and/or VISION_CNN_MODEL.");
+                resp->setBody("JPEA image world model is unavailable");
                 cb(resp);
                 return;
             }
@@ -6938,7 +6942,36 @@ void setupFrontendServer()
                 return;
             }
 
-            auto result = visionPipeline.analyze(img);
+            std::vector<uchar> encodedImage;
+            if (!cv::imencode(".jpg", img, encodedImage)) {
+                resp->setStatusCode(drogon::k500InternalServerError);
+                resp->setBody("Failed to encode image for JPEA analysis");
+                cb(resp);
+                return;
+            }
+            const auto embedding = imageWorldModel->encode(
+                std::vector<uint8_t>(encodedImage.begin(), encodedImage.end()),
+                img.cols,
+                img.rows,
+                "image/jpeg");
+            Json::Value result(Json::objectValue);
+            result["ok"] = !embedding.empty();
+            result["model"] = imageWorldModel->config().id;
+            result["architecture"] = imageWorldModel->config().arch;
+            result["backend"] = imageWorldModel->status().value("backend", std::string("unknown"));
+            result["imageSize"]["w"] = img.cols;
+            result["imageSize"]["h"] = img.rows;
+            result["detections"] = Json::Value(Json::arrayValue);
+            result["details"] = Json::Value(Json::arrayValue);
+            result["embedding"] = Json::Value(Json::arrayValue);
+            for (float value : embedding) {
+                result["embedding"].append(value);
+            }
+            result["embeddingDim"] = static_cast<int>(embedding.size());
+            result["graphContext"] = "vision-jepa|model:" + imageWorldModel->config().id + "|embeddingDim:" + std::to_string(embedding.size());
+            if (embedding.empty()) {
+                result["error"] = "JPEA image world model returned an empty concept vector";
+            }
             std::string sessionId;
             if (json->isMember("sessionId")) {
                 sessionId = (*json)["sessionId"].asString();
@@ -6962,6 +6995,110 @@ void setupFrontendServer()
                                                                             {"rawLocation", json->isMember("imagePath") && (*json)["imagePath"].isString() ? (*json)["imagePath"].asString() : std::string("inline-image")},
                                                                             {"metadata", metadata}});
                 result["worldModel"] = nlohmannToJsonCpp(worldResult);
+            }
+            resp->setStatusCode(drogon::k200OK);
+            resp->setContentTypeString("application/json");
+            resp->setBody(result.toStyledString());
+        } catch (const std::exception &e) {
+            resp->setStatusCode(drogon::k500InternalServerError);
+            resp->setBody(e.what());
+        }
+        cb(resp); }, {drogon::Post});
+
+    drogon::app().registerHandler("/camera/analyze", [&imageWorldModel, &worldModel](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+                                  {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        try {
+            auto json = req->getJsonObject();
+            if (!json) {
+                resp->setStatusCode(drogon::k400BadRequest);
+                resp->setBody("Missing JSON body");
+                cb(resp);
+                return;
+            }
+            if (!imageWorldModel || !imageWorldModel->status().value("ready", false)) {
+                resp->setStatusCode(drogon::k503ServiceUnavailable);
+                resp->setBody("compiled RDK X5 JPEA model is unavailable");
+                cb(resp);
+                return;
+            }
+
+            if (json->isMember("videoBase64") || json->isMember("videoPath")) {
+                resp->setStatusCode(drogon::k410Gone);
+                resp->setBody("host video transport is disabled; use the X5-local camera endpoint without videoBase64 or videoPath");
+                cb(resp);
+                return;
+            }
+
+            const std::string cameraDevice = getEnv("JPEA_CAMERA_DEVICE", "/dev/video0");
+            const int configuredWidth = std::max(1, parseWorldModelInt(getEnv("JPEA_CAMERA_WIDTH", "1920"), 1920));
+            const int configuredHeight = std::max(1, parseWorldModelInt(getEnv("JPEA_CAMERA_HEIGHT", "1080"), 1080));
+            const int configuredFps = std::max(1, parseWorldModelInt(getEnv("JPEA_CAMERA_FPS", "30"), 30));
+            cv::VideoCapture capture(cameraDevice, cv::CAP_V4L2);
+            if (capture.isOpened()) {
+                capture.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+                capture.set(cv::CAP_PROP_FRAME_WIDTH, configuredWidth);
+                capture.set(cv::CAP_PROP_FRAME_HEIGHT, configuredHeight);
+                capture.set(cv::CAP_PROP_FPS, configuredFps);
+            }
+            cv::Mat frame;
+            bool decoded = false;
+            for (int attempt = 0; attempt < 12 && !decoded; ++attempt) {
+                decoded = capture.isOpened() && capture.read(frame) && !frame.empty();
+            }
+            if (!decoded) {
+                resp->setStatusCode(drogon::k503ServiceUnavailable);
+                resp->setBody("X5 camera did not provide a frame from " + cameraDevice);
+                cb(resp);
+                return;
+            }
+
+            static std::mutex videoFormatMutex;
+            static int lockedWidth = 0;
+            static int lockedHeight = 0;
+            static int lockedType = -1;
+            {
+                std::lock_guard<std::mutex> lock(videoFormatMutex);
+                if (lockedWidth == 0) {
+                    lockedWidth = configuredWidth;
+                    lockedHeight = configuredHeight;
+                    lockedType = frame.type();
+                }
+                if (frame.cols != lockedWidth || frame.rows != lockedHeight || frame.type() != lockedType) {
+                    resp->setStatusCode(drogon::k409Conflict);
+                    resp->setBody("video frame specification differs from the locked JPEA deployment specification");
+                    cb(resp);
+                    return;
+                }
+            }
+
+            if (!frame.isContinuous() || frame.type() != CV_8UC3) {
+                resp->setStatusCode(drogon::k500InternalServerError);
+                resp->setBody("camera returned a non-contiguous or non-BGR frame");
+                cb(resp);
+                return;
+            }
+            const auto embedding = imageWorldModel->encode(std::vector<uint8_t>(frame.datastart, frame.dataend), frame.cols, frame.rows, "application/x-bgr");
+            if (embedding.empty()) {
+                resp->setStatusCode(drogon::k503ServiceUnavailable);
+                resp->setBody(imageWorldModel->status().value("error", std::string("RDK X5 JPEA inference failed")));
+                cb(resp);
+                return;
+            }
+            Json::Value result(Json::objectValue);
+            result["ok"] = true;
+            result["backend"] = "horizon-hbdnn";
+            result["model"] = imageWorldModel->config().id;
+            result["frameSpec"]["width"] = frame.cols;
+            result["frameSpec"]["height"] = frame.rows;
+            result["frameSpec"]["opencvType"] = frame.type();
+            result["embedding"] = Json::Value(Json::arrayValue);
+            for (float value : embedding) result["embedding"].append(value);
+            result["embeddingDim"] = static_cast<int>(embedding.size());
+            const std::string sessionId = json->isMember("sessionId") ? (*json)["sessionId"].asString() : std::string();
+            if (!sessionId.empty()) {
+                nlohmann::json metadata{{"source", "video/analyze"}, {"frameWidth", frame.cols}, {"frameHeight", frame.rows}, {"embedding", embedding}, {"jpeaBackend", "horizon-hbdnn"}};
+                result["worldModel"] = nlohmannToJsonCpp(worldModel.ingestEvidence(nlohmann::json{{"sessionId", sessionId}, {"modality", "video"}, {"graphSummary", "video-jpea|model:" + imageWorldModel->config().id + "|embeddingDim:" + std::to_string(embedding.size())}, {"rawLocation", cameraDevice}, {"metadata", metadata}}));
             }
             resp->setStatusCode(drogon::k200OK);
             resp->setContentTypeString("application/json");

@@ -142,20 +142,20 @@ public:
 
     /* Data operations */
     virtual PluginResult onReadData(const std::string& key) {
-        return PluginResult{false, "Not implemented", {}, false, false, false};
+        return PluginResult{false, "not supported", {}, false, false, false};
     }
 
     virtual PluginResult onWriteData(const std::string& key, const nlohmann::json& value) {
-        return PluginResult{false, "Not implemented", {}, false, false, false};
+        return PluginResult{false, "not supported", {}, false, false, false};
     }
 
     virtual PluginResult onDeleteData(const std::string& key) {
-        return PluginResult{false, "Not implemented", {}, false, false, false};
+        return PluginResult{false, "not supported", {}, false, false, false};
     }
 
     /* Configuration */
     virtual PluginResult onConfigChange(const std::string& key, const nlohmann::json& value) {
-        return PluginResult{false, "Not implemented", {}, false, false, false};
+        return PluginResult{false, "not supported", {}, false, false, false};
     }
 
     /* LLM operations */
@@ -169,11 +169,11 @@ public:
 
     /* Emotion operations */
     virtual PluginResult onEmotionRead(const std::string& sessionId) {
-        return PluginResult{false, "Not implemented", {}, false, false, false};
+        return PluginResult{false, "not supported", {}, false, false, false};
     }
 
     virtual PluginResult onEmotionWrite(const std::string& sessionId, const nlohmann::json& emotion) {
-        return PluginResult{false, "Not implemented", {}, false, false, false};
+        return PluginResult{false, "not supported", {}, false, false, false};
     }
 
     /* Health check */

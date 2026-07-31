@@ -127,21 +127,6 @@
 
 ---
 
-## 7) OpenClaw-2026.2.17（`outsides/OpenClaw-2026.2.17`）
-
-> 当前为 macOS 应用包分发形态，非源码仓。
-
-### 核心文件
-- `OpenClaw.app/Contents/MacOS/OpenClaw`
-  - 作用：主可执行二进制。
-- `OpenClaw.app/Contents/Info.plist`
-  - 作用：应用元信息（版本、Bundle ID、URL Scheme、系统要求）。
-- `OpenClaw.app/Contents/Frameworks/`
-  - 作用：运行时依赖框架。
-- `OpenClaw.app/Contents/Resources/`
-  - 作用：资源文件。
-
----
 
 ## 8) Redis-8.0.3-Windows-x64-cygwin-with-Service（`outsides/Redis-8.0.3-Windows-x64-cygwin-with-Service`）
 
@@ -285,6 +270,6 @@
 
 - 需要“可二次开发源码”的优先对接：`llamacpp`、`xllamacpp`、`BitNet`、`swanlab`、`vllm`、`sglang`。
 - 需要“图学习/图计算能力”优先对接：`dgl`、`GraphScope`（按场景选库，避免重复建设）。
-- 需要“可直接部署运行”的优先对接：`Redis-8.0.3...`、`OpenClaw-2026.2.17`。
+- 需要“可直接部署运行”的优先对接：`Redis-8.0.3...`。
 - `llama.cpp`（该目录）应视为分发/打包项目；若需深入改内核，应以 `llamacpp` 为主。
 - `rknn` 当前以模型工件为主，建议补充对应推理脚本仓后再纳入“可开发模块”。

@@ -90,4 +90,5 @@ struct Config {
   std::string logMode{"release"};
   fs::path exportDir;
   bool httpLog{false};
+  fs::path tunedConfigPath;
 };

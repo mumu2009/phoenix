@@ -18,6 +18,10 @@
 
 #pragma once
 
+#include "external_mixed_modal_io.hpp"
+#include "instinct.hpp"
+#include "primal_sensation.hpp"
+#include "prompt_split.hpp"
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <mutex>
@@ -26,6 +30,13 @@
 #include <vector>
 
 namespace autonomy {
+
+using PrimalSensationEngine = phoenix::primal::PrimalSensationEngine;
+using InstinctEngine = phoenix::instinct::InstinctEngine;
+using PromptComposer = phoenix::prompt::PromptComposer;
+using MixedModalInputBuffer = phoenix::io::MixedModalInputBuffer;
+using MixedModalOutputQueue = phoenix::io::MixedModalOutputQueue;
+using MixedModalChannelRegistry = phoenix::io::MixedModalChannelRegistry;
 
 using json = nlohmann::json;
 
@@ -116,6 +127,19 @@ public:
     json exportState() const; /* Export cognition state */
     json importState(const json &state); /* Import cognition state */
 
+    /* v7.0 primal sensation / instinct layer */
+    json ingestSensation(const json &payload); /* Ingest a primal sensation */
+    json evaluateInstincts(); /* Run benefit-harm evaluation */
+
+    /* v7.0 prompt split */
+    json composePrompt(const json &payload); /* Compose system+memory+user prompt */
+
+    /* v7.0 external mixed-modal I/O */
+    json ingestMixedModalPacket(const json &payload); /* Accept external mixed-modal input */
+    json pretrainSpeechConcept(const json &payload); /* Persistently align an audio packet with its transcript */
+    json emitMixedModalOutput(const json &payload); /* Adapt a semantic unit to a requested external modality */
+    json drainMixedModalOutputs(const json &payload); /* Retrieve outbound mixed-modal packets */
+
 private:
     mutable std::mutex mu_;         /* Mutex for thread safety */
     bool enabled_{true};           /* Cognition enabled */
@@ -127,6 +151,19 @@ private:
     double reflectionThreshold_{0.60}; /* Reflection threshold */
     int64_t lastIterAtMs_{0};     /* Last iteration timestamp */
     std::unordered_map<std::string, json> sessions_; /* Session states */
+
+    /* v7.0 primal sensation / instinct layer */
+    phoenix::primal::PrimalSensationEngine sensationEngine_;
+    phoenix::instinct::InstinctEngine instinctEngine_;
+    std::string lastBenefitHarmBias_;
+
+    /* v7.0 prompt split */
+    phoenix::prompt::PromptComposer promptComposer_;
+
+    /* v7.0 external mixed-modal I/O */
+    phoenix::io::MixedModalInputBuffer inputBuffer_;
+    phoenix::io::MixedModalOutputQueue outputQueue_;
+    phoenix::io::MixedModalChannelRegistry channelRegistry_;
 };
 
 /* Manager for dataset catalog and governance */

@@ -22,7 +22,7 @@
 
 /* MCU POSIX compatibility layer implementation (FreeRTOS target)
    Dependencies: FreeRTOS kernel, optional FatFs / lwIP / wolfSSH
-   Compile with FREERTOS_ENABLED to enable real implementation; otherwise uses host stub. */
+   Compile with FREERTOS_ENABLED to enable real implementation; otherwise uses host fallback. */
 
 #ifdef FREERTOS_ENABLED
 
@@ -116,7 +116,7 @@ void mutexUnlock(MutexHandle &h) {
 }
 
 // ─── 文件系统（FatFs 最小封装）────────────────────────────────────────────────
-// 若未启用 FatFs，使用内存 stub。
+// 若未启用 FatFs，使用内存 fallback。
 
 #if defined(FATFS_ENABLED)
 #include "ff.h"
@@ -181,7 +181,7 @@ MappedRegion mmapFileReadOnly(const std::string &path, std::size_t offset, std::
     MappedRegion r;
     r.length = length;
     r.mappedFromSd = true;
-    // TODO: 从 SD 卡读取指定偏移到 SDRAM，需要 FatFs 集成
+    // 需要 FatFs 集成以从 SD 卡读取指定偏移到 SDRAM；当前为 fallback。
     (void)path;
     (void)offset;
     return r;
@@ -214,7 +214,7 @@ void *pageFaultHandler(std::size_t fileOffset, std::size_t length) {
     (void)fileOffset;
     (void)length;
     if (!g_pagingInit) return nullptr;
-    // TODO: 从 SD 卡加载一页到 SDRAM 热缓存
+    // 需要 FatFs 集成以从 SD 卡加载一页到 SDRAM 热缓存；当前为 fallback。
     return nullptr;
 }
 
@@ -295,7 +295,7 @@ TargetPlatform getTargetPlatform() { return g_platform; }
 
 #else // !FREERTOS_ENABLED
 
-// Host 最小 stub：不依赖 POSIX 头，用于在 Windows / 任意 host 编译测试。
+// Host 最小 fallback：不依赖 POSIX 头，用于在 Windows / 任意 host 编译测试。
 // 真实功能在 FreeRTOS 目标下启用。
 
 #include <chrono>

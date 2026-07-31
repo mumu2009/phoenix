@@ -84,6 +84,20 @@ bool ModernContextManager::addEntry(const ContextEntry& entry) {
     return true;
 }
 
+bool ModernContextManager::addSemanticUnit(const phoenix::multimodal::SemanticUnit& unit, const std::string& role) {
+    ContextEntry entry;
+    entry.content = unit.content;
+    entry.role = role;
+    entry.importance = unit.confidence;
+    entry.semanticUnits.push_back(unit);
+    if (entry.semanticUnits.front().timestampMs == 0) {
+        entry.semanticUnits.front().timestampMs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+    }
+    return addEntry(entry);
+}
+
 std::vector<ContextEntry> ModernContextManager::getContext(size_t maxTokens) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     
@@ -184,6 +198,54 @@ std::vector<SemanticSearchResult> ModernContextManager::semanticSearch(
     return results;
 }
 
+std::vector<SemanticSearchResult> ModernContextManager::semanticSearch(
+    const phoenix::multimodal::SemanticUnit& query, size_t topK) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    
+    if (!impl_->config.enableSemanticSearch || !impl_->config.enableMultimodal) {
+        return {};
+    }
+    
+    std::vector<SemanticSearchResult> results;
+    const auto& qvec = query.semanticVector;
+    
+    for (size_t i = 0; i < impl_->contextEntries.size(); ++i) {
+        const auto& entry = impl_->contextEntries[i];
+        if (entry.semanticUnits.empty() && entry.embedding.empty()) {
+            continue;
+        }
+        
+        float bestSim = 0.0f;
+        for (const auto& unit : entry.semanticUnits) {
+            float sim = phoenix::multimodal::cosineSimilarity(qvec, unit.semanticVector);
+            if (sim > bestSim) bestSim = sim;
+        }
+        if (!entry.embedding.empty()) {
+            float sim = phoenix::multimodal::cosineSimilarity(qvec, entry.embedding);
+            if (sim > bestSim) bestSim = sim;
+        }
+        
+        if (bestSim >= impl_->config.similarityThreshold) {
+            SemanticSearchResult result;
+            result.entry = entry;
+            result.similarity = bestSim;
+            result.position = i;
+            results.push_back(result);
+        }
+    }
+    
+    std::sort(results.begin(), results.end(),
+        [](const SemanticSearchResult& a, const SemanticSearchResult& b) {
+            return a.similarity > b.similarity;
+        });
+    
+    if (results.size() > topK) {
+        results.resize(topK);
+    }
+    
+    return results;
+}
+
 bool ModernContextManager::updateImportance(const std::string& contentId, float newImportance) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     
@@ -255,15 +317,23 @@ nlohmann::json ModernContextManager::getStatistics() const {
         avgImportance /= impl_->contextEntries.size();
     }
     
+    size_t totalSemanticUnits = 0;
+    for (const auto& entry : impl_->contextEntries) {
+        totalSemanticUnits += entry.semanticUnits.size();
+    }
+    
     return {
         {"totalEntries", impl_->contextEntries.size()},
         {"totalTokens", totalTokens},
+        {"totalSemanticUnits", totalSemanticUnits},
         {"maxTokens", impl_->config.maxTokens},
         {"strategy", static_cast<int>(impl_->config.strategy)},
         {"averageImportance", avgImportance},
         {"semanticSearchEnabled", impl_->config.enableSemanticSearch},
         {"attentionSinkEnabled", impl_->config.enableAttentionSink},
-        {"hierarchicalEnabled", impl_->config.enableHierarchical}
+        {"hierarchicalEnabled", impl_->config.enableHierarchical},
+        {"multimodalEnabled", impl_->config.enableMultimodal},
+        {"multimodalEmbeddingDim", impl_->config.multimodalEmbeddingDim}
     };
 }
 
@@ -279,7 +349,9 @@ std::string ModernContextManager::exportContext() const {
     exportData["config"] = {
         {"maxTokens", impl_->config.maxTokens},
         {"strategy", static_cast<int>(impl_->config.strategy)},
-        {"semanticSearchEnabled", impl_->config.enableSemanticSearch}
+        {"semanticSearchEnabled", impl_->config.enableSemanticSearch},
+        {"multimodalEnabled", impl_->config.enableMultimodal},
+        {"multimodalEmbeddingDim", impl_->config.multimodalEmbeddingDim}
     };
     
     nlohmann::json entriesJson = nlohmann::json::array();
@@ -989,6 +1061,15 @@ ContextBuilder& ContextBuilder::addEntry(const ContextEntry& entry) {
     currentTokens_ += entryWithTokens.estimatedTokens;
     
     return *this;
+}
+
+ContextBuilder& ContextBuilder::addSemanticUnit(const phoenix::multimodal::SemanticUnit& unit, const std::string& role) {
+    ContextEntry entry;
+    entry.content = unit.content;
+    entry.role = role;
+    entry.importance = unit.confidence;
+    entry.semanticUnits.push_back(unit);
+    return addEntry(entry);
 }
 
 std::vector<ContextEntry> ContextBuilder::build() {

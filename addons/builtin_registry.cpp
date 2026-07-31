@@ -86,7 +86,7 @@ std::shared_ptr<Addon> createBuiltinAddon(const std::string &type, const std::st
 	if (type == "search") {
 		return createSearchAddon(name.empty() ? std::string("search") : name);
 	}
-	if (type == "computer" || type == "shell" || type == "desktop" || type == "openclaw") {
+	if (type == "computer" || type == "shell" || type == "desktop") {
 		return createComputerShellAddon(name.empty() ? std::string("computer") : name);
 	}
 	if (error) *error = "unsupported addon type";

@@ -88,13 +88,6 @@ v3.0 先定义统一生命周期接口，再渐进增强：
 3. 回归可执行（前端单测 + 后端接口回归脚本）
 4. 性能优化（延迟/吞吐/锁等待/内存）
 
-## 7. OpenClaw 的定位
-
-OpenClaw 只作为前端 provider 旁路，不替换后端 Transformer 主链。
-
-- 默认 provider=core
-- 可切换 provider=openclaw
-- 前端统一归一化响应结构，不改变后端契约
 
 ## 8. 结论
 

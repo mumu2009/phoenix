@@ -18,6 +18,8 @@
    You should have received a copy of the GNU Lesser General Public License
    along with 079 Project.  If not, see <http://www.gnu.org/licenses/>. */
 
+#include "../semantic_unit.hpp"
+
 class MemeGraph
 /* MemeGraph represents memory graph node relationships and retrieval interface */
 // 调用方式：在学习、推理与可视化导出路径中共享。
@@ -398,12 +400,60 @@ public:
     return out;
   }
 
+  /**
+   * @brief Attach semantic units to a graph node (v7.0 true-multimodal memory).
+   */
+  void setNodeSemanticUnits(const std::string &memeId,
+                            const std::vector<phoenix::multimodal::SemanticUnit> &units) {
+    std::lock_guard<std::mutex> lock(graphMu_);
+    ensureNodeLocked(memeId);
+    nodeSemanticUnits_[memeId] = units;
+  }
+
+  /**
+   * @brief Retrieve semantic units attached to a node.
+   */
+  std::vector<phoenix::multimodal::SemanticUnit> getNodeSemanticUnits(
+      const std::string &memeId) const {
+    std::lock_guard<std::mutex> lock(graphMu_);
+    auto it = nodeSemanticUnits_.find(memeId);
+    if (it != nodeSemanticUnits_.end())
+      return it->second;
+    return {};
+  }
+
+  /**
+   * @brief Find top-K nodes whose semantic units are most similar to a query.
+   */
+  std::vector<std::pair<std::string, float>> semanticSearch(
+      const phoenix::multimodal::SemanticUnit &query,
+      size_t topK = 5) {
+    std::lock_guard<std::mutex> lock(graphMu_);
+    loadAll();
+    std::vector<std::pair<std::string, float>> scored;
+    for (const auto &kv : nodeSemanticUnits_) {
+      float best = 0.0f;
+      for (const auto &unit : kv.second) {
+        float sim = phoenix::multimodal::cosineSimilarity(query.semanticVector, unit.semanticVector);
+        if (sim > best)
+          best = sim;
+      }
+      scored.emplace_back(kv.first, best);
+    }
+    std::sort(scored.begin(), scored.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+    if (scored.size() > topK)
+      scored.resize(topK);
+    return scored;
+  }
+
   void importSnapshot(const json &snapshot) {
     std::lock_guard<std::mutex> lock(graphMu_);
     nodes_.clear();
     meta_.clear();
     nodeOrder_.clear();
     metaOrder_.clear();
+    nodeSemanticUnits_.clear();
     for (auto &item : snapshot.value("nodes", json::array())) {
       std::string id = item.value("id", "");
       if (id.empty())
@@ -420,6 +470,16 @@ public:
       nodes_[id] = std::move(node);
       nodeOrder_.push_back(id);
       persistNode(id);
+    }
+    if (snapshot.contains("semanticUnits") && snapshot["semanticUnits"].is_object()) {
+      for (auto it = snapshot["semanticUnits"].begin();
+           it != snapshot["semanticUnits"].end(); ++it) {
+        std::vector<phoenix::multimodal::SemanticUnit> units;
+        for (auto &u : it.value()) {
+          units.push_back(phoenix::multimodal::SemanticUnit::fromJson(u));
+        }
+        nodeSemanticUnits_[it.key()] = std::move(units);
+      }
     }
     json meta = snapshot.value("meta", json::object());
     for (auto it = meta.begin(); it != meta.end(); ++it) {
@@ -444,6 +504,7 @@ private:
   std::vector<std::string> nodeOrder_;
   std::unordered_map<std::string, json> meta_;
   std::vector<std::string> metaOrder_;
+  std::unordered_map<std::string, std::vector<phoenix::multimodal::SemanticUnit>> nodeSemanticUnits_;
   bool fullyLoaded_{false};
 
   void loadAll() {

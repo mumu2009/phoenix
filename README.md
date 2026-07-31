@@ -1,6 +1,8 @@
-# Phoenix
+# Phoenix v7.0 "Arthur"
 
 A set of facilities based on LLM, which can efficiently boost the speed and accuracy of LLM in long context, making it more like a person.
+
+> This branch is the v7.0 "Arthur" upgrade of the Phoenix system, focused on true multimodal fusion, primal-sensation/instinct/emotion integration, and comprehensive test coverage.
 
 ---
 
@@ -11,6 +13,10 @@ A set of facilities based on LLM, which can efficiently boost the speed and accu
 - **SparkArray ensemble** — multi-AI voting layer dispatching queries across a controller pool; supports `PersonaForestAverager` and pluggable factory modules; `bigRounds` for iterative consensus
 - **Dual-track context** — independent GNN graph-context and semantic context system that feed into the Transformer together; GNN keywords harmonize with context hints via Jaccard alignment scoring
 - **Attention-sink context window** — configurable `maxTokens`, `importanceThreshold`, `similarityThreshold`, `semanticChunkSize`, and attention-sink tokens via `config/phoenix_tuned.json`
+- **True-multimodal semantic units** — `SemanticUnit`/`SemanticMemory` in `semantic_unit.{hpp,cpp}` with modality-aware fusion, projection, and cosine-similarity search; integrated into `ModernContextManager`, `ContextBuilder`, and `MemeGraph` for v7.0
+- **Primal sensation / instinct layer** — biological interoceptive signals (`primal_sensation.{hpp,cpp}`) and innate drives (`instinct.{hpp,cpp}`) with benefit-harm (趋利避害) evaluation wired into `CognitionAutonomyManager`
+- **Prompt split** — immutable `SystemPrompt` and dynamic `MemoryPrompt` composed by `PromptComposer` (`prompt_split.{hpp,cpp}`); memory portion is regenerated from context and affect signals each turn
+- **External mixed-modal I/O** — `MixedModalPacket`, `MixedModalInputBuffer`, `MixedModalOutputQueue`, and `MixedModalChannelRegistry` (`external_mixed_modal_io.{hpp,cpp}`) translate external text/image/audio/video/sensor payloads into `SemanticUnit` objects
 - **Emotion system** — pluggable emotion processing layer (`emotion_system.cpp`) integrated into the response pipeline
 - **World model** — scene-level world representation (`world_model.hpp`) for environment-aware reasoning
 - **Vision / multimodal input** — `/api/chat` and `/api/transformer/chat` accept `imageContext`, `imageEmbedding`, `imageEmbeddings`, and `vision` payloads; embedding chunks are injected into graph context
@@ -65,6 +71,53 @@ A set of facilities based on LLM, which can efficiently boost the speed and accu
 
 ---
 
+## Model Deployment Topology (v7.0)
+
+Phoenix can place the three heavy model roles on the local host or on separate
+edge devices at startup.  Each role is configured independently:
+
+- `llm` — text generation backend (Ollama / llama.cpp server / BitNet).
+- `vision` — image encoder / JPEA world model.
+- `speech` — audio / 1D JPEA world model.
+
+Configuration comes from command-line arguments, environment variables, or a
+JSON file; later sources override earlier ones.  Examples:
+
+```bash
+# 1) Host runs everything (default)
+phoenix_main.exe
+
+# 2) Edge LLM on another machine, local vision/speech
+phoenix_main.exe \
+  --llm-placement remote \
+  --llm-remote-url http://192.168.1.10:11434 \
+  --llm-remote-method ollama \
+  --llm-remote-model llama3.1:8b
+
+# 3) Three models on three devices via JSON config
+phoenix_main.exe --model-deployment-config config/model_deployment.json
+```
+
+See `doc/v7.0/model_deployment.md` and `config/model_deployment.example.json`
+for the full argument list, environment variables, and the HTTP/JSON protocol
+used by remote vision and speech endpoints.
+
+Helper tools:
+
+```bash
+# Generate a deployment JSON from the command line
+python tools/generate_model_deployment_config.py \
+  --llm remote --llm-url http://192.168.1.10:11434 --llm-method ollama --llm-model llama3.1:8b \
+  --vision remote --vision-url http://192.168.1.11:5000/infer \
+  --speech remote --speech-url http://192.168.1.12:5001/infer \
+  -o config/model_deployment.json
+
+# Example edge inference server for vision/speech (run on the edge devices)
+python tools/model_deployment_edge_example.py --port 5000
+```
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -87,6 +140,11 @@ conan install . --build=missing
 
 # 2. Build all binaries
 compile.bat
+
+# Optional: build without edge image/speech (RDK X5 BPU / remote endpoints)
+# $env:PHOENIX_DISABLE_EDGE_IMAGE = "1"
+# $env:PHOENIX_DISABLE_EDGE_SPEECH = "1"
+# compile.bat
 
 # Artifacts produced:
 #   phoenix_main.exe    — main gateway + AI runtime
@@ -449,7 +507,7 @@ Frontend proxy at 5081 routes `/api/*` → 5080 and `/auth/*` → 5080/api/auth/
 ## Directory Structure
 
 ```
-v6.0Alixander/
+phoenix/
 ├── main.cpp                      # Gateway entry point; all routing assembled here
 ├── main_hub_parts/               # Auto-split segments of main.cpp (116 files)
 ├── frontend_server.cpp           # Frontend service (port 5081) + reverse proxy

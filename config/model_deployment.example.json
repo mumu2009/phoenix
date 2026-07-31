@@ -1,0 +1,30 @@
+{
+  "llm": {
+    "placement": "remote",
+    "remote": {
+      "url": "http://192.168.1.10:11434",
+      "method": "ollama",
+      "modelName": "llama3.1:8b",
+      "timeoutMs": 120000,
+      "headers": {}
+    }
+  },
+  "vision": {
+    "placement": "remote",
+    "remote": {
+      "url": "http://192.168.1.11:5000/infer",
+      "method": "http-json",
+      "timeoutMs": 30000,
+      "headers": {}
+    }
+  },
+  "speech": {
+    "placement": "remote",
+    "remote": {
+      "url": "http://192.168.1.12:5001/infer",
+      "method": "http-json",
+      "timeoutMs": 30000,
+      "headers": {}
+    }
+  }
+}

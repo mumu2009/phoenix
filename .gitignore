@@ -58,8 +58,6 @@ dump.rdb
 Python314/
 Redis-8.0.3-Windows-x64-cygwin-with-Service/
 poppler-25.12.0/
-OpenClaw-2026.2.17.zip
-openclaw-2026.2.17.tar.gz
 outsides/
 # ─── Frontend node_modules ─────────────────────────────────────────────────────
 079project_frontend/node_modules/

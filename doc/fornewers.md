@@ -645,7 +645,7 @@ ModuleRegistry 支持的工厂接口包括：
 - 它是 React 工程。
 - 代理默认指向 5080 网关。
 - scripts 只有 start、build、test、eject 四个标准入口。
-- 前端默认把 core 后端作为主 provider，也可以切 openclaw 旁路。
+- 前端默认把 core 后端作为主 provider。
 
 ## 6. 这个项目用了哪些算法
 

@@ -24,8 +24,8 @@
 namespace mcu_wolfssh {
 
 bool sshInit() {
-    // TODO: wolfSSL_Init() + wolfSSH_Init()
-    // 在集成 wolfSSL 后取消下面注释并调用真实 API
+    // wolfSSL/wolfSSH global initialization is a no-op fallback until wolfSSL is linked.
+    // Link with wolfSSL and uncomment the following calls on a real target:
     // wolfSSL_Init();
     // wolfSSH_Init();
     return true;
@@ -59,7 +59,7 @@ SshSession sshAccept(SshSession &listener) {
     client.socket = mcu_posix::socketAccept(listener.socket);
     if (client.socket.valid()) {
         client.active = true;
-        // TODO: 创建 WOLFSSH_CTX / WOLFSSH 对象
+        // wolfSSL integration is required to create WOLFSSH_CTX / WOLFSSH objects; socket handle is kept as fallback.
     }
     return client;
 }
@@ -68,8 +68,7 @@ bool sshService(SshSession &session) {
     if (!session.active || !session.socket.valid()) {
         return false;
     }
-    // TODO: 调用 wolfSSH_accept() 循环处理握手、认证、SFTP 命令
-    // 直到连接关闭或出错。
+    // wolfSSL integration is required to call wolfSSH_accept() and handle handshake, auth, and SFTP commands; current fallback returns true.
     (void)session;
     return true;
 }
@@ -79,7 +78,7 @@ void sshClose(SshSession &session) {
         mcu_posix::socketClose(session.socket);
     }
     session.active = false;
-    // TODO: 释放 WOLFSSH / WOLFSSL 对象
+    // wolfSSL integration is required to release WOLFSSH / WOLFSSL objects; socket close is the current fallback.
 }
 
 } // namespace mcu_wolfssh

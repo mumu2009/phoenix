@@ -9,7 +9,7 @@ flowchart LR
     G2 --> T1[Transformer Inference]
     T1 --> V1[/api/transformer/verify]
     V1 --> R1[Normalized Response reply/latency/graph/addon]
-    R1 --> F1[Frontend Provider Adapter core/openclaw]
+    R1 --> F1[Frontend Provider Adapter]
 
     D0[tests + robots samples] --> D1[Data Cleaning]
     D1 --> D2[TrainSample Contract]

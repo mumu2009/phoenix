@@ -37,6 +37,13 @@
 #include <windows.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <netdb.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #endif
 
 namespace external_runtime {
@@ -334,27 +341,84 @@ bool backendReady(const BackendRuntimeSpec &spec, const std::string &host, int p
 }
 #else
 bool tcpReady(const std::string &host, int port, int timeoutMs) {
-    (void)host;
-    (void)port;
-    (void)timeoutMs;
-    return false;
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    addrinfo *result = nullptr;
+    const std::string portText = std::to_string(port);
+    if (getaddrinfo(host.c_str(), portText.c_str(), &hints, &result) != 0) {
+        return false;
+    }
+    bool ready = false;
+    for (addrinfo *entry = result; entry != nullptr && !ready; entry = entry->ai_next) {
+        const int socketFd = socket(entry->ai_family, entry->ai_socktype, entry->ai_protocol);
+        if (socketFd < 0) {
+            continue;
+        }
+        const int flags = fcntl(socketFd, F_GETFL, 0);
+        if (flags >= 0) {
+            fcntl(socketFd, F_SETFL, flags | O_NONBLOCK);
+        }
+        const int connectResult = connect(socketFd, entry->ai_addr, entry->ai_addrlen);
+        if (connectResult == 0) {
+            ready = true;
+        } else if (errno == EINPROGRESS) {
+            fd_set writable;
+            FD_ZERO(&writable);
+            FD_SET(socketFd, &writable);
+            timeval wait{};
+            wait.tv_sec = std::max(0, timeoutMs) / 1000;
+            wait.tv_usec = (std::max(0, timeoutMs) % 1000) * 1000;
+            if (select(socketFd + 1, nullptr, &writable, nullptr, &wait) > 0 && FD_ISSET(socketFd, &writable)) {
+                int socketError = 0;
+                socklen_t errorSize = sizeof(socketError);
+                ready = getsockopt(socketFd, SOL_SOCKET, SO_ERROR, &socketError, &errorSize) == 0 && socketError == 0;
+            }
+        }
+        close(socketFd);
+    }
+    freeaddrinfo(result);
+    return ready;
 }
 
 bool httpEndpointReady(const std::string &baseUrl, const std::string &path, int timeoutMs) {
-    (void)baseUrl;
-    (void)path;
-    (void)timeoutMs;
-    return false;
+    auto client = drogon::HttpClient::newHttpClient(baseUrl);
+    if (!client) {
+        return false;
+    }
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->setMethod(drogon::Get);
+    request->setPath(path);
+    std::promise<std::pair<drogon::ReqResult, drogon::HttpResponsePtr>> promise;
+    auto future = promise.get_future();
+    client->sendRequest(request, [&promise](drogon::ReqResult result, const drogon::HttpResponsePtr &response) {
+        try {
+            promise.set_value({result, response});
+        } catch (...) {
+        }
+    });
+    if (future.wait_for(std::chrono::milliseconds(std::max(100, timeoutMs))) != std::future_status::ready) {
+        return false;
+    }
+    const auto response = future.get();
+    return response.first == drogon::ReqResult::Ok && response.second &&
+           response.second->statusCode() >= 200 && response.second->statusCode() < 300;
 }
 
 bool backendReady(const BackendRuntimeSpec &spec, const std::string &host, int port, int timeoutMs) {
-    (void)spec;
-    return tcpReady(host, port, timeoutMs);
+    if (!tcpReady(host, port, timeoutMs)) {
+        return false;
+    }
+    if (spec.provider != "llamacpp") {
+        return true;
+    }
+    return httpEndpointReady(spec.baseUrl, "/health", timeoutMs) &&
+           (httpEndpointReady(spec.baseUrl, "/props", timeoutMs) ||
+            httpEndpointReady(spec.baseUrl, "/v1/models", timeoutMs));
 }
 
-uint32_t launchDetachedProcess(const std::string &commandLine, const fs::path &workingDir) {
-    (void)commandLine;
-    (void)workingDir;
+uint32_t launchDetachedProcess(const std::string &, const fs::path &) {
     return 0;
 }
 #endif

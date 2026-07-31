@@ -43,14 +43,14 @@ std::string lowerCopy(std::string value) {
 
 bool isComputerAlias(const std::string &value) {
 	const std::string lowered = lowerCopy(trimCopy(value));
-	return lowered == "computer" || lowered == "shell" || lowered == "desktop" || lowered == "openclaw";
+	return lowered == "computer" || lowered == "shell" || lowered == "desktop";
 }
 
 std::string stripPrefix(const std::string &text) {
 	std::string trimmed = trimCopy(text);
 	std::string lowered = lowerCopy(trimmed);
 	const std::vector<std::string> prefixes = {
-		"computer:", "shell:", "desktop:", "openclaw:", "电脑:", "桌面:"
+		"computer:", "shell:", "desktop:", "电脑:", "桌面:"
 	};
 	for (const auto &prefix : prefixes) {
 		if (lowered.rfind(prefix, 0) == 0) {

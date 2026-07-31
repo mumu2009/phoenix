@@ -33,12 +33,19 @@
         prompt =
             std::string("Context:\n") + graphContext + "\n\nUser:\n" + text;
 
+      json options = json{{"num_predict", std::max(1, maxTokens)}};
+      if (inferenceOptions.is_object() && !inferenceOptions.empty()) {
+        for (auto it = inferenceOptions.begin(); it != inferenceOptions.end(); ++it) {
+          if (it.value().is_number())
+            options[it.key()] = it.value();
+        }
+      }
       json payload = {
           {"model", selectedModel},
           {"stream", false},
           {"messages",
            json::array({json{{"role", "user"}, {"content", prompt}}})},
-          {"options", json{{"num_predict", std::max(1, maxTokens)}}}};
+          {"options", options}};
       if (!contextHintText.empty())
         payload["contextHint"] = contextHintText;
 
@@ -87,11 +94,11 @@
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons((u_short)port);
+        addr.sin_port = htons(static_cast<unsigned short>(port));
         inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
 
         // Non-blocking connect with select() timeout so connect() never hangs forever
-        u_long nonblk = 1;
+        ioctl_arg_t nonblk = 1;
         ioctlsocket(sock, FIONBIO, &nonblk);
         int cr = connect(sock, (struct sockaddr*)&addr, sizeof(addr));
         bool connected = false;
@@ -102,8 +109,8 @@
           struct timeval tv;
           tv.tv_sec  = timeoutVal / 1000;
           tv.tv_usec = (timeoutVal % 1000) * 1000;
-          if (select(0, nullptr, &wfds, nullptr, &tv) == 1) {
-            int err = 0; int errlen = sizeof(err);
+          if (select((int)sock + 1, nullptr, &wfds, nullptr, &tv) == 1) {
+            int err = 0; sockopt_len_t errlen = sizeof(err);
             getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&err, &errlen);
             connected = (err == 0);
           }
@@ -116,10 +123,20 @@
           return out;
         }
         // Restore blocking mode and set send/recv timeouts
-        u_long blk = 0;
+        ioctl_arg_t blk = 0;
         ioctlsocket(sock, FIONBIO, &blk);
+#ifndef _WIN32
+        {
+          struct timeval tv;
+          tv.tv_sec = timeoutVal / 1000;
+          tv.tv_usec = (timeoutVal % 1000) * 1000;
+          setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+          setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        }
+#else
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutVal, sizeof(timeoutVal));
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeoutVal, sizeof(timeoutVal));
+#endif
 
         int sent = 0;
         while (sent < (int)reqStr.size()) {
@@ -212,7 +229,8 @@
   }
 
   json chatWithLlamaCpp(const std::string &text,
-                        const std::string &graphContext, int maxTokens) {
+                        const std::string &graphContext, int maxTokens,
+                        const json &inferenceOptions = json::object()) {
     bool voterEnabled = false;
     int numPasses = 5;
     double maskRate = 0.05;
@@ -226,7 +244,8 @@
     if (!voterEnabled || numPasses <= 1 || maskRate <= 0.0) {
       return chatWithExternalAdapter(
           "llamacpp", config_.llamaCppBaseUrl, config_.llamaCppModel,
-          config_.llamaCppRequestTimeoutMs, text, graphContext, maxTokens);
+          config_.llamaCppRequestTimeoutMs, text, graphContext, maxTokens,
+          inferenceOptions);
     }
 
     auto maskTokens = [&](const std::string &s,
@@ -260,7 +279,8 @@
       std::string mctx = (i == 0) ? graphContext : maskTokens(graphContext, rng);
       json r = chatWithExternalAdapter(
           "llamacpp", config_.llamaCppBaseUrl, config_.llamaCppModel,
-          config_.llamaCppRequestTimeoutMs, mtext, mctx, maxTokens);
+          config_.llamaCppRequestTimeoutMs, mtext, mctx, maxTokens,
+          inferenceOptions);
       if (!r.is_object()) continue;
       std::string reply = r.value("reply", "");
       if (reply.empty()) continue;
@@ -278,7 +298,8 @@
     if (!best.is_object()) {
       return chatWithExternalAdapter(
           "llamacpp", config_.llamaCppBaseUrl, config_.llamaCppModel,
-          config_.llamaCppRequestTimeoutMs, text, graphContext, maxTokens);
+          config_.llamaCppRequestTimeoutMs, text, graphContext, maxTokens,
+          inferenceOptions);
     }
     best["rfVotes"] = static_cast<int>(candidates.size());
     best["rfBestScore"] = bestScore;
@@ -287,9 +308,11 @@
   }
 
   json chatWithBitNet(const std::string &text, const std::string &graphContext,
-                      int maxTokens) {
+                      int maxTokens,
+                      const json &inferenceOptions = json::object()) {
     return chatWithExternalAdapter(
         "bitnet", config_.bitnetBaseUrl, config_.bitnetModel,
-        config_.bitnetRequestTimeoutMs, text, graphContext, maxTokens);
+        config_.bitnetRequestTimeoutMs, text, graphContext, maxTokens,
+        inferenceOptions);
   }
 

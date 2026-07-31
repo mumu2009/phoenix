@@ -23,6 +23,9 @@ static Config loadConfig(int argc, char **argv) {
   const auto rootDir = getProjectRoot();
   // Load the single authoritative runtime parameter file.
   phoenix::PhoenixConfig::instance().load(rootDir / "config" / "phoenix.json");
+
+  // Load the optional auto-tuned override file.
+  phoenix::tuned::loadTunedConfig(rootDir / "config" / "phoenix_tuned.json");
   auto arg = [&](const std::string &k,
                  const std::string &def = "") -> std::string {
     auto it = args.find(k);
@@ -48,6 +51,11 @@ static Config loadConfig(int argc, char **argv) {
       p = rootDir / p;
     return fs::absolute(p);
   };
+
+  // Load the v7.0 model deployment topology (LLM / vision / speech placement).
+  phoenix::deployment::ModelDeploymentConfig::instance().load(
+      args, rootDir.string(),
+      argOrEnv("model-deployment-config", "AI_MODEL_DEPLOYMENT_CONFIG", ""));
 
   Config c;
   c.baseDir =
@@ -229,6 +237,7 @@ static Config loadConfig(int argc, char **argv) {
       c.transformerBackend = "off";
     }
   }
+
   c.ollamaModel = argOrEnv("ollama-model", "AI_OLLAMA_MODEL", "");
   c.ollamaBaseUrl = argOrEnv("ollama-base-url", "AI_OLLAMA_BASE_URL",
                              "http://127.0.0.1:11434");
@@ -265,6 +274,48 @@ static Config loadConfig(int argc, char **argv) {
                              "AI_EXTERNAL_BACKEND_STYLE_SIM", "false");
     }
     c.externalBackendStyleSim = boolFrom(styleSimRaw, false);
+  }
+
+  // Apply v7.0 remote LLM deployment overrides.  If the user asked for an
+  // edge LLM, the backend, base URL and model name are taken from the
+  // deployment record after the legacy flags, so the deployment config wins.
+  const auto &llmDeployment =
+      phoenix::deployment::ModelDeploymentConfig::instance().llm();
+  const bool llmRemote =
+      (llmDeployment.placement == phoenix::deployment::ModelPlacement::Remote ||
+       llmDeployment.placement == phoenix::deployment::ModelPlacement::Auto) &&
+      !llmDeployment.remote.url.empty();
+  if (llmRemote) {
+    std::string method = llmDeployment.remote.method;
+    if (method != "ollama" && method != "llamacpp" && method != "bitnet")
+      method = "ollama";
+    c.inferenceEnabled = true;
+    c.transformerBackend = method;
+    if (method == "ollama") {
+      c.usingOllama = true;
+      c.ollamaFineTuning = false;
+      c.ollamaBaseUrl = llmDeployment.remote.url;
+      if (!llmDeployment.remote.modelName.empty())
+        c.ollamaModel = llmDeployment.remote.modelName;
+      if (llmDeployment.remote.timeoutMs > 0)
+        c.ollamaRequestTimeoutMs = llmDeployment.remote.timeoutMs;
+    } else if (method == "llamacpp") {
+      c.usingOllama = false;
+      c.ollamaFineTuning = false;
+      c.llamaCppBaseUrl = llmDeployment.remote.url;
+      if (!llmDeployment.remote.modelName.empty())
+        c.llamaCppModel = llmDeployment.remote.modelName;
+      if (llmDeployment.remote.timeoutMs > 0)
+        c.llamaCppRequestTimeoutMs = llmDeployment.remote.timeoutMs;
+    } else if (method == "bitnet") {
+      c.usingOllama = false;
+      c.ollamaFineTuning = false;
+      c.bitnetBaseUrl = llmDeployment.remote.url;
+      if (!llmDeployment.remote.modelName.empty())
+        c.bitnetModel = llmDeployment.remote.modelName;
+      if (llmDeployment.remote.timeoutMs > 0)
+        c.bitnetRequestTimeoutMs = llmDeployment.remote.timeoutMs;
+    }
   }
 
   {
@@ -351,10 +402,19 @@ static Config loadConfig(int argc, char **argv) {
       modelField = modelPath.string();
     };
 
-    if (c.transformerBackend == "llamacpp")
-      ensureGgufModelForBackend("llamacpp", "llamacpp-model", c.llamaCppModel);
-    else if (c.transformerBackend == "bitnet")
+    if (c.transformerBackend == "llamacpp") {
+      // When Phoenix on X5 talks to a host-side llama-server, there is no .gguf on the device.
+      if (isRemoteLlamacppUrl(c.llamaCppBaseUrl)) {
+        std::string configured = trimCopy(c.llamaCppModel);
+        if (configured.empty())
+          configured = "llamacpp";
+        c.llamaCppModel = configured;
+      } else {
+        ensureGgufModelForBackend("llamacpp", "llamacpp-model", c.llamaCppModel);
+      }
+    } else if (c.transformerBackend == "bitnet") {
       ensureGgufModelForBackend("bitnet", "bitnet-model", c.bitnetModel);
+    }
   }
 
   c.transformerBootstrap = boolFrom(
@@ -368,6 +428,11 @@ static Config loadConfig(int argc, char **argv) {
   c.logMode = argOrEnv("log-mode", "AI_LOG_MODE", "release");
   c.exportDir =
       pathArgOrEnv("export-dir", "AI_EXPORT_DIR", rootDir / "runtime_store");
+  c.tunedConfigPath = pathArgOrEnv(
+      "tuned-config", "PHOENIX_TUNED_CONFIG",
+      rootDir / "config" / "phoenix_tuned.json");
+  phoenix::tuned::loadTunedConfig(c.tunedConfigPath);
+
   return c;
 }
 

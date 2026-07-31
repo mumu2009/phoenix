@@ -630,6 +630,8 @@ namespace
 
 		const std::vector<ObjectivePoint> &points() const { return points_; }
 
+		void clear() { points_.clear(); }
+
 	private:
 		static bool dominate(const ObjectivePoint &a, const ObjectivePoint &b)
 		{
@@ -745,7 +747,7 @@ namespace
 
 			for (int g = 0; g < gens; ++g)
 			{
-				auto sub = sampler_.sample(graphStub_, static_cast<std::size_t>(pop), 8);
+				auto sub = sampler_.sample(inputGraph_, static_cast<std::size_t>(pop), 8);
 				for (const auto &sg : sub)
 				{
 					auto pt = scorer_.score(feature, sg, residualWeight, mutationRate, mutationScale);
@@ -764,7 +766,8 @@ namespace
 			return out;
 		}
 
-		void setGraphStub(const Graph &g) { graphStub_ = g; }
+		void setInputGraph(const Graph &g) { inputGraph_ = g; }
+		void reset() { archive_.clear(); }
 		const ParetoArchive &archive() const { return archive_; }
 
 	private:
@@ -779,7 +782,7 @@ namespace
 		MultiObjectiveScorer scorer_;
 		ConstraintHandler constraint_;
 		ParetoArchive archive_;
-		Graph graphStub_;
+		Graph inputGraph_;
 		double mutationRate_{0.1};
 		double mutationScale_{0.1};
 	};
@@ -2396,12 +2399,32 @@ namespace
 				return latest_;
 			}
 
-			auto feature = extractor_.extract(graph, featureDim_);
-			auto semantic = analyzer_.analyze(graph);
+			const std::string fingerprint = graphFingerprint(graph);
+			const bool cacheHit = compiledPlan_.fingerprint == fingerprint;
+			if (!cacheHit)
+			{
+				const auto baseFeature = extractor_.extract(graph, featureDim_);
+				compiledPlan_.normalized = adjacencyNormalizer_.build(graph, 0.1, 0.15);
+				compiledPlan_.laplacian = laplacianBuilder_.buildSymmetricNormalized(graph, compiledPlan_.normalized);
+				compiledPlan_.walkEmbedding = randomWalkEmbedding_.embed(compiledPlan_.normalized, 16, 6, 3, 20260722u);
+				compiledPlan_.spectrum = powerIterationSolver_.topKEigenApprox(compiledPlan_.laplacian, 4, 24, 1e-5, 20260722u);
+				compiledPlan_.feature = populationManager_.fuseFeature(baseFeature, compiledPlan_.walkEmbedding, compiledPlan_.spectrum);
+				compiledPlan_.semantic = analyzer_.analyze(graph);
+				compiledPlan_.community = communityDetector_.detect(graph, compiledPlan_.normalized, 12);
+				compiledPlan_.motif = motifCounter_.count(graph, compiledPlan_.normalized);
+				compiledPlan_.spectralRadius = powerIterationSolver_.spectralRadiusBound(compiledPlan_.laplacian);
+				compiledPlan_.fingerprint = fingerprint;
+			}
 
-			controller_.setGraphStub(graph);
-			auto points = controller_.run(feature, generations, population, residualWeight, mutationRate, mutationScale);
-			auto crowd = crowding_.compute(controller_.archive().points());
+			controller_.reset();
+			controller_.setInputGraph(graph);
+			auto points = controller_.run(compiledPlan_.feature, generations, population, residualWeight, mutationRate, mutationScale);
+			auto ranking = ranker_.rank(points);
+			auto surrogate = surrogateEvaluator_.fit(compiledPlan_.feature, points);
+			auto refined = populationManager_.refine(points, ranking, surrogateEvaluator_.predict(compiledPlan_.feature, surrogate), constraintProjector_, residualWeight);
+			auto crowd = crowding_.compute(refined.refined);
+			const auto annealing = annealingScheduler_.aggregate(annealingScheduler_.buildSchedule(generations, mutationRate, mutationScale, residualWeight));
+			const auto diagnostics = diagnosticsReporter_.build(graph, compiledPlan_.normalized, compiledPlan_.community, compiledPlan_.motif, surrogate, annealing, refined.frontier, compiledPlan_.spectralRadius, compiledPlan_.semantic);
 
 			json genInfo = json::array();
 			for (std::size_t i = 0; i < points.size() && i < 256; ++i)
@@ -2410,7 +2433,7 @@ namespace
 			}
 
 			json topKeywords = json::array();
-			for (const auto &kv : semantic.topKeywords)
+			for (const auto &kv : compiledPlan_.semantic.topKeywords)
 			{
 				topKeywords.push_back(json{{"token", kv.first}, {"score", kv.second}});
 			}
@@ -2421,15 +2444,18 @@ namespace
 				       {"generations", std::clamp(generations, 1, 128)},
 				       {"population", std::clamp(population, 8, 256)},
 				       {"archive", controller_.archive().points().size()},
+				       {"compiledPlan", json{{"fingerprint", fingerprint}, {"cacheHit", cacheHit}, {"featureRows", compiledPlan_.feature.row}, {"featureColumns", compiledPlan_.feature.col}}},
+				       {"invariantCorrection", json{{"normalized", true}, {"constraintProjected", true}, {"spectralRadiusBound", compiledPlan_.spectralRadius}}},
 				       {"crowding", crowd},
 				       {"genInfo", genInfo},
-				       {"semantic", json{{"lexicalDiversity", semantic.lexicalDiversity},
-							 {"edgeEntropy", semantic.edgeEntropy},
-							 {"reciprocity", semantic.reciprocity},
-							 {"avgClustering", semantic.avgClustering},
-							 {"randomWalkCoverage", semantic.randomWalkCoverage},
-							 {"giantComponentRatio", semantic.giantComponentRatio},
-							 {"pagerankSkew", semantic.pagerankSkew},
+				       {"diagnostics", diagnostics},
+				       {"semantic", json{{"lexicalDiversity", compiledPlan_.semantic.lexicalDiversity},
+							 {"edgeEntropy", compiledPlan_.semantic.edgeEntropy},
+							 {"reciprocity", compiledPlan_.semantic.reciprocity},
+							 {"avgClustering", compiledPlan_.semantic.avgClustering},
+							 {"randomWalkCoverage", compiledPlan_.semantic.randomWalkCoverage},
+							 {"giantComponentRatio", compiledPlan_.semantic.giantComponentRatio},
+							 {"pagerankSkew", compiledPlan_.semantic.pagerankSkew},
 							 {"topKeywords", topKeywords}}},
 				       {"ts", gnnTick()}};
 
@@ -2451,6 +2477,42 @@ namespace
 		int generations() const override { return 1; }
 
 	private:
+		struct CompiledGraphPlan
+		{
+			std::string fingerprint;
+			Matrix feature;
+			NormalizedAdjacency normalized;
+			Matrix laplacian;
+			Matrix walkEmbedding;
+			std::vector<std::pair<double, std::vector<double>>> spectrum;
+			SemanticGraphAnalyzer::Summary semantic;
+			CommunityDetector::Result community;
+			MotifCounter::MotifStats motif;
+			double spectralRadius{0.0};
+		};
+
+		static std::string graphFingerprint(const Graph &graph)
+		{
+			std::uint64_t hash = 1469598103934665603ull;
+			auto mix = [&hash](std::uint64_t value)
+			{
+				hash ^= value;
+				hash *= 1099511628211ull;
+			};
+			for (const auto &node : graph.node)
+			{
+				for (unsigned char ch : node)
+					mix(ch);
+				mix(0xff);
+			}
+			for (const auto &edge : graph.edge)
+			{
+				mix(edge.first);
+				mix(edge.second);
+			}
+			return std::to_string(hash) + ":" + std::to_string(graph.node.size()) + ":" + std::to_string(graph.edge.size());
+		}
+
 		void loadCorpus()
 		{
 			docs_.clear();
@@ -2511,8 +2573,21 @@ namespace
 		GraphBuilder builder_;
 		SpectralFeatureExtractor extractor_;
 		SemanticGraphAnalyzer analyzer_;
+		AdjacencyNormalizer adjacencyNormalizer_;
+		LaplacianBuilder laplacianBuilder_;
+		PowerIterationSolver powerIterationSolver_;
+		RandomWalkEmbedding randomWalkEmbedding_;
+		CommunityDetector communityDetector_;
+		MotifCounter motifCounter_;
+		NSGA2Ranker ranker_;
+		SurrogateEvaluator surrogateEvaluator_;
+		ConstraintProjector constraintProjector_;
+		AnnealingScheduler annealingScheduler_;
+		EvolutionPopulationManager populationManager_;
+		DiagnosticsReporter diagnosticsReporter_;
 		CrowdingDistance crowding_;
 		EvolutionController controller_;
+		CompiledGraphPlan compiledPlan_;
 	};
 
 	struct RegisterGnnGaFactory

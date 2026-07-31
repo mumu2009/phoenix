@@ -123,6 +123,50 @@ struct EmotionTensor {
         float ds = surprise - other.surprise;
         return std::sqrt(dv*dv + da*da + dd*dd + dt*dt + dj*dj + df*df + dang*dang + ds*ds);
     }
+
+    /* Human-readable directive derived from the tensor (used in prompt text). */
+    std::string modulationHint() const {
+        std::ostringstream oss;
+        if (arousal >= 0.3f) oss << "high-arousal; ";
+        else if (arousal <= -0.3f) oss << "low-arousal; ";
+        if (fear >= 0.3f) oss << "risk-averse; ";
+        else if (fear <= -0.3f) oss << "risk-tolerant; ";
+        if (trust >= 0.3f) oss << "trust-high; ";
+        else if (trust <= -0.3f) oss << "trust-low verify; ";
+        if (joy >= 0.3f) oss << "optimistic; ";
+        else if (joy <= -0.3f) oss << "cautious; ";
+        if (dominance >= 0.3f) oss << "directive; ";
+        else if (dominance <= -0.3f) oss << "deferential; ";
+        if (valence >= 0.3f) oss << "approach; ";
+        else if (valence <= -0.3f) oss << "avoid; ";
+        if (surprise >= 0.3f) oss << "novelty-attention; ";
+        if (oss.str().empty()) oss << "neutral; ";
+        std::string s = oss.str();
+        s.pop_back(); s.pop_back();
+        return s;
+    }
+
+    /* Map the emotion tensor to LLM inference options.
+       Returns a JSON object with temperature, top_p, presence_penalty and
+       frequency_penalty adjustments.  These are *additive* to the caller's
+       base values and can be clamped by the caller. */
+    nlohmann::json inferenceOptions(float baseTemp = 0.7f,
+                                    float baseTopP = 0.9f) const {
+        float temperature = baseTemp + 0.35f * arousal - 0.15f * fear;
+        float topP = baseTopP + 0.08f * surprise - 0.05f * dominance;
+        float presence = -0.2f * trust + 0.15f * joy;
+        float frequency = 0.15f * anger - 0.1f * valence;
+        temperature = std::max(0.1f, std::min(1.5f, temperature));
+        topP = std::max(0.1f, std::min(1.0f, topP));
+        presence = std::max(-2.0f, std::min(2.0f, presence));
+        frequency = std::max(-2.0f, std::min(2.0f, frequency));
+        return {
+            {"temperature", temperature},
+            {"top_p", topP},
+            {"presence_penalty", presence},
+            {"frequency_penalty", frequency}
+        };
+    }
 };
 
 /* Emotion state with temporal information */
