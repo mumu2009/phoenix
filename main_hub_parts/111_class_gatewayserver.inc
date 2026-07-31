@@ -36,6 +36,8 @@ public:
         boolFrom(getEnv("AI_AUTH_ACCEPT_LOCAL_TOKEN", "true"), true);
     jwtSecret_ = getEnv("AI_AUTH_JWT_SECRET",
                         getEnv("AUTH_JWT_SECRET", "dev-secret-change-me"));
+    cognitionAutonomyEnabled_ =
+        boolFrom(getEnv("AI_ENABLE_COGNITION_AUTONOMY", "true"), true);
     rlDisabled_ = config_.disableLearning || config_.disableRL;
     advDisabled_ = config_.disableLearning || config_.disableADV;
     gnnGaDisabled_ = config_.disableLearning;
@@ -350,6 +352,8 @@ private:
   autonomy::SpiderAutonomyManager spiderAutonomy_;
   autonomy::OptimizerAutonomyManager optimizerAutonomy_;
   autonomy::DatasetCatalogManager datasetCatalog_;
+  autonomy::CognitionAutonomyManager cognitionManager_;
+  phoenix::memory::HierarchicalMemory cognitionMemory_;
   std::mutex transformerMu_;
   std::mutex chatMu_;
   Config config_;
@@ -367,6 +371,7 @@ private:
   bool dialogLearnGraphContext_{false};
   bool dataCleaningEnabled_{true};
   bool retrainTrace_{false};
+  bool cognitionAutonomyEnabled_{true};
   GatewayContextService contextService_;
   size_t dataCleanMaxChars_{2048};
   std::atomic<uint64_t> cleanedInputCount_{0};
@@ -393,6 +398,92 @@ private:
     double gnnEvery{40};
   } dialogThresholds_;
   bool releaseSnapshotLogged_{false};
+
+  struct CognitionPack {
+    std::string context;
+    nlohmann::json inferenceOptions;
+    nlohmann::json emotionTensor;
+    std::vector<nlohmann::json> mixedModalOutputs;
+    nlohmann::json worldEvidence;
+  };
+
+  CognitionPack runCognitionAutonomy(const nlohmann::json &body,
+                                     const std::string &userText,
+                                     const std::string &baseContext) {
+    CognitionPack pack;
+    pack.context = baseContext;
+    if (!cognitionAutonomyEnabled_)
+      return pack;
+    try {
+      std::string sessionId = body.value("sessionId", "");
+      nlohmann::json observePayload;
+      observePayload["sessionId"] = sessionId;
+      observePayload["reply"] = userText;
+      observePayload["autonomySource"] = "gateway-chat";
+      observePayload["worldUncertainty"] = body.value("worldUncertainty", 0.25);
+      nlohmann::json worldState;
+      worldState["graphContext"] = baseContext;
+      worldState["graphResult"] = body.value("graphResult", nlohmann::json::object());
+      if (!sessionId.empty()) {
+        auto prev = cognitionMemory_.get("cognition:" + sessionId);
+        if (prev)
+          worldState["previousCognition"] = *prev;
+      }
+      auto obs = cognitionManager_.observe(observePayload, worldState);
+      if (!obs.value("ok", false))
+        return pack;
+
+      nlohmann::json iterPayload;
+      iterPayload["sessionId"] = body.value("sessionId", "");
+      iterPayload["userPrompt"] = userText;
+      iterPayload["graphContext"] = baseContext;
+      iterPayload["body"] = body;
+      auto iter = cognitionManager_.iterate(iterPayload, worldState);
+      if (!iter.value("ok", false))
+        return pack;
+
+      const nlohmann::json &r = iter.value("result", nlohmann::json::object());
+      pack.inferenceOptions = r.value("inferenceOptions", nlohmann::json::object());
+      pack.emotionTensor = r.value("emotionTensor", nlohmann::json::object());
+      pack.mixedModalOutputs = r.value("mixedModalOutputs", nlohmann::json::array());
+      pack.worldEvidence = r.value("worldEvidence", nlohmann::json::array());
+      std::string mod = r.value("cognitionModulation", "");
+      if (!mod.empty()) {
+        if (pack.context.empty())
+          pack.context = mod;
+        else
+          pack.context = mod + "\n" + pack.context;
+      }
+
+      // Run graph-diffusion summarization over the provided graph result.
+      phoenix::graph::GraphDiffusionSummarizer diffusor;
+      auto diffSummary = diffusor.summarizeFromJson(worldState["graphResult"]);
+      if (!diffSummary.rankedNodes.empty()) {
+        if (!pack.worldEvidence.is_array())
+          pack.worldEvidence = nlohmann::json::array();
+        pack.worldEvidence.push_back(
+            {{"stage", "graphDiffusion"}, {"summary", diffSummary.toJson()}});
+      }
+
+      // Persist the cognition pack in hierarchical memory for the next turn.
+      if (!sessionId.empty()) {
+        nlohmann::json packJson;
+        packJson["inferenceOptions"] = pack.inferenceOptions;
+        packJson["emotionTensor"] = pack.emotionTensor;
+        packJson["worldEvidence"] = pack.worldEvidence;
+        packJson["mixedModalOutputs"] = pack.mixedModalOutputs;
+        double activation = 0.5;
+        if (pack.emotionTensor.is_object() &&
+            pack.emotionTensor.contains("arousal") &&
+            pack.emotionTensor["arousal"].is_number()) {
+          activation = 0.5 + 0.5 * pack.emotionTensor["arousal"].get<double>();
+        }
+        cognitionMemory_.put("cognition:" + sessionId, packJson, activation);
+      }
+    } catch (...) {
+    }
+    return pack;
+  }
 
   void loadDialogConfig() {
     dialogThresholds_.rlEvery =
@@ -684,7 +775,8 @@ private:
   }
 
   json chatWithOllama(const std::string &text, const std::string &graphContext,
-                      int maxTokens) {
+                      int maxTokens,
+                      const json &inferenceOptions = json::object()) {
     json out = json::object();
     out["provider"] =
         config_.ollamaFineTuning ? "ollama+fine-tuning" : "ollama";
@@ -759,12 +851,19 @@ private:
         prompt =
             std::string("Context:\n") + graphContext + "\n\nUser:\n" + text;
       }
+      json options = json{{"num_predict", std::max(16, maxTokens)}};
+      if (inferenceOptions.is_object() && !inferenceOptions.empty()) {
+        for (auto it = inferenceOptions.begin(); it != inferenceOptions.end(); ++it) {
+          if (it.value().is_number())
+            options[it.key()] = it.value();
+        }
+      }
       json payload = {
           {"model", selectedModel},
           {"stream", false},
           {"messages",
            json::array({json{{"role", "user"}, {"content", prompt}}})},
-          {"options", json{{"num_predict", std::max(16, maxTokens)}}}};
+          {"options", options}};
 
       auto client = drogon::HttpClient::newHttpClient(
           config_.ollamaBaseUrl.empty() ? std::string("http://127.0.0.1:11434")
@@ -860,5 +959,6 @@ private:
                                const std::string &baseUrl,
                                const std::string &model, int timeoutMs,
                                const std::string &text,
-                               const std::string &graphContext, int maxTokens) {
+                               const std::string &graphContext, int maxTokens,
+                               const json &inferenceOptions = json::object()) {
     json out = json::object();

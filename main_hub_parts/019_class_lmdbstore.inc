@@ -2,9 +2,6 @@
    Segment: class_LmdbStore
    Original lines: 3016-3136 */
 
-// Disabled due to pre-existing compilation errors unrelated to LoRA integration
-#if 0
-
 class LmdbStore : public KeyValueStore {
 public:
   LmdbStore(const std::string &name, const fs::path &rootDir,
@@ -126,4 +123,3 @@ private:
   MDB_env *env_{nullptr};
   MDB_dbi dbi_{0};
 };
-#endif

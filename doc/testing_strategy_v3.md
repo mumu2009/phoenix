@@ -34,7 +34,6 @@
 - `npm test -- --watchAll=false`
 - 重点验证：
   - 发送消息主流程不回归
-  - `core/openclaw` provider 切换后返回结构能被 UI 正确消费
 
 ## 4. 失败分级处理
 

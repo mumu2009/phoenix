@@ -1,0 +1,690 @@
+const API = '';
+
+const state = {
+    diagram: { direction: 'LR', nodes: [], edges: [], annotations: [], subgraphs: [] },
+    view: { panX: 0, panY: 0, zoom: 1 },
+    mode: 'select',
+    selection: { type: 'none', id: null },
+    drag: null,
+    pan: null,
+    addArrow: null,
+    nodeIdCounter: 1,
+    edgeIdCounter: 1,
+    annIdCounter: 1,
+    undoStack: [],
+    undoLimit: 30,
+};
+
+const canvas = document.getElementById('canvas');
+const viewport = document.getElementById('viewport');
+const wrapper = document.getElementById('canvas-wrapper');
+const zoomLabel = document.getElementById('zoom-level');
+const dirSelect = document.getElementById('direction-select');
+
+const SHAPE_MAP = {
+    box: 'rect', round: 'rect', circle: 'circle', diamond: 'polygon',
+    stadium: 'rect', subroutine: 'rect', cylinder: 'path', hexagon: 'polygon', asymmetric: 'path'
+};
+
+function setMode(mode) {
+    state.mode = mode;
+    document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
+    const map = { select: 'btn-select', pan: 'btn-pan', addNode: 'btn-add-node', addArrow: 'btn-add-arrow', addAnnotation: 'btn-add-annotation' };
+    document.getElementById(map[mode])?.classList.add('active');
+    wrapper.className = 'canvas-wrapper ' + (mode === 'pan' ? 'panning' : mode === 'addNode' ? 'adding-node' : mode === 'addArrow' ? 'adding-arrow' : mode === 'addAnnotation' ? 'adding-annotation' : '');
+}
+
+function estimateNodeSize(label) {
+    const normalized = label.replace(/<br\s*\/?>/gi, '\n');
+    const lines = normalized.split('\n');
+    const maxLen = Math.max(...lines.map(l => l.length), 8);
+    const hasCJK = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(normalized);
+    const charWidth = hasCJK ? 14 : 8;
+    return { width: Math.max(140, maxLen * charWidth + 32), height: Math.max(50, lines.length * 18 + 24) };
+}
+
+function nextNodeId() { return 'n' + (state.nodeIdCounter++); }
+function nextEdgeId() { return 'e' + (state.edgeIdCounter++); }
+function nextAnnId() { return 'a' + (state.annIdCounter++); }
+
+function snapshotDiagram() {
+    return JSON.parse(JSON.stringify({
+        diagram: state.diagram,
+        nodeIdCounter: state.nodeIdCounter,
+        edgeIdCounter: state.edgeIdCounter,
+        annIdCounter: state.annIdCounter,
+    }));
+}
+
+function pushUndo() {
+    state.undoStack.push(snapshotDiagram());
+    if (state.undoStack.length > state.undoLimit) state.undoStack.shift();
+}
+
+function undo() {
+    if (!state.undoStack.length) return;
+    const snap = state.undoStack.pop();
+    state.diagram = snap.diagram;
+    state.nodeIdCounter = snap.nodeIdCounter;
+    state.edgeIdCounter = snap.edgeIdCounter;
+    state.annIdCounter = snap.annIdCounter;
+    state.selection = { type: 'none', id: null };
+    state.addArrow = null;
+    state.drag = null;
+    state.pan = null;
+    render();
+}
+
+function focusPropertyInput(selector) {
+    const el = document.querySelector(selector);
+    if (el) { el.focus(); const len = el.value.length; el.setSelectionRange(len, len); }
+}
+
+function worldToScreen(x, y) {
+    return { x: x * state.view.zoom + state.view.panX, y: y * state.view.zoom + state.view.panY };
+}
+function screenToWorld(x, y) {
+    return { x: (x - state.view.panX) / state.view.zoom, y: (y - state.view.panY) / state.view.zoom };
+}
+
+function getShapePath(n) {
+    const x = 0, y = 0, w = n.width, h = n.height;
+    switch (n.shape) {
+        case 'round': return { d: `M${x+6},${y} h${w-12} a6,6 0 0 1 6,6 v${h-12} a6,6 0 0 1 -6,6 h-${w-12} a6,6 0 0 1 -6,-6 v-${h-12} a6,6 0 0 1 6,-6 z`, tag: 'path' };
+        case 'circle': return { cx: w/2, cy: h/2, r: Math.min(w,h)/2, tag: 'circle' };
+        case 'diamond': return { d: `M${w/2},0 L${w},${h/2} L${w/2},${h} L0,${h/2} Z`, tag: 'polygon' };
+        case 'hexagon': return { d: `M${w*0.25},0 H${w*0.75} L${w},${h/2} L${w*0.75},${h} H${w*0.25} L0,${h/2} Z`, tag: 'polygon' };
+        case 'stadium': return { d: `M${h/2},0 H${w-h/2} a${h/2},${h/2} 0 0 1 0,${h} H${h/2} a${h/2},${h/2} 0 0 1 0,-${h} z`, tag: 'path' };
+        default: return { x: 0, y: 0, width: w, height: h, tag: 'rect' };
+    }
+}
+
+function render() {
+    renderCanvas();
+    updateUI();
+}
+
+function renderCanvas() {
+    viewport.innerHTML = '';
+    viewport.setAttribute('transform', `translate(${state.view.panX},${state.view.panY}) scale(${state.view.zoom})`);
+    renderSubgraphs();
+    renderEdges();
+    renderAnnotations();
+    renderNodes();
+}
+
+function updateUI() {
+    updateAnnotationList();
+    updatePropertiesPanel();
+}
+
+function renderSubgraphs() {
+    const groups = {};
+    for (const n of state.diagram.nodes) {
+        if (n.subgraph) groups[n.subgraph] = groups[n.subgraph] || [];
+        if (n.subgraph) groups[n.subgraph].push(n);
+    }
+    for (const sg of state.diagram.subgraphs || []) {
+        const nodes = groups[sg.id] || [];
+        if (nodes.length < 2) continue;
+        const xs = nodes.map(n => n.x).concat(nodes.map(n => n.x + n.width));
+        const ys = nodes.map(n => n.y).concat(nodes.map(n => n.y + n.height));
+        const sx = Math.min(...xs) - 20, sy = Math.min(...ys) - 35;
+        const sw = Math.max(...xs) - sx + 20, sh = Math.max(...ys) - sy + 20;
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', sx); rect.setAttribute('y', sy); rect.setAttribute('width', sw); rect.setAttribute('height', sh);
+        rect.setAttribute('rx', 6); rect.setAttribute('class', 'subgraph-rect');
+        g.appendChild(rect);
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', sx + 8); text.setAttribute('y', sy + 18); text.setAttribute('class', 'subgraph-label');
+        text.textContent = sg.label || sg.id;
+        g.appendChild(text);
+        viewport.appendChild(g);
+    }
+}
+
+function renderNodes() {
+    for (const n of state.diagram.nodes) {
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('transform', `translate(${n.x},${n.y})`);
+        g.setAttribute('data-id', n.id); g.setAttribute('data-type', 'node');
+        g.style.cursor = state.mode === 'select' ? 'move' : 'pointer';
+
+        const shape = getShapePath(n);
+        let el;
+        if (shape.tag === 'circle') {
+            el = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            el.setAttribute('cx', shape.cx); el.setAttribute('cy', shape.cy); el.setAttribute('r', shape.r);
+        } else if (shape.tag === 'rect') {
+            el = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            el.setAttribute('x', shape.x); el.setAttribute('y', shape.y); el.setAttribute('width', shape.width); el.setAttribute('height', shape.height);
+            el.setAttribute('rx', n.shape === 'round' || n.shape === 'stadium' ? (n.shape === 'stadium' ? n.height/2 : 6) : 0);
+        } else {
+            el = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+            el.setAttribute('points', shape.d.replace(/[MLHZ]/g, ' ').trim());
+            const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            pathEl.setAttribute('d', shape.d); el = pathEl;
+        }
+        el.setAttribute('class', 'node-shape' + (state.selection.type === 'node' && state.selection.id === n.id ? ' selected' : ''));
+        g.appendChild(el);
+
+        const lines = n.label.split('\n');
+        const startY = n.height / 2 - (lines.length - 1) * 8 + 4;
+        lines.forEach((line, i) => {
+            const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            t.setAttribute('x', n.width / 2); t.setAttribute('y', startY + i * 16);
+            t.setAttribute('class', 'node-label'); t.setAttribute('text-anchor', 'middle');
+            t.textContent = line;
+            g.appendChild(t);
+        });
+
+        g.addEventListener('mousedown', e => onNodeMouseDown(e, n));
+        viewport.appendChild(g);
+    }
+}
+
+function nodeCenter(n) {
+    return { x: n.x + n.width / 2, y: n.y + n.height / 2 };
+}
+
+function edgeEndPoints(e) {
+    const src = state.diagram.nodes.find(n => n.id === e.source);
+    const tgt = state.diagram.nodes.find(n => n.id === e.target);
+    if (!src || !tgt) return null;
+    const c1 = nodeCenter(src), c2 = nodeCenter(tgt);
+    return { x1: c1.x, y1: c1.y, x2: c2.x, y2: c2.y, src, tgt };
+}
+
+function renderEdges() {
+    // defs marker
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    defs.innerHTML = `
+        <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#334155"/>
+        </marker>
+        <marker id="arrowhead-dotted" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/>
+        </marker>`;
+    viewport.appendChild(defs);
+
+    for (const e of state.diagram.edges) {
+        const pts = edgeEndPoints(e);
+        if (!pts) continue;
+        const { x1, y1, x2, y2 } = pts;
+        const midX = (x1 + x2) / 2;
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('data-id', e.id); g.setAttribute('data-type', 'edge');
+        g.style.cursor = 'pointer';
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}`);
+        path.setAttribute('class', 'edge-path' + (e.style === 'dotted' ? ' dotted' : e.style === 'thick' ? ' thick' : e.style === 'invisible' ? ' invisible' : '')
+            + (state.selection.type === 'edge' && state.selection.id === e.id ? ' selected' : ''));
+        path.setAttribute('marker-end', `url(#${e.style === 'dotted' ? 'arrowhead-dotted' : 'arrowhead'})`);
+        g.appendChild(path);
+
+        if (e.label) {
+            const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            bg.setAttribute('x', midX - e.label.length * 3.5 - 4); bg.setAttribute('y', (y1 + y2) / 2 - 10);
+            bg.setAttribute('width', e.label.length * 7 + 8); bg.setAttribute('height', 18);
+            bg.setAttribute('class', 'edge-label-bg');
+            g.appendChild(bg);
+            const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            t.setAttribute('x', midX); t.setAttribute('y', (y1 + y2) / 2 + 4);
+            t.setAttribute('class', 'edge-label'); t.setAttribute('text-anchor', 'middle');
+            t.textContent = e.label;
+            g.appendChild(t);
+        }
+        g.addEventListener('mousedown', ev => onEdgeMouseDown(ev, e));
+        viewport.appendChild(g);
+    }
+
+    if (state.addArrow && state.addArrow.tempLine) {
+        const temp = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        temp.setAttribute('d', state.addArrow.tempLine);
+        temp.setAttribute('class', 'temp-edge'); temp.setAttribute('marker-end', 'url(#arrowhead)');
+        viewport.appendChild(temp);
+    }
+}
+
+function renderAnnotations() {
+    for (const a of state.diagram.annotations) {
+        const target = state.diagram.nodes.find(n => n.id === a.targetId);
+        const x = target ? target.x + target.width + 6 : a.x || 0;
+        const y = target ? target.y + 10 : a.y || 0;
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('transform', `translate(${x},${y})`);
+        g.setAttribute('data-id', a.id); g.setAttribute('data-type', 'annotation');
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('r', 6); circle.setAttribute('class', 'annotation-marker');
+        g.appendChild(circle);
+        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        t.setAttribute('x', 10); t.setAttribute('y', 4); t.setAttribute('class', 'annotation-text');
+        t.textContent = a.text.substring(0, 30);
+        g.appendChild(t);
+        g.style.cursor = 'pointer';
+        g.addEventListener('mousedown', ev => { ev.stopPropagation(); selectItem('annotation', a.id); });
+        viewport.appendChild(g);
+    }
+}
+
+function selectItem(type, id) {
+    state.selection = { type, id };
+    render();
+}
+
+function onNodeMouseDown(e, n) {
+    e.stopPropagation();
+    if (state.mode === 'addArrow') {
+        state.addArrow = { sourceId: n.id, sx: n.x + n.width / 2, sy: n.y + n.height / 2 };
+        return;
+    }
+    if (state.mode === 'addAnnotation') {
+        addAnnotationAt(n.id);
+        setMode('select');
+        return;
+    }
+    selectItem('node', n.id);
+    if (state.mode === 'select') {
+        pushUndo();
+        state.drag = { targetId: n.id, startX: e.clientX, startY: e.clientY, origX: n.x, origY: n.y };
+    }
+}
+
+function createEdgeAnchorAt(x, y) {
+    const id = nextNodeId();
+    state.diagram.nodes.push({ id, label: '●', shape: 'circle', x: x - 10, y: y - 10, width: 20, height: 20, subgraph: null, annotation: '' });
+    return id;
+}
+
+function onEdgeMouseDown(e, edge) {
+    e.stopPropagation();
+    if (state.mode === 'addArrow') {
+        const p = screenToWorld(e.offsetX, e.offsetY);
+        const anchorId = createEdgeAnchorAt(p.x, p.y);
+        if (!state.addArrow) {
+            state.addArrow = { sourceId: anchorId, sx: p.x, sy: p.y };
+        } else {
+            state.diagram.edges.push({ id: nextEdgeId(), source: state.addArrow.sourceId, target: anchorId, label: '', style: 'solid', pointsToEdge: edge.id });
+            state.addArrow = null;
+            render();
+        }
+        return;
+    }
+    selectItem('edge', edge.id);
+}
+
+function onCanvasMouseDown(e) {
+    if (state.mode === 'pan' || (e.button === 1) || (e.shiftKey)) {
+        state.pan = { startX: e.clientX, startY: e.clientY, origPanX: state.view.panX, origPanY: state.view.panY };
+        return;
+    }
+    if (state.mode === 'addNode') {
+        const p = screenToWorld(e.offsetX, e.offsetY);
+        pushUndo();
+        addNodeAt(p.x, p.y);
+        setMode('select');
+        return;
+    }
+    selectItem('none', null);
+}
+
+function onCanvasMouseMove(e) {
+    if (state.drag) {
+        const dx = (e.clientX - state.drag.startX) / state.view.zoom;
+        const dy = (e.clientY - state.drag.startY) / state.view.zoom;
+        const n = state.diagram.nodes.find(n => n.id === state.drag.targetId);
+        if (n) { n.x = state.drag.origX + dx; n.y = state.drag.origY + dy; renderCanvas(); }
+        return;
+    }
+    if (state.pan) {
+        state.view.panX = state.pan.origPanX + (e.clientX - state.pan.startX);
+        state.view.panY = state.pan.origPanY + (e.clientY - state.pan.startY);
+        renderCanvas(); return;
+    }
+    if (state.addArrow) {
+        const p = screenToWorld(e.offsetX, e.offsetY);
+        state.addArrow.tempLine = `M${state.addArrow.sx},${state.addArrow.sy} C${(state.addArrow.sx + p.x) / 2},${state.addArrow.sy} ${(state.addArrow.sx + p.x) / 2},${p.y} ${p.x},${p.y}`;
+        renderCanvas();
+        return;
+    }
+}
+
+function findEdgeNear(p, threshold = 20) {
+    let best = null, bestDist = Infinity;
+    for (const e of state.diagram.edges) {
+        const pts = edgeEndPoints(e);
+        if (!pts) continue;
+        const mx = (pts.x1 + pts.x2) / 2, my = (pts.y1 + pts.y2) / 2;
+        const dist = Math.hypot(mx - p.x, my - p.y);
+        if (dist < threshold && dist < bestDist) {
+            best = e; bestDist = dist;
+        }
+    }
+    return best;
+}
+
+function onCanvasMouseUp(e) {
+    if (state.addArrow) {
+        pushUndo();
+        const p = screenToWorld(e.offsetX, e.offsetY);
+        const target = state.diagram.nodes.find(n => p.x >= n.x && p.x <= n.x + n.width && p.y >= n.y && p.y <= n.y + n.height);
+        if (target && target.id !== state.addArrow.sourceId) {
+            state.diagram.edges.push({ id: nextEdgeId(), source: state.addArrow.sourceId, target: target.id, label: '', style: 'solid', pointsToEdge: null });
+        } else {
+            const edge = findEdgeNear(p, 30);
+            if (edge) {
+                const anchorId = createEdgeAnchorAt(p.x, p.y);
+                state.diagram.edges.push({ id: nextEdgeId(), source: state.addArrow.sourceId, target: anchorId, label: '', style: 'solid', pointsToEdge: edge.id });
+            }
+        }
+        state.addArrow = null; render();
+    }
+    state.drag = null; state.pan = null;
+}
+
+function onWheel(e) {
+    e.preventDefault();
+    const scale = e.deltaY > 0 ? 0.9 : 1.1;
+    const p = screenToWorld(e.offsetX, e.offsetY);
+    state.view.zoom = Math.max(0.1, Math.min(10, state.view.zoom * scale));
+    const sp = worldToScreen(p.x, p.y);
+    state.view.panX += e.offsetX - sp.x;
+    state.view.panY += e.offsetY - sp.y;
+    updateZoomLabel(); render();
+}
+
+function addNodeAt(x, y) {
+    const id = nextNodeId();
+    const size = estimateNodeSize(id);
+    state.diagram.nodes.push({ id, label: id, shape: 'box', x, y, width: size.width, height: size.height, subgraph: null, annotation: '' });
+    selectItem('node', id);
+}
+
+function addAnnotationAt(targetId) {
+    pushUndo();
+    const id = nextAnnId();
+    state.diagram.annotations.push({ id, text: '新注释', targetId, x: 0, y: 0 });
+    selectItem('annotation', id);
+}
+
+function updateZoomLabel() { zoomLabel.textContent = Math.round(state.view.zoom * 100) + '%'; }
+
+function fitView() {
+    if (!state.diagram.nodes.length) return;
+    const xs = state.diagram.nodes.map(n => n.x).concat(state.diagram.nodes.map(n => n.x + n.width));
+    const ys = state.diagram.nodes.map(n => n.y).concat(state.diagram.nodes.map(n => n.y + n.height));
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+    const pad = 60;
+    const ww = wrapper.clientWidth, wh = wrapper.clientHeight;
+    const scale = Math.min(ww / (maxX - minX + 2 * pad), wh / (maxY - minY + 2 * pad), 1);
+    state.view.zoom = Math.max(0.1, scale);
+    state.view.panX = -minX * state.view.zoom + pad;
+    state.view.panY = -minY * state.view.zoom + pad;
+    updateZoomLabel(); render();
+}
+
+function updateAnnotationList() {
+    const list = document.getElementById('annotation-list');
+    list.innerHTML = '';
+    if (!state.diagram.annotations.length) { list.innerHTML = '<p class="placeholder">暂无注释</p>'; return; }
+    for (const a of state.diagram.annotations) {
+        const target = state.diagram.nodes.find(n => n.id === a.targetId);
+        const div = document.createElement('div'); div.className = 'annotation-item';
+        div.innerHTML = `<div class="target">目标: ${target ? target.label : a.targetId}</div><div>${a.text}</div>`;
+        div.onclick = () => selectItem('annotation', a.id);
+        list.appendChild(div);
+    }
+}
+
+function updatePropertiesPanel() {
+    const panel = document.getElementById('properties-panel');
+    panel.innerHTML = '';
+    const { type, id } = state.selection;
+    if (type === 'none') { panel.innerHTML = '<p class="placeholder">未选择任何元素</p>'; return; }
+
+    if (type === 'node') {
+        const n = state.diagram.nodes.find(x => x.id === id);
+        if (!n) return;
+        panel.innerHTML = `
+            <label>ID</label><input id="prop-id" value="${n.id}" readonly>
+            <label>标签</label><textarea id="prop-label">${n.label}</textarea>
+            <label>形状</label>
+            <select id="prop-shape">
+                <option value="box" ${n.shape === 'box' ? 'selected' : ''}>矩形</option>
+                <option value="round" ${n.shape === 'round' ? 'selected' : ''}>圆角</option>
+                <option value="circle" ${n.shape === 'circle' ? 'selected' : ''}>圆形</option>
+                <option value="diamond" ${n.shape === 'diamond' ? 'selected' : ''}>菱形</option>
+                <option value="stadium" ${n.shape === 'stadium' ? 'selected' : ''}>体育场</option>
+                <option value="hexagon" ${n.shape === 'hexagon' ? 'selected' : ''}>六边形</option>
+            </select>
+            <button id="btn-del-node">删除节点</button>
+        `;
+        document.getElementById('prop-label').oninput = () => { n.label = document.getElementById('prop-label').value; renderCanvas(); };
+        document.getElementById('prop-shape').onchange = () => { n.shape = document.getElementById('prop-shape').value; renderCanvas(); };
+        document.getElementById('btn-del-node').onclick = () => {
+            state.diagram.nodes = state.diagram.nodes.filter(x => x.id !== id);
+            state.diagram.edges = state.diagram.edges.filter(e => e.source !== id && e.target !== id);
+            state.diagram.annotations = state.diagram.annotations.filter(a => a.targetId !== id);
+            selectItem('none', null); render();
+        };
+    } else if (type === 'edge') {
+        const e = state.diagram.edges.find(x => x.id === id);
+        if (!e) return;
+        panel.innerHTML = `
+            <label>源</label><input id="prop-src" value="${e.source}" readonly>
+            <label>目标</label><input id="prop-tgt" value="${e.target}" readonly>
+            <label>标签</label><input id="prop-label" value="${e.label}">
+            <label>样式</label>
+            <select id="prop-style">
+                <option value="solid" ${e.style === 'solid' ? 'selected' : ''}>实线</option>
+                <option value="dotted" ${e.style === 'dotted' ? 'selected' : ''}>虚线/点线</option>
+                <option value="thick" ${e.style === 'thick' ? 'selected' : ''}>粗线</option>
+                <option value="invisible" ${e.style === 'invisible' ? 'selected' : ''}>不可见</option>
+            </select>
+            <button id="btn-del-edge">删除箭头</button>
+        `;
+        document.getElementById('prop-label').oninput = () => { e.label = document.getElementById('prop-label').value; renderCanvas(); };
+        document.getElementById('prop-style').onchange = () => { e.style = document.getElementById('prop-style').value; renderCanvas(); };
+        document.getElementById('btn-del-edge').onclick = () => { state.diagram.edges = state.diagram.edges.filter(x => x.id !== id); selectItem('none', null); render(); };
+    } else if (type === 'annotation') {
+        const a = state.diagram.annotations.find(x => x.id === id);
+        if (!a) return;
+        panel.innerHTML = `
+            <label>注释</label><textarea id="prop-text">${a.text}</textarea>
+            <label>目标节点 ID</label><input id="prop-target" value="${a.targetId}">
+            <button id="btn-del-ann">删除注释</button>
+        `;
+        document.getElementById('prop-text').oninput = () => { a.text = document.getElementById('prop-text').value; renderCanvas(); };
+        document.getElementById('prop-target').onchange = () => { a.targetId = document.getElementById('prop-target').value; renderCanvas(); };
+        document.getElementById('btn-del-ann').onclick = () => { state.diagram.annotations = state.diagram.annotations.filter(x => x.id !== id); selectItem('none', null); render(); };
+    }
+}
+
+async function apiCall(path, payload) {
+    const res = await fetch(API + path, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    if (!res.ok) { const txt = await res.text(); alert('API error: ' + txt); return null; }
+    return await res.json();
+}
+
+async function importMermaid(code, fromMarkdown) {
+    const data = await apiCall('/api/parse_mermaid', { code, fromMarkdown });
+    if (data && data.ok) {
+        pushUndo();
+        loadDiagram(data.diagram);
+        dirSelect.value = data.diagram.direction || 'LR';
+        setMode('select');
+    }
+}
+
+async function autoLayout() {
+    pushUndo();
+    const data = await apiCall('/api/layout', { diagram: state.diagram });
+    if (data && data.ok) {
+        loadDiagram(data.diagram);
+        setMode('select');
+    }
+}
+
+function loadDiagram(d) {
+    state.diagram = { direction: d.direction || 'LR', nodes: d.nodes || [], edges: d.edges || [], annotations: d.annotations || [], subgraphs: d.subgraphs || [] };
+    // ensure numeric sizes
+    for (const n of state.diagram.nodes) {
+        if (!n.width || !n.height) { const s = estimateNodeSize(n.label); n.width = s.width; n.height = s.height; }
+    }
+    // recompute counters
+    const nums = (arr, prefix) => arr.map(x => parseInt(x.id.replace(prefix, '')) || 0);
+    state.nodeIdCounter = Math.max(1, ...nums(state.diagram.nodes, 'n')) + 1;
+    state.edgeIdCounter = Math.max(1, ...nums(state.diagram.edges, 'e')) + 1;
+    state.annIdCounter = Math.max(1, ...nums(state.diagram.annotations, 'a')) + 1;
+    selectItem('none', null); fitView();
+}
+
+async function exportMermaid() {
+    const data = await apiCall('/api/export/mermaid', { diagram: state.diagram });
+    if (data && data.ok) downloadText('diagram.mmd', data.mermaid);
+}
+
+async function exportJson() {
+    const res = await fetch(API + '/api/export/json', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ diagram: state.diagram })
+    });
+    if (!res.ok) return alert('Export JSON failed');
+    const blob = await res.blob(); downloadBlob(blob, 'diagram.json');
+}
+
+async function exportSvg() {
+    const data = await apiCall('/api/export/svg', { diagram: state.diagram });
+    if (data && data.ok) downloadText('diagram.svg', data.svg);
+}
+
+async function exportImage(fmt) {
+    const res = await fetch(API + '/api/export/image', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ diagram: state.diagram, format: fmt, scale: 2.0 })
+    });
+    if (!res.ok) { const txt = await res.text(); alert('Export image failed: ' + txt); return; }
+    const blob = await res.blob(); downloadBlob(blob, `diagram.${fmt}`);
+}
+
+function downloadText(filename, text) {
+    const blob = new Blob([text], { type: 'text/plain' });
+    downloadBlob(blob, filename);
+}
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+}
+
+// UI bindings
+function initUI() {
+    document.getElementById('btn-select').onclick = () => setMode('select');
+    document.getElementById('btn-pan').onclick = () => setMode('pan');
+    document.getElementById('btn-add-node').onclick = () => setMode('addNode');
+    document.getElementById('btn-add-arrow').onclick = () => setMode('addArrow');
+    document.getElementById('btn-add-annotation').onclick = () => setMode('addAnnotation');
+    document.getElementById('btn-auto-layout').onclick = autoLayout;
+    document.getElementById('btn-zoom-in').onclick = () => { state.view.zoom *= 1.2; updateZoomLabel(); render(); };
+    document.getElementById('btn-zoom-out').onclick = () => { state.view.zoom /= 1.2; updateZoomLabel(); render(); };
+    document.getElementById('btn-fit').onclick = fitView;
+    dirSelect.onchange = () => { state.diagram.direction = dirSelect.value; autoLayout(); };
+
+    document.getElementById('btn-import-mermaid').onclick = () => { document.getElementById('modal-mermaid').classList.remove('hidden'); };
+    document.getElementById('btn-close-mermaid').onclick = () => { document.getElementById('modal-mermaid').classList.add('hidden'); };
+    document.getElementById('btn-parse-mermaid').onclick = () => {
+        const code = document.getElementById('mermaid-input').value;
+        const fromMd = document.getElementById('from-markdown').checked;
+        importMermaid(code, fromMd);
+        document.getElementById('modal-mermaid').classList.add('hidden');
+    };
+
+    document.getElementById('btn-import-md').onclick = () => document.getElementById('file-input').click();
+    document.getElementById('file-input').onchange = async (e) => {
+        const file = e.target.files[0]; if (!file) return;
+        const text = await file.text();
+        importMermaid(text, true);
+    };
+
+    const exportBtn = document.getElementById('btn-export-menu');
+    const exportMenu = document.getElementById('export-menu');
+    exportBtn.onclick = (ev) => {
+        const rect = exportBtn.getBoundingClientRect();
+        exportMenu.style.left = rect.left + 'px';
+        exportMenu.style.top = (rect.bottom + 4) + 'px';
+        exportMenu.classList.toggle('hidden');
+        ev.stopPropagation();
+    };
+    document.addEventListener('click', () => exportMenu.classList.add('hidden'));
+    exportMenu.querySelectorAll('button').forEach(b => {
+        b.onclick = () => {
+            const fmt = b.dataset.fmt;
+            if (fmt === 'mermaid') exportMermaid();
+            else if (fmt === 'json') exportJson();
+            else if (fmt === 'svg') exportSvg();
+            else exportImage(fmt);
+        };
+    });
+
+    // keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        const k = e.key.toLowerCase();
+        if (e.ctrlKey && k === 'z') { e.preventDefault(); undo(); return; }
+        if (e.ctrlKey && k === 'enter') { e.preventDefault(); autoLayout(); return; }
+        if (k === 'escape') {
+            if (state.mode !== 'select') setMode('select');
+            else selectItem('none', null);
+            return;
+        }
+        switch (k) {
+            case 'v': setMode('select'); break;
+            case ' ': if (!e.repeat) setMode(state.mode === 'pan' ? 'select' : 'pan'); break;
+            case 'n': setMode('addNode'); break;
+            case 'a': setMode('addArrow'); break;
+            case 't': setMode('addAnnotation'); break;
+            case 'l': autoLayout(); break;
+            case 'f': fitView(); break;
+            case 'e':
+            case 'f2':
+                if (state.selection.type === 'node') focusPropertyInput('#prop-label');
+                else if (state.selection.type === 'edge') focusPropertyInput('#prop-label');
+                else if (state.selection.type === 'annotation') focusPropertyInput('#prop-text');
+                break;
+            case 'delete':
+            case 'backspace': deleteSelection(); break;
+        }
+    });
+    document.addEventListener('keyup', (e) => { if (e.key === ' ' && state.mode === 'pan') setMode('select'); });
+
+    wrapper.addEventListener('mousedown', onCanvasMouseDown);
+    wrapper.addEventListener('mousemove', onCanvasMouseMove);
+    wrapper.addEventListener('mouseup', onCanvasMouseUp);
+    wrapper.addEventListener('wheel', onWheel, { passive: false });
+
+    // initial sample diagram
+    importMermaid(`flowchart LR\n    A[开始] --> B{判断}\n    B -->|是| C[处理]\n    B -->|否| D[结束]\n    C --> D`, false);
+}
+
+function deleteSelection() {
+    if (state.selection.type === 'none') return;
+    pushUndo();
+    const { type, id } = state.selection;
+    if (type === 'node') {
+        state.diagram.nodes = state.diagram.nodes.filter(n => n.id !== id);
+        state.diagram.edges = state.diagram.edges.filter(e => e.source !== id && e.target !== id);
+        state.diagram.annotations = state.diagram.annotations.filter(a => a.targetId !== id);
+    } else if (type === 'edge') {
+        state.diagram.edges = state.diagram.edges.filter(e => e.id !== id);
+    } else if (type === 'annotation') {
+        state.diagram.annotations = state.diagram.annotations.filter(a => a.id !== id);
+    }
+    selectItem('none', null); render();
+}
+
+initUI();

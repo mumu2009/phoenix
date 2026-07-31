@@ -1,0 +1,33 @@
+========================================
+Phoenix GTest Suite
+========================================
+Note: Google Test filter = \ ModelDeployment.*:GraphDiffusionSummarizer.*:HierarchicalMemory.*:MixedModalIOTest.*\
+[==========] Running 9 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 5 tests from HierarchicalMemory
+[ RUN      ] HierarchicalMemory.PutAndGet
+[       OK ] HierarchicalMemory.PutAndGet (0 ms)
+[ RUN      ] HierarchicalMemory.PromotesHighActivationToWorkingTier
+[       OK ] HierarchicalMemory.PromotesHighActivationToWorkingTier (0 ms)
+[ RUN      ] HierarchicalMemory.DeleteRemovesFromAllTiers
+[       OK ] HierarchicalMemory.DeleteRemovesFromAllTiers (0 ms)
+[ RUN      ] HierarchicalMemory.QueryReturnsTopKByPrefix
+[       OK ] HierarchicalMemory.QueryReturnsTopKByPrefix (0 ms)
+[ RUN      ] HierarchicalMemory.SnapshotRoundTrip
+[       OK ] HierarchicalMemory.SnapshotRoundTrip (0 ms)
+[----------] 5 tests from HierarchicalMemory (0 ms total)
+
+[----------] 4 tests from GraphDiffusionSummarizer
+[ RUN      ] GraphDiffusionSummarizer.RanksSeedNodesWhenNoEdges
+[       OK ] GraphDiffusionSummarizer.RanksSeedNodesWhenNoEdges (0 ms)
+[ RUN      ] GraphDiffusionSummarizer.DiffusionBoostsHighlyConnectedNode
+[       OK ] GraphDiffusionSummarizer.DiffusionBoostsHighlyConnectedNode (0 ms)
+[ RUN      ] GraphDiffusionSummarizer.SummarizeFromJson
+[       OK ] GraphDiffusionSummarizer.SummarizeFromJson (0 ms)
+[ RUN      ] GraphDiffusionSummarizer.EmptyInputReturnsEmptySummary
+[       OK ] GraphDiffusionSummarizer.EmptyInputReturnsEmptySummary (0 ms)
+[----------] 4 tests from GraphDiffusionSummarizer (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 9 tests from 2 test suites ran. (0 ms total)
+[  PASSED  ] 9 tests.

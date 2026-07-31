@@ -1185,7 +1185,9 @@
                        {"llamacppModel", config_.llamaCppModel},
                        {"bitnetModel", config_.bitnetModel},
                        {"shmProtocolVersion", kSharedMemoryProtocolVersion},
-                       {"outsidesLinkMode", currentOutsidesLinkMode()}};
+                       {"outsidesLinkMode", currentOutsidesLinkMode()},
+                       {"version", phoenix::PHOENIX_VERSION_STRING},
+                       {"codename", phoenix::PHOENIX_CODENAME}};
     return out;
   }
 
@@ -1603,6 +1605,19 @@
         });
 
     drogon::app().registerHandler(
+        "/api/health",
+        [this](const drogon::HttpRequestPtr &,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+          respondJson(cb, json{{"ok", true},
+                               {"service", "phoenix-gateway"},
+                               {"timestamp", ts}});
+        },
+        {drogon::Get, drogon::Post});
+
+    drogon::app().registerHandler(
         "/api/graph/chat",
         [this](const drogon::HttpRequestPtr &req,
                std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
@@ -1961,6 +1976,24 @@
                 graphContext = emotionContextStr + "\n" + graphContext;
             }
 
+            // v7.0: run the autonomy cognition stack to observe world state,
+            // iterate the primal/instinct/prompt layers and obtain affect-driven
+            // context + inference options.
+            nlohmann::json inferenceOptions;
+            nlohmann::json cognitionEmotionTensor;
+            nlohmann::json cognitionWorldEvidence;
+            std::vector<nlohmann::json> cognitionMixedModalOutputs;
+            std::string cognitionContext;
+            try {
+              auto pack = runCognitionAutonomy(body, userText, graphContext);
+              graphContext = pack.context;
+              inferenceOptions = pack.inferenceOptions;
+              cognitionEmotionTensor = pack.emotionTensor;
+              cognitionWorldEvidence = pack.worldEvidence;
+              cognitionMixedModalOutputs = pack.mixedModalOutputs;
+            } catch (...) {
+            }
+
             std::string providerTag = std::string("provider:") + backendMode;
             std::string cacheKey = buildInferenceCacheKey(
                 sessionId, text, providerTag + "\n" + graphContext, maxTokens);
@@ -1993,7 +2026,8 @@
                   std::cout << "[gateway] /api/chat stage=model_start "
                                "provider=ollama maxTokens="
                             << maxTokens << std::endl;
-                tReply = chatWithOllama(text, modelGraphContext, maxTokens);
+                tReply = chatWithOllama(text, modelGraphContext, maxTokens,
+                        inferenceOptions);
                 modelElapsedMs =
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0)
@@ -2008,7 +2042,8 @@
                   std::cout << "[gateway] /api/chat stage=model_start "
                                "provider=llamacpp maxTokens="
                             << maxTokens << std::endl;
-                tReply = chatWithLlamaCpp(text, modelGraphContext, maxTokens);
+                tReply = chatWithLlamaCpp(text, modelGraphContext, maxTokens,
+                          inferenceOptions);
                 modelElapsedMs =
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0)
@@ -2023,7 +2058,8 @@
                   std::cout << "[gateway] /api/chat stage=model_start "
                                "provider=bitnet maxTokens="
                             << maxTokens << std::endl;
-                tReply = chatWithBitNet(text, modelGraphContext, maxTokens);
+                tReply = chatWithBitNet(text, modelGraphContext, maxTokens,
+                        inferenceOptions);
                 modelElapsedMs =
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0)
@@ -2125,13 +2161,16 @@
               json tReplyAfterTool;
               if (usingOllama) {
                 tReplyAfterTool =
-                    chatWithOllama(text, followupGraphContext, maxTokens);
+                    chatWithOllama(text, followupGraphContext, maxTokens,
+                   inferenceOptions);
               } else if (usingLlamaCpp) {
                 tReplyAfterTool =
-                    chatWithLlamaCpp(text, followupGraphContext, maxTokens);
+                    chatWithLlamaCpp(text, followupGraphContext, maxTokens,
+                     inferenceOptions);
               } else if (usingBitNet) {
                 tReplyAfterTool =
-                    chatWithBitNet(text, followupGraphContext, maxTokens);
+                    chatWithBitNet(text, followupGraphContext, maxTokens,
+                   inferenceOptions);
               } else {
                 std::lock_guard<std::mutex> lock(transformerMu_);
                 tReplyAfterTool =
@@ -2198,6 +2237,14 @@
               result["emotionModulation"] = emotionModulation;
             if (!emotionLogitBias.empty())
               result["emotionLogitBias"] = emotionLogitBias;
+            if (!inferenceOptions.is_null())
+              result["cognitionInferenceOptions"] = inferenceOptions;
+            if (!cognitionEmotionTensor.is_null())
+              result["cognitionEmotionTensor"] = cognitionEmotionTensor;
+            if (!cognitionWorldEvidence.is_null() && !cognitionWorldEvidence.empty())
+              result["cognitionWorldEvidence"] = cognitionWorldEvidence;
+            if (!cognitionMixedModalOutputs.empty())
+              result["cognitionMixedModalOutputs"] = cognitionMixedModalOutputs;
             if (usingOllama)
               result["provider"] =
                   json{{"id", (config_.ollamaFineTuning ? "ollama+fine-tuning"
@@ -2453,6 +2500,20 @@
               maxTokens = std::min(maxTokens, 32);
             if (maxTokens <= 0) maxTokens = 16;
             std::string sessionId = body.value("sessionId", "");
+            nlohmann::json inferenceOptions;
+            nlohmann::json cognitionEmotionTensor;
+            nlohmann::json cognitionWorldEvidence;
+            std::vector<nlohmann::json> cognitionMixedModalOutputs;
+            try {
+              auto pack = runCognitionAutonomy(body, text, graphContext);
+              graphContext = pack.context;
+              inferenceOptions = pack.inferenceOptions;
+              cognitionEmotionTensor = pack.emotionTensor;
+              cognitionWorldEvidence = pack.worldEvidence;
+              cognitionMixedModalOutputs = pack.mixedModalOutputs;
+            } catch (...) {
+              inferenceOptions = json::object();
+            }
             std::string providerTag = std::string("provider:") + backendMode;
             std::string cacheKey = buildInferenceCacheKey(
                 sessionId, text, providerTag + "\n" + graphContext, maxTokens);
@@ -2478,11 +2539,14 @@
                                                gnnHint.align);
               std::string modelGraphContext = graphContext;
               if (usingOllama) {
-                tReply = chatWithOllama(text, modelGraphContext, maxTokens);
+                tReply = chatWithOllama(text, modelGraphContext, maxTokens,
+                        inferenceOptions);
               } else if (usingLlamaCpp) {
-                tReply = chatWithLlamaCpp(text, modelGraphContext, maxTokens);
+                tReply = chatWithLlamaCpp(text, modelGraphContext, maxTokens,
+                          inferenceOptions);
               } else if (usingBitNet) {
-                tReply = chatWithBitNet(text, modelGraphContext, maxTokens);
+                tReply = chatWithBitNet(text, modelGraphContext, maxTokens,
+                        inferenceOptions);
               } else {
                 std::lock_guard<std::mutex> lock(transformerMu_);
                 int dim = transformer_.params().value("dModel", 128);
@@ -2548,13 +2612,16 @@
               json tReplyAfterTool;
               if (usingOllama) {
                 tReplyAfterTool =
-                    chatWithOllama(text, followupGraphContext, maxTokens);
+                    chatWithOllama(text, followupGraphContext, maxTokens,
+                   inferenceOptions);
               } else if (usingLlamaCpp) {
                 tReplyAfterTool =
-                    chatWithLlamaCpp(text, followupGraphContext, maxTokens);
+                    chatWithLlamaCpp(text, followupGraphContext, maxTokens,
+                     inferenceOptions);
               } else if (usingBitNet) {
                 tReplyAfterTool =
-                    chatWithBitNet(text, followupGraphContext, maxTokens);
+                    chatWithBitNet(text, followupGraphContext, maxTokens,
+                   inferenceOptions);
               } else {
                 std::lock_guard<std::mutex> lock(transformerMu_);
                 tReplyAfterTool =
@@ -2618,6 +2685,14 @@
               result["toolCall"] =
                   json{{"type", addonCall.type}, {"input", addonCall.input}};
             }
+            if (!inferenceOptions.is_null())
+              result["cognitionInferenceOptions"] = inferenceOptions;
+            if (!cognitionEmotionTensor.is_null())
+              result["cognitionEmotionTensor"] = cognitionEmotionTensor;
+            if (!cognitionWorldEvidence.is_null() && !cognitionWorldEvidence.empty())
+              result["cognitionWorldEvidence"] = cognitionWorldEvidence;
+            if (!cognitionMixedModalOutputs.empty())
+              result["cognitionMixedModalOutputs"] = cognitionMixedModalOutputs;
             result["verify"] = verify;
             result["cached"] = cacheHit;
             if (!graphResult.is_null())
@@ -4073,11 +4148,7 @@
                            {"mode", "backend-adapter"},
                            {"supports",
                             json::array({"chat", "transformer-chat"})},
-                           {"model", config_.bitnetModel}},
-                      json{{"id", "openclaw"},
-                           {"mode", "frontend-bypass"},
-                           {"supports", json::array({"chat"})},
-                           {"compat", "provider-adapter-v1"}}})},
+                           {"model", config_.bitnetModel}}})},
                 {"defaultProvider", defaultProvider},
                 {"compat",
                  json{{"shmProtocolVersion", kSharedMemoryProtocolVersion},
@@ -4357,6 +4428,11 @@
               }
             }
 
+            nlohmann::json inferenceOptions;
+            nlohmann::json cognitionEmotionTensor;
+            nlohmann::json cognitionWorldEvidence;
+            std::vector<nlohmann::json> cognitionMixedModalOutputs;
+
             bool includeTransformerNlp = true;
             if (opts.contains("includeTransformerNlp")) {
               includeTransformerNlp =
@@ -4373,6 +4449,8 @@
                                                          ? "ollama-fine-tuning"
                                                          : "ollama")
                                                   : "native";
+
+              std::string graphContext = payload->value("graphContext", "");
 
               bool modeOff = (backendMode == "off" || backendMode == "false" ||
                               backendMode == "disabled");
@@ -4392,7 +4470,16 @@
                     maxTokens = std::max(16, (int)v);
                 }
 
-                std::string graphContext = payload->value("graphContext", "");
+                try {
+                  auto pack = runCognitionAutonomy(*payload, text, graphContext);
+                  graphContext = pack.context;
+                  inferenceOptions = pack.inferenceOptions;
+                  cognitionEmotionTensor = pack.emotionTensor;
+                  cognitionWorldEvidence = pack.worldEvidence;
+                  cognitionMixedModalOutputs = pack.mixedModalOutputs;
+                } catch (...) {
+                  inferenceOptions = json::object();
+                }
                 json transformerReply = json::object();
                 bool usingOllama = (backendMode == "ollama" ||
                                     backendMode == "ollama-fine-tuning");
@@ -4404,13 +4491,16 @@
                 try {
                   if (usingOllama)
                     transformerReply =
-                        chatWithOllama(text, graphContext, maxTokens);
+                        chatWithOllama(text, graphContext, maxTokens,
+                   inferenceOptions);
                   else if (usingLlamaCpp)
                     transformerReply =
-                        chatWithLlamaCpp(text, graphContext, maxTokens);
+                        chatWithLlamaCpp(text, graphContext, maxTokens,
+                     inferenceOptions);
                   else if (usingBitNet)
                     transformerReply =
-                        chatWithBitNet(text, graphContext, maxTokens);
+                        chatWithBitNet(text, graphContext, maxTokens,
+                   inferenceOptions);
                   else {
                     std::lock_guard<std::mutex> lock(transformerMu_);
                     std::vector<std::vector<float>> graphEmb;
@@ -4439,6 +4529,14 @@
 
             json result = bigRounds > 1 ? spark_->dispatchBig(*payload, opts)
                                         : spark_->dispatch(*payload, opts);
+            if (!inferenceOptions.is_null())
+              result["cognitionInferenceOptions"] = inferenceOptions;
+            if (!cognitionEmotionTensor.is_null())
+              result["cognitionEmotionTensor"] = cognitionEmotionTensor;
+            if (!cognitionWorldEvidence.is_null() && !cognitionWorldEvidence.empty())
+              result["cognitionWorldEvidence"] = cognitionWorldEvidence;
+            if (!cognitionMixedModalOutputs.empty())
+              result["cognitionMixedModalOutputs"] = cognitionMixedModalOutputs;
             respondJson(cb, json{{"ok", true}, {"result", result}});
           } catch (const std::exception &e) {
             respondJson(cb, json{{"ok", false}, {"error", e.what()}},
@@ -4862,6 +4960,8 @@
                   now - startedAt_)
                   .count();
           out["ok"] = true;
+          out["version"] = phoenix::PHOENIX_VERSION_STRING;
+          out["codename"] = phoenix::PHOENIX_CODENAME;
           out["uptime"] = uptime;
           out["load"] = getLoadAvg();
           out["processCpuPercent"] = getProcessCpuPercent();

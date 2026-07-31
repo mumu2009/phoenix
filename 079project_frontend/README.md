@@ -21,21 +21,13 @@
 
 前端聊天默认走后端主链 `/api/chat`（即 GNN+Transformer 主链）。
 
-可通过环境变量启用 OpenClaw 前端并行旁路：
+可通过 `REACT_APP_API_BASE=` 配置前端网关基址。
 
-- `REACT_APP_CHAT_PROVIDER=core|openclaw`（默认 `core`）
-- `REACT_APP_OPENCLAW_CHAT_PATH=/openclaw/chat`（可按网关路径调整）
-- `REACT_APP_API_BASE=`（可选，前端网关基址）
-
-设计约束：
-
-- OpenClaw 作为前端并行旁路，不替换后端 `/api/transformer/*`。
-- 统一返回结构由客户端归一化为 `{ ok, result: { reply, latency? } }`，避免 UI 改造扩散。
+统一返回结构由客户端归一化为 `{ ok, result: { reply, latency? } }`，避免 UI 改造扩散。
 
 ## 说明
 
-- 若未设置 `REACT_APP_CHAT_PROVIDER`，系统默认使用 `core` 主链。
-- 聊天页顶部提供 `core/openclaw` 切换器；仅影响前端请求目标，不改变后端 `/api/chat` 与 `/api/transformer/*` 主链设计。
+- 系统默认使用 `core` 主链。
 - 鉴权 token 由 `localStorage` 中的 `phoenix_auth_token` 管理。
 - 推荐只把 `core` 视为正式发布态默认入口；其他 provider 视为并行旁路或兼容入口。
 - 监控面板依赖后端 `GET /api/monitoring/stats` 与 `POST /api/monitoring/reset`。
