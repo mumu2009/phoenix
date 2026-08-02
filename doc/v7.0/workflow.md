@@ -122,9 +122,9 @@ flowchart TD
 
     subgraph WM["世界模型"]
         IMGIF["phoenix::io::JpeaV2ImageWorldModel"]
-        IMGF["phoenix::io::JpeaV2ImageFallbackModel"]
+        IMGO["phoenix::io::JpeaV2ImageLocalOnnxModel / Hbdnn / Remote / ServerClient"]
         SPKIF["phoenix::io::JpeaV2SpeechWorldModel"]
-        SPKF["phoenix::io::JpeaV2SpeechFallbackModel"]
+        SPKO["phoenix::io::JpeaV2SpeechLocalOnnxModel / Hbdnn / Remote / ServerClient"]
     end
 
     subgraph TXT["文本/Transformer"]
@@ -169,8 +169,8 @@ flowchart TD
     BRIDGE -->|textEncoder| TTE
     BRIDGE -->|imageWorldModel| IMGIF
     BRIDGE -->|speechWorldModel| SPKIF
-    IMGIF -->|fallback| IMGF
-    SPKIF -->|fallback| SPKF
+    IMGIF -->|factory| IMGO
+    SPKIF -->|factory| SPKO
     BRIDGE <-->|SemanticUnit| SU
 
     SU -->|retrieve/fuse| SM
@@ -254,13 +254,13 @@ flowchart TD
     end
 
     subgraph WM_F["世界模型函数"]
-        CREATE_IMG["createJpeaV2ImageWorldModel(variant, targetDim, backend)"]
-        IMG_encode["JpeaV2ImageFallbackModel::encode(...)"]
-        IMG_decode["JpeaV2ImageFallbackModel::decode(...)"]
+        CREATE_IMG["createJpeaV2ImageWorldModel(variant, targetDim)"]
+        IMG_encode["JpeaV2ImageLocalOnnxModel/Hbdnn/Remote::encode(...)"]
+        IMG_decode["JpeaV2ImageLocalOnnxModel/Hbdnn/Remote::decode(...)"]
         IMG_status["JpeaV2ImageWorldModel::status()"]
         CREATE_SPK["createJpeaV2SpeechWorldModel(variant, targetDim)"]
-        SPK_encode["JpeaV2SpeechFallbackModel::encode(...)"]
-        SPK_adapt["JpeaV2SpeechFallbackModel::contrastiveAdapt(...)"]
+        SPK_encode["JpeaV2SpeechLocalOnnxModel/Hbdnn/Remote::encode(...)"]
+        SPK_adapt["JpeaV2SpeechLocalOnnxModel/Hbdnn/Remote::adapt(...)"]
     end
 
     subgraph TXT_F["文本编码/生成函数"]
@@ -376,4 +376,4 @@ flowchart TD
 - **模块粒度** 展示系统主要模块与数据流向。
 - **类粒度** 展示核心类之间的协作关系。
 - **函数粒度** 展示一次典型多模态输入到自主响应的完整调用链。
-- 图中 `fallback` 路径表示当前尚未接入真实 PyTorch/HuggingFace 后端时的确定性实现，真实权重下载后可在 `createJpeaV2ImageWorldModel` / `createJpeaV2SpeechWorldModel` 中选择后端。
+- 图中 `factory` 路径表示 `createJpeaV2ImageWorldModel` / `createJpeaV2SpeechWorldModel` 根据部署配置选择 Local-ONNX、BPU、Remote、ServerClient 或 Unavailable 后端。无确定性统计 fallback。

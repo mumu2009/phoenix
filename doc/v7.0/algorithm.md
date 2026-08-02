@@ -115,23 +115,17 @@ runtime_store/models/ijepa/<id>/model.safetensors
 
 `JpeaV2ImageWorldModel` 接口：`encode`、`encodeContext`、`encodeTarget`、`predictTarget`、`adapt`、`decode`、`status`。
 
-当前实现 `JpeaV2ImageFallbackModel` 为确定性 fallback：
+工厂根据部署配置选择后端：
 
 ```text
-encode(imageBytes, width, height, mimeType):
-    grid = preprocess(imageBytes, width, height, mimeType)  // 224x224 灰度浮点
-    return patchStatsToConcept(grid, {})                    // 全 patch 统计
-
-patchStatsToConcept(grid, mask):
-    for each patch (px, py):
-        if mask 非空且 mask[patchIdx] == false: skip
-        mean = average(patch pixels)
-        std = sqrt(E[x^2] - mean^2)
-        stats.append(mean, std)
-    return projectToDimension(stats, targetDim, 0x1DEA)
+local(cpu|gpu)  -> JpeaV2ImageLocalOnnxModel  运行 additive_jpea/.../best.onnx
+local(bpu)     -> JpeaV2ImageHbdnnModel      加载 best.bin / model_encoder.bin
+remote         -> JpeaV2ImageRemoteModel      POST JSON 到 remote url
+server-client  -> JpeaV2ImageServerClientModel 仅接受客户端发来的 concept vector
+missing        -> JpeaV2ImageUnavailableModel  status() 报错，encode/decode 返回空
 ```
 
-真实后端（PyTorch/HuggingFace）待接入；fallback 确保语义接口可运行、可测试。
+`JpeaV2ImageLocalOnnxModel` 在 x86_64 上通过 `tools/local_onnx_runner.py` 调用 ONNX Runtime；`JpeaV2ImageHbdnnModel` 在 RDK X5 上调用 `rdk_x5_bpu::execute`。不再有确定性统计 fallback。
 
 ### 3.3 JEPA 预测流程
 
