@@ -224,13 +224,21 @@ class ResNet18Base(nn.Module):
             if "base_state" in ckpt:
                 state = ckpt["base_state"]
             else:
-                state = ckpt.get("model", ckpt)
+                state = ckpt.get("state_dict", ckpt.get("model", ckpt))
             # If the checkpoint is a JpeaV2ImageAutoencoder, strip encoder.
             if any(k.startswith("encoder.") for k in state):
                 state = {
                     k.split("encoder.", 1)[1]: v
                     for k, v in state.items()
                     if k.startswith("encoder.")
+                }
+            # If the checkpoint came from an AdditiveResidualModel, strip the
+            # base. prefix and drop the residual blocks.
+            if any(k.startswith("base.") for k in state):
+                state = {
+                    k.split("base.", 1)[1]: v
+                    for k, v in state.items()
+                    if k.startswith("base.")
                 }
         else:
             state = ckpt.state_dict()
@@ -248,6 +256,25 @@ class ResNet18Base(nn.Module):
 # Generic additive residual model
 # ---------------------------------------------------------------------------
 
+def get_input_shape(model_name: str, concept: int = CONCEPT) -> tuple:
+    return {
+        "speech_encoder": (1, 1, 1, 16000),
+        "speech_decoder": (1, concept, 1, 1),
+        "vision_encoder": (1, 3, 224, 224),
+        "vision_decoder": (1, concept, 1, 1),
+    }[model_name]
+
+
+def get_output_shape(model_name: str, concept: int = CONCEPT) -> tuple:
+    return {
+        "speech_encoder": (1, concept, 1, 1),
+        "speech_decoder": (1, 1, 1, 15872),
+        "vision_encoder": (1, concept, 1, 1),
+        "vision_decoder": (1, 3, 224, 224),
+    }[model_name]
+
+
+# Legacy constants (concept=128) for quick reference; prefer the functions above.
 MODEL_INPUT_SHAPES = {
     "speech_encoder": (1, 1, 1, 16000),
     "speech_decoder": (1, CONCEPT, 1, 1),
@@ -298,8 +325,8 @@ class AdditiveResidualModel(nn.Module):
             raise ValueError(f"Unknown model_name: {model_name}")
         self.model_name = model_name
         self.concept = concept
-        self.input_shape = (1,) + MODEL_INPUT_SHAPES[model_name][1:]
-        self.output_shape = (1,) + MODEL_OUTPUT_SHAPES[model_name][1:]
+        self.input_shape = get_input_shape(model_name, concept)
+        self.output_shape = get_output_shape(model_name, concept)
         self.block_config = block_config or {}
 
         if isinstance(base, bool) and base and model_name == "vision_encoder":
@@ -379,6 +406,9 @@ class AdditiveResidualModel(nn.Module):
             base=base,
             block_config=block_config,
         )
+        n_blocks = ckpt.get("n_blocks", 0)
+        for _ in range(n_blocks):
+            model.add_block()
         model.load_state_dict(ckpt["state_dict"])
         return model
 
@@ -388,7 +418,7 @@ class AdditiveResidualModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 def get_dummy_input(model_name: str, concept: int = CONCEPT) -> torch.Tensor:
-    return torch.randn(*MODEL_INPUT_SHAPES[model_name])
+    return torch.randn(*get_input_shape(model_name, concept))
 
 
 def write_calibration(

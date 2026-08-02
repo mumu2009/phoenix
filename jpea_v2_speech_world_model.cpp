@@ -19,9 +19,11 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <numeric>
@@ -44,9 +46,9 @@ std::string resolveBpuModelPath(const std::string &envOverride,
   if (!envOverride.empty()) return envOverride;
 
   const std::vector<std::string> names = [modelKind]() {
-    if (modelKind == "encoder") return std::vector<std::string>{"model_encoder.bin", "encoder.bin", "model.bin", "ijepa.bin"};
-    if (modelKind == "decoder") return std::vector<std::string>{"model_decoder.bin", "decoder.bin", "decode.bin"};
-    return std::vector<std::string>{"model.bin"};
+    if (modelKind == "encoder") return std::vector<std::string>{"best.bin", "model_encoder.bin", "encoder.bin", "model.bin", "ijepa.bin"};
+    if (modelKind == "decoder") return std::vector<std::string>{"best.bin", "model_decoder.bin", "decoder.bin", "decode.bin"};
+    return std::vector<std::string>{"best.bin", "model.bin"};
   }();
 
   // Map the 16 kHz speech variant to the real on-device folder layout.
@@ -54,6 +56,11 @@ std::string resolveBpuModelPath(const std::string &envOverride,
   if (variantId == "jpea_v2_speech_16k" || variantId == "speech_16k") {
     folder = "speech_16k";
   }
+
+  // Additive residual BPU models live under their own per-model directory.
+  const std::vector<std::string> additiveTypes = {
+      std::string("runtime_store/models/additive_jpea/") + (modelKind == "encoder" ? "speech_encoder" : "speech_decoder"),
+  };
 
   std::vector<std::string> roots;
   roots.push_back(std::string("runtime_store/models/ijepa/") + folder);
@@ -63,6 +70,12 @@ std::string resolveBpuModelPath(const std::string &envOverride,
   roots.push_back(std::string("runtime_store/models/ijepa/"));
 
   std::error_code ec;
+  for (const auto &root : additiveTypes) {
+    for (const auto &name : names) {
+      std::filesystem::path p = std::filesystem::path(root) / name;
+      if (std::filesystem::is_regular_file(p, ec)) return p.string();
+    }
+  }
   for (const auto &root : roots) {
     for (const auto &name : names) {
       std::filesystem::path p = std::filesystem::path(root) / name;
@@ -70,6 +83,36 @@ std::string resolveBpuModelPath(const std::string &envOverride,
     }
   }
   return {};
+}
+
+std::string resolveOnnxModelPath(const std::string &modelKind) {
+  const std::vector<std::string> names = {"best.onnx", "model.onnx"};
+  const std::vector<std::string> roots = {
+      std::string("runtime_store/models/additive_jpea/") + (modelKind == "encoder" ? "speech_encoder" : "speech_decoder"),
+      std::string("runtime_store/models/ijepa/"),
+  };
+
+  std::error_code ec;
+  for (const auto &root : roots) {
+    for (const auto &name : names) {
+      std::filesystem::path p = std::filesystem::path(root) / name;
+      if (std::filesystem::is_regular_file(p, ec)) return p.string();
+    }
+  }
+  return {};
+}
+
+nlohmann::json readModelManifest(const std::filesystem::path &modelDir) {
+  std::filesystem::path manifestPath = modelDir / "model.manifest.json";
+  std::ifstream in(manifestPath, std::ios::binary);
+  if (!in) return {};
+  try {
+    nlohmann::json j;
+    in >> j;
+    return j;
+  } catch (const std::exception &) {
+    return {};
+  }
 }
 
 static std::filesystem::path temporaryInputPath() {
@@ -985,13 +1028,488 @@ class JpeaV2SpeechRemoteModel : public JpeaV2SpeechWorldModel {
 
 }  // namespace
 
+std::filesystem::path temporaryOnnxPath() {
+  static std::atomic<uint64_t> sequence{0};
+  std::error_code ec;
+  return std::filesystem::temp_directory_path(ec) /
+         ("phoenix-onnx-" + std::to_string(sequence.fetch_add(1)));
+}
+
+std::string pythonExecutable() {
+  std::error_code ec;
+  const std::vector<std::string> candidates = {
+      "Python314/pythonw.exe", "Python314/python.exe", "pythonw", "python", "py"};
+  for (const auto &c : candidates) {
+    if (std::filesystem::is_regular_file(c, ec))
+      return std::filesystem::absolute(c, ec).string();
+  }
+  return "python";
+}
+
+std::string toShapeString(const std::vector<int> &shape) {
+  std::ostringstream oss;
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i) oss << "x";
+    oss << shape[i];
+  }
+  return oss.str();
+}
+
+nlohmann::json runLocalOnnx(
+    const std::string &modelPath,
+    const std::string &inputName,
+    const std::vector<int> &inputShape,
+    const std::vector<float> &inputFloats,
+    const std::string &outputName,
+    const std::vector<int> &outputShape,
+    bool gpu) {
+  std::error_code ec;
+  const auto inPath = temporaryOnnxPath().replace_extension(".in");
+  const auto outPath = temporaryOnnxPath().replace_extension(".out");
+
+  {
+    std::ofstream out(inPath, std::ios::binary | std::ios::trunc);
+    if (!out) {
+      return {{"ok", false}, {"error", "failed to write ONNX input binary"}};
+    }
+    out.write(reinterpret_cast<const char *>(inputFloats.data()),
+              static_cast<std::streamsize>(inputFloats.size() * sizeof(float)));
+  }
+
+  std::ostringstream cmd;
+  cmd << "\"" << pythonExecutable() << "\" "
+      << "tools/local_onnx_runner.py "
+      << "--model \"" << modelPath << "\" "
+      << "--input \"" << inPath.string() << "\" "
+      << "--input-name \"" << inputName << "\" "
+      << "--input-shape " << toShapeString(inputShape) << " "
+      << "--output \"" << outPath.string() << "\" "
+      << "--output-name \"" << outputName << "\" "
+      << "--output-shape " << toShapeString(outputShape);
+  if (gpu) cmd << " --gpu";
+
+  std::string outputJson;
+  FILE *pipe = _popen(cmd.str().c_str(), "r");
+  if (!pipe) {
+    std::filesystem::remove(inPath, ec);
+    return {{"ok", false}, {"error", "failed to start local ONNX runner"}};
+  }
+  char buffer[1024];
+  while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+    outputJson += buffer;
+  }
+  const int rc = _pclose(pipe);
+  std::filesystem::remove(inPath, ec);
+
+  auto result = nlohmann::json::parse(outputJson, nullptr, false);
+  if (result.is_discarded()) {
+    return {{"ok", false}, {"error", "local ONNX runner returned invalid JSON"}, {"raw", outputJson}};
+  }
+  if (!result.value("ok", false) || rc != 0) {
+    return result;
+  }
+
+  std::ifstream in(outPath, std::ios::binary);
+  if (!in) {
+    return {{"ok", false}, {"error", "local ONNX runner did not write output file"}};
+  }
+  const size_t expected = static_cast<size_t>(std::accumulate(outputShape.begin(), outputShape.end(), 1, std::multiplies<int>()));
+  std::vector<float> outputFloats(expected);
+  in.read(reinterpret_cast<char *>(outputFloats.data()),
+          static_cast<std::streamsize>(expected * sizeof(float)));
+  if (!in) {
+    return {{"ok", false}, {"error", "failed to read ONNX output binary"}};
+  }
+  std::filesystem::remove(outPath, ec);
+  result["floats"] = std::move(outputFloats);
+  return result;
+}
+
+class JpeaV2SpeechServerClientModel : public JpeaV2SpeechWorldModel {
+ public:
+  JpeaV2SpeechServerClientModel(JpeaV2SpeechWorldModelConfig cfg, int targetDim)
+      : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128) {}
+
+  std::vector<float> encode(const std::vector<uint8_t> &, int, const std::string &) override {
+    lastError_ = "server-client mode expects a client-supplied concept vector";
+    return {};
+  }
+  std::vector<float> encodeContext(const std::vector<uint8_t> &, int, const std::string &, const std::vector<bool> &) override {
+    lastError_ = "server-client mode expects a client-supplied concept vector";
+    return {};
+  }
+  std::vector<float> encodeTarget(const std::vector<uint8_t> &, int, const std::string &, const std::vector<int> &) override {
+    lastError_ = "server-client mode expects a client-supplied concept vector";
+    return {};
+  }
+  std::vector<float> predictTarget(const std::vector<float> &contextRepr, const std::vector<int> &) override {
+    return std::vector<float>(contextRepr.begin(), contextRepr.end());
+  }
+  float adapt(const std::vector<uint8_t> &, int, const std::string &, int, float) override {
+    lastError_ = "server-client mode does not support adaptation";
+    return -1.0f;
+  }
+  float contrastiveAdapt(const std::vector<uint8_t> &, int, const std::string &, const std::vector<float> &, float) override {
+    lastError_ = "server-client mode does not support adaptation";
+    return -1.0f;
+  }
+  std::vector<uint8_t> decode(const std::vector<float> &, const std::string &, size_t) override {
+    lastError_ = "server-client mode expects a client-supplied decoded payload";
+    return {};
+  }
+  nlohmann::json status() const override {
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "server-client"},
+                          {"targetDim", targetDim_}, {"ready", false},
+                          {"error", "server-client: expects client concept vectors"}};
+  }
+  const JpeaV2SpeechWorldModelConfig &config() const override { return cfg_; }
+
+ private:
+  JpeaV2SpeechWorldModelConfig cfg_;
+  int targetDim_;
+  std::string lastError_;
+};
+
+class JpeaV2SpeechUnavailableModel : public JpeaV2SpeechWorldModel {
+ public:
+  JpeaV2SpeechUnavailableModel(JpeaV2SpeechWorldModelConfig cfg, int targetDim, std::string reason)
+      : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128),
+        reason_(std::move(reason)) {}
+
+  std::vector<float> encode(const std::vector<uint8_t> &, int, const std::string &) override { return {}; }
+  std::vector<float> encodeContext(const std::vector<uint8_t> &, int, const std::string &, const std::vector<bool> &) override { return {}; }
+  std::vector<float> encodeTarget(const std::vector<uint8_t> &, int, const std::string &, const std::vector<int> &) override { return {}; }
+  std::vector<float> predictTarget(const std::vector<float> &, const std::vector<int> &) override { return {}; }
+  float adapt(const std::vector<uint8_t> &, int, const std::string &, int, float) override { return -1.0f; }
+  float contrastiveAdapt(const std::vector<uint8_t> &, int, const std::string &, const std::vector<float> &, float) override { return -1.0f; }
+  std::vector<uint8_t> decode(const std::vector<float> &, const std::string &, size_t) override { return {}; }
+  nlohmann::json status() const override {
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "unavailable"},
+                          {"targetDim", targetDim_}, {"ready", false}, {"error", reason_}};
+  }
+  const JpeaV2SpeechWorldModelConfig &config() const override { return cfg_; }
+
+ private:
+  JpeaV2SpeechWorldModelConfig cfg_;
+  int targetDim_;
+  std::string reason_;
+};
+
+class JpeaV2SpeechLocalOnnxModel : public JpeaV2SpeechWorldModel {
+ public:
+  JpeaV2SpeechLocalOnnxModel(JpeaV2SpeechWorldModelConfig cfg, int targetDim, bool gpu)
+      : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128),
+        gpu_(gpu),
+        modelPath_(resolveOnnxModelPath("encoder")),
+        decoderPath_(resolveOnnxModelPath("decoder")) {
+    loadManifest("encoder", encoderInputName_, encoderOutputName_, encoderInputShape_, encoderOutputShape_, conceptDim_);
+    loadManifest("decoder", decoderInputName_, decoderOutputName_, decoderInputShape_, decoderOutputShape_, conceptDim_);
+    if (conceptDim_ <= 0) conceptDim_ = kEncoderOutputDim;
+  }
+
+  std::vector<float> encode(const std::vector<uint8_t> &audioBytes, int sampleRate,
+                            const std::string &mimeType) override {
+    if (modelPath_.empty()) {
+      lastError_ = "local ONNX speech encoder model (best.onnx) is not configured";
+      return {};
+    }
+    auto samples = preprocessAudio(audioBytes, sampleRate, mimeType);
+    auto input = prepareInput(samples, {});
+
+    auto result = runLocalOnnx(modelPath_, encoderInputName_, encoderInputShape_, input,
+                               encoderOutputName_, encoderOutputShape_, gpu_);
+    if (!result.value("ok", false)) {
+      lastError_ = result.value("error", std::string("local ONNX speech encode failed"));
+      return {};
+    }
+    auto values = result.value("floats", std::vector<float>{});
+    if (static_cast<int>(values.size()) != conceptDim_) {
+      lastError_ = "ONNX speech encoder output dimension mismatch";
+      return {};
+    }
+    if (targetDim_ != conceptDim_) {
+      values = phoenix::multimodal::projectToDimension(values, static_cast<size_t>(targetDim_), 0x41554449U);
+    }
+    ++samples_;
+    lastError_.clear();
+    return phoenix::multimodal::normalizeVector(values);
+  }
+
+  std::vector<float> encodeContext(const std::vector<uint8_t> &audioBytes, int sampleRate,
+                                   const std::string &mimeType, const std::vector<bool> &mask) override {
+    if (modelPath_.empty()) {
+      lastError_ = "local ONNX speech encoder model (best.onnx) is not configured";
+      return {};
+    }
+    auto samples = preprocessAudio(audioBytes, sampleRate, mimeType);
+    auto input = prepareInput(samples, mask);
+    auto result = runLocalOnnx(modelPath_, encoderInputName_, encoderInputShape_, input,
+                               encoderOutputName_, encoderOutputShape_, gpu_);
+    if (!result.value("ok", false)) {
+      lastError_ = result.value("error", std::string("local ONNX speech encode failed"));
+      return {};
+    }
+    auto values = result.value("floats", std::vector<float>{});
+    if (targetDim_ != conceptDim_) {
+      values = phoenix::multimodal::projectToDimension(values, static_cast<size_t>(targetDim_), 0x41554449U);
+    }
+    return phoenix::multimodal::normalizeVector(values);
+  }
+
+  std::vector<float> encodeTarget(const std::vector<uint8_t> &audioBytes, int sampleRate,
+                                  const std::string &mimeType, const std::vector<int> &windowIndices) override {
+    auto samples = preprocessAudio(audioBytes, sampleRate, mimeType);
+    const int windows = countWindows(static_cast<int>(samples.size()));
+    std::vector<bool> mask;
+    if (!windowIndices.empty()) {
+      mask.assign(static_cast<size_t>(windows), false);
+      for (int idx : windowIndices) {
+        if (idx >= 0 && idx < windows) mask[static_cast<size_t>(idx)] = true;
+      }
+    }
+    return encodeContext(audioBytes, sampleRate, mimeType, mask);
+  }
+
+  std::vector<float> predictTarget(const std::vector<float> &contextRepr, const std::vector<int> &) override {
+    if (contextRepr.size() != static_cast<size_t>(targetDim_)) {
+      lastError_ = "predictor input dimension mismatch";
+      return {};
+    }
+    return std::vector<float>(contextRepr.begin(), contextRepr.end());
+  }
+
+  float adapt(const std::vector<uint8_t> &, int, const std::string &, int, float) override {
+    lastError_ = "local ONNX speech model does not support adaptation";
+    return -1.0f;
+  }
+
+  float contrastiveAdapt(const std::vector<uint8_t> &, int, const std::string &, const std::vector<float> &, float) override {
+    lastError_ = "local ONNX speech model does not support contrastive adaptation";
+    return -1.0f;
+  }
+
+  std::vector<uint8_t> decode(const std::vector<float> &conceptVector,
+                              const std::string &mimeType,
+                              size_t lengthHint) override {
+    if (decoderPath_.empty()) {
+      lastError_ = "local ONNX speech decoder model (best.onnx) is not configured";
+      return {};
+    }
+    std::vector<float> decoderConcept = conceptVector;
+    if (static_cast<int>(decoderConcept.size()) != conceptDim_) {
+      decoderConcept = phoenix::multimodal::projectToDimension(decoderConcept, static_cast<size_t>(conceptDim_), 0x1DEA);
+    }
+
+    auto result = runLocalOnnx(decoderPath_, decoderInputName_, decoderInputShape_, decoderConcept,
+                               decoderOutputName_, decoderOutputShape_, gpu_);
+    if (!result.value("ok", false)) {
+      lastError_ = result.value("error", std::string("local ONNX speech decode failed"));
+      return {};
+    }
+    auto values = result.value("floats", std::vector<float>{});
+
+    const size_t targetLen = lengthHint > 0 ? lengthHint : static_cast<size_t>(cfg_.sampleRate);
+    std::vector<float> waveform(targetLen, 0.0f);
+    const size_t toCopy = std::min(values.size(), targetLen);
+    std::copy(values.begin(), values.begin() + toCopy, waveform.begin());
+
+    std::vector<uint8_t> raw(targetLen);
+    for (size_t i = 0; i < targetLen; ++i) {
+      float norm = (waveform[i] + 1.0f) * 127.5f;
+      raw[i] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, norm)));
+    }
+
+    if (mimeType == "audio/wav") {
+      auto header = buildWavHeader(static_cast<uint32_t>(targetLen), static_cast<uint32_t>(cfg_.sampleRate));
+      std::vector<uint8_t> out;
+      out.reserve(header.size() + raw.size());
+      out.insert(out.end(), header.begin(), header.end());
+      out.insert(out.end(), raw.begin(), raw.end());
+      ++samples_;
+      lastError_.clear();
+      return out;
+    }
+
+    ++samples_;
+    lastError_.clear();
+    return raw;
+  }
+
+  nlohmann::json status() const override {
+    std::error_code ec;
+    bool modelReady = !modelPath_.empty() && std::filesystem::is_regular_file(modelPath_, ec);
+    bool decoderReady = !decoderPath_.empty() && std::filesystem::is_regular_file(decoderPath_, ec);
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", gpu_ ? "local-gpu" : "local-onnx"},
+                          {"sampleRate", cfg_.sampleRate}, {"targetDim", targetDim_},
+                          {"conceptDim", conceptDim_}, {"samples", samples_},
+                          {"modelPath", modelPath_}, {"decoderPath", decoderPath_},
+                          {"ready", modelReady},
+                          {"decoderReady", decoderReady},
+                          {"error", lastError_}};
+  }
+
+  const JpeaV2SpeechWorldModelConfig &config() const override { return cfg_; }
+
+ private:
+  std::vector<float> preprocessAudio(const std::vector<uint8_t> &payload,
+                                     int sampleRate,
+                                     const std::string &mimeType) const {
+    size_t offset = 0;
+    if (mimeType == "audio/wav" && payload.size() >= 4) {
+      if (payload[0] == 'R' && payload[1] == 'I' && payload[2] == 'F' && payload[3] == 'F') {
+        offset = 44;
+      }
+    }
+    if (offset > payload.size()) offset = payload.size();
+
+    std::vector<float> samples(payload.size() - offset);
+    for (size_t i = 0; i < samples.size(); ++i) {
+      samples[i] = (static_cast<float>(payload[offset + i]) / 127.5f) - 1.0f;
+    }
+
+    if (sampleRate > 0 && sampleRate != cfg_.sampleRate && !samples.empty()) {
+      const float ratio = static_cast<float>(cfg_.sampleRate) / static_cast<float>(sampleRate);
+      const size_t outLen = static_cast<size_t>(static_cast<float>(samples.size()) * ratio + 0.5f);
+      if (outLen > 0) {
+        std::vector<float> resampled(outLen);
+        for (size_t i = 0; i < outLen; ++i) {
+          const float src = static_cast<float>(i) / ratio;
+          const size_t lo = static_cast<size_t>(std::floor(src));
+          const size_t hi = std::min(lo + 1, samples.size() - 1);
+          const float frac = src - static_cast<float>(lo);
+          resampled[i] = samples[lo] * (1.0f - frac) + samples[hi] * frac;
+        }
+        samples = std::move(resampled);
+      }
+    }
+    return samples;
+  }
+
+  int countWindows(int sampleCount) const {
+    if (sampleCount < cfg_.windowSamples) return 0;
+    return 1 + (sampleCount - cfg_.windowSamples) / cfg_.strideSamples;
+  }
+
+  std::vector<float> prepareInput(const std::vector<float> &samples,
+                                  const std::vector<bool> &mask) const {
+    std::vector<float> masked = samples;
+    const int windows = countWindows(static_cast<int>(masked.size()));
+    if (!mask.empty()) {
+      for (int w = 0; w < windows; ++w) {
+        if (w < static_cast<int>(mask.size()) && mask[static_cast<size_t>(w)]) continue;
+        const int start = w * cfg_.strideSamples;
+        for (int k = 0; k < cfg_.windowSamples; ++k) {
+          const size_t idx = static_cast<size_t>(start + k);
+          if (idx < masked.size()) masked[idx] = 0.0f;
+        }
+      }
+    }
+
+    std::vector<float> input(static_cast<size_t>(kFixedInputSamples), 0.0f);
+    const size_t toCopy = std::min(masked.size(), static_cast<size_t>(kFixedInputSamples));
+    std::copy(masked.begin(), masked.begin() + toCopy, input.begin());
+    return input;
+  }
+
+  static std::vector<uint8_t> buildWavHeader(uint32_t dataSize, uint32_t sampleRate,
+                                             uint16_t numChannels = 1, uint16_t bitsPerSample = 8) {
+    std::vector<uint8_t> header(44, 0);
+    const uint16_t audioFormat = 1;
+    const uint32_t byteRate = sampleRate * numChannels * bitsPerSample / 8;
+    const uint16_t blockAlign = numChannels * bitsPerSample / 8;
+
+    auto write4 = [&](size_t off, uint32_t v) {
+      header[off] = static_cast<uint8_t>(v & 0xff);
+      header[off + 1] = static_cast<uint8_t>((v >> 8) & 0xff);
+      header[off + 2] = static_cast<uint8_t>((v >> 16) & 0xff);
+      header[off + 3] = static_cast<uint8_t>((v >> 24) & 0xff);
+    };
+    auto write2 = [&](size_t off, uint16_t v) {
+      header[off] = static_cast<uint8_t>(v & 0xff);
+      header[off + 1] = static_cast<uint8_t>((v >> 8) & 0xff);
+    };
+
+    header[0] = 'R'; header[1] = 'I'; header[2] = 'F'; header[3] = 'F';
+    write4(4, 36 + dataSize);
+    header[8] = 'W'; header[9] = 'A'; header[10] = 'V'; header[11] = 'E';
+    header[12] = 'f'; header[13] = 'm'; header[14] = 't'; header[15] = ' ';
+    write4(16, 16);
+    write2(20, audioFormat);
+    write2(22, numChannels);
+    write4(24, sampleRate);
+    write4(28, byteRate);
+    write2(32, blockAlign);
+    write2(34, bitsPerSample);
+    header[36] = 'd'; header[37] = 'a'; header[38] = 't'; header[39] = 'a';
+    write4(40, dataSize);
+    return header;
+  }
+
+  void loadManifest(const std::string &kind, std::string &inputName, std::string &outputName,
+                    std::vector<int> &inputShape, std::vector<int> &outputShape, int &concept) {
+    std::error_code ec;
+    const std::string &path = (kind == "encoder") ? modelPath_ : decoderPath_;
+    if (path.empty()) return;
+    auto dir = std::filesystem::path(path).parent_path();
+    auto manifest = readModelManifest(dir);
+    if (!manifest.is_object()) return;
+    inputName = manifest.value("input_name", kind == "encoder" ? "waveform" : "concept");
+    outputName = manifest.value("output_name", kind == "encoder" ? "concept" : "reconstruction");
+    if (manifest.contains("input_shape") && manifest["input_shape"].is_array())
+      inputShape = manifest["input_shape"].get<std::vector<int>>();
+    if (manifest.contains("output_shape") && manifest["output_shape"].is_array())
+      outputShape = manifest["output_shape"].get<std::vector<int>>();
+    if (manifest.contains("concept_dim") && manifest["concept_dim"].is_number())
+      concept = manifest["concept_dim"].get<int>();
+    if (inputShape.empty())
+      inputShape = (kind == "encoder") ? std::vector<int>{1, 1, 1, kFixedInputSamples}
+                                         : std::vector<int>{1, concept, 1, 1};
+    if (outputShape.empty())
+      outputShape = (kind == "encoder") ? std::vector<int>{1, concept, 1, 1}
+                                          : std::vector<int>{1, 1, 1, kDecoderOutputSamples};
+  }
+
+  JpeaV2SpeechWorldModelConfig cfg_;
+  int targetDim_;
+  bool gpu_;
+  std::string modelPath_;
+  std::string decoderPath_;
+  size_t samples_ = 0;
+  std::string lastError_;
+  std::string encoderInputName_;
+  std::string encoderOutputName_;
+  std::vector<int> encoderInputShape_;
+  std::vector<int> encoderOutputShape_;
+  std::string decoderInputName_;
+  std::string decoderOutputName_;
+  std::vector<int> decoderInputShape_;
+  std::vector<int> decoderOutputShape_;
+  int conceptDim_ = 0;
+};
+
+phoenix::deployment::LocalBackendType chooseLocalBackend(const phoenix::deployment::ModelDeploymentRecord &record) {
+  auto backend = record.localBackend;
+  if (backend == phoenix::deployment::LocalBackendType::Auto) {
+#if defined(__aarch64__)
+    backend = phoenix::deployment::LocalBackendType::Bpu;
+#elif defined(__x86_64__) || defined(__amd64__)
+    backend = phoenix::deployment::LocalBackendType::Cpu;
+#else
+    backend = phoenix::deployment::LocalBackendType::Cpu;
+#endif
+  }
+  return backend;
+}
+
 /**
- * @brief Factory that selects a local HBDNN, remote, or fallback speech world model.
+ * @brief Factory that selects a local HBDNN, remote, server-client, or ONNX
+ *        speech world model.
  *
- * Preference order: remote edge endpoint (when configured), local HBDNN BPU
- * model (when the runtime and compiled model are both available), and finally
- * the deterministic fallback.  The fallback is also used for ServerClient
- * placement or disabled edge builds.
+ * Preference order:
+ *   1. Server-client: the client runs the model and only sends concept vectors.
+ *   2. Remote edge endpoint (when configured).
+ *   3. Local backend from model_deployment.localBackend (cpu/gpu/bpu/js).
+ *   4. Unavailable model if no model files are present.
  */
 std::unique_ptr<JpeaV2SpeechWorldModel> createJpeaV2SpeechWorldModel(
     const std::string &variantId, int targetDim, const std::string & /*backend*/) {
@@ -999,11 +1517,12 @@ std::unique_ptr<JpeaV2SpeechWorldModel> createJpeaV2SpeechWorldModel(
   if (!v) {
     v = findJpeaV2SpeechVariant("jpea_v2_speech_16k");
   }
+  if (!v) return nullptr;
 
   const auto &deployment = phoenix::deployment::ModelDeploymentConfig::instance().speech();
 
   if (deployment.placement == phoenix::deployment::ModelPlacement::ServerClient) {
-    return std::make_unique<JpeaV2SpeechFallbackModel>(*v, targetDim);
+    return std::make_unique<JpeaV2SpeechServerClientModel>(*v, targetDim);
   }
 
   const bool useRemote =
@@ -1014,19 +1533,32 @@ std::unique_ptr<JpeaV2SpeechWorldModel> createJpeaV2SpeechWorldModel(
     return std::make_unique<JpeaV2SpeechRemoteModel>(*v, targetDim, deployment.remote);
   }
 
+  auto backend = chooseLocalBackend(deployment);
+  if (backend == phoenix::deployment::LocalBackendType::Bpu) {
 #if PHOENIX_EDGE_SPEECH_ENABLED
-  // Prefer local HBDNN only when the compiled model and BPU runtime are both
-  // available.  On non-X5 builds this check fails gracefully and we fall back
-  // to the deterministic CPU implementation, preserving a working audio<->concept
-  // bridge everywhere.
-  auto hbdnn = std::make_unique<JpeaV2SpeechHbdnnModel>(*v, targetDim);
-  if (hbdnn->status().value("ready", false)) {
-    return hbdnn;
-  }
+    auto hbdnn = std::make_unique<JpeaV2SpeechHbdnnModel>(*v, targetDim);
+    if (hbdnn->status().value("ready", false)) return hbdnn;
+    return std::make_unique<JpeaV2SpeechUnavailableModel>(
+        *v, targetDim, "local BPU speech model is not ready (missing .bin or BPU runtime)");
+#else
+    return std::make_unique<JpeaV2SpeechUnavailableModel>(
+        *v, targetDim, "local BPU speech backend is disabled at compile time");
 #endif
+  }
 
-  (void)deployment;
-  return std::make_unique<JpeaV2SpeechFallbackModel>(*v, targetDim);
+  if (backend == phoenix::deployment::LocalBackendType::Cpu ||
+      backend == phoenix::deployment::LocalBackendType::Gpu) {
+    return std::make_unique<JpeaV2SpeechLocalOnnxModel>(
+        *v, targetDim, backend == phoenix::deployment::LocalBackendType::Gpu);
+  }
+
+  if (backend == phoenix::deployment::LocalBackendType::Js) {
+    return std::make_unique<JpeaV2SpeechUnavailableModel>(
+        *v, targetDim, "browser JS runner must execute on the client; no C++ implementation");
+  }
+
+  return std::make_unique<JpeaV2SpeechUnavailableModel>(
+      *v, targetDim, "no local speech backend could be selected");
 }
 
 }  // namespace io

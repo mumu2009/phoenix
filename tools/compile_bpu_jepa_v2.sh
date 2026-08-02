@@ -19,7 +19,7 @@
 #   bash /workspace/tools/compile_bpu_jepa_v2.sh \
 #        --model-name speech_encoder \
 #        --onnx /workspace/additive/speech_encoder/model.onnx \
-#        --calib-dir /workspace/additive/speech_encoder/calibration_calibration \
+#        --calib-dir /workspace/additive/speech_encoder/calibration \
 #        --input-name waveform \
 #        --input-shape 1x1x1x16000 \
 #        --out-dir /workspace/additive/speech_encoder/bin
@@ -89,7 +89,7 @@ while [[ $# -gt 0 ]]; do
 done
 set -- "${POSITIONAL[@]}"
 
-mkdir -p "$OUT_DIR" "$OUT_DIR/mapper_work"
+[[ -n "$OUT_DIR" ]] && mkdir -p "$OUT_DIR" "$OUT_DIR/mapper_work"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -172,6 +172,7 @@ if [[ -n "$MODEL_NAME" && -n "$ONNX" ]]; then
     [[ -n "$INPUT_NAME" ]] || die "--input-name is required in generic mode"
     [[ -n "$INPUT_SHAPE" ]] || die "--input-shape is required in generic mode"
 
+    mkdir -p "$OUT_DIR" "$OUT_DIR/mapper_work"
     fix_onnx_ir "$ONNX"
     compile_onnx "$MODEL_NAME" "$ONNX" "$CALIB_DIR" "$INPUT_NAME" "$INPUT_SHAPE" "$PER_CHANNEL" "$CALIB_TYPE"
 
@@ -200,6 +201,7 @@ fi
 [[ -d "$ONNX_DIR/calibration_encoder" ]] || die "Encoder calibration not found in $ONNX_DIR"
 [[ -d "$ONNX_DIR/calibration_decoder" ]] || die "Decoder calibration not found in $ONNX_DIR"
 
+mkdir -p "$OUT_DIR" "$OUT_DIR/mapper_work"
 fix_onnx_ir "$ONNX_DIR/model_encoder.onnx"
 fix_onnx_ir "$ONNX_DIR/model_decoder.onnx"
 

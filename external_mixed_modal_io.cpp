@@ -610,11 +610,15 @@ phoenix::multimodal::SemanticUnit MixedModalConceptBridge::encode(const MixedMod
             height = packet.metadata["height"].get<int>();
         }
         auto variant = imageVariantFromMetadata(packet.metadata);
-        auto encoded = imageWorldModel(variant, static_cast<int>(dim))
-                           .encode(packet.payload, width, height, packet.mimeType);
+        auto &imageModel = imageWorldModel(variant, static_cast<int>(dim));
+        auto encoded = imageModel.encode(packet.payload, width, height, packet.mimeType);
         if (encoded.empty()) {
-            encoded = mediaConcept(packet.payload, dim, 0x494D4147U);
-            unit.metadata["jpeaBackend"] = "fallback";
+            auto status = imageModel.status();
+            unit.metadata["jpeaBackend"] = status.value("backend", "unavailable");
+            unit.metadata["jpeaError"] = status.value("error", "image world model not ready");
+            unit.confidence = 0.0f;
+        } else {
+            unit.metadata["jpeaBackend"] = "jpea-v2-image-world-model";
         }
         unit.semanticVector = std::move(encoded);
         unit.metadata["conceptEncoder"] = "jpea-v2-image-world-model";
@@ -622,11 +626,15 @@ phoenix::multimodal::SemanticUnit MixedModalConceptBridge::encode(const MixedMod
     } else if (packet.modality == MixedModalModality::Audio) {
         auto variant = speechVariantFromMetadata(packet.metadata);
         const int sampleRate = sampleRateFromMetadata(packet.metadata);
-        auto encoded = speechWorldModel(variant, static_cast<int>(dim))
-                           .encode(packet.payload, sampleRate, packet.mimeType);
+        auto &speechModel = speechWorldModel(variant, static_cast<int>(dim));
+        auto encoded = speechModel.encode(packet.payload, sampleRate, packet.mimeType);
         if (encoded.empty()) {
-            encoded = mediaConcept(packet.payload, dim, 0x41554449U);
-            unit.metadata["jpeaSpeechBackend"] = "fallback";
+            auto status = speechModel.status();
+            unit.metadata["jpeaSpeechBackend"] = status.value("backend", "unavailable");
+            unit.metadata["jpeaSpeechError"] = status.value("error", "speech world model not ready");
+            unit.confidence = 0.0f;
+        } else {
+            unit.metadata["jpeaSpeechBackend"] = "jpea-v2-speech-world-model";
         }
         {
             std::lock_guard<std::mutex> lock(gSpeechModelMutex);
@@ -640,8 +648,6 @@ phoenix::multimodal::SemanticUnit MixedModalConceptBridge::encode(const MixedMod
         unit.semanticVector = std::move(encoded);
         unit.metadata["conceptEncoder"] = "jpea-v2-speech-world-model";
         unit.metadata["jpeaSpeechVariant"] = variant;
-        if (!unit.metadata.contains("jpeaSpeechBackend"))
-            unit.metadata["jpeaSpeechBackend"] = "jpea-v2";
         unit.metadata["speechModelSamples"] = std::to_string(gSpeechModel.samples);
     } else {
         unit.semanticVector = mediaConcept(packet.payload, dim, 0x53545255U);
@@ -678,7 +684,9 @@ bool MixedModalConceptBridge::pretrainSpeech(const MixedModalPacket &audio,
     auto &model = speechWorldModel(variant, static_cast<int>(dim));
 
     // 1. JEPA self-supervised adaptation (predict masked windows from context).
-    model.adapt(audio.payload, sampleRate, audio.mimeType, 1, 1e-3f);
+    if (model.adapt(audio.payload, sampleRate, audio.mimeType, 1, 1e-3f) < 0.0f) {
+        return false;
+    }
 
     // 2. Contrastive speech -> text alignment.
     auto acoustic = model.encode(audio.payload, sampleRate, audio.mimeType);
@@ -764,10 +772,11 @@ bool MixedModalConceptBridge::pretrainImage(const MixedModalPacket &image,
     auto &model = imageWorldModel(variant, static_cast<int>(dim));
 
     // JEPA self-supervised adaptation (predict masked patches from context).
-    model.adapt(image.payload, width, height, image.mimeType, 1, 1e-3f);
+    if (model.adapt(image.payload, width, height, image.mimeType, 1, 1e-3f) < 0.0f) {
+        return false;
+    }
 
     auto visual = model.encode(image.payload, width, height, image.mimeType);
-    if (visual.empty()) visual = mediaConcept(image.payload, dim, 0x494D4147U);
     if (visual.size() != dim) return false;
 
     const auto correlationId = phoenix::multimodal::generateSemanticId(caption);
@@ -840,21 +849,12 @@ MixedModalPacket MixedModalConceptBridge::decode(const phoenix::multimodal::Sema
     } else if (target == MixedModalModality::Image || target == MixedModalModality::Video) {
         packet.mimeType = "image/png";
         auto variant = "ijepa_vith14_1k";
-        packet.payload = imageWorldModel(variant, static_cast<int>(unit.semanticVector.size()))
-                             .decode(unit.semanticVector, packet.mimeType);
-        // If no decoder is configured, emit a 1x1 PNG placeholder so the
-        // downstream pipeline still receives a valid image packet.
+        auto &model = imageWorldModel(variant, static_cast<int>(unit.semanticVector.size()));
+        packet.payload = model.decode(unit.semanticVector, packet.mimeType);
         if (packet.payload.empty()) {
-            static const std::vector<uint8_t> kPlaceholder1x1Png{
-                0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00,
-                0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01,
-                0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
-                0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41,
-                0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0x50, 0x0f, 0x00,
-                0x04, 0x85, 0x01, 0x80, 0x84, 0xa3, 0x92, 0x23, 0x00, 0x00,
-                0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82};
-            packet.payload = kPlaceholder1x1Png;
-            packet.metadata["imageDecodeFallback"] = true;
+            auto status = model.status();
+            packet.metadata["imageDecodeBackend"] = status.value("backend", "unavailable");
+            packet.metadata["imageDecodeError"] = status.value("error", "image decoder not ready");
         }
         packet.metadata["sourceModality"] = phoenix::multimodal::modalityToString(unit.modality);
         packet.metadata["conceptVector"] = unit.semanticVector;
@@ -870,18 +870,12 @@ MixedModalPacket MixedModalConceptBridge::decode(const phoenix::multimodal::Sema
                 lengthHint = 0;
             }
         }
-        packet.payload = speechWorldModel(variant, static_cast<int>(unit.semanticVector.size()))
-                             .decode(unit.semanticVector, packet.mimeType, lengthHint);
-        // If the speech model cannot synthesize a waveform, return a JSON
-        // concept payload as the portable fallback.
+        auto &model = speechWorldModel(variant, static_cast<int>(unit.semanticVector.size()));
+        packet.payload = model.decode(unit.semanticVector, packet.mimeType, lengthHint);
         if (packet.payload.empty()) {
-            packet.mimeType = "application/json";
-            nlohmann::json conceptPayload{{"semanticVector", unit.semanticVector},
-                                          {"sourceModality", phoenix::multimodal::modalityToString(unit.modality)},
-                                          {"lengthHint", lengthHint}};
-            const auto serialized = conceptPayload.dump();
-            packet.payload.assign(serialized.begin(), serialized.end());
-            packet.metadata["requiresModalityDecoder"] = true;
+            auto status = model.status();
+            packet.metadata["audioDecodeBackend"] = status.value("backend", "unavailable");
+            packet.metadata["audioDecodeError"] = status.value("error", "audio decoder not ready");
         }
         packet.metadata["sourceModality"] = phoenix::multimodal::modalityToString(unit.modality);
         packet.metadata["conceptVector"] = unit.semanticVector;

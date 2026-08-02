@@ -35,6 +35,28 @@ std::string placementToString(ModelPlacement p) {
   return "local";
 }
 
+std::string localBackendTypeToString(LocalBackendType b) {
+  if (b == LocalBackendType::Gpu) return "gpu";
+  if (b == LocalBackendType::Bpu) return "bpu";
+  if (b == LocalBackendType::Js) return "js";
+  if (b == LocalBackendType::Auto) return "auto";
+  return "cpu";
+}
+
+LocalBackendType parseLocalBackendType(const std::string &s) {
+  std::string t;
+  t.reserve(s.size());
+  for (unsigned char c : s) {
+    if (std::isalnum(static_cast<unsigned char>(c)))
+      t.push_back(static_cast<char>(std::tolower(c)));
+  }
+  if (t == "bpu" || t == "x5" || t == "horizon" || t == "edge") return LocalBackendType::Bpu;
+  if (t == "gpu" || t == "cuda" || t == "rocm" || t == "hip") return LocalBackendType::Gpu;
+  if (t == "js" || t == "javascript" || t == "browser" || t == "web" || t == "wasm") return LocalBackendType::Js;
+  if (t == "cpu" || t == "onnx" || t == "local" || t == "x86" || t == "x86_64") return LocalBackendType::Cpu;
+  return LocalBackendType::Auto;
+}
+
 ModelPlacement parsePlacement(const std::string &s) {
   std::string t;
   t.reserve(s.size());
@@ -129,6 +151,7 @@ void RemoteEndpoint::fromJson(const nlohmann::json &j) {
 nlohmann::json ModelDeploymentRecord::toJson() const {
   nlohmann::json j;
   j["placement"] = placementToString(placement);
+  j["localBackend"] = localBackendTypeToString(localBackend);
   j["remote"] = remote.toJson();
   return j;
 }
@@ -136,6 +159,7 @@ nlohmann::json ModelDeploymentRecord::toJson() const {
 void ModelDeploymentRecord::fromJson(const nlohmann::json &j) {
   if (!j.is_object()) return;
   placement = parsePlacement(j.value("placement", "local"));
+  localBackend = parseLocalBackendType(j.value("localBackend", "auto"));
   if (j.contains("remote") && j["remote"].is_object())
     remote.fromJson(j["remote"]);
 }
@@ -180,12 +204,14 @@ static std::string dotPathForModelEnv(const std::string &env) {
   if (env == "AI_LLM_REMOTE_TOKEN") return "model_deployment.llm.remoteToken";
   if (env == "AI_LLM_REMOTE_TIMEOUT_MS") return "model_deployment.llm.remoteTimeoutMs";
   if (env == "AI_VISION_PLACEMENT") return "model_deployment.vision.placement";
+  if (env == "AI_VISION_LOCAL_BACKEND") return "model_deployment.vision.localBackend";
   if (env == "AI_VISION_REMOTE_URL") return "model_deployment.vision.remoteUrl";
   if (env == "AI_VISION_REMOTE_METHOD") return "model_deployment.vision.remoteMethod";
   if (env == "AI_VISION_REMOTE_MODEL") return "model_deployment.vision.remoteModel";
   if (env == "AI_VISION_REMOTE_TOKEN") return "model_deployment.vision.remoteToken";
   if (env == "AI_VISION_REMOTE_TIMEOUT_MS") return "model_deployment.vision.remoteTimeoutMs";
   if (env == "AI_SPEECH_PLACEMENT") return "model_deployment.speech.placement";
+  if (env == "AI_SPEECH_LOCAL_BACKEND") return "model_deployment.speech.localBackend";
   if (env == "AI_SPEECH_REMOTE_URL") return "model_deployment.speech.remoteUrl";
   if (env == "AI_SPEECH_REMOTE_METHOD") return "model_deployment.speech.remoteMethod";
   if (env == "AI_SPEECH_REMOTE_MODEL") return "model_deployment.speech.remoteModel";
@@ -212,6 +238,8 @@ void applyRecordFromArgs(
     const std::string &envPrefix) {
   record.placement = parsePlacement(argOrEnv(
       args, prefix + "-placement", envPrefix + "_PLACEMENT", "local"));
+  record.localBackend = parseLocalBackendType(argOrEnv(
+      args, prefix + "-local-backend", envPrefix + "_LOCAL_BACKEND", "auto"));
   record.remote.url = argOrEnv(
       args, prefix + "-remote-url", envPrefix + "_REMOTE_URL", "");
   record.remote.method = lowerCopy(argOrEnv(

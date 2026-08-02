@@ -40,12 +40,35 @@ enum class ModelPlacement {
 };
 
 /**
+ * @brief Local backend used when a model is placed on this host.
+ *
+ * - Cpu:    x86_64 / general-purpose CPU; loads and runs the ONNX model
+ *           (directly via ONNX Runtime or through the local HTTP runner).
+ * - Gpu:    local GPU / CUDA (uses the same ONNX path with GPU provider).
+ * - Bpu:    aarch64 / RDK X5 BPU; loads the compiled Horizon .bin.
+ * - Js:     browser / client-side JS runner (server-client mode stub).
+ * - Auto:   let the factory choose from the build / runtime environment.
+ */
+enum class LocalBackendType {
+  Auto = 0,
+  Cpu = 1,
+  Gpu = 2,
+  Bpu = 3,
+  Js = 4,
+};
+
+/**
  * @brief Convert a ModelPlacement value to a human-readable string.
  *
  * @param p  placement value.
- * @return   "local", "remote", or "auto".
+ * @return   "local", "remote", "auto", or "server-client".
  */
 std::string placementToString(ModelPlacement p);
+
+/**
+ * @brief Convert a LocalBackendType value to a human-readable string.
+ */
+std::string localBackendTypeToString(LocalBackendType b);
 
 /**
  * @brief Parse a placement string.
@@ -57,6 +80,16 @@ std::string placementToString(ModelPlacement p);
  * @return   corresponding ModelPlacement, or ModelPlacement::Local on failure.
  */
 ModelPlacement parsePlacement(const std::string &s);
+
+/**
+ * @brief Parse a local backend string.
+ *
+ * Accepts "cpu", "gpu", "bpu", "js", "auto" and common aliases.
+ *
+ * @param s  input string; leading/trailing whitespace is ignored.
+ * @return   corresponding LocalBackendType, or LocalBackendType::Auto on failure.
+ */
+LocalBackendType parseLocalBackendType(const std::string &s);
 
 /**
  * @brief Description of a remote model endpoint.
@@ -117,6 +150,7 @@ struct RemoteEndpoint {
  */
 struct ModelDeploymentRecord {
   ModelPlacement placement = ModelPlacement::Local;
+  LocalBackendType localBackend = LocalBackendType::Auto;
   RemoteEndpoint remote;
 
   nlohmann::json toJson() const;

@@ -88,10 +88,20 @@ def base_ip(role: str) -> str:
     return "http://127.0.0.1"
 
 
+def default_local_backend(arch: str, placement: str) -> str:
+    if placement != "local":
+        return "auto"
+    if arch == "aarch64":
+        return "bpu"
+    if arch == "hybrid":
+        return "gpu"
+    return "cpu"
+
+
 def build_record(placement: str, role: str, conn: str, is_llm: bool,
-                 llm_model: str = "", timeout: int = 30000) -> dict:
+                 arch: str, llm_model: str = "", timeout: int = 30000) -> dict:
     if placement == "local":
-        return {"placement": placement}
+        return {"placement": placement, "localBackend": default_local_backend(arch, placement)}
 
     port = default_port(conn, is_llm)
     path = default_path(conn, is_llm)
@@ -141,9 +151,9 @@ def build_matrix_entry(current: str, gateway: str, arch: str, conn: str,
                        llm: str, vision: str, speech: str,
                        llm_model: str) -> dict:
     return {
-        "llm": build_record(llm, current, conn, True, llm_model, 120000),
-        "vision": build_record(vision, current, conn, False, timeout=30000),
-        "speech": build_record(speech, current, conn, False, timeout=30000),
+        "llm": build_record(llm, current, conn, True, arch, llm_model, 120000),
+        "vision": build_record(vision, current, conn, False, arch, timeout=30000),
+        "speech": build_record(speech, current, conn, False, arch, timeout=30000),
         "_metadata": {
             "current": current,
             "gateway": gateway,
@@ -156,10 +166,10 @@ def build_matrix_entry(current: str, gateway: str, arch: str, conn: str,
 def default_all_auto() -> dict:
     """The 649th default config: all auto, same host, http-json."""
     return {
-        "llm": build_record("auto", "host", "http-json", True,
+        "llm": build_record("auto", "host", "http-json", True, "x86_64",
                             llm_model="llama3.1:8b", timeout=120000),
-        "vision": build_record("auto", "host", "http-json", False, timeout=30000),
-        "speech": build_record("auto", "host", "http-json", False, timeout=30000),
+        "vision": build_record("auto", "host", "http-json", False, "x86_64", timeout=30000),
+        "speech": build_record("auto", "host", "http-json", False, "x86_64", timeout=30000),
         "_metadata": {
             "current": "host",
             "gateway": "host",
