@@ -13,6 +13,8 @@ dist/
 *.map
 compile_output.txt
 build_success_flag.txt
+gguf
+AGENTS.md
 
 # ─── Conan / CMake ─────────────────────────────────────────────────────────────
 CMakeFiles/
@@ -96,11 +98,9 @@ tools/__pycache__/
 
 # ─── Hardware design files (not part of the software package) ─────────────────
 catastrophe/
-
 # ─── Corpus / test data (too large; user must provide locally) ────────────────
 robots/
-test/
-test-tools/
+
 tests/
 hacktests/
 # NOTE: robots/ corpus seeds must be provided by the user before first run.

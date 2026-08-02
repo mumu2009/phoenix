@@ -15,11 +15,25 @@
 #ifndef PHOENIX_EDGE_IMAGE_ENABLED
 #define PHOENIX_EDGE_IMAGE_ENABLED 1
 #endif
+#ifndef PHOENIX_EDGE_SPEECH_ENABLED
+#define PHOENIX_EDGE_SPEECH_ENABLED 1
+#endif
 
 #if __has_include(<dnn/hb_dnn.h>)
-#if PHOENIX_EDGE_IMAGE_ENABLED
+#if PHOENIX_EDGE_IMAGE_ENABLED || PHOENIX_EDGE_SPEECH_ENABLED
 #include <dnn/hb_dnn.h>
 #define PHOENIX_RDK_X5_HAVE_HBDNN 1
+
+// Older hb_dnn.h headers expose the quanti type enum values directly; newer
+// versions might not define the legacy constants.  Provide fallbacks so the
+// same source builds against both.
+#ifndef HB_DNN_QUANTI_TYPE_SCALE
+#define HB_DNN_QUANTI_TYPE_SCALE SCALE
+#endif
+#ifndef HB_DNN_QUANTI_TYPE_SHIFT
+#define HB_DNN_QUANTI_TYPE_SHIFT SHIFT
+#endif
+
 #endif
 #endif
 

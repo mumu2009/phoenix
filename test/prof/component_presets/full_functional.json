@@ -1,0 +1,24 @@
+{
+  "pipeline": {
+    "gnn": true,
+    "context": true,
+    "brain": {
+      "enabled": true,
+      "profile": "functional"
+    }
+  },
+  "learning": {
+    "enabled": true,
+    "rl": true,
+    "adv": true,
+    "gnnGa": true,
+    "dialog": true,
+    "dialogTransformer": false,
+    "dialogGraphContext": true
+  },
+  "collective": {
+    "routingStorage": true,
+    "ignoreMatchingForComputeNodes": true,
+    "matching": "storage-only"
+  }
+}

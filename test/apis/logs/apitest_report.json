@@ -1,0 +1,331 @@
+{
+  "generatedAt": "2026-03-22T18:10:22.201227",
+  "inventory": {
+    "total": 35,
+    "byMethod": {
+      "ANY": 31,
+      "GET": 4
+    },
+    "byKind": {
+      "literal": 32,
+      "regex": 3
+    }
+  },
+  "endpoints": [
+    {
+      "path": "/",
+      "method": "ANY",
+      "source_line": 3466,
+      "kind": "literal"
+    },
+    {
+      "path": "/api/gguf/export",
+      "method": "ANY",
+      "source_line": 3935,
+      "kind": "literal"
+    },
+    {
+      "path": "/api/gguf/inspect",
+      "method": "ANY",
+      "source_line": 3915,
+      "kind": "literal"
+    },
+    {
+      "path": "/asset-manifest.json",
+      "method": "GET",
+      "source_line": 3543,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/bootstrap",
+      "method": "ANY",
+      "source_line": 3608,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/config",
+      "method": "ANY",
+      "source_line": 3595,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/forgot",
+      "method": "ANY",
+      "source_line": 3854,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/login",
+      "method": "ANY",
+      "source_line": 3719,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/logout",
+      "method": "ANY",
+      "source_line": 3905,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/me",
+      "method": "ANY",
+      "source_line": 3758,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/register",
+      "method": "ANY",
+      "source_line": 3662,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/reset",
+      "method": "ANY",
+      "source_line": 3881,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/verify",
+      "method": "ANY",
+      "source_line": 3818,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/verify/request",
+      "method": "ANY",
+      "source_line": 3783,
+      "kind": "literal"
+    },
+    {
+      "path": "/context/ingest",
+      "method": "ANY",
+      "source_line": 3989,
+      "kind": "literal"
+    },
+    {
+      "path": "/context/reset",
+      "method": "ANY",
+      "source_line": 4099,
+      "kind": "literal"
+    },
+    {
+      "path": "/context/status",
+      "method": "ANY",
+      "source_line": 4124,
+      "kind": "literal"
+    },
+    {
+      "path": "/favicon.ico",
+      "method": "GET",
+      "source_line": 3591,
+      "kind": "literal"
+    },
+    {
+      "path": "/logo192.png",
+      "method": "ANY",
+      "source_line": 3547,
+      "kind": "literal"
+    },
+    {
+      "path": "/logo512.png",
+      "method": "ANY",
+      "source_line": 3567,
+      "kind": "literal"
+    },
+    {
+      "path": "/manifest.json",
+      "method": "GET",
+      "source_line": 3539,
+      "kind": "literal"
+    },
+    {
+      "path": "/robots.txt",
+      "method": "GET",
+      "source_line": 3587,
+      "kind": "literal"
+    },
+    {
+      "path": "/speech/analyze",
+      "method": "ANY",
+      "source_line": 4195,
+      "kind": "literal"
+    },
+    {
+      "path": "/speech/ingest",
+      "method": "ANY",
+      "source_line": 4248,
+      "kind": "literal"
+    },
+    {
+      "path": "/speech/synthesize",
+      "method": "ANY",
+      "source_line": 4223,
+      "kind": "literal"
+    },
+    {
+      "path": "/static/css/{1}",
+      "method": "ANY",
+      "source_line": 3528,
+      "kind": "literal"
+    },
+    {
+      "path": "/static/js/{1}",
+      "method": "ANY",
+      "source_line": 3516,
+      "kind": "literal"
+    },
+    {
+      "path": "/v51/chat",
+      "method": "ANY",
+      "source_line": 4034,
+      "kind": "literal"
+    },
+    {
+      "path": "/v51/learn",
+      "method": "ANY",
+      "source_line": 4333,
+      "kind": "literal"
+    },
+    {
+      "path": "/v51/process",
+      "method": "ANY",
+      "source_line": 4303,
+      "kind": "literal"
+    },
+    {
+      "path": "/v51/status",
+      "method": "ANY",
+      "source_line": 4363,
+      "kind": "literal"
+    },
+    {
+      "path": "/vision/analyze",
+      "method": "ANY",
+      "source_line": 4145,
+      "kind": "literal"
+    },
+    {
+      "path": "^/api/.*$",
+      "method": "ANY",
+      "source_line": 3977,
+      "kind": "regex"
+    },
+    {
+      "path": "^/openclaw/.*$",
+      "method": "ANY",
+      "source_line": 3981,
+      "kind": "regex"
+    },
+    {
+      "path": "^/robots/.*$",
+      "method": "ANY",
+      "source_line": 3985,
+      "kind": "regex"
+    }
+  ],
+  "results": [
+    {
+      "name": "root_html",
+      "ok": true,
+      "status": "HTML",
+      "detail": "title=React App",
+      "elapsed_ms": 1
+    },
+    {
+      "name": "api_chat_proxy_ollama",
+      "ok": true,
+      "status": "PROXY",
+      "detail": "provider=ollama+fine-tuning, modelElapsedMs=9751, replyLen=168",
+      "elapsed_ms": 9753
+    },
+    {
+      "name": "context_lifecycle",
+      "ok": true,
+      "status": "SEMANTIC",
+      "detail": "context ingest -> status -> reset lifecycle verified",
+      "elapsed_ms": 4
+    },
+    {
+      "name": "v51_chat_text",
+      "ok": true,
+      "status": "REGEX",
+      "detail": "semantic markers detected",
+      "elapsed_ms": 0
+    },
+    {
+      "name": "vision_analyze",
+      "ok": true,
+      "status": "SEMANTIC",
+      "detail": "vision analyzed valid PNG 2x2",
+      "elapsed_ms": 3
+    },
+    {
+      "name": "speech_analyze",
+      "ok": true,
+      "status": "SEMANTIC",
+      "detail": "speech analyzed env=env_cluster_2 emotion=emo_cluster_2 pitch=219.2",
+      "elapsed_ms": 1750
+    },
+    {
+      "name": "speech_synthesize",
+      "ok": true,
+      "status": "SEMANTIC",
+      "detail": "speech synthesis produced decodable wav duration=3070ms",
+      "elapsed_ms": 10
+    },
+    {
+      "name": "speech_ingest",
+      "ok": true,
+      "status": "SEMANTIC",
+      "detail": "speech analyze -> context ingest linkage verified",
+      "elapsed_ms": 1752
+    },
+    {
+      "name": "v51_learn_status",
+      "ok": true,
+      "status": "JSON",
+      "detail": "learn->status path verified",
+      "elapsed_ms": 1
+    },
+    {
+      "name": "gguf_inspect",
+      "ok": true,
+      "status": "SEMANTIC",
+      "detail": "gguf parser returned tensor and token-unit projection metadata",
+      "elapsed_ms": 2
+    },
+    {
+      "name": "gguf_export",
+      "ok": true,
+      "status": "SEMANTIC",
+      "detail": "gguf structured export bundle and files verified",
+      "elapsed_ms": 5
+    },
+    {
+      "name": "fine_tuning_corpus_add",
+      "ok": true,
+      "status": "SEMANTIC",
+      "detail": "fine-tuning corpus add wrote augmented jsonl rows",
+      "elapsed_ms": 4
+    },
+    {
+      "name": "fine_tuning_run_dry",
+      "ok": true,
+      "status": "SEMANTIC",
+      "detail": "fine-tuning dry-run validated corpus and plan",
+      "elapsed_ms": 126
+    },
+    {
+      "name": "fine_tuning_run_invalid_weights",
+      "ok": true,
+      "status": "SEMANTIC",
+      "detail": "fine-tuning invalid alpha/beta rejected with documented bad-request path",
+      "elapsed_ms": 1
+    }
+  ],
+  "summary": {
+    "total": 14,
+    "passed": 14,
+    "failed": 0
+  }
+}

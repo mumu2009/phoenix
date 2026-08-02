@@ -1,0 +1,28 @@
+[
+  {
+    "id": "qa-001",
+    "taskType": "qa",
+    "input": "请解释滑动窗口为什么可以降低长上下文推理的内存开销。",
+    "reference": "因为系统只保留局部窗口的精确状态，并把更早历史压缩为摘要状态，所以空间复杂度主要取决于窗口大小而不是总上下文长度。",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 80
+    },
+    "tags": ["window", "memory", "theory"]
+  },
+  {
+    "id": "tool-001",
+    "taskType": "tool-call",
+    "input": "调用计算器计算 37 乘以 48。",
+    "reference": {
+      "tool": "calculator",
+      "arguments": {"expression": "37*48"},
+      "result": "1776"
+    },
+    "scoring": {
+      "method": "structured-match",
+      "threshold": 100
+    },
+    "tags": ["tool", "calculator"]
+  }
+]
