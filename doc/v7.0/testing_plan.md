@@ -20,10 +20,10 @@ components that it touches.
 
 | Component | Files | Unit Tests | Penetration / Error Tests | Status |
 |-----------|-------|------------|---------------------------|--------|
-| Model deployment topology | `model_deployment.{hpp,cpp}` | `tests/gtest/unit/autonomy/test_model_deployment.cpp` (17 tests) | JSON round-trips, invalid inputs, empty URLs, `auto` placement, `server-client` placement | done |
-| Remote vision / speech models | `jpea_v2_image_world_model.cpp`, `jpea_v2_speech_world_model.cpp` | `MixedModalIOTest.*` (runtime) | Local fallback, remote dispatch, `server-client` fallback | done |
+| Model deployment topology | `model_deployment.{hpp,cpp}` | `tests/gtest/unit/autonomy/test_model_deployment.cpp` (20 tests) | JSON round-trips, invalid inputs, empty URLs, `auto` placement, `server-client` placement, `localBackend` cpu/gpu/bpu/js | done |
+| Remote / local vision / speech models | `jpea_v2_image_world_model.cpp`, `jpea_v2_speech_world_model.cpp` | `MixedModalIOTest.*` (runtime) | Local ONNX / BPU / server-client / unavailable model selection, additive residual `.onnx`/`.bin` resolution | done |
 | Config loading | `main_hub_parts/002_section_before_sharedmemoryslice.inc` | `ModelDeployment.ConfigLoadFromArgs` | CLI / env / JSON precedence | done |
-| Multimodal concept bridge | `external_mixed_modal_io.cpp` | `MixedModalIOTest.*` (runtime) | Empty-payload fallbacks, audio decode, out-of-bounds guards, client-supplied concept vectors | done |
+| Multimodal concept bridge | `external_mixed_modal_io.cpp` | `MixedModalIOTest.*` (runtime) | Empty-payload error reporting, audio decode, out-of-bounds guards, client-supplied concept vectors, no deterministic fallbacks | done |
 | Graph diffusion summarizer | `graph_diffusion_summarizer.{hpp,cpp}` | `test_graph_diffusion_summarizer.cpp` | Empty graph, malformed JSON | done |
 | Hierarchical memory | `hierarchical_memory.{hpp,cpp}` | `test_hierarchical_memory.cpp` | Tier promotion, deletion, snapshots | done |
 | BPU concept head training | `tools/train_bpu_jepa_head.py` | `tools/train_bpu_jepa_head.py` run on `runtime_store/calibration/golden` | VICReg loss convergence, ONNX export, manifest update | done |
@@ -45,16 +45,18 @@ compile.bat
 
 ## Notes
 
-- Pre-existing `MixedModalIOTest.ToSemanticUnitImage` and
-  `SpeechPretrainingPersistsConceptAlignment` failures are addressed by
-  deterministic fallbacks in `MixedModalConceptBridge::encode` and by using
-  `JpeaV2SpeechFallbackModel` when speech is deployed locally.
-- `MixedModalIOTest.DecodeSemanticUnitToConceptPacket` is fixed by a 1x1 PNG
-  placeholder in `MixedModalConceptBridge::decode` when no image decoder is
-  configured.
-- `MixedModalIOTest.DecodeSemanticUnitToAudioPacket` is now wired to the
-  `JpeaV2SpeechWorldModel::decode` fallback, producing an `audio/pcm` payload
-  unless the speech model reports it cannot synthesize.
+- `MixedModalIOTest.ToSemanticUnitImage`, `ImageEncodeReportsModelNotReady`,
+  `SpeechPretrainingFailsWithoutModel`, `PretrainImageFailsWithoutModel`,
+  `DecodeSemanticUnitToConceptPacket`, and `DecodeSemanticUnitToAudioPacket`
+  now expect empty vectors/payloads and error metadata when no real model is
+  configured; deterministic statistical fallbacks in
+  `MixedModalConceptBridge::encode` and `decode` have been removed.
+- The factories create `JpeaV2ImageLocalOnnxModel` / `JpeaV2SpeechLocalOnnxModel`
+  for the x86_64 `cpu`/`gpu` local backend, `JpeaV2ImageHbdnnModel` /
+  `JpeaV2SpeechHbdnnModel` for the RDK X5 `bpu` backend, and
+  `JpeaV2*UnavailableModel` when the required `.onnx` or `.bin` is missing.
+- `JpeaV2ImageServerClientModel` and `JpeaV2SpeechServerClientModel` reject
+  raw encode/decode calls and expect client-supplied concept vectors.
 - Remote image and speech world models now forward `decode` requests to the
   edge endpoint and base64-decode the returned payload.
 - `tools/model_deployment_edge_example.py` handles both `encode` and `decode`

@@ -50,8 +50,8 @@ flowchart TB
 
     subgraph MOD["世界模型 / 编码器"]
         TXT["TransformerTextEncoder<br/>Tokenizer / TransformerModel"]
-        IMG["JpeaV2ImageWorldModel<br/>+ fallback / RDK X5 BPU"]
-        SPK["JpeaV2SpeechWorldModel<br/>+ fallback"]
+        IMG["JpeaV2ImageWorldModel<br/>+ Local-ONNX / BPU / Remote / ServerClient"]
+        SPK["JpeaV2SpeechWorldModel<br/>+ Local-ONNX / BPU / Remote / ServerClient"]
     end
 
     subgraph INF["推理后端"]
@@ -233,8 +233,8 @@ flowchart LR
 
     subgraph ENC_LAYER["模态编码器"]
         TE["TransformerTextEncoder"]
-        JW["JpeaV2ImageWorldModel<br/>fallback / BPU / PyTorch"]
-        SW["JpeaV2SpeechWorldModel<br/>fallback"]
+        JW["JpeaV2ImageWorldModel<br/>Local-ONNX / BPU / Remote / ServerClient"]
+        SW["JpeaV2SpeechWorldModel<br/>Local-ONNX / BPU / Remote / ServerClient"]
         MC["mediaConcept<br/>未知模态"]
     end
 

@@ -54,6 +54,27 @@ All blocks use only BPU-friendly operators:
 Batch size is fixed at 1.  No dynamic axes are exported, and no training-only
 ops are used.
 
+## Runtime loading
+
+The evolved additive residual models are consumed at runtime by the Phoenix
+mixed-modal bridge:
+
+* **x86_64 / cpu / gpu** — `jpea_v2_image_world_model.cpp` and
+  `jpea_v2_speech_world_model.cpp` resolve
+  `runtime_store/models/additive_jpea/{speech,vision}_{encoder,decoder}/best.onnx`,
+  then call `tools/local_onnx_runner.py` through a `popen` pipe.  The Python
+  runner loads the ONNX with `onnxruntime`, reads the float32 input binary, and
+  writes the float32 output binary.
+* **RDK X5 / bpu** — the same `runtime_store/models/additive_jpea/.../best.bin`
+  compiled with `tools/compile_bpu_jepa_v2.sh` is executed through
+  `rdk_x5_bpu::execute`.
+* **Server-client / js** — the backend does not run the model.  Use
+  `static/js/client_onnx_runner.js` as a stub for client-side inference.
+
+`model.manifest.json` in each model directory supplies `input_name`,
+`output_name`, `input_shape`, `output_shape`, and `concept_dim`; the C++ factory
+uses them to configure the local runner or BPU call.
+
 ## File inventory
 
 | File | Purpose |

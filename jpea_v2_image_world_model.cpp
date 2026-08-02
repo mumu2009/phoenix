@@ -1069,16 +1069,15 @@ class JpeaV2ImageRemoteModel : public JpeaV2ImageWorldModel {
   std::string lastError_;
 };
 
-}  // namespace
 
-std::filesystem::path temporaryOnnxPath() {
+static std::filesystem::path temporaryOnnxPath() {
   static std::atomic<uint64_t> sequence{0};
   std::error_code ec;
   return std::filesystem::temp_directory_path(ec) /
          ("phoenix-onnx-" + std::to_string(sequence.fetch_add(1)));
 }
 
-std::string pythonExecutable() {
+static std::string pythonExecutable() {
   std::error_code ec;
   const std::vector<std::string> candidates = {
       "Python314/pythonw.exe", "Python314/python.exe", "pythonw", "python", "py"};
@@ -1089,7 +1088,7 @@ std::string pythonExecutable() {
   return "python";
 }
 
-std::string toShapeString(const std::vector<int> &shape) {
+static std::string toShapeString(const std::vector<int> &shape) {
   std::ostringstream oss;
   for (size_t i = 0; i < shape.size(); ++i) {
     if (i) oss << "x";
@@ -1098,7 +1097,7 @@ std::string toShapeString(const std::vector<int> &shape) {
   return oss.str();
 }
 
-nlohmann::json runLocalOnnx(
+static nlohmann::json runLocalOnnx(
     const std::string &modelPath,
     const std::string &inputName,
     const std::vector<int> &inputShape,
@@ -1460,7 +1459,7 @@ class JpeaV2ImageLocalOnnxModel : public JpeaV2ImageWorldModel {
 #endif
 
   void loadManifest(const std::string &kind, std::string &inputName, std::string &outputName,
-                    std::vector<int> &inputShape, std::vector<int> &outputShape, int &concept) {
+                    std::vector<int> &inputShape, std::vector<int> &outputShape, int &conceptDim) {
     std::error_code ec;
     const std::string &path = (kind == "encoder") ? modelPath_ : decoderPath_;
     if (path.empty()) return;
@@ -1474,12 +1473,12 @@ class JpeaV2ImageLocalOnnxModel : public JpeaV2ImageWorldModel {
     if (manifest.contains("output_shape") && manifest["output_shape"].is_array())
       outputShape = manifest["output_shape"].get<std::vector<int>>();
     if (manifest.contains("concept_dim") && manifest["concept_dim"].is_number())
-      concept = manifest["concept_dim"].get<int>();
+      conceptDim = manifest["concept_dim"].get<int>();
     if (inputShape.empty())
       inputShape = (kind == "encoder") ? std::vector<int>{1, 3, cfg_.resolution, cfg_.resolution}
-                                         : std::vector<int>{1, concept, 1, 1};
+                                         : std::vector<int>{1, conceptDim, 1, 1};
     if (outputShape.empty())
-      outputShape = (kind == "encoder") ? std::vector<int>{1, concept, 1, 1}
+      outputShape = (kind == "encoder") ? std::vector<int>{1, conceptDim, 1, 1}
                                           : std::vector<int>{1, 3, cfg_.resolution, cfg_.resolution};
   }
 
@@ -1503,7 +1502,7 @@ class JpeaV2ImageLocalOnnxModel : public JpeaV2ImageWorldModel {
   int conceptDim_ = 0;
 };
 
-phoenix::deployment::LocalBackendType chooseLocalBackend(const phoenix::deployment::ModelDeploymentRecord &record) {
+static phoenix::deployment::LocalBackendType chooseLocalBackend(const phoenix::deployment::ModelDeploymentRecord &record) {
   auto backend = record.localBackend;
   if (backend == phoenix::deployment::LocalBackendType::Auto) {
 #if defined(__aarch64__)
@@ -1516,6 +1515,8 @@ phoenix::deployment::LocalBackendType chooseLocalBackend(const phoenix::deployme
   }
   return backend;
 }
+
+}  // namespace
 
 /**
  * @brief Factory that selects the best available image world model.

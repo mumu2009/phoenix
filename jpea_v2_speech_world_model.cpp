@@ -838,29 +838,7 @@ class JpeaV2SpeechFallbackModel : public JpeaV2SpeechWorldModel {
   }
 };
 
-class JpeaV2SpeechUnavailableModel : public JpeaV2SpeechWorldModel {
- public:
-  JpeaV2SpeechUnavailableModel(JpeaV2SpeechWorldModelConfig cfg, int targetDim)
-      : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128) {}
 
-  std::vector<float> encode(const std::vector<uint8_t> &, int, const std::string &) override { return {}; }
-  std::vector<float> encodeContext(const std::vector<uint8_t> &, int, const std::string &, const std::vector<bool> &) override { return {}; }
-  std::vector<float> encodeTarget(const std::vector<uint8_t> &, int, const std::string &, const std::vector<int> &) override { return {}; }
-  std::vector<float> predictTarget(const std::vector<float> &, const std::vector<int> &) override { return {}; }
-  float adapt(const std::vector<uint8_t> &, int, const std::string &, int, float) override { return -1.0f; }
-  float contrastiveAdapt(const std::vector<uint8_t> &, int, const std::string &, const std::vector<float> &, float) override { return -1.0f; }
-  std::vector<uint8_t> decode(const std::vector<float> &, const std::string &, size_t) override { return {}; }
-  nlohmann::json status() const override {
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "unavailable"},
-                          {"targetDim", targetDim_}, {"ready", false},
-                          {"error", "no compiled RDK X5 speech JPEA model is configured"}};
-  }
-  const JpeaV2SpeechWorldModelConfig &config() const override { return cfg_; }
-
- private:
-  JpeaV2SpeechWorldModelConfig cfg_;
-  int targetDim_;
-};
 
 /**
  * @brief Remote implementation of the 1-D speech world model.
@@ -1018,16 +996,15 @@ class JpeaV2SpeechRemoteModel : public JpeaV2SpeechWorldModel {
   std::string lastError_;
 };
 
-}  // namespace
 
-std::filesystem::path temporaryOnnxPath() {
+static std::filesystem::path temporaryOnnxPath() {
   static std::atomic<uint64_t> sequence{0};
   std::error_code ec;
   return std::filesystem::temp_directory_path(ec) /
          ("phoenix-onnx-" + std::to_string(sequence.fetch_add(1)));
 }
 
-std::string pythonExecutable() {
+static std::string pythonExecutable() {
   std::error_code ec;
   const std::vector<std::string> candidates = {
       "Python314/pythonw.exe", "Python314/python.exe", "pythonw", "python", "py"};
@@ -1038,7 +1015,7 @@ std::string pythonExecutable() {
   return "python";
 }
 
-std::string toShapeString(const std::vector<int> &shape) {
+static std::string toShapeString(const std::vector<int> &shape) {
   std::ostringstream oss;
   for (size_t i = 0; i < shape.size(); ++i) {
     if (i) oss << "x";
@@ -1047,7 +1024,7 @@ std::string toShapeString(const std::vector<int> &shape) {
   return oss.str();
 }
 
-nlohmann::json runLocalOnnx(
+static nlohmann::json runLocalOnnx(
     const std::string &modelPath,
     const std::string &inputName,
     const std::vector<int> &inputShape,
@@ -1438,7 +1415,7 @@ class JpeaV2SpeechLocalOnnxModel : public JpeaV2SpeechWorldModel {
   }
 
   void loadManifest(const std::string &kind, std::string &inputName, std::string &outputName,
-                    std::vector<int> &inputShape, std::vector<int> &outputShape, int &concept) {
+                    std::vector<int> &inputShape, std::vector<int> &outputShape, int &conceptDim) {
     std::error_code ec;
     const std::string &path = (kind == "encoder") ? modelPath_ : decoderPath_;
     if (path.empty()) return;
@@ -1452,12 +1429,12 @@ class JpeaV2SpeechLocalOnnxModel : public JpeaV2SpeechWorldModel {
     if (manifest.contains("output_shape") && manifest["output_shape"].is_array())
       outputShape = manifest["output_shape"].get<std::vector<int>>();
     if (manifest.contains("concept_dim") && manifest["concept_dim"].is_number())
-      concept = manifest["concept_dim"].get<int>();
+      conceptDim = manifest["concept_dim"].get<int>();
     if (inputShape.empty())
       inputShape = (kind == "encoder") ? std::vector<int>{1, 1, 1, kFixedInputSamples}
-                                         : std::vector<int>{1, concept, 1, 1};
+                                         : std::vector<int>{1, conceptDim, 1, 1};
     if (outputShape.empty())
-      outputShape = (kind == "encoder") ? std::vector<int>{1, concept, 1, 1}
+      outputShape = (kind == "encoder") ? std::vector<int>{1, conceptDim, 1, 1}
                                           : std::vector<int>{1, 1, 1, kDecoderOutputSamples};
   }
 
@@ -1479,7 +1456,7 @@ class JpeaV2SpeechLocalOnnxModel : public JpeaV2SpeechWorldModel {
   int conceptDim_ = 0;
 };
 
-phoenix::deployment::LocalBackendType chooseLocalBackend(const phoenix::deployment::ModelDeploymentRecord &record) {
+static phoenix::deployment::LocalBackendType chooseLocalBackend(const phoenix::deployment::ModelDeploymentRecord &record) {
   auto backend = record.localBackend;
   if (backend == phoenix::deployment::LocalBackendType::Auto) {
 #if defined(__aarch64__)
@@ -1492,6 +1469,8 @@ phoenix::deployment::LocalBackendType chooseLocalBackend(const phoenix::deployme
   }
   return backend;
 }
+
+}  // namespace
 
 /**
  * @brief Factory that selects a local HBDNN, remote, server-client, or ONNX
