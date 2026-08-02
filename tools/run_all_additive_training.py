@@ -59,6 +59,8 @@ KALI_FILES = [
     "tools/hb_mapper_patch.py",
     "tools/x5_bpu_evaluate.py",
     "tools/x5_onnx_runtime_setup.py",
+    "tools/llm_concept_encoder.py",
+    "tools/prepare_multimodal_pool.py",
     "tools/run_all_additive_training.py",
 ]
 
@@ -86,18 +88,29 @@ def parse_args():
     )
 
     # Data options
-    parser.add_argument("--synthetic", action="store_true", default=False,
+    data_group = parser.add_mutually_exclusive_group()
+    data_group.add_argument("--synthetic", action="store_true", default=False,
                         help="Use synthetic pool for all models (no teacher)")
-    parser.add_argument("--speech-dataset", default=None,
+    data_group.add_argument("--real-data", action="store_true", default=False,
+                        help="Use real MUSAN + Tiny-ImageNet data with LLM concept encoder")
+    parser.add_argument("--precomputed-pool", default=None,
+                        help="Skip pool preparation and use this existing pool root (subdirs: speech_encoder, ...)")
+    parser.add_argument("--speech-dataset", default="/home/kali/phoenix/datasets/musan_16k",
                         help="Path to 16 kHz WAV dataset for speech models")
-    parser.add_argument("--vision-image-dir", default=None,
+    parser.add_argument("--vision-image-dir", default="/home/kali/datasets/tiny-imagenet-200",
                         help="Path to image dataset for vision models")
+    parser.add_argument("--bge-dir", default="/home/kali/models/bge-small-en",
+                        help="Directory with BGE-small-en model for LLM concept encoding")
     parser.add_argument("--vision-base-pt", default=None,
                         help="ResNet18 base .pt for vision_encoder (if None, pretrained ImageNet)")
     parser.add_argument("--teacher-pt", default=None,
-                        help="Teacher .pt for decoder/encoder pool generation")
+                        help="Teacher .pt for legacy real-data pool generation (not needed with --real-data)")
     parser.add_argument("--pool-size", type=int, default=10000,
                         help="Samples per data pool")
+    parser.add_argument("--concept", type=int, default=128,
+                        help="Concept vector dimension")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed")
 
     # Evolution hyperparameters
     parser.add_argument("--max-rounds", type=int, default=3,
@@ -200,20 +213,65 @@ def run_gtest_filter():
     return subprocess.run([str(gtest), f"--gtest_filter={filter_arg}"], cwd=REPO_ROOT).returncode
 
 
-def prepare_pool(c, model, work_dir, args):
-    """Prepare the data pool for one model."""
-    pool_dir = f"{work_dir}/pools/{model}"
-    python = f"{KALI_ENV} {KALI_VENV}"
+def prepare_pools(c, args, models):
+    """Prepare or select data pools for all requested models.
 
-    cmd_parts = [
-        "cd", f"{args.kali_repo_path}", "&&",
-        python, "-u", "tools/bpu_evolve_additive.py",
-        "--model-name", model,
-        "--work-dir", f"{work_dir}/{model}",
-        "--data-pool", pool_dir,
-    ]
+    Returns a dict {model: pool_dir}.
+    """
+    if args.precomputed_pool:
+        root = args.precomputed_pool
+        print(f"[pool] using precomputed pool root: {root}")
+        return {m: f"{root}/{m}" for m in models}
 
-    if args.synthetic or not _has_real_data(model, args):
+    if args.real_data:
+        root = f"{args.work_dir}/pools_real"
+        print(f"[pool] preparing real multimodal pools in {root} ...")
+        python = f"{KALI_ENV} {KALI_VENV}"
+        n = args.pool_size
+        # Vision pools are very memory-heavy; keep the cap that prepare_multimodal_pool
+        # already enforces, but pass a sensible per-modality number.
+        script_args = (
+            f"-u tools/prepare_multimodal_pool.py "
+            f"--musan-dir {args.speech_dataset} "
+            f"--imagenet-dir {args.vision_image_dir} "
+            f"--bge-dir {args.bge_dir} "
+            f"--out-dir {root} "
+            f"--concept {args.concept} "
+            f"--max-samples-per-modality {n} "
+            f"--seed {args.seed}"
+        )
+        log = "/tmp/prepare_multimodal_pool.log"
+        done_marker = f"{root}/metadata.json"
+        # Start in the background because the script can take several minutes.
+        full = (
+            f"cd {args.kali_repo_path} && "
+            f"nohup {python} {script_args} > {log} 2>&1 & "
+            f"echo $!"
+        )
+        pid = run_kali(c, full, timeout=30).strip().split()[-1]
+        print(f"[pool] prepare_multimodal_pool.py PID={pid}, log={log}")
+        while is_running(c, pid):
+            print("[pool] still preparing ...")
+            time.sleep(args.poll_interval)
+        out = run_kali(c, f"tail -n 40 {log}", timeout=30)
+        print(out)
+        if not run_kali(c, f"test -f {done_marker} && echo ok", timeout=10).strip():
+            print(f"[error] pool preparation failed; marker {done_marker} not found")
+            return {}
+        return {m: f"{root}/{m}" for m in models}
+
+    # Legacy / synthetic per-model preparation.
+    pools = {}
+    for model in models:
+        pool_dir = f"{args.work_dir}/pools/{model}"
+        python = f"{KALI_ENV} {KALI_VENV}"
+        cmd_parts = [
+            "cd", f"{args.kali_repo_path}", "&&",
+            python, "-u", "tools/bpu_evolve_additive.py",
+            "--model-name", model,
+            "--work-dir", f"{args.work_dir}/{model}",
+            "--data-pool", pool_dir,
+        ]
         # Use a small pool for quick validation by default.
         # Vision models need tiny pools because the input tensor is very large.
         if model.startswith("vision"):
@@ -221,33 +279,11 @@ def prepare_pool(c, model, work_dir, args):
         else:
             n = args.pool_size
         cmd_parts += ["--prepare-synthetic-pool", str(n)]
-    else:
-        cmd_parts += ["--prepare-pool"]
-        if model in ("speech_encoder", "speech_decoder"):
-            cmd_parts += ["--dataset", args.speech_dataset]
-        if model in ("vision_encoder", "vision_decoder"):
-            cmd_parts += ["--dataset", args.vision_image_dir]
-        if args.teacher_pt:
-            cmd_parts += ["--teacher-pt", args.teacher_pt]
-        if model == "vision_encoder" and args.vision_base_pt:
-            cmd_parts += ["--base-path", args.vision_base_pt]
-
-    print(f"[pool] {model}: preparing ...")
-    out = run_kali(c, " ".join(cmd_parts), timeout=300)
-    print(out)
-    return pool_dir
-
-
-def _has_real_data(model, args):
-    # Real data pool requires both a dataset and a teacher .pt that can
-    # generate the paired concept/target samples.
-    if not args.teacher_pt:
-        return False
-    if model.startswith("speech") and args.speech_dataset:
-        return True
-    if model.startswith("vision") and args.vision_image_dir:
-        return True
-    return False
+        print(f"[pool] {model}: preparing synthetic ...")
+        out = run_kali(c, " ".join(cmd_parts), timeout=300)
+        print(out)
+        pools[model] = pool_dir
+    return pools
 
 
 def start_evolution(c, model, pool_dir, args):
@@ -280,6 +316,8 @@ def start_evolution(c, model, pool_dir, args):
         "--batch-size", str(batch_size),
         "--parallel", str(args.parallel),
         "--block-size", args.block_size,
+        "--concept", str(args.concept),
+        "--seed", str(args.seed),
     ]
 
     if model == "vision_encoder" and args.vision_base_pt:
@@ -329,9 +367,7 @@ def main() -> int:
     print(f"[x5] will use work dir {args.x5_work} (created by controller)")
 
     # Prepare all pools first (quick on CPU).
-    pools = {}
-    for model in models:
-        pools[model] = prepare_pool(c, model, args.work_dir, args)
+    pools = prepare_pools(c, args, models)
 
     # Start evolutions with limited concurrency.
     jobs = []
