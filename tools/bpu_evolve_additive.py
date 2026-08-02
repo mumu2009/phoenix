@@ -174,8 +174,9 @@ class DataPool:
         """Generate a random pool for smoke testing (no teacher required)."""
         self.pool_dir.mkdir(parents=True, exist_ok=True)
         rng = np.random.default_rng(seed)
-        inputs = rng.normal(0.0, 0.5, size=(n, *self.input_shape)).astype(np.float32)
-        targets = rng.normal(0.0, 0.5, size=(n, *self.output_shape)).astype(np.float32)
+        # Use float32 directly so large image pools do not allocate float64.
+        inputs = rng.standard_normal(size=(n, *self.input_shape), dtype=np.float32) * 0.5
+        targets = rng.standard_normal(size=(n, *self.output_shape), dtype=np.float32) * 0.5
         np.save(self.pool_dir / "inputs.npy", inputs)
         np.save(self.pool_dir / "targets.npy", targets)
         print(f"[pool] synthetic {n} samples -> {self.pool_dir}")
