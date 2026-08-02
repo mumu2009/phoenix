@@ -185,15 +185,6 @@ def local_build():
         print(f"[local] {script} ...")
         rc = subprocess.run([str(path)], cwd=REPO_ROOT, shell=True).returncode
         if rc != 0:
-            # compile.bat returns 1 when it was killed by a runner timeout, but
-            # the three main executables may still have been produced.  Keep the
-            # batch usable in that case.
-            if script == "compile.bat" and all(
-                (REPO_ROOT / exe).is_file()
-                for exe in ["phoenix_main.exe", "bug_shooter.exe", "phoenix_sql_cli.exe"]
-            ):
-                print(f"[warn] {script} returned {rc} but all executables exist; continuing")
-                continue
             print(f"[error] {script} failed with code {rc}")
             return rc
     return 0
