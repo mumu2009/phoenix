@@ -1,0 +1,57 @@
+{
+  "generatedAt": "2026-03-22T00:31:22.948344",
+  "baseUrl": "http://127.0.0.1:5081",
+  "summary": {
+    "total": 4,
+    "pass": 4,
+    "blocked": 0,
+    "fail": 0,
+    "allUsable": true
+  },
+  "results": [
+    {
+      "mode": "ollama",
+      "status": "PASS",
+      "ready": true,
+      "chat_ok": true,
+      "provider_id": "ollama",
+      "detail": "model=llama3.1:8b replyLen=135",
+      "runtime_status": "",
+      "model": "llama3.1:8b",
+      "elapsed_ms": 5340
+    },
+    {
+      "mode": "llamacpp",
+      "status": "PASS",
+      "ready": false,
+      "chat_ok": true,
+      "provider_id": "llamacpp",
+      "detail": "replyLen=100",
+      "runtime_status": "",
+      "model": "D:\\_phoenix\\_079\\v5.0Odin\\test\\apis\\..\\..\\GGUF_models\\blobs\\sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29",
+      "elapsed_ms": 78908
+    },
+    {
+      "mode": "bitnet",
+      "status": "PASS",
+      "ready": false,
+      "chat_ok": true,
+      "provider_id": "bitnet",
+      "detail": "replyLen=3852",
+      "runtime_status": "",
+      "model": "D:\\_phoenix\\_079\\v5.0Odin\\test\\apis\\..\\..\\GGUF_models\\blobs\\sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29",
+      "elapsed_ms": 52966
+    },
+    {
+      "mode": "native",
+      "status": "PASS",
+      "ready": true,
+      "chat_ok": true,
+      "provider_id": "core",
+      "detail": "replyLen=88",
+      "runtime_status": "",
+      "model": "native-transformer",
+      "elapsed_ms": 29113
+    }
+  ]
+}

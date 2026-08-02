@@ -103,19 +103,7 @@ namespace
         static std::once_flag once;
         std::call_once(once, []()
                        {
-            const char *raw = std::getenv("AI_SPEAK_RESERVED_MB");
-            double mb = 64.0;
-            if (raw && *raw)
-            {
-                try
-                {
-                    mb = std::stod(raw);
-                }
-                catch (...)
-                {
-                    mb = 64.0;
-                }
-            }
+            double mb = phoenix::resolveConfig<double>("speech.reservedMemMb", 64.0, "AI_SPEAK_RESERVED_MB");
             if (!std::isfinite(mb) || mb < 8.0)
                 mb = 64.0;
             speakArena().init((size_t)(mb * 1024.0 * 1024.0)); });
@@ -324,15 +312,15 @@ std::string SpeakIO::recognizeSpeech(const AudioData &audio, Json::Value &asrMet
     if (speakLogger().enabled())
         speakLogger().log(LoggerCXX::Type::COMPUTE, std::string("speak recognizeSpeech samples=") + std::to_string(audio.mono.size()));
 #ifdef HAVE_VOSK
-    const char *modelPath = std::getenv("VOSK_MODEL");
-    if (!modelPath || !std::strlen(modelPath))
+    std::string modelPath = phoenix::resolveConfig<std::string>("speech.voskModelPath", "", "VOSK_MODEL");
+    if (modelPath.empty())
     {
         asrMeta["ok"] = false;
         asrMeta["error"] = "VOSK_MODEL not set";
         return "";
     }
     vosk_set_log_level(0);
-    VoskModel *model = vosk_model_new(modelPath);
+    VoskModel *model = vosk_model_new(modelPath.c_str());
     if (!model)
     {
         asrMeta["ok"] = false;
@@ -745,33 +733,14 @@ namespace
         std::vector<Cluster> envClusters;
         std::vector<Cluster> emoClusters;
 
-        // 从环境变量读取整数配置。
-        // 调用方式：传入变量名和回退值。
-        // 实现思路：解析失败或缺失时返回 fallback。
-        // 注意事项：返回值至少为 1，避免无效聚类数。
-        static int getEnvInt(const char *name, int fallback)
-        {
-            const char *v = std::getenv(name);
-            if (!v || !*v)
-                return fallback;
-            try
-            {
-                return std::max(1, std::stoi(v));
-            }
-            catch (...)
-            {
-                return fallback;
-            }
-        }
-
         // 构造在线学习器并加载聚类参数。
         // 调用方式：由静态单例初始化时自动调用。
-        // 实现思路：读取环境变量设置环境/情绪聚类个数。
+        // 实现思路：从 config/phoenix.json 读取环境/情绪聚类个数，允许环境变量覆盖。
         // 注意事项：构造过程不做重计算，开销较小。
         AudioLearner()
         {
-            envK = getEnvInt("SPEAK_ENV_CLUSTERS", 6);
-            emoK = getEnvInt("SPEAK_EMO_CLUSTERS", 6);
+            envK = std::max(1, phoenix::resolveConfig<int>("speech.envClusters", 6, "SPEAK_ENV_CLUSTERS"));
+            emoK = std::max(1, phoenix::resolveConfig<int>("speech.emoClusters", 6, "SPEAK_EMO_CLUSTERS"));
         }
 
         // 将特征分配到最近聚类并执行增量更新。

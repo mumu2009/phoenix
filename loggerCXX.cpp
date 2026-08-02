@@ -17,6 +17,7 @@
    along with 079 Project.  If not, see <http://www.gnu.org/licenses/>. */
 
 #include "loggerCXXH.hpp"
+#include "phoenix_config.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -82,19 +83,7 @@ void LoggerCXX::initialize(const std::string &mode, const std::filesystem::path 
         {
             mode_ = Mode::Release;
         }
-        const char *rawInterval = std::getenv("AI_LOG_MEMORY_INTERVAL_SEC");
-        int interval = 0;
-        if (rawInterval && *rawInterval)
-        {
-            try
-            {
-                interval = std::stoi(rawInterval);
-            }
-            catch (...)
-            {
-                interval = 0;
-            }
-        }
+        int interval = phoenix::resolveConfig<int>("logger.memoryIntervalSec", 0, "AI_LOG_MEMORY_INTERVAL_SEC");
         if (interval < 0)
             interval = 0;
         memoryIntervalSec_ = interval;

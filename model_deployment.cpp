@@ -9,6 +9,7 @@
    (at your option) any later version. */
 
 #include "model_deployment.hpp"
+#include "phoenix_config.hpp"
 
 #include <drogon/HttpClient.h>
 #include <trantor/utils/Logger.h>
@@ -170,6 +171,29 @@ void ModelDeploymentConfig::fromJson(const nlohmann::json &j) {
 
 namespace {
 
+static std::string dotPathForModelEnv(const std::string &env) {
+  if (env == "AI_MODEL_DEPLOYMENT_CONFIG") return "model_deployment.configPath";
+  if (env == "AI_LLM_PLACEMENT") return "model_deployment.llm.placement";
+  if (env == "AI_LLM_REMOTE_URL") return "model_deployment.llm.remoteUrl";
+  if (env == "AI_LLM_REMOTE_METHOD") return "model_deployment.llm.remoteMethod";
+  if (env == "AI_LLM_REMOTE_MODEL") return "model_deployment.llm.remoteModel";
+  if (env == "AI_LLM_REMOTE_TOKEN") return "model_deployment.llm.remoteToken";
+  if (env == "AI_LLM_REMOTE_TIMEOUT_MS") return "model_deployment.llm.remoteTimeoutMs";
+  if (env == "AI_VISION_PLACEMENT") return "model_deployment.vision.placement";
+  if (env == "AI_VISION_REMOTE_URL") return "model_deployment.vision.remoteUrl";
+  if (env == "AI_VISION_REMOTE_METHOD") return "model_deployment.vision.remoteMethod";
+  if (env == "AI_VISION_REMOTE_MODEL") return "model_deployment.vision.remoteModel";
+  if (env == "AI_VISION_REMOTE_TOKEN") return "model_deployment.vision.remoteToken";
+  if (env == "AI_VISION_REMOTE_TIMEOUT_MS") return "model_deployment.vision.remoteTimeoutMs";
+  if (env == "AI_SPEECH_PLACEMENT") return "model_deployment.speech.placement";
+  if (env == "AI_SPEECH_REMOTE_URL") return "model_deployment.speech.remoteUrl";
+  if (env == "AI_SPEECH_REMOTE_METHOD") return "model_deployment.speech.remoteMethod";
+  if (env == "AI_SPEECH_REMOTE_MODEL") return "model_deployment.speech.remoteModel";
+  if (env == "AI_SPEECH_REMOTE_TOKEN") return "model_deployment.speech.remoteToken";
+  if (env == "AI_SPEECH_REMOTE_TIMEOUT_MS") return "model_deployment.speech.remoteTimeoutMs";
+  return "";
+}
+
 std::string argOrEnv(
     const std::map<std::string, std::string> &args,
     const std::string &argKey,
@@ -177,9 +201,8 @@ std::string argOrEnv(
     const std::string &defaultValue) {
   auto it = args.find(argKey);
   if (it != args.end() && !it->second.empty()) return it->second;
-  const char *env = std::getenv(envKey.c_str());
-  if (env && *env) return std::string(env);
-  return defaultValue;
+  return phoenix::resolveConfigAsString(dotPathForModelEnv(envKey), defaultValue,
+                                        envKey.c_str());
 }
 
 void applyRecordFromArgs(

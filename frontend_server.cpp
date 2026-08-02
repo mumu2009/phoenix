@@ -33,6 +33,8 @@
 #include <unordered_set>
 #include <numeric>
 #include <cstring>
+#include <cstdlib>
+#include <type_traits>
 #include "frontend_server.hpp"
 #include "phoenix_config.hpp"
 #include "emotion_system.hpp"
@@ -73,7 +75,7 @@
 
 namespace fs = std::filesystem;
 
-std::string getEnv(const std::string &name, const std::string &fallback);
+using phoenix::resolveConfig;
 
 namespace
 {
@@ -314,19 +316,7 @@ namespace
         static std::once_flag once;
         std::call_once(once, []()
                        {
-            const char *raw = std::getenv("AI_FRONTEND_RESERVED_MB");
-            double mb = 96.0;
-            if (raw && *raw)
-            {
-                try
-                {
-                    mb = std::stod(raw);
-                }
-                catch (...)
-                {
-                    mb = 96.0;
-                }
-            }
+            double mb = resolveConfig<double>("frontend_server.reservedMemMb", 96.0, "AI_FRONTEND_RESERVED_MB");
             if (!std::isfinite(mb) || mb < 8.0)
                 mb = 96.0;
             frontendArena().init((size_t)(mb * 1024.0 * 1024.0)); });
@@ -1396,13 +1386,13 @@ namespace
         ShortTermLlamaWindow()
         {
             // 运行时可调：FRONTEND_SHORT_WINDOW_MAX_MESSAGES / FRONTEND_SHORT_WINDOW_MAX_TOKENS
-            // 默认值与原硬编码一致，可在 benchmark 阈值扫描时通过环境变量覆盖无需重编译。
+            // 默认值从 config/phoenix.json 读取；环境变量仍可覆盖。
             static size_t envMaxMessages = 40;
             static size_t envMaxTokens = 2048;
             static std::once_flag winInit;
             std::call_once(winInit, []() {
-                try { envMaxMessages = std::max<size_t>(1, std::stoul(getEnv("FRONTEND_SHORT_WINDOW_MAX_MESSAGES", "40"))); } catch (...) { envMaxMessages = 40; }
-                try { envMaxTokens = std::max<size_t>(64, std::stoul(getEnv("FRONTEND_SHORT_WINDOW_MAX_TOKENS", "2048"))); } catch (...) { envMaxTokens = 2048; }
+                envMaxMessages = std::max<size_t>(1, resolveConfig<size_t>("context.adaptive.shortWindowMaxMessages", 40, "FRONTEND_SHORT_WINDOW_MAX_MESSAGES"));
+                envMaxTokens = std::max<size_t>(64, resolveConfig<size_t>("context.adaptive.shortWindowMaxTokens", 2048, "FRONTEND_SHORT_WINDOW_MAX_TOKENS"));
             });
             maxMessages = envMaxMessages;
             maxTokens = envMaxTokens;
@@ -1556,11 +1546,11 @@ namespace
 
         AdaptiveController()
         {
-            // 初始值从环境变量读取，与 selectMode 的 once_flag 值一致
-            try { concatThresh = std::max(1, std::stoi(getEnv("FRONTEND_CONCAT_THRESH", "5"))); } catch (...) { concatThresh = 5; }
-            try { rnnThresh = std::max(concatThresh + 1, std::stoi(getEnv("FRONTEND_RNN_THRESH", "15"))); } catch (...) { rnnThresh = 15; }
-            try { maxMessages = std::max(1, std::stoi(getEnv("FRONTEND_SHORT_WINDOW_MAX_MESSAGES", "40"))); } catch (...) { maxMessages = 40; }
-            try { targetLatencyMs = std::max(1000.0f, std::stof(getEnv("FRONTEND_TARGET_LATENCY_MS", "15000"))); } catch (...) { targetLatencyMs = 15000.0f; }
+            // 初始值从 config/phoenix.json 读取；环境变量仍可覆盖。
+            concatThresh = std::max(1, resolveConfig<int>("context.adaptive.concatThresh", 5, "FRONTEND_CONCAT_THRESH"));
+            rnnThresh = std::max(concatThresh + 1, resolveConfig<int>("context.adaptive.rnnThresh", 15, "FRONTEND_RNN_THRESH"));
+            maxMessages = std::max(1, resolveConfig<int>("context.adaptive.shortWindowMaxMessages", 40, "FRONTEND_SHORT_WINDOW_MAX_MESSAGES"));
+            targetLatencyMs = std::max(1000.0f, resolveConfig<float>("context.adaptive.targetLatencyMs", 15000.0f, "FRONTEND_TARGET_LATENCY_MS"));
         }
 
         // 每轮对话结束后调用，传入本轮实测延迟（毫秒）。
@@ -1785,19 +1775,19 @@ namespace
         // 注意事项：构造阶段失败不会抛出，调用方需检查 ready。
         TorchVisionPipeline()
         {
-            dataRoot_ = fs::path(getEnv("VISION_DATA_ROOT", "/graphies"));
-            modelDir_ = fs::path(getEnv("VISION_MODEL_DIR", "./models/vision"));
-            clsInput_ = std::max(64, std::stoi(getEnv("VISION_TORCH_CNN_INPUT", "224")));
-            detInput_ = std::max(96, std::stoi(getEnv("VISION_TORCH_YOLO_INPUT", "416")));
-            detS_ = std::max(4, std::stoi(getEnv("VISION_TORCH_YOLO_S", "7")));
-            detB_ = std::max(1, std::stoi(getEnv("VISION_TORCH_YOLO_B", "2")));
-            detScore_ = std::stof(getEnv("VISION_TORCH_YOLO_SCORE", "0.25"));
-            detNms_ = std::stof(getEnv("VISION_TORCH_YOLO_NMS", "0.45"));
-            detEpochs_ = std::max(1, std::stoi(getEnv("VISION_TORCH_YOLO_EPOCHS", "10")));
-            clsEpochs_ = std::max(1, std::stoi(getEnv("VISION_TORCH_CNN_EPOCHS", "8")));
-            batch_ = std::max(1, std::stoi(getEnv("VISION_TORCH_BATCH", "8")));
-            lr_ = std::stof(getEnv("VISION_TORCH_LR", "0.001"));
-            forceTrain_ = getEnv("VISION_TORCH_FORCE_TRAIN", "false") == "true";
+            dataRoot_ = fs::path(resolveConfig<std::string>("vision.dataRoot", std::string("/graphies"), "VISION_DATA_ROOT"));
+            modelDir_ = fs::path(resolveConfig<std::string>("vision.modelDir", std::string("./models/vision"), "VISION_MODEL_DIR"));
+            clsInput_ = std::max(64, resolveConfig<int>("vision.torch.cnnInput", 224, "VISION_TORCH_CNN_INPUT"));
+            detInput_ = std::max(96, resolveConfig<int>("vision.torch.yoloInput", 416, "VISION_TORCH_YOLO_INPUT"));
+            detS_ = std::max(4, resolveConfig<int>("vision.torch.yoloS", 7, "VISION_TORCH_YOLO_S"));
+            detB_ = std::max(1, resolveConfig<int>("vision.torch.yoloB", 2, "VISION_TORCH_YOLO_B"));
+            detScore_ = resolveConfig<float>("vision.torch.yoloScore", 0.25f, "VISION_TORCH_YOLO_SCORE");
+            detNms_ = resolveConfig<float>("vision.torch.yoloNms", 0.45f, "VISION_TORCH_YOLO_NMS");
+            detEpochs_ = std::max(1, resolveConfig<int>("vision.torch.yoloEpochs", 10, "VISION_TORCH_YOLO_EPOCHS"));
+            clsEpochs_ = std::max(1, resolveConfig<int>("vision.torch.cnnEpochs", 8, "VISION_TORCH_CNN_EPOCHS"));
+            batch_ = std::max(1, resolveConfig<int>("vision.torch.batch", 8, "VISION_TORCH_BATCH"));
+            lr_ = resolveConfig<float>("vision.torch.lr", 0.001f, "VISION_TORCH_LR");
+            forceTrain_ = resolveConfig<bool>("vision.torch.forceTrain", false, "VISION_TORCH_FORCE_TRAIN");
 
             if (!fs::exists(modelDir_))
             {
@@ -2451,22 +2441,22 @@ namespace
         // 注意事项：当前实现允许无外部模型的启发式兜底分析。
         VisionPipeline()
         {
-            yoloModel_ = getEnv("VISION_YOLO_MODEL", "");
-            yoloLabels_ = getEnv("VISION_YOLO_LABELS", "");
-            yoloInput_ = std::max(128, std::stoi(getEnv("VISION_YOLO_INPUT", "640")));
-            // Runtime-tunable thresholds from config/phoenix.json
-            try { yoloScore_ = phoenix::cfgOr<float>("vision.confidenceThreshold", 0.35f); } catch (...) { yoloScore_ = 0.35f; }
-            try { yoloNms_ = phoenix::cfgOr<float>("vision.nmsThreshold", 0.45f); } catch (...) { yoloNms_ = 0.45f; }
-            try { yoloMax_ = phoenix::cfgOr<int>("vision.maxBoxes", 80); } catch (...) { yoloMax_ = 80; }
-            try { minBoxAreaRatio_ = phoenix::cfgOr<float>("vision.minBoxAreaRatio", 0.001f); } catch (...) { minBoxAreaRatio_ = 0.001f; }
+            yoloModel_ = resolveConfig<std::string>("vision.yolo.model", std::string(""), "VISION_YOLO_MODEL");
+            yoloLabels_ = resolveConfig<std::string>("vision.yolo.labels", std::string(""), "VISION_YOLO_LABELS");
+            yoloInput_ = std::max(128, resolveConfig<int>("vision.yolo.input", 640, "VISION_YOLO_INPUT"));
+            // Runtime-tunable thresholds from config/phoenix.json (env may override)
+            try { yoloScore_ = resolveConfig<float>("vision.confidenceThreshold", 0.35f); } catch (...) { yoloScore_ = 0.35f; }
+            try { yoloNms_ = resolveConfig<float>("vision.nmsThreshold", 0.45f); } catch (...) { yoloNms_ = 0.45f; }
+            try { yoloMax_ = resolveConfig<int>("vision.maxBoxes", 80); } catch (...) { yoloMax_ = 80; }
+            try { minBoxAreaRatio_ = resolveConfig<float>("vision.minBoxAreaRatio", 0.001f); } catch (...) { minBoxAreaRatio_ = 0.001f; }
 
-            cnnModel_ = getEnv("VISION_CNN_MODEL", "");
-            cnnLabels_ = getEnv("VISION_CNN_LABELS", "");
-            cnnInput_ = std::max(64, std::stoi(getEnv("VISION_CNN_INPUT", "224")));
-            cnnTopK_ = std::max(1, std::stoi(getEnv("VISION_CNN_TOPK", "5")));
-            cnnEmbedLayer_ = getEnv("VISION_CNN_EMBED_LAYER", "");
-            cnnMean_ = parseFloatList(getEnv("VISION_CNN_MEAN", "0,0,0"));
-            cnnStd_ = parseFloatList(getEnv("VISION_CNN_STD", "1,1,1"));
+            cnnModel_ = resolveConfig<std::string>("vision.cnn.model", std::string(""), "VISION_CNN_MODEL");
+            cnnLabels_ = resolveConfig<std::string>("vision.cnn.labels", std::string(""), "VISION_CNN_LABELS");
+            cnnInput_ = std::max(64, resolveConfig<int>("vision.cnn.input", 224, "VISION_CNN_INPUT"));
+            cnnTopK_ = std::max(1, resolveConfig<int>("vision.cnn.topK", 5, "VISION_CNN_TOPK"));
+            cnnEmbedLayer_ = resolveConfig<std::string>("vision.cnn.embedLayer", std::string(""), "VISION_CNN_EMBED_LAYER");
+            cnnMean_ = resolveConfig<std::vector<float>>("vision.cnn.mean", std::vector<float>{0.0f, 0.0f, 0.0f}, "VISION_CNN_MEAN");
+            cnnStd_ = resolveConfig<std::vector<float>>("vision.cnn.std", std::vector<float>{1.0f, 1.0f, 1.0f}, "VISION_CNN_STD");
             if (cnnMean_.size() != 3)
                 cnnMean_ = {0.0f, 0.0f, 0.0f};
             if (cnnStd_.size() != 3)
@@ -3092,38 +3082,34 @@ namespace
             : embeddings_(), useTorchModels_(useTorch), robotsDir_(robotsDir)
         {
             // 跨 session 学习配置：探测基座 LLM 判定"已知/未知"，仅持久化未知事实。
-            probeBaseUrl_ = getEnv("FRONTEND_LLAMACPP_BASE_URL", getEnv("AI_LLAMACPP_BASE_URL", "http://127.0.0.1:8082"));
+            probeBaseUrl_ = resolveConfig<std::string>("knowledge_probe.llamacppBaseUrl", std::string("http://127.0.0.1:8082"), "FRONTEND_LLAMACPP_BASE_URL", "AI_LLAMACPP_BASE_URL");
             while (!probeBaseUrl_.empty() && probeBaseUrl_.back() == '/')
                 probeBaseUrl_.pop_back();
-            probeModel_ = getEnv("FRONTEND_LLAMACPP_MODEL", getEnv("AI_LLAMACPP_MODEL", ""));
-            try { probeTimeoutMs_ = std::max(2000, std::stoi(getEnv("FRONTEND_KNOWLEDGE_PROBE_TIMEOUT_MS", "60000"))); } catch (...) { probeTimeoutMs_ = 60000; }
-            try { knownSimThreshold_ = std::stof(getEnv("FRONTEND_KNOWLEDGE_KNOWN_SIM", "0.5")); } catch (...) { knownSimThreshold_ = 0.5f; }
-            {
-                std::string lv = getEnv("FRONTEND_CROSS_SESSION_LEARN", "false");
-                std::transform(lv.begin(), lv.end(), lv.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                crossSessionLearnEnabled_ = !(lv == "0" || lv == "false" || lv == "no" || lv == "off");
-            }
+            probeModel_ = resolveConfig<std::string>("knowledge_probe.llamacppModel", std::string(""), "FRONTEND_LLAMACPP_MODEL", "AI_LLAMACPP_MODEL");
+            probeTimeoutMs_ = std::max(2000, resolveConfig<int>("knowledge_probe.probeTimeoutMs", 60000, "FRONTEND_KNOWLEDGE_PROBE_TIMEOUT_MS"));
+            knownSimThreshold_ = resolveConfig<float>("knowledge_probe.knownSimThreshold", 0.5f, "FRONTEND_KNOWLEDGE_KNOWN_SIM");
+            crossSessionLearnEnabled_ = resolveConfig<bool>("knowledge_probe.crossSessionLearnEnabled", false, "FRONTEND_CROSS_SESSION_LEARN");
 
-            embeddings_.dim = std::max(32, std::stoi(getEnv("FRONTEND_EMB_DIM", "128")));
-            embeddings_.window = std::max(1, std::stoi(getEnv("FRONTEND_EMB_WINDOW", "4")));
-            embeddings_.minCount = std::max(1, std::stoi(getEnv("FRONTEND_EMB_MIN_COUNT", "2")));
-            embeddings_.maxVocab = std::max(200, std::stoi(getEnv("FRONTEND_EMB_MAX_VOCAB", "3000")));
-            embeddings_.setCorpus(robotsDir, (size_t)std::max(10, std::stoi(getEnv("FRONTEND_EMB_MAX_FILES", "400"))));
+            embeddings_.dim = std::max(32, resolveConfig<int>("context.embeddings.dim", 128, "FRONTEND_EMB_DIM"));
+            embeddings_.window = std::max(1, resolveConfig<int>("context.embeddings.window", 4, "FRONTEND_EMB_WINDOW"));
+            embeddings_.minCount = std::max(1, resolveConfig<int>("context.embeddings.minCount", 2, "FRONTEND_EMB_MIN_COUNT"));
+            embeddings_.maxVocab = std::max(200, resolveConfig<int>("context.embeddings.maxVocab", 3000, "FRONTEND_EMB_MAX_VOCAB"));
+            embeddings_.setCorpus(robotsDir, (size_t)std::max(10, resolveConfig<int>("context.embeddings.maxFiles", 400, "FRONTEND_EMB_MAX_FILES")));
 #ifdef HAVE_TORCH
             if (useTorchModels_)
             {
-                torchModels_.maxLen = std::max<int64_t>(16, std::stoll(getEnv("FRONTEND_TORCH_MAX_LEN", "64")));
-                torchModels_.embDim = std::max<int64_t>(32, std::stoll(getEnv("FRONTEND_TORCH_EMB_DIM", "128")));
-                torchModels_.hidDim = std::max<int64_t>(32, std::stoll(getEnv("FRONTEND_TORCH_HID_DIM", "128")));
-                torchModels_.epochs = std::max(1, std::stoi(getEnv("FRONTEND_TORCH_EPOCHS", "4")));
-                torchModels_.batch = std::max(4, std::stoi(getEnv("FRONTEND_TORCH_BATCH", "16")));
-                maxTorchFiles_ = std::max(10, std::stoi(getEnv("FRONTEND_TORCH_MAX_FILES", "240")));
+                torchModels_.maxLen = std::max<int64_t>(16, resolveConfig<int64_t>("context.torch.maxLen", 64, "FRONTEND_TORCH_MAX_LEN"));
+                torchModels_.embDim = std::max<int64_t>(32, resolveConfig<int64_t>("context.torch.embDim", 128, "FRONTEND_TORCH_EMB_DIM"));
+                torchModels_.hidDim = std::max<int64_t>(32, resolveConfig<int64_t>("context.torch.hidDim", 128, "FRONTEND_TORCH_HID_DIM"));
+                torchModels_.epochs = std::max(1, resolveConfig<int>("context.torch.epochs", 4, "FRONTEND_TORCH_EPOCHS"));
+                torchModels_.batch = std::max(4, resolveConfig<int>("context.torch.batch", 16, "FRONTEND_TORCH_BATCH"));
+                maxTorchFiles_ = std::max(10, resolveConfig<int>("context.torch.maxFiles", 240, "FRONTEND_TORCH_MAX_FILES"));
             }
 #endif
 
             // 初始化异步流水线各阶段
-            auto initStage = [this](PipelineStage &stage, const char *envVar, int defaultWorkers) {
-                try { stage.workerCount = std::max(1, std::min(8, std::stoi(getEnv(envVar, std::to_string(defaultWorkers).c_str())))); } catch (...) { stage.workerCount = defaultWorkers; }
+            auto initStage = [this](PipelineStage &stage, const std::string &dotPath, const char *envVar, int defaultWorkers) {
+                try { stage.workerCount = std::max(1, std::min(8, resolveConfig<int>(dotPath, defaultWorkers, envVar))); } catch (...) { stage.workerCount = defaultWorkers; }
                 stage.shutdown.store(false);
                 for (int i = 0; i < stage.workerCount; ++i)
                 {
@@ -3149,23 +3135,19 @@ namespace
                 }
             };
 
-            initStage(embeddingStage_, "FRONTEND_EMBEDDING_WORKERS", 2);
-            initStage(rnnStage_, "FRONTEND_RNN_WORKERS", 2);
-            initStage(contextStage_, "FRONTEND_CONTEXT_WORKERS", 2);
-            initStage(episodicStage_, "FRONTEND_EPISODIC_WORKERS", 1);
+            initStage(embeddingStage_, "frontend_server.embeddingWorkers", "FRONTEND_EMBEDDING_WORKERS", 2);
+            initStage(rnnStage_, "frontend_server.rnnWorkers", "FRONTEND_RNN_WORKERS", 2);
+            initStage(contextStage_, "frontend_server.contextWorkers", "FRONTEND_CONTEXT_WORKERS", 2);
+            initStage(episodicStage_, "frontend_server.episodicWorkers", "FRONTEND_EPISODIC_WORKERS", 1);
 
             // 异步启动摘要模型：先尝试加载 checkpoint，否则从 WikiText 预训练。
             // FRONTEND_SUMMARY_MODEL_ENABLED=false 可完全禁用（默认启用）。
             {
-                std::string summaryEnabled = getEnv("FRONTEND_SUMMARY_MODEL_ENABLED", "true");
-                std::transform(summaryEnabled.begin(), summaryEnabled.end(), summaryEnabled.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (summaryEnabled != "false" && summaryEnabled != "0" && summaryEnabled != "no" && summaryEnabled != "off")
+                bool summaryEnabled = resolveConfig<bool>("summary_model.enabled", true, "FRONTEND_SUMMARY_MODEL_ENABLED");
+                if (summaryEnabled)
                 {
-                    int pretrainLines = 200000;
-                    int trainEpochs = 4;
-                    try { pretrainLines = std::max(1000, std::stoi(getEnv("FRONTEND_SUMMARY_PRETRAIN_LINES", "200000"))); } catch (...) {}
-                    try { trainEpochs = std::max(1, std::stoi(getEnv("FRONTEND_SUMMARY_TRAIN_EPOCHS", "4"))); } catch (...) {}
+                    int pretrainLines = std::max(1000, resolveConfig<int>("summary_model.pretrainLines", 200000, "FRONTEND_SUMMARY_PRETRAIN_LINES"));
+                    int trainEpochs = std::max(1, resolveConfig<int>("summary_model.trainEpochs", 4, "FRONTEND_SUMMARY_TRAIN_EPOCHS"));
                     fs::path wikitextPath = robotsDir_ / ".." / "robots" / "wikitext-103-all.txt";
                     if (!fs::exists(wikitextPath))
                         wikitextPath = robotsDir_ / "wikitext-103-all.txt";
@@ -3921,13 +3903,13 @@ namespace
             }
             (void)tokenCount;
             // 动态阈值：优先使用每 session 的 AdaptiveController 值（经实测延迟调整）
-            // 若 adaptive 尚未运行（roundCount==0），则使用全局 env-var 初始值（once_flag）。
+            // 若 adaptive 尚未运行（roundCount==0），则使用全局初始值（once_flag，config/env 可覆盖）。
             static int globalConcatThresh = 5;
             static int globalRnnThresh = 15;
             static std::once_flag threshInit;
             std::call_once(threshInit, []() {
-                try { globalConcatThresh = std::max(1, std::stoi(getEnv("FRONTEND_CONCAT_THRESH", "5"))); } catch (...) { globalConcatThresh = 5; }
-                try { globalRnnThresh = std::max(globalConcatThresh + 1, std::stoi(getEnv("FRONTEND_RNN_THRESH", "15"))); } catch (...) { globalRnnThresh = 15; }
+                globalConcatThresh = std::max(1, resolveConfig<int>("context.adaptive.concatThresh", 5, "FRONTEND_CONCAT_THRESH"));
+                globalRnnThresh = std::max(globalConcatThresh + 1, resolveConfig<int>("context.adaptive.rnnThresh", 15, "FRONTEND_RNN_THRESH"));
             });
             int concatThresh = (state.adaptive.roundCount > 0) ? state.adaptive.concatThresh : globalConcatThresh;
             int rnnThresh = (state.adaptive.roundCount > 0) ? state.adaptive.rnnThresh : globalRnnThresh;
@@ -3959,7 +3941,7 @@ namespace
             static int topKLimit = 50;
             static std::once_flag topKInit;
             std::call_once(topKInit, []() {
-                try { topKLimit = std::max(10, std::stoi(getEnv("FRONTEND_RNN_TOP_K", "50"))); } catch (...) { topKLimit = 50; }
+                topKLimit = std::max(10, resolveConfig<int>("context.rnnTopK", 50, "FRONTEND_RNN_TOP_K"));
             });
 
             // ScoredToken 描述 token 与相似度评分的配对项。
@@ -4093,8 +4075,8 @@ namespace
                     phoenix::cfgOr<float>("summary_model.lr", 0.001f);
                 params.tokenizerMode =
                     phoenix::cfgOr<std::string>("summary_model.tokenizerMode", std::string("bpe"));
-                try { maxSummaryTokens = std::max(8, std::stoi(getEnv("FRONTEND_SUMMARY_MAX_TOKENS", "32"))); } catch (...) { maxSummaryTokens = 32; }
-                checkpointPath = getEnv("FRONTEND_SUMMARY_CHECKPOINT", "runtime_store/summary_model.json");
+                maxSummaryTokens = std::max(8, resolveConfig<int>("summary_model.maxTokens", 32, "FRONTEND_SUMMARY_MAX_TOKENS"));
+                checkpointPath = resolveConfig<std::string>("summary_model.checkpointPath", std::string("runtime_store/summary_model.json"), "FRONTEND_SUMMARY_CHECKPOINT");
             }
 
             bool tryLoadCheckpoint()
@@ -4283,12 +4265,6 @@ namespace
     };
 }
 
-std::string getEnv(const std::string &name, const std::string &fallback)
-{
-    const char *value = std::getenv(name.c_str());
-    return (value == nullptr || std::string(value).empty()) ? fallback : std::string(value);
-}
-
 static std::vector<std::string> emotionTokenize(const std::string &text)
 {
     std::vector<std::string> tokens;
@@ -4308,10 +4284,10 @@ static std::vector<std::string> emotionTokenize(const std::string &text)
 void setupFrontendServer()
 {
     ensureFrontendArena();
-    const std::string webRoot = getEnv("WEB_ROOT", "./079project_frontend/build");
-    const std::string host = getEnv("FRONTEND_HOST", "127.0.0.1");
-    const int port = std::stoi(getEnv("FRONTEND_PORT", "5081"));
-    const std::string robotsDir = getEnv("ROBOTS_DIR", "./robots");
+    const std::string webRoot = resolveConfig<std::string>("frontend_server.webRoot", std::string("./079project_frontend/build"), "WEB_ROOT");
+    const std::string host = resolveConfig<std::string>("frontend_server.host", std::string("127.0.0.1"), "FRONTEND_HOST");
+    const int port = resolveConfig<int>("frontend_server.port", 5081, "FRONTEND_PORT");
+    const std::string robotsDir = resolveConfig<std::string>("frontend_server.robotsDir", std::string("./robots"), "ROBOTS_DIR");
 
     static auto boolEnv = [](const std::string &value, bool fallback)
     {
@@ -4343,28 +4319,28 @@ void setupFrontendServer()
             return fallback;
         }
     };
-    const bool useTorch = boolEnv(getEnv("FRONTEND_USE_TORCH", "false"), false);
-    const fs::path worldModelDbPath = fs::path(getEnv("FRONTEND_WORLDMODEL_DB", "./runtime_store/frontend_world_model.sqlite"));
-    const fs::path worldModelLegacyDir = fs::path(getEnv("FRONTEND_WORLDMODEL_LEGACY_DIR", "./lmdb/frontend_world_model"));
-    const std::string worldModelRedisUrl = getEnv("FRONTEND_WORLDMODEL_REDIS_URL", getEnv("REDIS_URL", "redis://127.0.0.1:6379"));
-    const int worldModelRedisDb = parseWorldModelInt(getEnv("FRONTEND_WORLDMODEL_REDIS_DB", "7"), 7);
-    const std::string worldModelRedisPrefix = getEnv("FRONTEND_WORLDMODEL_REDIS_PREFIX", "phoenix:frontend:world");
-    const int defaultWorldAgentCount = std::max(1, parseWorldModelInt(getEnv("FRONTEND_WORLD_AGENT_COUNT", getEnv("AI_WORLD_AGENT_COUNT", "4")), 4));
-    const int defaultWorldMapWidth = std::max(2, parseWorldModelInt(getEnv("FRONTEND_WORLD_MAP_WIDTH", getEnv("AI_WORLD_MAP_WIDTH", "6")), 6));
-    const int defaultWorldMapHeight = std::max(2, parseWorldModelInt(getEnv("FRONTEND_WORLD_MAP_HEIGHT", getEnv("AI_WORLD_MAP_HEIGHT", "6")), 6));
-    const int defaultWorldMapDepth = std::max(1, parseWorldModelInt(getEnv("FRONTEND_WORLD_MAP_DEPTH", getEnv("AI_WORLD_MAP_DEPTH", "3")), 3));
-    const int defaultWorldDialogueTurns = std::max(0, parseWorldModelInt(getEnv("FRONTEND_WORLD_DIALOGUE_TURNS", getEnv("AI_WORLD_DIALOGUE_TURNS", "2")), 2));
-    const int defaultWorldEcologyClusters = std::max(0, parseWorldModelInt(getEnv("FRONTEND_WORLD_ECOLOGY_CLUSTERS", getEnv("AI_WORLD_ECOLOGY_CLUSTERS", "2")), 2));
-    const bool defaultWorld3DMap = boolEnv(getEnv("FRONTEND_WORLD_3D_MAP_ENABLED", getEnv("AI_WORLD_3D_MAP_ENABLED", "true")), true);
-    const bool defaultWorldEmbodiedAgents = boolEnv(getEnv("FRONTEND_WORLD_EMBODIED_AGENTS_ENABLED", getEnv("AI_WORLD_EMBODIED_AGENTS_ENABLED", "true")), true);
-    const bool defaultWorldEcologyVideo = boolEnv(getEnv("FRONTEND_WORLD_ECOLOGY_VIDEO_ENABLED", getEnv("AI_WORLD_ECOLOGY_VIDEO_ENABLED", "true")), true);
-    const bool defaultWorldPhysicsEnabled = boolEnv(getEnv("FRONTEND_WORLD_PHYSICS_ENABLED", getEnv("AI_WORLD_PHYSICS_ENABLED", "true")), true);
-    const std::string defaultWorldPhysicsBackend = getEnv("FRONTEND_WORLD_PHYSICS_BACKEND", getEnv("AI_WORLD_PHYSICS_BACKEND", "bullet3"));
-    const int defaultWorldPhysicsSubsteps = std::max(1, parseWorldModelInt(getEnv("FRONTEND_WORLD_PHYSICS_SUBSTEPS", getEnv("AI_WORLD_PHYSICS_SUBSTEPS", "4")), 4));
-    const bool defaultWorldEarthMapEnabled = boolEnv(getEnv("FRONTEND_WORLD_EARTH_MAP_ENABLED", getEnv("AI_WORLD_EARTH_MAP_ENABLED", "true")), true);
-    const std::string defaultWorldEarthMapUri = getEnv("FRONTEND_WORLD_EARTH_MAP_URI", getEnv("AI_WORLD_EARTH_MAP_URI", physics_world::bundledEarthHeightfieldUri()));
-    const std::string defaultWorldEarthMapFormat = getEnv("FRONTEND_WORLD_EARTH_MAP_FORMAT", getEnv("AI_WORLD_EARTH_MAP_FORMAT", physics_world::preferredEarthMapFormat()));
-    const fs::path bullet3Root = fs::path(getEnv("FRONTEND_BULLET3_ROOT", "./outsides/bullet3"));
+    const bool useTorch = resolveConfig<bool>("frontend_server.useTorch", false, "FRONTEND_USE_TORCH");
+    const fs::path worldModelDbPath = fs::path(resolveConfig<std::string>("world_model.storage.db", std::string("./runtime_store/frontend_world_model.sqlite"), "FRONTEND_WORLDMODEL_DB"));
+    const fs::path worldModelLegacyDir = fs::path(resolveConfig<std::string>("world_model.storage.legacyDir", std::string("./lmdb/frontend_world_model"), "FRONTEND_WORLDMODEL_LEGACY_DIR"));
+    const std::string worldModelRedisUrl = resolveConfig<std::string>("world_model.storage.redisUrl", std::string("redis://127.0.0.1:6379"), "FRONTEND_WORLDMODEL_REDIS_URL", "REDIS_URL");
+    const int worldModelRedisDb = resolveConfig<int>("world_model.storage.redisDb", 7, "FRONTEND_WORLDMODEL_REDIS_DB");
+    const std::string worldModelRedisPrefix = resolveConfig<std::string>("world_model.storage.redisPrefix", std::string("phoenix:frontend:world"), "FRONTEND_WORLDMODEL_REDIS_PREFIX");
+    const int defaultWorldAgentCount = std::max(1, resolveConfig<int>("world_model.agentCount", 4, "FRONTEND_WORLD_AGENT_COUNT", "AI_WORLD_AGENT_COUNT"));
+    const int defaultWorldMapWidth = std::max(2, resolveConfig<int>("world_model.mapWidth", 6, "FRONTEND_WORLD_MAP_WIDTH", "AI_WORLD_MAP_WIDTH"));
+    const int defaultWorldMapHeight = std::max(2, resolveConfig<int>("world_model.mapHeight", 6, "FRONTEND_WORLD_MAP_HEIGHT", "AI_WORLD_MAP_HEIGHT"));
+    const int defaultWorldMapDepth = std::max(1, resolveConfig<int>("world_model.mapDepth", 3, "FRONTEND_WORLD_MAP_DEPTH", "AI_WORLD_MAP_DEPTH"));
+    const int defaultWorldDialogueTurns = std::max(0, resolveConfig<int>("world_model.dialogueTurns", 2, "FRONTEND_WORLD_DIALOGUE_TURNS", "AI_WORLD_DIALOGUE_TURNS"));
+    const int defaultWorldEcologyClusters = std::max(0, resolveConfig<int>("world_model.ecologyClusters", 2, "FRONTEND_WORLD_ECOLOGY_CLUSTERS", "AI_WORLD_ECOLOGY_CLUSTERS"));
+    const bool defaultWorld3DMap = resolveConfig<bool>("world_model.3dMapEnabled", true, "FRONTEND_WORLD_3D_MAP_ENABLED", "AI_WORLD_3D_MAP_ENABLED");
+    const bool defaultWorldEmbodiedAgents = resolveConfig<bool>("world_model.embodiedAgentsEnabled", true, "FRONTEND_WORLD_EMBODIED_AGENTS_ENABLED", "AI_WORLD_EMBODIED_AGENTS_ENABLED");
+    const bool defaultWorldEcologyVideo = resolveConfig<bool>("world_model.ecologyVideoEnabled", true, "FRONTEND_WORLD_ECOLOGY_VIDEO_ENABLED", "AI_WORLD_ECOLOGY_VIDEO_ENABLED");
+    const bool defaultWorldPhysicsEnabled = resolveConfig<bool>("world_model.physicsEnabled", true, "FRONTEND_WORLD_PHYSICS_ENABLED", "AI_WORLD_PHYSICS_ENABLED");
+    const std::string defaultWorldPhysicsBackend = resolveConfig<std::string>("world_model.physicsBackend", std::string("bullet3"), "FRONTEND_WORLD_PHYSICS_BACKEND", "AI_WORLD_PHYSICS_BACKEND");
+    const int defaultWorldPhysicsSubsteps = std::max(1, resolveConfig<int>("world_model.physicsSubsteps", 4, "FRONTEND_WORLD_PHYSICS_SUBSTEPS", "AI_WORLD_PHYSICS_SUBSTEPS"));
+    const bool defaultWorldEarthMapEnabled = resolveConfig<bool>("world_model.earthMapEnabled", true, "FRONTEND_WORLD_EARTH_MAP_ENABLED", "AI_WORLD_EARTH_MAP_ENABLED");
+    const std::string defaultWorldEarthMapUri = resolveConfig<std::string>("world_model.earthMapUri", std::string(physics_world::bundledEarthHeightfieldUri()), "FRONTEND_WORLD_EARTH_MAP_URI", "AI_WORLD_EARTH_MAP_URI");
+    const std::string defaultWorldEarthMapFormat = resolveConfig<std::string>("world_model.earthMapFormat", std::string(physics_world::preferredEarthMapFormat()), "FRONTEND_WORLD_EARTH_MAP_FORMAT", "AI_WORLD_EARTH_MAP_FORMAT");
+    const fs::path bullet3Root = fs::path(resolveConfig<std::string>("frontend_server.bullet3Root", std::string("./outsides/bullet3"), "FRONTEND_BULLET3_ROOT"));
     const auto defaultEarthMapRequest = physics_world::normalizeEarthMapImportRequest(nlohmann::json{{"enabled", defaultWorldEarthMapEnabled || !defaultWorldEarthMapUri.empty()},
                                                                                                      {"sourceUri", defaultWorldEarthMapUri},
                                                                                                      {"format", defaultWorldEarthMapFormat}});
@@ -4375,9 +4351,9 @@ void setupFrontendServer()
     static ContextService contextService(fs::path(robotsDir), useTorch);
     static std::unique_ptr<phoenix::io::JpeaV2ImageWorldModel> imageWorldModel =
         phoenix::io::createJpeaV2ImageWorldModel(
-            getEnv("JPEA_IMAGE_VARIANT", "ijepa_vith14_1k"),
-            std::max(1, parseWorldModelInt(getEnv("JPEA_IMAGE_CONCEPT_DIM", "128"), 128)),
-            getEnv("JPEA_IMAGE_BACKEND", "auto"));
+            resolveConfig<std::string>("jpea.image.variant", std::string("ijepa_vith14_1k"), "JPEA_IMAGE_VARIANT"),
+            std::max(1, resolveConfig<int>("jpea.image.conceptDim", 128, "JPEA_IMAGE_CONCEPT_DIM")),
+            resolveConfig<std::string>("jpea.image.backend", std::string("auto"), "JPEA_IMAGE_BACKEND"));
     static SpeakIO speakIO;
     static V51RuntimeEngine v51Runtime;
     static std::shared_ptr<Database079> worldModelDb = [worldModelDbPath, worldModelLegacyDir, worldModelRedisUrl, worldModelRedisDb, worldModelRedisPrefix]()
@@ -4390,7 +4366,7 @@ void setupFrontendServer()
         worldModelDb ? worldModelDb->createStore("kvm") : nullptr,
         worldModelDb ? worldModelDb->createStore("meme_graph") : nullptr,
         worldModelDb ? worldModelDb->createStore("session") : nullptr);
-    static UserStore userStore(fs::path(getEnv("AUTH_DB", "./auth/users.json")));
+    static UserStore userStore(fs::path(resolveConfig<std::string>("auth.userDb", std::string("./auth/users.json"), "AUTH_DB")));
     static phoenix::emotion::EmotionSystem emotionSystem = []() {
         phoenix::emotion::EmotionSystem::Config cfg;
         cfg.enabled = phoenix::cfgOr<bool>("emotion.enabled", true);
@@ -4447,26 +4423,26 @@ void setupFrontendServer()
         try { f.setPositiveRelaxes(phoenix::cfgOr<bool>("mechanical_mind.positiveRelaxes", true)); } catch (...) {}
         return f;
     }();
-    const bool allowRegister = boolEnv(getEnv("AUTH_ALLOW_REGISTER", "true"), true);
-    const bool requireEmailVerify = boolEnv(getEnv("AUTH_REQUIRE_EMAIL_VERIFY", "true"), true);
-    const bool devReturnToken = boolEnv(getEnv("AUTH_DEV_RETURN_TOKEN", "false"), false);
-    const bool smtpEnabled = boolEnv(getEnv("AUTH_SMTP_ENABLED", "false"), false);
-    const bool allowLocalAuthFallback = boolEnv(getEnv("AUTH_LOCAL_TOKEN_FALLBACK", "true"), true);
+    const bool allowRegister = resolveConfig<bool>("auth.allowRegister", true, "AUTH_ALLOW_REGISTER");
+    const bool requireEmailVerify = resolveConfig<bool>("auth.requireEmailVerify", true, "AUTH_REQUIRE_EMAIL_VERIFY");
+    const bool devReturnToken = resolveConfig<bool>("auth.devReturnToken", false, "AUTH_DEV_RETURN_TOKEN");
+    const bool smtpEnabled = resolveConfig<bool>("auth.smtpEnabled", false, "AUTH_SMTP_ENABLED");
+    const bool allowLocalAuthFallback = resolveConfig<bool>("auth.allowLocalTokenFallback", true, "AUTH_LOCAL_TOKEN_FALLBACK");
 #ifdef _WIN32
-    const bool defaultPreferLocalAuthToken = true;
+    const bool defaultPreferLocalAuthToken = resolveConfig<bool>("auth.preferLocalToken", true);
 #else
-    const bool defaultPreferLocalAuthToken = false;
+    const bool defaultPreferLocalAuthToken = resolveConfig<bool>("auth.preferLocalToken", false);
 #endif
-    const bool preferLocalAuthToken = boolEnv(getEnv("AUTH_PREFER_LOCAL_TOKEN", defaultPreferLocalAuthToken ? "true" : "false"), defaultPreferLocalAuthToken);
+    const bool preferLocalAuthToken = resolveConfig<bool>("auth.preferLocalToken", defaultPreferLocalAuthToken, "AUTH_PREFER_LOCAL_TOKEN");
     const bool enableEmailVerifyFlow = requireEmailVerify && (smtpEnabled || devReturnToken);
-    const std::string jwtSecretRuntime = getEnv("JWT_SECRET", jwtSecret);
-    const fs::path outboxDir = fs::path(getEnv("AUTH_OUTBOX_DIR", "./auth/outbox"));
-    const std::string smtpHost = getEnv("SMTP_HOST", "");
-    const std::string smtpPort = getEnv("SMTP_PORT", "465");
-    const std::string smtpUser = getEnv("SMTP_USER", "");
-    const std::string smtpPass = getEnv("SMTP_PASS", "");
-    const std::string smtpFrom = getEnv("SMTP_FROM", smtpUser);
-    std::string aiApiBase = getEnv("AI_API_BASE", "http://127.0.0.1:5080");
+    const std::string jwtSecretRuntime = resolveConfig<std::string>("auth.jwtSecret", jwtSecret, "JWT_SECRET");
+    const fs::path outboxDir = fs::path(resolveConfig<std::string>("auth.outboxDir", std::string("./auth/outbox"), "AUTH_OUTBOX_DIR"));
+    const std::string smtpHost = resolveConfig<std::string>("smtp.host", std::string(""), "SMTP_HOST");
+    const std::string smtpPort = resolveConfig<std::string>("smtp.port", std::string("465"), "SMTP_PORT");
+    const std::string smtpUser = resolveConfig<std::string>("smtp.user", std::string(""), "SMTP_USER");
+    const std::string smtpPass = resolveConfig<std::string>("smtp.pass", std::string(""), "SMTP_PASS");
+    const std::string smtpFrom = resolveConfig<std::string>("smtp.from", smtpUser, "SMTP_FROM");
+    std::string aiApiBase = resolveConfig<std::string>("chat.aiApiBase", std::string("http://127.0.0.1:5080"), "AI_API_BASE");
     while (!aiApiBase.empty() && aiApiBase.back() == '/')
         aiApiBase.pop_back();
     auto parseThreadCount = [](const std::string &raw, int fallback)
@@ -4483,7 +4459,7 @@ void setupFrontendServer()
     };
     unsigned hw = std::thread::hardware_concurrency();
     int defaultThreads = hw > 0 ? static_cast<int>(std::max(2u, std::min(8u, hw))) : 4;
-    int frontendThreads = parseThreadCount(getEnv("FRONTEND_HTTP_THREADS", std::to_string(defaultThreads)), defaultThreads);
+    int frontendThreads = std::max(2, resolveConfig<int>("frontend_server.httpThreads", defaultThreads, "FRONTEND_HTTP_THREADS"));
     if (frontendThreads < 2)
         frontendThreads = 2;
     drogon::app().setThreadNum(frontendThreads);
@@ -4633,12 +4609,12 @@ void setupFrontendServer()
             return fallback;
         }
     };
-    const int chatQueueWaitMs = std::max(3000, parseIntEnv(getEnv("FRONTEND_CHAT_QUEUE_WAIT_MS", "180000"), 180000));
-    const int chatUpstreamTimeoutMs = std::max(5000, parseIntEnv(getEnv("FRONTEND_CHAT_UPSTREAM_TIMEOUT_MS", "360000"), 360000));
-    const int apiUpstreamTimeoutMs = std::max(3000, parseIntEnv(getEnv("FRONTEND_API_UPSTREAM_TIMEOUT_MS", "45000"), 45000));
-    const int chatMaxInFlight = std::max(1, std::min(16, parseIntEnv(getEnv("FRONTEND_CHAT_MAX_INFLIGHT", "1"), 1)));
-    const bool frontendHttpLog = boolEnv(getEnv("FRONTEND_HTTP_LOG", "false"), false);
-    const bool frontendV51Default = boolEnv(getEnv("FRONTEND_V51_DEFAULT", "true"), true);
+    const int chatQueueWaitMs = std::max(3000, resolveConfig<int>("chat.queueWaitMs", 180000, "FRONTEND_CHAT_QUEUE_WAIT_MS"));
+    const int chatUpstreamTimeoutMs = std::max(5000, resolveConfig<int>("chat.upstreamTimeoutMs", 360000, "FRONTEND_CHAT_UPSTREAM_TIMEOUT_MS"));
+    const int apiUpstreamTimeoutMs = std::max(3000, resolveConfig<int>("api.upstreamTimeoutMs", 45000, "FRONTEND_API_UPSTREAM_TIMEOUT_MS"));
+    const int chatMaxInFlight = std::max(1, std::min(16, resolveConfig<int>("chat.maxInFlight", 1, "FRONTEND_CHAT_MAX_INFLIGHT")));
+    const bool frontendHttpLog = resolveConfig<bool>("frontend_server.httpLog", false, "FRONTEND_HTTP_LOG");
+    const bool frontendV51Default = resolveConfig<bool>("frontend_server.v51Default", true, "FRONTEND_V51_DEFAULT");
     static edge_platform::PlatformManager platformManager;
     static std::once_flag platformInitOnce;
 
@@ -4663,28 +4639,28 @@ void setupFrontendServer()
 
     std::call_once(platformInitOnce, [&]() {
         edge_platform::RuntimeConfig platformConfig;
-        platformConfig.baseDir = fs::path(getEnv("FRONTEND_PLATFORM_BASE_DIR", getEnv("EDGE_PLATFORM_BASE_DIR", fs::current_path().string())));
-        platformConfig.netlistRoot = fs::path(getEnv("FRONTEND_PLATFORM_NETLIST_ROOT", getEnv("EDGE_PLATFORM_NETLIST_ROOT", "./catastrophe")));
-        platformConfig.gerberConnectorMap = fs::path(getEnv("FRONTEND_PLATFORM_GERBER_CONNECTOR_MAP", getEnv("EDGE_PLATFORM_GERBER_CONNECTOR_MAP", "./catastrophe/gerber_catastrophe1_20260417_connector_map.json")));
-        platformConfig.enabled = boolEnv(getEnv("FRONTEND_PLATFORM_ENABLED", getEnv("EDGE_PLATFORM_ENABLED", "true")), true);
-        platformConfig.npuEnabled = boolEnv(getEnv("FRONTEND_PLATFORM_NPU_ENABLED", getEnv("EDGE_PLATFORM_NPU_ENABLED", "true")), true);
-        platformConfig.preferredComputeBackend = getEnv("FRONTEND_PLATFORM_PREFERRED_BACKEND", getEnv("EDGE_PLATFORM_PREFERRED_BACKEND", "auto"));
-        platformConfig.maxComputeInflight = std::max(1, parseWorldModelInt(getEnv("FRONTEND_PLATFORM_MAX_COMPUTE_INFLIGHT", getEnv("EDGE_PLATFORM_MAX_COMPUTE_INFLIGHT", "2")), 2));
-        platformConfig.npuSpiDevice = getEnv("FRONTEND_PLATFORM_SPI_DEVICE", getEnv("EDGE_PLATFORM_SPI_DEVICE", "/dev/spidev0.0"));
-        platformConfig.npuSpiSpeedHz = std::max(100000, parseWorldModelInt(getEnv("FRONTEND_PLATFORM_SPI_SPEED_HZ", getEnv("EDGE_PLATFORM_SPI_SPEED_HZ", "120000000")), 120000000));
-        platformConfig.npuSpiMode = std::max(0, std::min(3, parseWorldModelInt(getEnv("FRONTEND_PLATFORM_SPI_MODE", getEnv("EDGE_PLATFORM_SPI_MODE", "0")), 0)));
-        platformConfig.npuAsyncGpioExecuteLocally = boolEnv(getEnv("FRONTEND_PLATFORM_GPIO_LOCAL_EXECUTE", getEnv("EDGE_PLATFORM_GPIO_LOCAL_EXECUTE", "true")), true);
-        platformConfig.npuGpioSysfsRoot = getEnv("FRONTEND_PLATFORM_GPIO_SYSFS_ROOT", getEnv("EDGE_PLATFORM_GPIO_SYSFS_ROOT", "/sys/class/gpio"));
-        platformConfig.npuGpioPulseUs = std::max(0, parseWorldModelInt(getEnv("FRONTEND_PLATFORM_GPIO_PULSE_US", getEnv("EDGE_PLATFORM_GPIO_PULSE_US", "0")), 0));
-        platformConfig.npuVirtualMemoryEnabled = boolEnv(getEnv("FRONTEND_PLATFORM_NPU_VM_ENABLED", getEnv("EDGE_PLATFORM_NPU_VM_ENABLED", "true")), true);
-        platformConfig.npuAdvertisedMemoryMb = std::max(1024, parseWorldModelInt(getEnv("FRONTEND_PLATFORM_NPU_VM_MB", getEnv("EDGE_PLATFORM_NPU_VM_MB", "8192")), 8192));
-        platformConfig.npuSdcardWeightsRoot = fs::path(getEnv("FRONTEND_PLATFORM_NPU_SD_WEIGHTS_ROOT", getEnv("EDGE_PLATFORM_NPU_SD_WEIGHTS_ROOT", "runtime_store/sdcard_weights")));
-        platformConfig.npuHotWeightsLimit = std::max(1, parseWorldModelInt(getEnv("FRONTEND_PLATFORM_NPU_HOT_LIMIT", getEnv("EDGE_PLATFORM_NPU_HOT_LIMIT", "12")), 12));
-        platformConfig.npuHotPromoteHits = std::max(1, parseWorldModelInt(getEnv("FRONTEND_PLATFORM_NPU_HOT_PROMOTE_HITS", getEnv("EDGE_PLATFORM_NPU_HOT_PROMOTE_HITS", "2")), 2));
-        platformConfig.npuUnitCount = std::max(1, parseWorldModelInt(getEnv("FRONTEND_PLATFORM_NPU_UNIT_COUNT", getEnv("EDGE_PLATFORM_NPU_UNIT_COUNT", "19")), 19));
-        platformConfig.npuEfficiencyProbeEnabled = boolEnv(getEnv("FRONTEND_PLATFORM_NPU_PROBE_ENABLED", getEnv("EDGE_PLATFORM_NPU_PROBE_ENABLED", "true")), true);
-        platformConfig.npuEfficiencyAnomalyThreshold = std::max(0.05, std::min(1.0, parseWorldModelDouble(getEnv("FRONTEND_PLATFORM_NPU_PROBE_THRESHOLD", getEnv("EDGE_PLATFORM_NPU_PROBE_THRESHOLD", "0.35")), 0.35)));
-        const auto netlistFiles = splitPathList(getEnv("FRONTEND_PLATFORM_NETLIST_FILES", getEnv("EDGE_PLATFORM_NETLIST_FILES", std::string())));
+        platformConfig.baseDir = fs::path(resolveConfig<std::string>("edge_platform.baseDir", fs::current_path().string(), "FRONTEND_PLATFORM_BASE_DIR", "EDGE_PLATFORM_BASE_DIR"));
+        platformConfig.netlistRoot = fs::path(resolveConfig<std::string>("edge_platform.netlistRoot", std::string("./catastrophe"), "FRONTEND_PLATFORM_NETLIST_ROOT", "EDGE_PLATFORM_NETLIST_ROOT"));
+        platformConfig.gerberConnectorMap = fs::path(resolveConfig<std::string>("edge_platform.gerberConnectorMap", std::string("./catastrophe/gerber_catastrophe1_20260417_connector_map.json"), "FRONTEND_PLATFORM_GERBER_CONNECTOR_MAP", "EDGE_PLATFORM_GERBER_CONNECTOR_MAP"));
+        platformConfig.enabled = resolveConfig<bool>("edge_platform.enabled", true, "FRONTEND_PLATFORM_ENABLED", "EDGE_PLATFORM_ENABLED");
+        platformConfig.npuEnabled = resolveConfig<bool>("edge_platform.npu.enabled", true, "FRONTEND_PLATFORM_NPU_ENABLED", "EDGE_PLATFORM_NPU_ENABLED");
+        platformConfig.preferredComputeBackend = resolveConfig<std::string>("edge_platform.preferredComputeBackend", std::string("auto"), "FRONTEND_PLATFORM_PREFERRED_BACKEND", "EDGE_PLATFORM_PREFERRED_BACKEND");
+        platformConfig.maxComputeInflight = std::max(1, resolveConfig<int>("edge_platform.maxComputeInflight", 2, "FRONTEND_PLATFORM_MAX_COMPUTE_INFLIGHT", "EDGE_PLATFORM_MAX_COMPUTE_INFLIGHT"));
+        platformConfig.npuSpiDevice = resolveConfig<std::string>("edge_platform.npu.spiDevice", std::string("/dev/spidev0.0"), "FRONTEND_PLATFORM_SPI_DEVICE", "EDGE_PLATFORM_SPI_DEVICE");
+        platformConfig.npuSpiSpeedHz = std::max(100000, resolveConfig<int>("edge_platform.npu.spiSpeedHz", 120000000, "FRONTEND_PLATFORM_SPI_SPEED_HZ", "EDGE_PLATFORM_SPI_SPEED_HZ"));
+        platformConfig.npuSpiMode = std::max(0, std::min(3, resolveConfig<int>("edge_platform.npu.spiMode", 0, "FRONTEND_PLATFORM_SPI_MODE", "EDGE_PLATFORM_SPI_MODE")));
+        platformConfig.npuAsyncGpioExecuteLocally = resolveConfig<bool>("edge_platform.npu.gpioLocalExecute", true, "FRONTEND_PLATFORM_GPIO_LOCAL_EXECUTE", "EDGE_PLATFORM_GPIO_LOCAL_EXECUTE");
+        platformConfig.npuGpioSysfsRoot = resolveConfig<std::string>("edge_platform.npu.gpioSysfsRoot", std::string("/sys/class/gpio"), "FRONTEND_PLATFORM_GPIO_SYSFS_ROOT", "EDGE_PLATFORM_GPIO_SYSFS_ROOT");
+        platformConfig.npuGpioPulseUs = std::max(0, resolveConfig<int>("edge_platform.npu.gpioPulseUs", 0, "FRONTEND_PLATFORM_GPIO_PULSE_US", "EDGE_PLATFORM_GPIO_PULSE_US"));
+        platformConfig.npuVirtualMemoryEnabled = resolveConfig<bool>("edge_platform.npu.vmEnabled", true, "FRONTEND_PLATFORM_NPU_VM_ENABLED", "EDGE_PLATFORM_NPU_VM_ENABLED");
+        platformConfig.npuAdvertisedMemoryMb = std::max(1024, resolveConfig<int>("edge_platform.npu.vmMb", 8192, "FRONTEND_PLATFORM_NPU_VM_MB", "EDGE_PLATFORM_NPU_VM_MB"));
+        platformConfig.npuSdcardWeightsRoot = fs::path(resolveConfig<std::string>("edge_platform.npu.sdWeightsRoot", std::string("runtime_store/sdcard_weights"), "FRONTEND_PLATFORM_NPU_SD_WEIGHTS_ROOT", "EDGE_PLATFORM_NPU_SD_WEIGHTS_ROOT"));
+        platformConfig.npuHotWeightsLimit = std::max(1, resolveConfig<int>("edge_platform.npu.hotWeightsLimit", 12, "FRONTEND_PLATFORM_NPU_HOT_LIMIT", "EDGE_PLATFORM_NPU_HOT_LIMIT"));
+        platformConfig.npuHotPromoteHits = std::max(1, resolveConfig<int>("edge_platform.npu.hotPromoteHits", 2, "FRONTEND_PLATFORM_NPU_HOT_PROMOTE_HITS", "EDGE_PLATFORM_NPU_HOT_PROMOTE_HITS"));
+        platformConfig.npuUnitCount = std::max(1, resolveConfig<int>("edge_platform.npu.unitCount", 19, "FRONTEND_PLATFORM_NPU_UNIT_COUNT", "EDGE_PLATFORM_NPU_UNIT_COUNT"));
+        platformConfig.npuEfficiencyProbeEnabled = resolveConfig<bool>("edge_platform.npu.probeEnabled", true, "FRONTEND_PLATFORM_NPU_PROBE_ENABLED", "EDGE_PLATFORM_NPU_PROBE_ENABLED");
+        platformConfig.npuEfficiencyAnomalyThreshold = std::max(0.05, std::min(1.0, (double)resolveConfig<float>("edge_platform.npu.probeThreshold", 0.35f, "FRONTEND_PLATFORM_NPU_PROBE_THRESHOLD", "EDGE_PLATFORM_NPU_PROBE_THRESHOLD")));
+        const auto netlistFiles = splitPathList(resolveConfig<std::string>("edge_platform.netlistFiles", std::string(), "FRONTEND_PLATFORM_NETLIST_FILES", "EDGE_PLATFORM_NETLIST_FILES"));
         if (!netlistFiles.empty()) {
             platformConfig.netlistFiles = netlistFiles;
         }
@@ -7030,10 +7006,10 @@ void setupFrontendServer()
                 return;
             }
 
-            const std::string cameraDevice = getEnv("JPEA_CAMERA_DEVICE", "/dev/video0");
-            const int configuredWidth = std::max(1, parseWorldModelInt(getEnv("JPEA_CAMERA_WIDTH", "1920"), 1920));
-            const int configuredHeight = std::max(1, parseWorldModelInt(getEnv("JPEA_CAMERA_HEIGHT", "1080"), 1080));
-            const int configuredFps = std::max(1, parseWorldModelInt(getEnv("JPEA_CAMERA_FPS", "30"), 30));
+            const std::string cameraDevice = resolveConfig<std::string>("jpea.camera.device", std::string("/dev/video0"), "JPEA_CAMERA_DEVICE");
+            const int configuredWidth = std::max(1, resolveConfig<int>("jpea.camera.width", 1920, "JPEA_CAMERA_WIDTH"));
+            const int configuredHeight = std::max(1, resolveConfig<int>("jpea.camera.height", 1080, "JPEA_CAMERA_HEIGHT"));
+            const int configuredFps = std::max(1, resolveConfig<int>("jpea.camera.fps", 30, "JPEA_CAMERA_FPS"));
             cv::VideoCapture capture(cameraDevice, cv::CAP_V4L2);
             if (capture.isOpened()) {
                 capture.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));

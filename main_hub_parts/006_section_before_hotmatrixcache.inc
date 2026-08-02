@@ -26,7 +26,7 @@ static ProcessReservedArena &globalReservedArena() {
 static void initProcessMemoryReservation() {
   static std::once_flag once;
   std::call_once(once, []() {
-    double mb = numberOr(getEnv("AI_RESERVED_MEM_MB", "256"), 256.0);
+    double mb = phoenix::resolveConfig<double>("main.reservedMemMb", 256.0, "AI_RESERVED_MEM_MB");
     if (!std::isfinite(mb) || mb < 8.0)
       mb = 256.0;
     size_t bytes = (size_t)(mb * 1024.0 * 1024.0);

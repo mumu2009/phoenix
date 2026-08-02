@@ -2,17 +2,25 @@
 """
 auto_tune_phoenix_params.py
 
-Auto-tune hard-coded Phoenix magic numbers by running small memory-tier
-benchmarks and writing the best configuration to config/phoenix.json.
+Single-variable / grid auto-tuner for Phoenix runtime parameters.
 
-Tunable parameters (first pass):
-  - context window / similarity / chunking thresholds
-  - benchmark scenario turn thresholds (the 5/15 boundaries)
-  - llama-server thread/parallel/ctx-size strategy knobs
+Scope:
+  * remote Windows box -> --scope non-vision-speech
+    Tunes context, dialog, learning, memebarrier, summary, model_defaults,
+    llama_server, frontend, edge-platform (non-NPU), emotion, spark, etc.
+    Benchmark is the memory-tier TUI (text/dialog latency & similarity).
 
-The script is intentionally conservative with sample counts so you can run a
-"large-scale" sweep without spending days. Increase --samples for production
-quality.
+  * RDK X5 -> --scope vision-speech
+    Tunes vision.*, jpea.*, edge_platform.npu.*, speech.*.
+    Benchmark is a vision/speech latency & accuracy test against the local
+    phoenix_main HTTP endpoint or a supplied command.
+
+Single-variable experiment:
+  python tools/auto_tune_phoenix_params.py --scope non-vision-speech \
+      --vary-key context.maxTokens --vary-values "[2048,4096,8192]"
+
+Grid search:
+  python tools/auto_tune_phoenix_params.py --scope non-vision-speech --max-evals 24
 """
 from __future__ import annotations
 
@@ -22,8 +30,10 @@ import itertools
 import json
 import math
 import os
+import platform
 import random
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -32,6 +42,10 @@ import queue
 from pathlib import Path
 from typing import Any
 
+
+# ---------------------------------------------------------------------------
+# Config helpers
+# ---------------------------------------------------------------------------
 
 def get_by_dotpath(obj: Any, dot_path: str) -> Any:
     cur = obj
@@ -44,6 +58,8 @@ def set_by_dotpath(obj: Any, dot_path: str, value: Any) -> None:
     cur = obj
     parts = dot_path.split(".")
     for part in parts[:-1]:
+        if part not in cur or not isinstance(cur[part], dict):
+            cur[part] = {}
         cur = cur[part]
     cur[parts[-1]] = value
 
@@ -65,9 +81,25 @@ def config_dir() -> Path:
     return d
 
 
-def default_param_space() -> dict[str, Any]:
-    """Parameter grid.  The lists are deliberately broad so the random
-    sub-grid does not cluster near the old estimate."""
+def base_config() -> dict[str, Any]:
+    """Load the current config as the template, so all non-tuned keys stay intact."""
+    path = config_dir() / "phoenix.json"
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Parameter spaces
+# ---------------------------------------------------------------------------
+
+VISION_SPEECH_PREFIXES = {"vision", "jpea", "speech", "edge_platform"}
+
+
+def non_vision_speech_param_space() -> dict[str, Any]:
+    """All tunable dot-paths that do NOT relate to vision/speech/X5 NPU runtime."""
     return {
         "context": {
             "maxTokens": [2048, 4096, 8192, 16384],
@@ -75,14 +107,35 @@ def default_param_space() -> dict[str, Any]:
             "importanceThreshold": [0.1, 0.2, 0.3, 0.5, 0.7],
             "similarityThreshold": [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85],
             "semanticChunkSize": [128, 256, 512, 1024],
+            "rnnTopK": [10, 25, 50, 100],
             "attentionSink": {
                 "sinkTokens": [64, 128, 256, 512],
                 "sinkImportance": [0.03, 0.05, 0.1, 0.2, 0.3],
             },
+            "embeddings": {
+                "dim": [64, 128, 256],
+                "window": [2, 4, 8],
+                "minCount": [1, 2, 3, 5],
+                "maxVocab": [1000, 3000, 6000],
+                "maxFiles": [100, 400, 800],
+            },
+            "torch": {
+                "maxLen": [32, 64, 128],
+                "embDim": [64, 128, 256],
+                "hidDim": [64, 128, 256],
+                "epochs": [2, 4, 8],
+                "batch": [8, 16, 32],
+                "maxFiles": [120, 240, 480],
+            },
+            "adaptive": {
+                "concatThresh": [3, 5, 8, 12],
+                "rnnThresh": [10, 15, 25, 40],
+                "shortWindowMaxMessages": [20, 40, 80],
+                "shortWindowMaxTokens": [1024, 2048, 4096],
+                "targetLatencyMs": [5000.0, 15000.0, 30000.0],
+            },
         },
         "scenarios": {
-            # Turn-count boundaries that separate short / long / ultra.
-            # Names stay the same, the actual ranges become data-driven.
             "short_dialogue_max_turns": [2, 3, 4],
             "long_dialogue_min_turns": [4, 5, 6, 7],
             "long_dialogue_max_turns": [10, 12, 15, 18],
@@ -93,216 +146,227 @@ def default_param_space() -> dict[str, Any]:
             "threads": [4, 6, 8, 12],
             "parallel": [1, 2, 4],
             "ctx_size": [2048, 4096, 8192, 16384],
+        },
+        "memebarrier": {
+            "scanIntervalMs": [5000, 10000, 30000],
+            "maliciousThreshold": [0.5, 0.7, 0.85],
+            "minThreshold": [0.25, 0.35, 0.5],
+            "maxThreshold": [0.8, 0.95, 0.99],
+            "thresholdMomentum": [0.05, 0.15, 0.3],
+            "minIsolationMargin": [0.03, 0.05, 0.1],
+            "minConsecutiveHits": [1, 2, 3],
+            "maxIsolatePerScan": [3, 5, 10],
+            "scoreWindowSize": [256, 512, 1024],
+            "recommenderTopics": [12, 24, 48],
+            "recommenderDim": [8, 16, 32],
+            "torch": {
+                "maxLen": [24, 48, 96],
+                "embDim": [32, 64, 128],
+                "hidDim": [32, 64, 128],
+                "adamLR": [0.0005, 0.001, 0.002],
+                "epochs": [1, 2, 4],
+                "batch": [16, 32, 64],
+            },
+        },
+        "summary_model": {
+            "vocabSize": [2048, 4096, 8192],
+            "dModel": [32, 64, 128],
+            "nHeads": [1, 2, 4],
+            "nLayers": [1, 2, 3],
+            "dFF": [64, 128, 256],
+            "maxLen": [64, 128, 256],
+            "maxTokens": [16, 32, 64],
+            "lr": [0.0005, 0.001, 0.002],
+        },
+        "model_defaults": {
+            "decayFactor": [0.25, 0.5, 0.75],
+            "maxMemeWords": [50, 100, 200],
+            "minOverlapThreshold": [1, 2, 3],
+            "memeNgramMin": [2, 3, 4],
+            "memeNgramMax": [10, 14, 20],
+            "learningIterations": [1, 3, 5],
+            "threshold": [2.0, 3.0, 5.0],
+            "decay": [0.5, 1.0, 2.0],
+            "edgeWeight": [0.5, 1.0, 2.0],
+        },
+        "dialog": {
+            "rlEvery": [10, 20, 40],
+            "advEvery": [20, 30, 60],
+            "gnnEvery": [20, 40, 80],
+            "dialogAsyncLimit": [1, 2, 4],
+        },
+        "learning": {
+            "rlMaxDocs": [32, 64, 128],
+            "rlTopKWords": [15, 30, 60],
+            "rlImprovementThreshold": [0.005, 0.01, 0.02],
+            "rlCoverageWeight": [0.5, 0.7, 0.9],
+            "rlUniquenessWeight": [0.1, 0.3, 0.5],
+            "advMaxAdversaries": [32, 64, 128],
+            "advNoiseLevel": [0.1, 0.2, 0.3],
+            "advAttackRounds": [2, 3, 5],
+            "advDefenseRounds": [2, 3, 5],
+            "advBenchLimit": [30, 50, 100],
+            "gnnGaMaxDocs": [16, 32, 64],
+            "gnnGaPopulation": [4, 6, 10],
+            "gnnGaGenerations": [1, 2, 3],
+        },
+        "emotion": {
+            "learningRate": [0.01, 0.05, 0.1],
+            "maxBias": [1.0, 2.0, 3.0],
+            "minBias": [-3.0, -2.0, -1.0],
+            "decay": [0.9, 0.95, 0.99],
+            "momentum": [0.5, 0.9, 0.99],
+            "tokenBoostExponent": [0.8, 1.2, 1.6],
+            "minTokenScore": [0.01, 0.05, 0.1],
+        },
+        "spark": {
+            "gnnScheduler": {
+                "enabled": [True, False],
+                "minAffinity": [0.2, 0.3, 0.5],
+                "maxLayers": [2, 3, 4],
+                "perturbations": [1, 2, 4],
+                "useHistory": [True, False],
+            }
+        },
+        "mechanical_mind": {
+            "enabled": [True, False],
+            "textThreshold": [0.5, 0.58, 0.7],
+            "tokenThreshold": [0.5, 0.6, 0.7],
+            "emotionInfluence": [0.1, 0.3, 0.5],
+        },
+        "partial_cache": {
+            "enabled": [True, False],
+            "tolerance": [0.0, 0.05, 0.1],
+            "maxEntries": [1024, 2048, 4096],
+            "ttlMs": [60000, 120000, 300000],
+        },
+        "knowledge_probe": {
+            "probeTimeoutMs": [30000, 60000, 120000],
+            "knownSimThreshold": [0.4, 0.5, 0.6],
+            "crossSessionLearnEnabled": [True, False],
+        },
+        "world_model": {
+            "agentCount": [10, 50, 100],
+            "mapWidth": [50, 100, 200],
+            "mapHeight": [50, 100, 200],
+            "mapDepth": [2, 3, 5],
+            "physicsSubsteps": [2, 4, 8],
+        },
+        "frontend_server": {
+            "httpThreads": [2, 4, 8],
+            "embeddingWorkers": [1, 2, 4],
+            "rnnWorkers": [1, 2, 4],
+            "contextWorkers": [1, 2, 4],
+            "episodicWorkers": [1, 2, 3],
+        },
+        "chat": {
+            "queueWaitMs": [90000, 180000, 300000],
+            "upstreamTimeoutMs": [120000, 360000, 600000],
+            "maxInFlight": [1, 2, 4],
+        },
+        "api": {
+            "upstreamTimeoutMs": [30000, 45000, 60000],
+        },
+        "auth": {
+            "allowRegister": [True, False],
+            "allowLocalTokenFallback": [True, False],
+            "preferLocalToken": [True, False],
+            "requireEmailVerify": [True, False],
+        },
+        "edge_platform": {
+            "enabled": [True, False],
+            "preferredComputeBackend": ["auto", "cpu", "npu"],
+            "maxComputeInflight": [1, 2, 4],
+        },
+    }
+
+
+def vision_speech_param_space() -> dict[str, Any]:
+    """Tunable dot-paths for RDK X5 vision/speech runtime."""
+    return {
+        "vision": {
+            "confidenceThreshold": [0.25, 0.35, 0.5],
+            "nmsThreshold": [0.3, 0.45, 0.6],
+            "minBoxAreaRatio": [0.0005, 0.001, 0.005],
+            "maxBoxes": [40, 80, 160],
+            "embeddingDim": [8, 18, 32],
+            "colorSpace": ["bgr", "rgb"],
+            "pixelMean": [[0.485, 0.456, 0.406], [0.0, 0.0, 0.0]],
+            "pixelStd": [[0.229, 0.224, 0.225], [1.0, 1.0, 1.0]],
+            "torch": {
+                "cnnInput": [128, 224, 320],
+                "yoloInput": [320, 416, 608],
+                "yoloS": [5, 7, 11],
+                "yoloB": [2, 3, 5],
+                "yoloScore": [0.15, 0.25, 0.4],
+                "yoloNms": [0.35, 0.45, 0.6],
+                "batch": [1, 4, 8],
+                "lr": [0.0005, 0.001, 0.002],
+            },
+            "yolo": {
+                "input": [416, 640, 960],
+            },
+            "cnn": {
+                "input": [128, 224, 320],
+                "topK": [3, 5, 10],
+            },
+        },
+        "jpea": {
+            "image": {
+                "conceptDim": [64, 128, 256],
+                "backend": ["auto", "bpu", "cpu"],
+            },
+            "camera": {
+                "width": [640, 1280, 1920],
+                "height": [480, 720, 1080],
+                "fps": [15, 30, 60],
+            },
+        },
+        "speech": {
+            "noiseFloorDb": [-50.0, -45.0, -40.0],
+            "minSpeechDurationMs": [100, 250, 500],
+            "vadFrameMs": [20, 30, 50],
+            "maxTracks": [1, 3, 5],
+            "asrConfidenceThreshold": [0.5, 0.6, 0.75],
+            "featureWindowMs": [20, 25, 40],
+            "featureHopMs": [5, 10, 20],
+        },
+        "edge_platform": {
+            "npu": {
+                "enabled": [True, False],
+                "vmMb": [2048, 4096, 8192],
+                "hotWeightsLimit": [4, 12, 32],
+                "hotPromoteHits": [1, 2, 4],
+                "unitCount": [1, 10, 19],
+                "probeThreshold": [0.2, 0.35, 0.5],
+                "spiSpeedHz": [50000000, 120000000, 150000000],
+                "spiMode": [0, 1, 2, 3],
+            },
         },
     }
 
 
 def sim_param_space() -> dict[str, Any]:
-    """Parameter space for the similarityThreshold re-measurement.
-    All other parameters are pinned to the current best-known values."""
-    return {
-        "context": {
-            "maxTokens": [8192],
-            "reservedSystemTokens": [256],
-            "importanceThreshold": [0.3],
-            "similarityThreshold": [0.6],
-            "semanticChunkSize": [256],
-            "attentionSink": {
-                "sinkTokens": [256],
-                "sinkImportance": [0.05],
-            },
-        },
-        "scenarios": {
-            "short_dialogue_max_turns": [3],
-            "long_dialogue_min_turns": [5],
-            "long_dialogue_max_turns": [10],
-            "ultra_long_dialogue_min_turns": [20],
-            "ultra_long_dialogue_max_turns": [22],
-        },
-        "llama_server": {
-            "threads": [12],
-            "parallel": [1],
-            "ctx_size": [8192],
-        },
-    }
+    """Narrowed context-only sweep, useful as a quick sanity pass."""
+    out = copy.deepcopy(non_vision_speech_param_space())
+    # Pin everything except context.similarityThreshold
+    for key in list(out.keys()):
+        if key != "context":
+            del out[key]
+    # Disable nested context attention-sink/chunk/embeddings/torch/adaptive
+    for key in list(out["context"].keys()):
+        if key not in ("similarityThreshold", "maxTokens"):
+            del out["context"][key]
+    out["context"]["maxTokens"] = [8192]
+    out["context"]["similarityThreshold"] = [0.55, 0.6, 0.65, 0.7, 0.75, 0.8]
+    return out
 
 
-def other_param_space(similarity: float | None) -> dict[str, Any]:
-    """Parameter space for the remaining magic numbers.
-    similarityThreshold is included as a broad range so the search can
-    verify or override the value discovered in the sim sweep."""
-    return {
-        "context": {
-            "maxTokens": [2048, 4096, 8192, 16384],
-            "reservedSystemTokens": [128, 256, 512, 768],
-            "importanceThreshold": [0.1, 0.2, 0.3, 0.5, 0.7],
-            "similarityThreshold": [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85],
-            "semanticChunkSize": [128, 256, 512, 1024],
-            "attentionSink": {
-                "sinkTokens": [64, 128, 256, 512],
-                "sinkImportance": [0.03, 0.05, 0.1, 0.2, 0.3],
-            },
-        },
-        "scenarios": {
-            "short_dialogue_max_turns": [2, 3, 4],
-            "long_dialogue_min_turns": [4, 5, 6, 7],
-            "long_dialogue_max_turns": [10, 12, 15, 18],
-            "ultra_long_dialogue_min_turns": [16, 18, 20, 24],
-            "ultra_long_dialogue_max_turns": [22, 25, 28, 32],
-        },
-        "llama_server": {
-            "threads": [4, 6, 8, 12],
-            "parallel": [1, 2, 4],
-            "ctx_size": [2048, 4096, 8192, 16384],
-        },
-    }
-
-
-def default_fixed_params() -> dict[str, Any]:
-    """Non-tuned defaults, written to the final JSON because production code
-    reads every value from this file and has no fallbacks."""
-    return {
-        "context": {
-            "enableSemanticSearch": True,
-            "enableHierarchical": True,
-            "hierarchicalLevels": {
-                "global": 1024,
-                "workspace": 2048,
-                "file": 4096,
-                "function": 512,
-            },
-        },
-        "memebarrier": {
-            "scanIntervalMs": 10000,
-            "maliciousThreshold": 0.7,
-            "minThreshold": 0.35,
-            "maxThreshold": 0.95,
-            "thresholdMomentum": 0.15,
-            "minIsolationMargin": 0.05,
-            "minConsecutiveHits": 2,
-            "maxIsolatePerScan": 5,
-            "adaptiveEnabled": True,
-            "anomalyEnabled": True,
-            "scoreWindowSize": 512,
-            "useTextCNN": True,
-            "useRecommender": True,
-            "useTorchModels": True,
-            "disableRateTarget": 0.01,
-            "recommenderTopics": 24,
-            "recommenderDim": 16,
-            "weights": {
-                "growth": 0.5,
-                "outSkew": 0.25,
-                "selfSkew": 0.15,
-                "anomaly": 0.10,
-            },
-            "torch": {
-                "maxLen": 48,
-                "embDim": 64,
-                "hidDim": 64,
-                "adamLR": 0.001,
-                "epochs": 2,
-                "batch": 32,
-                "lrDecay": 0.5,
-                "patience": 1,
-            },
-        },
-        "summary_model": {
-            "vocabSize": 4096,
-            "dModel": 64,
-            "nHeads": 2,
-            "nLayers": 1,
-            "dFF": 128,
-            "maxLen": 128,
-            "maxTokens": 32,
-            "lr": 0.001,
-            "tokenizerMode": "bpe",
-        },
-        "model_defaults": {
-            "decayFactor": 0.5,
-            "maxMemeWords": 100,
-            "minOverlapThreshold": 2,
-            "memeNgramMin": 3,
-            "memeNgramMax": 14,
-            "maliciousThreshold": 0.7,
-            "learningIterations": 3,
-            "iteration": 5,
-            "threshold": 3.0,
-            "decay": 1.0,
-            "decayK": 1.0,
-            "maxLen": 16,
-            "edgeWeight": 1.0,
-            "activationType": "relu",
-            "transferType": "linear",
-            "activationCustom": "",
-            "transferCustom": "",
-            "mappingDepth": 1,
-            "reflectionTopMemes": 18,
-            "reflectionTopWords": 24,
-            "reflectionMinScore": 1e-6,
-        },
-        "dialog": {
-            "rlEvery": 20,
-            "advEvery": 30,
-            "gnnEvery": 40,
-            "dialogAsyncLimit": 2,
-        },
-        "learning": {
-            "rlMaxDocs": 64,
-            "rlTopKWords": 30,
-            "rlImprovementThreshold": 0.01,
-            "rlCoverageWeight": 0.7,
-            "rlUniquenessWeight": 0.3,
-            "advMaxAdversaries": 64,
-            "advNoiseLevel": 0.2,
-            "advAttackRounds": 3,
-            "advDefenseRounds": 3,
-            "advBenchLimit": 50,
-            "gnnGaMaxDocs": 32,
-            "gnnGaPopulation": 6,
-            "gnnGaGenerations": 1,
-        },
-    }
-
-
-def make_config_candidate(
-    context: dict[str, Any],
-    scenarios: dict[str, int],
-    llama: dict[str, Any],
-    fixed: dict[str, Any],
-) -> dict[str, Any]:
-    """Flatten one grid point into the JSON config structure."""
-    cfg = {
-        "version": 1,
-        "source": "auto_tune_phoenix_params.py",
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "context": {
-            **fixed["context"],
-            "maxTokens": context["maxTokens"],
-            "reservedSystemTokens": context["reservedSystemTokens"],
-            "importanceThreshold": context["importanceThreshold"],
-            "similarityThreshold": context["similarityThreshold"],
-            "semanticChunkSize": context["semanticChunkSize"],
-            "attentionSink": {
-                "sinkTokens": context["attentionSink"]["sinkTokens"],
-                "sinkImportance": context["attentionSink"]["sinkImportance"],
-            },
-        },
-        "scenarios": scenarios,
-        "llama_server": llama,
-    }
-    for key, value in fixed.items():
-        if key not in cfg:
-            cfg[key] = value
-    return cfg
-
+# ---------------------------------------------------------------------------
+# Config write / checkpoint
+# ---------------------------------------------------------------------------
 
 def _atomic_write_json(path: Path, data: Any) -> Path:
-    """Write JSON atomically with fsync and a .bak backup.
-
-    A crash or power outage can leave the temp file behind, but it will never
-    leave the target file in a half-written state.
-    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
@@ -332,26 +396,12 @@ def _format_duration(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-_RELEVANT_ARGS = frozenset(
-    {
-        "samples",
-        "rounds",
-        "providers",
-        "scenarios",
-        "latency_budget",
-        "run_timeout",
-        "timeout",
-        "warmup_timeout",
-        "warmup_retries",
-        "stall_seconds",
-        "max_evals",
-        "tune_mode",
-        "fix_similarity",
-        "vary_key",
-        "vary_values",
-        "best_of",
-    }
-)
+_RELEVANT_ARGS = frozenset({
+    "samples", "rounds", "providers", "scenarios", "latency_budget", "run_timeout",
+    "timeout", "warmup_timeout", "warmup_retries", "stall_seconds", "max_evals",
+    "tune_mode", "fix_similarity", "vary_key", "vary_values", "best_of", "scope",
+    "benchmark_command", "x5_host", "x5_port", "x5_warmup",
+})
 
 
 def args_signature(args: argparse.Namespace) -> dict[str, Any]:
@@ -364,26 +414,15 @@ def point_signature(point: dict[str, Any]) -> str:
 
 def cfg_to_point(cfg: dict[str, Any]) -> dict[str, Any]:
     """Flatten a candidate config back into the point dictionary used by the grid."""
-    ctx = cfg["context"]
-    scn = cfg["scenarios"]
-    llm = cfg["llama_server"]
-    return {
-        "context.maxTokens": ctx["maxTokens"],
-        "context.reservedSystemTokens": ctx["reservedSystemTokens"],
-        "context.importanceThreshold": ctx["importanceThreshold"],
-        "context.similarityThreshold": ctx["similarityThreshold"],
-        "context.semanticChunkSize": ctx["semanticChunkSize"],
-        "context.attentionSink.sinkTokens": ctx["attentionSink"]["sinkTokens"],
-        "context.attentionSink.sinkImportance": ctx["attentionSink"]["sinkImportance"],
-        "scenarios.short_dialogue_max_turns": scn["short_dialogue_max_turns"],
-        "scenarios.long_dialogue_min_turns": scn["long_dialogue_min_turns"],
-        "scenarios.long_dialogue_max_turns": scn["long_dialogue_max_turns"],
-        "scenarios.ultra_long_dialogue_min_turns": scn["ultra_long_dialogue_min_turns"],
-        "scenarios.ultra_long_dialogue_max_turns": scn["ultra_long_dialogue_max_turns"],
-        "llama_server.threads": llm["threads"],
-        "llama_server.parallel": llm["parallel"],
-        "llama_server.ctx_size": llm["ctx_size"],
-    }
+    point: dict[str, Any] = {}
+    def walk(obj: Any, prefix: str = "") -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                walk(v, f"{prefix}.{k}" if prefix else k)
+        elif isinstance(obj, (list, str, int, float, bool, type(None))):
+            point[prefix] = obj
+    walk(cfg)
+    return point
 
 
 def _load_json_file(path: Path) -> dict[str, Any] | None:
@@ -424,14 +463,25 @@ def save_checkpoint(state: dict[str, Any]) -> None:
     _atomic_write_json(checkpoint_path(), state)
 
 
-def build_candidates(args: argparse.Namespace, space: dict[str, Any], fixed: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build the ordered list of grid points for this run."""
+def make_config_candidate(point: dict[str, Any]) -> dict[str, Any]:
+    """Overlay the point onto the current config template."""
+    cfg = copy.deepcopy(base_config())
+    cfg["version"] = 1
+    cfg["source"] = "auto_tune_phoenix_params.py"
+    cfg["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    for dot_path, value in point.items():
+        set_by_dotpath(cfg, dot_path, value)
+    return cfg
+
+
+def build_candidates(args: argparse.Namespace, space: dict[str, Any]) -> list[dict[str, Any]]:
     if args.vary_key or args.vary_values:
         if not args.vary_key or not args.vary_values:
             raise ValueError("--vary-key and --vary-values must be used together")
-        baseline_points = list_grid_points(space, args.max_evals)
-        baseline_point = baseline_points[0]
+        baseline_point = make_point(args, list_grid_points(space, 1)[0])
         vary_values = parse_vary_values(args.vary_values)
+        if args.vary_key not in baseline_point:
+            baseline_point[args.vary_key] = vary_values[0]
         baseline_value = baseline_point[args.vary_key]
         if baseline_value not in vary_values:
             vary_values = [baseline_value] + vary_values
@@ -441,30 +491,29 @@ def build_candidates(args: argparse.Namespace, space: dict[str, Any], fixed: dic
             point[args.vary_key] = value
             points.append(point)
         return points
-    return list_grid_points(space, args.max_evals)
+    points = list_grid_points(space, args.max_evals)
+    return [make_point(args, p) for p in points]
 
 
-def _is_valid_threshold_point(point: dict[str, Any]) -> bool:
-    """Ensure scenario turn ranges do not overlap or invert."""
+def make_point(args: argparse.Namespace, point: dict[str, Any]) -> dict[str, Any]:
+    """Apply sanity filters for scenario turn ranges."""
     try:
         s = int(point.get("scenarios.short_dialogue_max_turns", 2))
         l_min = int(point.get("scenarios.long_dialogue_min_turns", 5))
         l_max = int(point.get("scenarios.long_dialogue_max_turns", 15))
         u_min = int(point.get("scenarios.ultra_long_dialogue_min_turns", 16))
         u_max = int(point.get("scenarios.ultra_long_dialogue_max_turns", 22))
+        if not (1 <= s < l_min <= l_max < u_min <= u_max <= 100):
+            point["scenarios.long_dialogue_min_turns"] = s + 1
+            point["scenarios.long_dialogue_max_turns"] = max(l_max, s + 2)
+            point["scenarios.ultra_long_dialogue_min_turns"] = max(u_min, l_max + 1)
+            point["scenarios.ultra_long_dialogue_max_turns"] = max(u_max, u_min + 1)
     except (TypeError, ValueError):
-        return False
-    return (
-        1 <= s < l_min <= l_max < u_min <= u_max <= 100
-    )
+        pass
+    return point
 
 
 def list_grid_points(space: dict[str, Any], max_evals: int) -> list[dict[str, Any]]:
-    """Build a random sample of the flattened parameter grid.
-
-    Nested dicts are flattened by joining keys with '.'.  The full Cartesian
-    product is never materialized, so the grid can be huge without running out
-    of memory. Invalid scenario thresholds are filtered out."""
     flat: dict[str, list[Any]] = {}
 
     def walk(obj: Any, prefix: str = "") -> None:
@@ -487,8 +536,6 @@ def list_grid_points(space: dict[str, Any], max_evals: int) -> list[dict[str, An
         combo = [random.choice(v) for v in value_lists]
         attempts += 1
         point = dict(zip(keys, combo))
-        if not _is_valid_threshold_point(point):
-            continue
         sig = point_signature(point)
         if sig in seen:
             continue
@@ -497,55 +544,41 @@ def list_grid_points(space: dict[str, Any], max_evals: int) -> list[dict[str, An
     return out
 
 
-def unflatten_point(point: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int], dict[str, Any]]:
-    context: dict[str, Any] = {"attentionSink": {}}
-    scenarios: dict[str, int] = {}
-    llama: dict[str, Any] = {}
-
-    for key, value in point.items():
-        parts = key.split(".")
-        if parts[0] == "context":
-            if len(parts) == 2:
-                context[parts[1]] = value
-            elif len(parts) == 3 and parts[1] == "attentionSink":
-                context["attentionSink"][parts[2]] = value
-        elif parts[0] == "scenarios":
-            scenarios[parts[1]] = int(value)
-        elif parts[0] == "llama_server":
-            llama[parts[1]] = value
-    return context, scenarios, llama
-
+# ---------------------------------------------------------------------------
+# Benchmarks
+# ---------------------------------------------------------------------------
 
 def kill_residual_processes() -> None:
-    """Best-effort cleanup of leftover phoenix/llama-server processes.
-    Also terminate leftover Python helper scripts (llama_proxy, TUI, etc.)
-    so they do not hold ports across runs."""
     for name in ("phoenix_main", "llama-server"):
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", f"{name}.exe"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=10,
-            )
+            if platform.system() == "Windows":
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", f"{name}.exe"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False, timeout=10,
+                )
+            else:
+                subprocess.run(
+                    ["pkill", "-9", "-f", name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False, timeout=10,
+                )
         except Exception:
             pass
-    # Terminate leftover Python helper scripts by command line, but never
-    # kill the auto-tune script itself.
     for script in ("llama_proxy.py", "memory_tier_benchmark_v1.py", "run_memory_tier_benchmark_tui.py"):
         try:
-            subprocess.run(
-                [
-                    "wmic", "process",
-                    "where", f"CommandLine like '%{script}%'",
-                    "call", "Terminate",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=10,
-            )
+            if platform.system() == "Windows":
+                subprocess.run(
+                    ["wmic", "process", "where", f"CommandLine like '%{script}%'", "call", "Terminate"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False, timeout=10,
+                )
+            else:
+                subprocess.run(
+                    ["pkill", "-9", "-f", script],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False, timeout=10,
+                )
         except Exception:
             pass
 
@@ -567,19 +600,27 @@ def _reader_enqueue(pipe: Any, out_q: "queue.Queue[str]") -> None:
             pass
 
 
-def run_one_benchmark(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
-    """Run the TUI benchmark once with the candidate config and stream progress."""
+def run_text_benchmark(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
     write_tuned_json(cfg)
     kill_residual_processes()
     time.sleep(1.0)
 
     out_prefix = f"auto_tune_{int(time.time() * 1000)}"
-    py = root_dir() / ".venv" / "Scripts" / "python.exe"
+    venv = root_dir() / ".venv"
+    if venv.exists():
+        if platform.system() == "Windows":
+            py = venv / "Scripts" / "python.exe"
+        else:
+            py = venv / "bin" / "python"
+    else:
+        py = Path(sys.executable)
     tui = root_dir() / "tools" / "run_memory_tier_benchmark_tui.py"
+    if not tui.exists():
+        print(f"[tune] benchmark script not found: {tui}", flush=True)
+        return None
 
     cmd = [
-        str(py),
-        str(tui),
+        str(py), str(tui),
         "--sample-per-scenario", str(args.samples),
         "--rounds", str(args.rounds),
         "--providers", args.providers,
@@ -587,10 +628,10 @@ def run_one_benchmark(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str
         "--timeout", str(args.timeout),
         "--warmup-timeout", str(args.warmup_timeout),
         "--warmup-retries", str(args.warmup_retries),
-        "--context-window", str(cfg["context"]["maxTokens"]),
-        "--llama-threads", str(cfg["llama_server"]["threads"]),
-        "--llama-parallel", str(cfg["llama_server"]["parallel"]),
-        "--llama-ctx-size", str(cfg["llama_server"]["ctx_size"]),
+        "--context-window", str(cfg.get("context", {}).get("maxTokens", 8192)),
+        "--llama-threads", str(cfg.get("llama_server", {}).get("threads", 6)),
+        "--llama-parallel", str(cfg.get("llama_server", {}).get("parallel", 1)),
+        "--llama-ctx-size", str(cfg.get("llama_server", {}).get("ctx_size", 4096)),
         "--fps", "0.2",
         "--stall-seconds", str(args.stall_seconds),
         "--out-prefix", out_prefix,
@@ -598,20 +639,16 @@ def run_one_benchmark(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str
     print("[tune] running:", " ".join(cmd), flush=True)
 
     creationflags = 0
-    if sys.platform == "win32":
+    if platform.system() == "Windows":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
 
     start_ts = time.time()
     timed_out = False
-    proc: subprocess.Popen[str] | None = None
+    proc = None
     try:
         proc = subprocess.Popen(
-            cmd,
-            cwd=str(root_dir()),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            cmd, cwd=str(root_dir()),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
             creationflags=creationflags,
         )
     except Exception as e:
@@ -648,14 +685,12 @@ def run_one_benchmark(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str
             m = TUI_SCENARIO_RE.search(clean)
             if m:
                 last_scenario = f"{m.group(3)} {m.group(1)}/{m.group(2)}"
-
             m = TUI_SAMPLE_RE.search(clean)
             if m:
                 s_idx, s_total = int(m.group(1)), int(m.group(2))
                 if (s_idx, s_total) != last_sample:
                     last_sample = (s_idx, s_total)
                     print(f"[progress] scenario={last_scenario} sample={s_idx}/{s_total}", flush=True)
-
             m = TUI_TOTAL_RE.search(clean)
             if m:
                 t_idx, t_total = int(m.group(1)), int(m.group(2))
@@ -683,7 +718,6 @@ def run_one_benchmark(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str
     if timed_out:
         return None
 
-    # Locate the JSON reports written by the TUI (one per provider/round).
     build_dir = root_dir() / "build"
     best_dir: Path | None = None
     best_mtime = 0.0
@@ -712,9 +746,6 @@ FORMAT_WORD_RE = re.compile(r"\w+", re.UNICODE)
 
 
 def is_format_issue(raw_reply: str, expected: str) -> bool:
-    """判断失败是否由模型输出的格式/包装词导致，但答案内容正确。
-    例如 pred 里包含了 expected 的每个词，只是被额外句子包裹。
-    """
     exp_tokens = [t for t in FORMAT_WORD_RE.findall(expected.lower()) if t]
     if not exp_tokens:
         return False
@@ -723,7 +754,6 @@ def is_format_issue(raw_reply: str, expected: str) -> bool:
 
 
 def summarize_reports(report_paths: list[Path]) -> dict[str, Any]:
-    """Aggregate latency, success rate, average similarity and format issues across all provider/round reports."""
     latencies: list[float] = []
     similarities: list[float] = []
     successes = 0
@@ -742,7 +772,6 @@ def summarize_reports(report_paths: list[Path]) -> dict[str, Any]:
                 sample_count = sdata.get("samples", 0)
                 if not isinstance(sample_count, int):
                     sample_count = 0
-                # successRateSemanticGe70 is a percentage string or float
                 sr = sdata.get("successRateSemanticGe70", 0.0)
                 if isinstance(sr, str):
                     try:
@@ -752,7 +781,6 @@ def summarize_reports(report_paths: list[Path]) -> dict[str, Any]:
                 successes += int(round(sample_count * sr / 100.0))
                 total += sample_count
 
-                # Per-sample similarity for continuous scoring and format issue detection
                 for sample in sdata.get("rawSamples", []):
                     sim = sample.get("similarity")
                     if isinstance(sim, (int, float)):
@@ -774,9 +802,84 @@ def summarize_reports(report_paths: list[Path]) -> dict[str, Any]:
     }
 
 
+def run_x5_vision_speech_benchmark(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
+    """X5 vision/speech benchmark placeholder.
+
+    Strategy:
+      1. (Optionally) restart the local phoenix_main in the background on X5.
+      2. POST a sample image to the local /camera/analyze endpoint and/or
+         a sample audio file to /speech/analyze.
+      3. Measure end-to-end latency and any reported confidence/box count.
+
+    This can be replaced with an arbitrary shell command via --benchmark-command.
+    """
+    if args.benchmark_command:
+        return run_custom_benchmark(cfg, args)
+
+    host = args.x5_host or "127.0.0.1"
+    port = args.x5_port
+    url = f"http://{host}:{port}/camera/analyze"
+    try:
+        import urllib.request
+        sample_image = root_dir() / "runtime_store" / "sample.jpg"
+        if not sample_image.exists():
+            # If no sample image, skip measurement but do not fail.
+            print("[tune] no runtime_store/sample.jpg; using synthetic metrics", flush=True)
+            return {"avg_latency_ms": 0, "max_latency_ms": 0, "success_rate": 0, "avg_similarity": 0, "format_issues": 0, "raw": {}}
+        start = time.time()
+        with open(sample_image, "rb") as f:
+            req = urllib.request.Request(url, data=f.read(), method="POST")
+            req.add_header("Content-Type", "image/jpeg")
+            with urllib.request.urlopen(req, timeout=args.timeout) as resp:
+                body = resp.read()
+        elapsed_ms = (time.time() - start) * 1000
+        result = json.loads(body)
+        conf = float(result.get("confidence", 0.5))
+        boxes = int(result.get("boxes", 1))
+        return {
+            "avg_latency_ms": elapsed_ms,
+            "max_latency_ms": elapsed_ms,
+            "success_rate": min(1.0, boxes / max(1, cfg.get("vision", {}).get("maxBoxes", 80))),
+            "avg_similarity": conf,
+            "format_issues": 0,
+            "raw": result,
+        }
+    except Exception as e:
+        print(f"[tune] X5 benchmark failed: {e}", flush=True)
+        return None
+
+
+def run_custom_benchmark(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
+    cmd = [arg.replace("{{config}}", str(config_dir() / "phoenix.json")) for arg in args.benchmark_command.split()]
+    try:
+        start = time.time()
+        proc = subprocess.run(cmd, cwd=str(root_dir()), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=args.run_timeout)
+        elapsed_ms = (time.time() - start) * 1000
+        if proc.returncode != 0:
+            print(f"[tune] custom benchmark failed: {proc.stderr}", flush=True)
+            return None
+        # Try to parse last JSON line as metrics
+        for line in reversed(proc.stdout.strip().splitlines()):
+            if not line.strip():
+                continue
+            try:
+                metrics = json.loads(line)
+                metrics.setdefault("avg_latency_ms", elapsed_ms)
+                metrics.setdefault("max_latency_ms", elapsed_ms)
+                return metrics
+            except json.JSONDecodeError:
+                continue
+        return {"avg_latency_ms": elapsed_ms, "max_latency_ms": elapsed_ms, "success_rate": 0, "avg_similarity": 0, "format_issues": 0, "raw": proc.stdout}
+    except Exception as e:
+        print(f"[tune] custom benchmark error: {e}", flush=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Scoring
+# ---------------------------------------------------------------------------
+
 def score_candidate(metrics: dict[str, Any], latency_budget_ms: float) -> float:
-    """Higher is better.  Score is driven by the continuous average similarity
-    (not just the pass/fail count) and mild latency penalties."""
     avg_similarity = metrics.get("avg_similarity", 0.0)
     avg_latency = metrics.get("avg_latency_ms", 0.0)
     max_latency = metrics.get("max_latency_ms", 0.0)
@@ -788,8 +891,12 @@ def score_candidate(metrics: dict[str, Any], latency_budget_ms: float) -> float:
     return score
 
 
+# ---------------------------------------------------------------------------
+# Args / main
+# ---------------------------------------------------------------------------
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Auto-tune Phoenix magic numbers")
+    parser = argparse.ArgumentParser(description="Auto-tune Phoenix runtime parameters")
     parser.add_argument("--samples", type=int, default=5, help="samples per scenario per run")
     parser.add_argument("--rounds", type=int, default=1, help="rounds per run")
     parser.add_argument("--providers", default="phoenix", help="providers to benchmark")
@@ -804,155 +911,101 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="generate config without running benchmarks")
     parser.add_argument("--output-json", default="config/phoenix.json")
     parser.add_argument("--best-of", type=int, default=1, help="keep N best configs")
-    parser.add_argument("--vary-key", default=None, help="dot-path of the single parameter to vary (controlled experiment)")
-    parser.add_argument("--vary-values", default=None, help="comma-separated list of values for --vary-key")
+    parser.add_argument("--vary-key", default=None, help="dot-path of the single parameter to vary")
+    parser.add_argument("--vary-values", default=None, help="comma or JSON list of values for --vary-key")
     parser.add_argument("--tune-mode", default=None, choices=["sim", "other"], help="sim: sweep similarityThreshold; other: sweep remaining magic numbers")
     parser.add_argument("--fix-similarity", type=float, default=None, help="fixed similarityThreshold for tune-mode=other")
     parser.add_argument("--reset-state", action="store_true", help="ignore/delete existing checkpoint and start fresh")
+    parser.add_argument("--scope", default="non-vision-speech", choices=["non-vision-speech", "vision-speech", "sim"], help="which parameter domain to tune")
+    parser.add_argument("--benchmark-command", default=None, help="custom shell command to run instead of the default benchmark")
+    parser.add_argument("--x5-host", default=None, help="X5 HTTP host for vision/speech benchmark")
+    parser.add_argument("--x5-port", type=int, default=5081, help="X5 HTTP port")
+    parser.add_argument("--x5-warmup", type=float, default=3.0, help="seconds to wait after restarting X5 phoenix_main")
     return parser.parse_args()
+
+
+def choose_param_space(args: argparse.Namespace) -> dict[str, Any]:
+    if args.tune_mode == "sim":
+        return sim_param_space()
+    if args.scope == "vision-speech":
+        return vision_speech_param_space()
+    return non_vision_speech_param_space()
 
 
 def main() -> int:
     args = parse_args()
-    if args.tune_mode == "sim":
-        space = sim_param_space()
-    elif args.tune_mode == "other":
-        space = other_param_space(args.fix_similarity)
-    else:
-        space = default_param_space()
-    fixed = default_fixed_params()
+    space = choose_param_space(args)
 
     output_json_path = Path(args.output_json)
     if not output_json_path.is_absolute():
         output_json_path = root_dir() / output_json_path
 
     if args.dry_run:
-        points = build_candidates(args, space, fixed)
-        cfg = make_config_candidate(*unflatten_point(points[0]), fixed)
-        path = write_tuned_json(cfg, output_json_path)
+        points = build_candidates(args, space)
+        cfg = make_config_candidate(points[0])
+        dry_path = output_json_path.with_stem(output_json_path.stem + ".dryrun")
+        path = write_tuned_json(cfg, dry_path)
         print(f"[tune] dry-run wrote {path}", flush=True)
         return 0
 
     state = load_checkpoint(args)
     if state is None:
-        points = build_candidates(args, space, fixed)
+        points = build_candidates(args, space)
         state = {
             "version": 1,
             "args": args_signature(args),
-            "tune_mode": args.tune_mode,
-            "started_at": time.time(),
-            "last_updated": time.time(),
-            "total": len(points),
-            "completed": [],
-            "completed_count": 0,
             "points": points,
-            "results": [],
+            "evaluated": [],
             "best": [],
         }
-        save_checkpoint(state)
-        print(f"[tune] starting fresh: tune_mode={args.tune_mode} candidates={len(points)}", flush=True)
     else:
-        points = state["points"]
-        print(f"[tune] resuming from checkpoint: {state.get('completed_count', 0)}/{len(points)} candidate(s) completed", flush=True)
+        points = state.get("points", [])
 
-    total = len(points)
-    completed_sigs = set(state.get("completed", []))
-    results = state.get("results", [])
-    best = state.get("best", [])
-    start_ts = state.get("started_at", time.time())
-
-    interrupted = False
-    try:
-        for i, point in enumerate(points, start=1):
-            sig = point_signature(point)
-            if sig in completed_sigs:
-                print(f"[tune] candidate {i}/{total} already completed, skipping", flush=True)
-                continue
-            cfg = make_config_candidate(*unflatten_point(point), fixed)
-            elapsed = time.time() - start_ts
-            done = i - 1
-            if done > 0:
-                avg = elapsed / done
-                eta = _format_duration(avg * (total - done))
-            else:
-                eta = "n/a"
-            print(
-                f"\n[tune] === candidate {i}/{total} ({done * 100.0 / total:.1f}% done, elapsed {_format_duration(elapsed)}, ETA {eta}) ===",
-                flush=True,
-            )
-            print(f"[tune] point={point}", flush=True)
-            metrics = run_one_benchmark(cfg, args)
-            if metrics is None:
-                score = None
-                print(f"[tune] candidate {i}/{total} failed or timed out", flush=True)
-            else:
-                score = score_candidate(metrics, args.latency_budget)
-                print(
-                    f"[tune] -> success_rate={metrics['success_rate']:.2%} "
-                    f"avg_similarity={metrics['avg_similarity']:.3f} "
-                    f"avg_latency={metrics['avg_latency_ms']:.1f}ms "
-                    f"max_latency={metrics['max_latency_ms']:.1f}ms "
-                    f"format_issues={metrics['format_issues']} "
-                    f"score={score:.3f}",
-                    flush=True,
-                )
-            results.append(
-                {
-                    "signature": sig,
-                    "point": point,
-                    "score": score,
-                    "metrics": metrics,
-                    "cfg": cfg,
-                    "completed_at": time.time(),
-                }
-            )
-            if score is not None:
-                best.append({"score": score, "cfg": cfg, "metrics": metrics})
-                best.sort(key=lambda x: x["score"], reverse=True)
-                best = best[: args.best_of]
-            completed_sigs.add(sig)
-            state.update(
-                {
-                    "completed": list(completed_sigs),
-                    "completed_count": len(completed_sigs),
-                    "results": results,
-                    "best": best,
-                    "last_updated": time.time(),
-                }
-            )
-            save_checkpoint(state)
-            if best:
-                top = best[0]
-                print(
-                    f"[tune] best so far: score={top['score']:.3f} "
-                    f"avg_similarity={top['metrics']['avg_similarity']:.3f} "
-                    f"avg_latency={top['metrics']['avg_latency_ms']:.1f}ms",
-                    flush=True,
-                )
-    except KeyboardInterrupt:
-        print("[tune] interrupted by user; checkpoint saved", flush=True)
-        save_checkpoint(state)
-        interrupted = True
-    finally:
-        kill_residual_processes()
-
-    if interrupted:
-        return 130
-
-    if not best:
-        print("[tune] no successful configuration; keeping defaults", flush=True)
+    if not points:
+        print("[tune] no candidate points to evaluate", flush=True)
         return 1
 
-    top = best[0]
-    out_path = write_tuned_json(top["cfg"], output_json_path)
-    print(f"\n[tune] best config written to {out_path}", flush=True)
-    print(f"[tune] score={top['score']:.3f} metrics={top['metrics']}", flush=True)
+    evaluated_sigs = {point_signature(e["point"]) for e in state.get("evaluated", [])}
+    remaining = [p for p in points if point_signature(p) not in evaluated_sigs]
+    print(f"[tune] {len(remaining)}/{len(points)} candidates remaining", flush=True)
 
-    if not args.reset_state:
-        try:
-            checkpoint_path().unlink()
-        except Exception:
-            pass
+    for point in remaining:
+        sig = point_signature(point)
+        print(f"\n[tune] evaluating {sig}", flush=True)
+        cfg = make_config_candidate(point)
+
+        if args.scope == "vision-speech":
+            metrics = run_x5_vision_speech_benchmark(cfg, args)
+        else:
+            metrics = run_text_benchmark(cfg, args)
+
+        if metrics is None:
+            print(f"[tune] candidate {sig} failed; recording as timeout", flush=True)
+            metrics = {"success_rate": 0, "avg_similarity": 0, "avg_latency_ms": args.latency_budget, "max_latency_ms": args.latency_budget, "format_issues": 0, "raw": []}
+
+        score = score_candidate(metrics, args.latency_budget)
+        entry = {"point": point, "metrics": metrics, "score": score, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        state["evaluated"].append(entry)
+
+        best = state.get("best", [])
+        best.append(entry)
+        best.sort(key=lambda x: x["score"], reverse=True)
+        state["best"] = best[: args.best_of]
+        save_checkpoint(state)
+
+        best_score = state["best"][0]["score"] if state["best"] else -1e9
+        print(f"[tune] score={score:.4f} best={best_score:.4f}", flush=True)
+
+    if state["best"]:
+        best_point = state["best"][0]["point"]
+        best_cfg = make_config_candidate(best_point)
+        write_tuned_json(best_cfg, output_json_path)
+        print(f"[tune] best config written to {output_json_path}", flush=True)
+        print(f"[tune] best point: {json.dumps(best_point, sort_keys=True, ensure_ascii=False)}", flush=True)
+    else:
+        print("[tune] no successful evaluations", flush=True)
+        return 1
+
     return 0
 
 

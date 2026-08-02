@@ -38,10 +38,7 @@ static Config loadConfig(int argc, char **argv) {
     auto it = args.find(argKey);
     if (it != args.end() && !it->second.empty())
       return it->second;
-    std::string v = getEnv(env);
-    if (!v.empty())
-      return v;
-    return def;
+    return phoenix::resolveConfigAsString(dotPathForEnv(env), def, env.c_str());
   };
   auto pathArgOrEnv = [&](const std::string &argKey, const std::string &env,
                           const fs::path &defPath) {
@@ -67,11 +64,14 @@ static Config loadConfig(int argc, char **argv) {
       (int)numberOrNaN(argOrEnv("study-port", "AI_STUDY_PORT", "5081"), 5081);
   c.httpLog = boolFrom(argOrEnv("http-log", "AI_HTTP_LOG", "false"), false);
 
-  auto aiCountRaw = argOrEnv("ai-count", "AI_COUNT", getEnv("AI_NUM", "7"));
+  auto aiCountRaw = argOrEnv("ai-count", "AI_COUNT",
+                             phoenix::resolveConfigAsString("main.aiCount", "7", "AI_NUM"));
   auto groupCountRaw =
-      argOrEnv("group-count", "AI_GROUP_COUNT", getEnv("GROUP_COUNT", "3"));
+      argOrEnv("group-count", "AI_GROUP_COUNT",
+               phoenix::resolveConfigAsString("main.groupCount", "3", "GROUP_COUNT"));
   auto groupSizeRaw =
-      argOrEnv("group-size", "AI_GROUP_SIZE", getEnv("GROUP_SIZE", aiCountRaw));
+      argOrEnv("group-size", "AI_GROUP_SIZE",
+               phoenix::resolveConfigAsString("main.groupSize", aiCountRaw, "GROUP_SIZE"));
   auto sparkNumAiRaw =
       argOrEnv("spark-num-ai", "AI_SPARK_NUM_AI", groupSizeRaw);
 
@@ -441,8 +441,9 @@ static void applyFrontendEnvFromConfig(const Config &config) {
   setRuntimeEnvValue("AI_API_BASE", std::string("http://") +
                                         config.gatewayHost + ":" +
                                         std::to_string(config.portGateway));
-  std::string gatewayJwtSecret = getEnv(
-      "AI_AUTH_JWT_SECRET", getEnv("AUTH_JWT_SECRET", "dev-secret-change-me"));
+  std::string gatewayJwtSecret = phoenix::resolveConfig<std::string>(
+      "auth.jwtSecret", "dev-secret-change-me", "AI_AUTH_JWT_SECRET",
+      "AUTH_JWT_SECRET");
   if (!gatewayJwtSecret.empty())
     setRuntimeEnvValue("JWT_SECRET", gatewayJwtSecret);
 }

@@ -19,7 +19,30 @@
     "attentionSink": {
       "sinkTokens": 512,
       "sinkImportance": 0.2
-    }
+    },
+    "embeddings": {
+      "dim": 128,
+      "window": 4,
+      "minCount": 2,
+      "maxVocab": 3000,
+      "maxFiles": 400
+    },
+    "torch": {
+      "maxLen": 64,
+      "embDim": 128,
+      "hidDim": 128,
+      "epochs": 4,
+      "batch": 16,
+      "maxFiles": 240
+    },
+    "adaptive": {
+      "concatThresh": 5,
+      "rnnThresh": 15,
+      "shortWindowMaxMessages": 40,
+      "shortWindowMaxTokens": 2048,
+      "targetLatencyMs": 15000.0
+    },
+    "rnnTopK": 50
   },
   "scenarios": {
     "short_dialogue_max_turns": 4,
@@ -77,7 +100,11 @@
     "maxLen": 128,
     "maxTokens": 32,
     "lr": 0.001,
-    "tokenizerMode": "bpe"
+    "tokenizerMode": "bpe",
+    "enabled": true,
+    "pretrainLines": 200000,
+    "trainEpochs": 4,
+    "checkpointPath": "runtime_store/summary_model.json"
   },
   "model_defaults": {
     "decayFactor": 0.5,
@@ -106,7 +133,9 @@
     "rlEvery": 20,
     "advEvery": 30,
     "gnnEvery": 40,
-    "dialogAsyncLimit": 2
+    "dialogAsyncLimit": 2,
+    "transformerLearning": false,
+    "learnGraphContext": false
   },
   "learning": {
     "rlMaxDocs": 64,
@@ -121,7 +150,9 @@
     "advBenchLimit": 50,
     "gnnGaMaxDocs": 32,
     "gnnGaPopulation": 6,
-    "gnnGaGenerations": 1
+    "gnnGaGenerations": 1,
+    "retrainTrace": false,
+    "rlIterations": 5
   },
   "universal_optimizer": {
     "enabled": true,
@@ -230,7 +261,11 @@
     "maxTracks": 3,
     "asrConfidenceThreshold": 0.6,
     "featureWindowMs": 25,
-    "featureHopMs": 10
+    "featureHopMs": 10,
+    "reservedMemMb": 64.0,
+    "envClusters": 6,
+    "emoClusters": 6,
+    "voskModelPath": ""
   },
   "vision": {
     "enhanceEnabled": true,
@@ -240,7 +275,55 @@
     "maxBoxes": 80,
     "embeddingDim": 18,
     "useTorchWhenAvailable": true,
-    "fallbackColorAnalysis": true
+    "fallbackColorAnalysis": true,
+    "colorSpace": "bgr",
+    "pixelMean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "pixelStd": [
+      0.229,
+      0.224,
+      0.225
+    ],
+    "dataRoot": "/graphies",
+    "modelDir": "./models/vision",
+    "torch": {
+      "cnnInput": 224,
+      "yoloInput": 416,
+      "yoloS": 7,
+      "yoloB": 2,
+      "yoloScore": 0.25,
+      "yoloNms": 0.45,
+      "yoloEpochs": 10,
+      "cnnEpochs": 8,
+      "batch": 8,
+      "lr": 0.001,
+      "forceTrain": false
+    },
+    "yolo": {
+      "model": "",
+      "labels": "",
+      "input": 640
+    },
+    "cnn": {
+      "model": "",
+      "labels": "",
+      "input": 224,
+      "topK": 5,
+      "embedLayer": "",
+      "mean": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "std": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
   },
   "mechanical_mind": {
     "enabled": false,
@@ -258,6 +341,281 @@
     "ttlMs": 120000,
     "correctionScale": 1.0,
     "gnnEnabled": false,
-    "transformerEnabled": false
+    "transformerEnabled": false,
+    "enableCorrection": false,
+    "maxBlockSamples": 8
+  },
+  "knowledge_probe": {
+    "llamacppBaseUrl": "http://127.0.0.1:8082",
+    "llamacppModel": "",
+    "probeTimeoutMs": 60000,
+    "knownSimThreshold": 0.5,
+    "crossSessionLearnEnabled": false
+  },
+  "world_model": {
+    "agentCount": 4,
+    "mapWidth": 6,
+    "mapHeight": 6,
+    "mapDepth": 3,
+    "dialogueTurns": 2,
+    "ecologyClusters": 2,
+    "3dMapEnabled": true,
+    "embodiedAgentsEnabled": true,
+    "ecologyVideoEnabled": true,
+    "physicsEnabled": true,
+    "physicsBackend": "bullet3",
+    "physicsSubsteps": 4,
+    "earthMapEnabled": true,
+    "earthMapUri": "",
+    "earthMapFormat": "",
+    "storage": {
+      "db": "./runtime_store/frontend_world_model.sqlite",
+      "legacyDir": "./lmdb/frontend_world_model",
+      "redisUrl": "redis://127.0.0.1:6379",
+      "redisDb": 7,
+      "redisPrefix": "phoenix:frontend:world"
+    }
+  },
+  "frontend_server": {
+    "webRoot": "./079project_frontend/build",
+    "host": "127.0.0.1",
+    "port": 5081,
+    "robotsDir": "./robots",
+    "bullet3Root": "./outsides/bullet3",
+    "useTorch": false,
+    "httpThreads": 4,
+    "httpLog": false,
+    "v51Default": true,
+    "embeddingWorkers": 2,
+    "rnnWorkers": 2,
+    "contextWorkers": 2,
+    "episodicWorkers": 1,
+    "reservedMemMb": 96.0
+  },
+  "chat": {
+    "queueWaitMs": 180000,
+    "upstreamTimeoutMs": 360000,
+    "maxInFlight": 1,
+    "aiApiBase": "http://127.0.0.1:5080"
+  },
+  "api": {
+    "upstreamTimeoutMs": 45000,
+    "gatewayHost": "127.0.0.1",
+    "gatewayPort": "5080"
+  },
+  "auth": {
+    "allowRegister": true,
+    "requireEmailVerify": true,
+    "devReturnToken": false,
+    "smtpEnabled": false,
+    "allowLocalTokenFallback": true,
+    "preferLocalToken": false,
+    "outboxDir": "./auth/outbox",
+    "jwtSecret": "",
+    "userDb": "./auth/users.json",
+    "enabled": true,
+    "acceptLocalToken": true
+  },
+  "smtp": {
+    "host": "",
+    "port": 465,
+    "user": "",
+    "pass": "",
+    "from": ""
+  },
+  "jpea": {
+    "image": {
+      "variant": "resnet18_224",
+      "conceptDim": 128,
+      "backend": "auto",
+      "horizonModel": "runtime_store/models/ijepa/resnet18_224/model_encoder.bin",
+      "horizonDecoderModel": "runtime_store/models/ijepa/resnet18_224/model_decoder.bin"
+    },
+    "camera": {
+      "device": "/dev/video0",
+      "width": 1920,
+      "height": 1080,
+      "fps": 30
+    },
+    "speech": {
+      "variant": "speech_16k",
+      "conceptDim": 128,
+      "backend": "auto",
+      "horizonModel": "runtime_store/models/ijepa/speech_16k/model_encoder.bin",
+      "horizonDecoderModel": "runtime_store/models/ijepa/speech_16k/model_decoder.bin"
+    }
+  },
+  "edge_platform": {
+    "npu": {
+      "enabled": true,
+      "vmEnabled": true,
+      "vmMb": 8192,
+      "sdWeightsRoot": "runtime_store/sdcard_weights",
+      "hotWeightsLimit": 12,
+      "hotPromoteHits": 2,
+      "unitCount": 19,
+      "probeEnabled": true,
+      "probeThreshold": 0.35,
+      "spiDevice": "/dev/spidev0.0",
+      "spiSpeedHz": 120000000,
+      "spiMode": 0,
+      "gpioLocalExecute": true,
+      "gpioSysfsRoot": "/sys/class/gpio",
+      "gpioPulseUs": 0
+    },
+    "enabled": true,
+    "baseDir": ".",
+    "netlistRoot": "./catastrophe",
+    "gerberConnectorMap": "./catastrophe/gerber_catastrophe1_20260417_connector_map.json",
+    "preferredComputeBackend": "auto",
+    "maxComputeInflight": 2,
+    "netlistFiles": ""
+  },
+  "logger": {
+    "memoryIntervalSec": 0
+  },
+  "robots": {
+    "retrain": {
+      "limitMax": 10000,
+      "batch": 64,
+      "batchChars": 4000000,
+      "docMaxChars": 6000,
+      "docMaxTokens": 256
+    }
+  },
+  "main": {
+    "reservedMemMb": 256.0,
+    "useTorchEmbed": false,
+    "cognitionAutonomyEnabled": true,
+    "disableGraphSelector": true,
+    "groupSize": 7,
+    "groupWorkerPort": 0,
+    "frontendSpawnDepth": 0,
+    "sigintForceExitMs": 12000,
+    "disableWatchdog": false,
+    "frontendSubprocess": false,
+    "frontendEnabled": true,
+    "lmdbMapBytes": 536870912,
+    "groupId": "G1",
+    "lmdbRoot": "",
+    "stopwordsPath": "",
+    "aiCount": 7,
+    "baseDir": "runtime_store",
+    "dbPath": "runtime_store/ai_store.sqlite",
+    "exportDir": "runtime_store",
+    "groupCount": 3,
+    "groupProc": false,
+    "groupProcTimeoutMs": 12000,
+    "httpLog": false,
+    "inferMP": false,
+    "inferWorkers": 0,
+    "kvmCacheMaxEntries": 50000,
+    "learningWarmup": false,
+    "logMode": "release",
+    "pidFile": "runtime_store/phoenix_main.pid",
+    "searchEndpoint": "",
+    "singleProc": false,
+    "snapshotDir": "snapshots",
+    "sparkNumAI": 7,
+    "studyPort": 5081,
+    "syncStandbyOnBoot": false,
+    "tunedConfigPath": "config/phoenix_tuned.json",
+    "gateway": {
+      "host": "127.0.0.1",
+      "port": 5080
+    },
+    "inference": {
+      "usingOllama": false,
+      "ollamaFineTuning": true,
+      "enabled": true,
+      "transformerMode": "",
+      "ollamaModel": "",
+      "ollamaBaseUrl": "http://127.0.0.1:11434",
+      "ollamaTimeoutMs": 120000,
+      "llamaCppModel": "",
+      "llamaCppBaseUrl": "http://127.0.0.1:8080",
+      "llamaCppTimeoutMs": 120000,
+      "llamaCppLoraFiles": "",
+      "llamaCppLoraInitWithoutApply": false,
+      "llamaCppFineTuning": false,
+      "bitnetModel": "",
+      "bitnetBaseUrl": "http://127.0.0.1:8090",
+      "bitnetTimeoutMs": 120000,
+      "ggufModelsDir": "GGUF_models",
+      "externalBackendStyleSim": false,
+      "transformerBootstrap": false,
+      "transformerBootstrapDocs": 256
+    },
+    "lmdb": {
+      "root": "lmdb",
+      "mapMb": 4096
+    },
+    "lemma": {
+      "autoload": false,
+      "csv": "lemma.csv",
+      "force": false,
+      "maxMb": 64
+    },
+    "redis": {
+      "url": "redis://127.0.0.1:6379",
+      "channel": "AI-model-workspace",
+      "cacheDb": 1,
+      "cachePrefix": "AI079",
+      "connectTimeoutMs": 1500
+    },
+    "robots": {
+      "autoload": true,
+      "chunkMaxWords": 20,
+      "chunkMinWords": 3,
+      "dir": "robots",
+      "warmupLimit": 200,
+      "warmupShuffle": false
+    },
+    "disable": {
+      "memebarrier": false,
+      "rl": false,
+      "adv": false,
+      "learning": false,
+      "gnnModule": false,
+      "contextModule": false
+    },
+    "tests": {
+      "autoload": true
+    },
+    "spark": {
+      "budget": "default"
+    }
+  },
+  "model_deployment": {
+    "configPath": "",
+    "llm": {
+      "placement": "local",
+      "remoteUrl": "",
+      "remoteMethod": "POST",
+      "remoteModel": "",
+      "remoteToken": "",
+      "remoteTimeoutMs": 30000
+    },
+    "vision": {
+      "placement": "local",
+      "remoteUrl": "",
+      "remoteMethod": "POST",
+      "remoteModel": "",
+      "remoteToken": "",
+      "remoteTimeoutMs": 30000
+    },
+    "speech": {
+      "placement": "local",
+      "remoteUrl": "",
+      "remoteMethod": "POST",
+      "remoteModel": "",
+      "remoteToken": "",
+      "remoteTimeoutMs": 30000
+    }
+  },
+  "llama_voter": {
+    "enabled": false,
+    "numPasses": 5,
+    "maskRate": 0.05
   }
 }

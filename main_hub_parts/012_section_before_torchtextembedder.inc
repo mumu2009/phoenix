@@ -231,7 +231,7 @@ static bool loadNaturalStopwords(std::unordered_set<std::string> &out) {
     candidates.push_back(root / "stopwords.txt");
   }
 
-  std::string envPaths = getEnv("STOPWORDS_PATH", "");
+  std::string envPaths = phoenix::resolveConfig<std::string>("main.stopwordsPath", "", "STOPWORDS_PATH");
   if (!envPaths.empty()) {
     for (char &ch : envPaths) {
       if (ch == ';' || ch == ',')

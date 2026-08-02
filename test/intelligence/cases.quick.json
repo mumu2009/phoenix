@@ -1,0 +1,35 @@
+[
+  {
+    "id": "qa-001",
+    "taskType": "qa",
+    "input": "请用两句话解释滑动窗口为什么可以降低长上下文推理的内存占用。",
+    "reference": "滑动窗口只保留当前局部上下文的精确状态，并把更早的历史压缩为摘要状态。因此系统内存主要随窗口大小变化，而不是随总上下文长度线性膨胀。",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 75
+    },
+    "tags": ["window", "memory"]
+  },
+  {
+    "id": "qa-002",
+    "taskType": "qa",
+    "input": "什么是词元和词素的区别？请简短回答。",
+    "reference": "词元是分词器输出的计算单元，词素是语义上的最小构成单位。词元偏向编码实现，词素偏向意义结构。",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 75
+    },
+    "tags": ["tokenizer", "morpheme"]
+  },
+  {
+    "id": "qa-003",
+    "taskType": "qa",
+    "input": "为什么 LoRA 模型在这种转换算法里更难直接迁移？",
+    "reference": "因为 LoRA 的低秩增量依附于原来的 token 表示空间，而转换算法会改变语义粒度和激活坐标系，所以原来的低秩方向不再天然兼容。",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 70
+    },
+    "tags": ["lora", "conversion"]
+  }
+]

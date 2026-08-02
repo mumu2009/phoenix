@@ -1,0 +1,46 @@
+[
+  {
+    "id": "gsm8k-main-test",
+    "dataset": "gsm8k",
+    "config": "main",
+    "split": "test",
+    "builder": "gsm8k",
+    "taskType": "math_reasoning",
+    "threshold": 35.0,
+    "defaultLimit": 128,
+    "tags": ["industry", "gsm8k", "math"]
+  },
+  {
+    "id": "ai2-arc-challenge-test",
+    "dataset": "allenai/ai2_arc",
+    "config": "ARC-Challenge",
+    "split": "test",
+    "builder": "arc_mcq",
+    "taskType": "multiple_choice_reasoning",
+    "threshold": 60.0,
+    "defaultLimit": 128,
+    "tags": ["industry", "arc", "reasoning", "mcq"]
+  },
+  {
+    "id": "hellaswag-validation",
+    "dataset": "Rowan/hellaswag",
+    "config": "default",
+    "split": "validation",
+    "builder": "hellaswag",
+    "taskType": "commonsense_reasoning",
+    "threshold": 55.0,
+    "defaultLimit": 128,
+    "tags": ["industry", "hellaswag", "commonsense"]
+  },
+  {
+    "id": "winogrande-xl-validation",
+    "dataset": "winogrande",
+    "config": "winogrande_xl",
+    "split": "validation",
+    "builder": "winogrande",
+    "taskType": "coreference_reasoning",
+    "threshold": 60.0,
+    "defaultLimit": 128,
+    "tags": ["industry", "winogrande", "commonsense"]
+  }
+]

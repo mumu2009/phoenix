@@ -1,0 +1,112 @@
+[
+  {
+    "id": "qa-101",
+    "taskType": "qa",
+    "input": "请用两句话解释为什么滑动窗口能降低长上下文推理的内存占用。",
+    "reference": "滑动窗口只保留当前局部上下文的精确状态，更早历史会被压缩或截断。所以内存主要随窗口大小增长，而不是随总上下文线性膨胀。",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 8
+    },
+    "tags": ["context", "memory"]
+  },
+  {
+    "id": "qa-102",
+    "taskType": "qa",
+    "input": "什么是幂等性？回答里必须包含‘重复请求’这四个字。",
+    "reference": "幂等性表示同一个操作在重复请求下产生相同结果，不会因为多次执行而不断改变系统状态。",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 10
+    },
+    "tags": ["api", "idempotency"]
+  },
+  {
+    "id": "reason-201",
+    "taskType": "reasoning",
+    "input": "为什么增大 batch size 往往能提升吞吐，但单次请求延迟不一定下降？请简短回答。",
+    "reference": "因为更大的 batch size 可以提高硬件利用率和总体吞吐，但单个请求常常要等待更多样本凑批，所以时延不一定降低。",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 8
+    },
+    "tags": ["performance", "throughput", "latency"]
+  },
+  {
+    "id": "reason-202",
+    "taskType": "reasoning",
+    "input": "为什么 LoRA 权重通常不能直接迁移到词表和语义粒度变化很大的新模型上？",
+    "reference": "因为 LoRA 的低秩增量依附于原模型的表示空间，词表和语义粒度变化后，原来的方向与激活坐标系不再天然兼容。",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 8
+    },
+    "tags": ["lora", "migration"]
+  },
+  {
+    "id": "translation-301",
+    "taskType": "translation",
+    "input": "把这句话翻译成英文：系统正在进行性能回归测试。",
+    "reference": "The system is running performance regression testing.",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 6
+    },
+    "tags": ["translation", "en"]
+  },
+  {
+    "id": "translation-302",
+    "taskType": "translation",
+    "input": "把这句话翻译成中文：The deployment was rolled back because the health check kept failing.",
+    "reference": "由于健康检查持续失败，部署被回滚了。",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 6
+    },
+    "tags": ["translation", "zh"]
+  },
+  {
+    "id": "format-401",
+    "taskType": "formatting",
+    "input": "给我一个项目周报模板，只要三行，分别覆盖进展、风险、下周计划。",
+    "reference": "进展：\n风险：\n下周计划：",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 10
+    },
+    "tags": ["template", "format"]
+  },
+  {
+    "id": "format-402",
+    "taskType": "formatting",
+    "input": "用两个项目符号说明 Redis 的两种常见持久化方式。",
+    "reference": "RDB\nAOF",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 8
+    },
+    "tags": ["redis", "bullet"]
+  },
+  {
+    "id": "coding-501",
+    "taskType": "coding",
+    "input": "写一个 Python 表达式，把列表去重并保持原顺序。",
+    "reference": "list(dict.fromkeys(items))",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 10
+    },
+    "tags": ["python", "deduplicate"]
+  },
+  {
+    "id": "coding-502",
+    "taskType": "coding",
+    "input": "给一个 SQL 注入风险的最短修复建议，必须提到参数化查询。",
+    "reference": "不要拼接 SQL，改用参数化查询。",
+    "scoring": {
+      "method": "keyword-plus-semantic",
+      "threshold": 10
+    },
+    "tags": ["security", "sql"]
+  }
+]

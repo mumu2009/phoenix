@@ -10,6 +10,7 @@
 
 #include "jpea_v2_image_world_model.hpp"
 #include "model_deployment.hpp"
+#include "phoenix_config.hpp"
 #include "rdk_x5_bpu.hpp"
 #include "semantic_unit.hpp"
 
@@ -46,8 +47,8 @@ std::string resolveBpuModelPath(const std::string &envOverride,
   if (!envOverride.empty()) return envOverride;
 
   const std::vector<std::string> names = [modelKind]() {
-    if (modelKind == "encoder") return std::vector<std::string>{"model.bin", "encoder.bin", "ijepa.bin"};
-    if (modelKind == "decoder") return std::vector<std::string>{"decoder.bin", "decode.bin"};
+    if (modelKind == "encoder") return std::vector<std::string>{"model_encoder.bin", "encoder.bin", "model.bin", "ijepa.bin"};
+    if (modelKind == "decoder") return std::vector<std::string>{"model_decoder.bin", "decoder.bin", "decode.bin"};
     return std::vector<std::string>{"model.bin"};
   }();
 
@@ -78,11 +79,24 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
  public:
   JpeaV2ImageHbdnnModel(JpeaV2ImageWorldModelConfig cfg, int targetDim)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128),
-        modelPath_(resolveBpuModelPath(environment("JPEA_IMAGE_HORIZON_MODEL"), "encoder", cfg_.id)),
-        decoderPath_(resolveBpuModelPath(environment("JPEA_IMAGE_HORIZON_DECODER_MODEL"), "decoder", cfg_.id)),
-        color_(environment("JPEA_IMAGE_INPUT_COLOR", "bgr")),
-        mean_(parseFloatVector(environment("JPEA_IMAGE_PIXEL_MEAN", "0.485 0.456 0.406"), 3)),
-        std_(parseFloatVector(environment("JPEA_IMAGE_PIXEL_STD", "0.229 0.224 0.225"), 3)) {}
+        modelPath_(resolveBpuModelPath(phoenix::resolveConfig<std::string>("jpea.image.horizonModel", "", "JPEA_IMAGE_HORIZON_MODEL"), "encoder", cfg_.id)),
+        decoderPath_(resolveBpuModelPath(phoenix::resolveConfig<std::string>("jpea.image.horizonDecoderModel", "", "JPEA_IMAGE_HORIZON_DECODER_MODEL"), "decoder", cfg_.id)),
+        color_(resolveColor()),
+        mean_(resolvePixelMean()),
+        std_(resolvePixelStd()),
+        predictorWeights_(static_cast<size_t>(targetDim_ * targetDim_), 0.0f),
+        predictorBias_(static_cast<size_t>(targetDim_), 0.0f),
+        decoderMatrixW_(static_cast<size_t>(targetDim_ * targetDim_), 0.0f),
+        decoderMatrixB_(static_cast<size_t>(targetDim_), 0.0f),
+        headW_(static_cast<size_t>(targetDim_ * 512), 0.0f),
+        headB_(static_cast<size_t>(targetDim_), 0.0f) {
+    for (int i = 0; i < targetDim_; ++i) {
+      predictorWeights_[static_cast<size_t>(i * targetDim_ + i)] = 1.0f;
+      decoderMatrixW_[static_cast<size_t>(i * targetDim_ + i)] = 1.0f;
+    }
+    loadDecoderInverseMatrix();
+    loadEncoderHead();
+  }
 
   std::vector<float> encode(const std::vector<uint8_t> &imageBytes, int width, int height,
                             const std::string &mimeType) override {
@@ -98,97 +112,123 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
       lastError_ = "RDK X5 hbDNN runtime is unavailable";
       return {};
     }
-    cv::Mat image;
-    if (mimeType == "application/x-bgr") {
-      if (width <= 0 || height <= 0 || imageBytes.size() != static_cast<size_t>(width) * static_cast<size_t>(height) * 3U) {
-        lastError_ = "direct BGR frame does not match its declared dimensions";
-        return {};
-      }
-      image = cv::Mat(height, width, CV_8UC3, const_cast<uint8_t *>(imageBytes.data())).clone();
-    } else {
-      std::vector<uchar> compressed(imageBytes.begin(), imageBytes.end());
-      image = cv::imdecode(compressed, cv::IMREAD_COLOR);
-      if (image.empty()) {
-        lastError_ = "unable to decode image payload";
-        return {};
-      }
-    }
-    cv::resize(image, image, cv::Size(cfg_.resolution, cfg_.resolution), 0, 0, cv::INTER_AREA);
-    if (color_ == "rgb") cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
-    if (color_ != "bgr" && color_ != "rgb") {
-      lastError_ = "JPEA_IMAGE_INPUT_COLOR must be bgr or rgb";
-      return {};
-    }
-    // Convert to float NCHW and normalize (matches the ONNX featuremap input).
-    image.convertTo(image, CV_32FC3, 1.0 / 255.0);
-    cv::subtract(image, cv::Scalar(mean_[2], mean_[1], mean_[0]), image);  // BGR order
-    cv::divide(image, cv::Scalar(std_[2], std_[1], std_[0]), image);
-    std::vector<cv::Mat> channels;
-    cv::split(image, channels);
-    std::vector<float> nchw(channels[0].total() * 3);
-    for (int c = 0; c < 3; ++c) {
-      const cv::Mat &ch = channels[c];
-      std::memcpy(nchw.data() + c * ch.total(), ch.ptr<float>(), ch.total() * sizeof(float));
-    }
-    const std::filesystem::path inputPath = temporaryInputPath();
-    {
-      std::ofstream output(inputPath, std::ios::binary | std::ios::trunc);
-      output.write(reinterpret_cast<const char *>(nchw.data()),
-                   static_cast<std::streamsize>(nchw.size() * sizeof(float)));
-      if (!output) {
-        lastError_ = "unable to write BPU input tensor";
-        return {};
-      }
-    }
-    const auto result = rdk_x5_bpu::execute(nlohmann::json{{"bpuModelPath", modelPath_},
-                                                              {"bpuInputFloatsPath", inputPath.string()},
-                                                              {"maxBpuOutputValues", targetDim_}});
-    std::error_code ec;
-    std::filesystem::remove(inputPath, ec);
-    if (!result.value("executed", false)) {
-      lastError_ = result.value("error", std::string("hbDNN inference failed"));
-      return {};
-    }
-    const auto outputs = result.value("outputs", nlohmann::json::array());
-    if (!outputs.is_array() || outputs.empty() || !outputs[0].contains("values") || !outputs[0]["values"].is_array()) {
-      lastError_ = "JPEA Horizon model must expose a float embedding output";
-      return {};
-    }
-    const auto embedding = outputs[0]["values"].get<std::vector<float>>();
-    if (static_cast<int>(embedding.size()) != targetDim_) {
-      lastError_ = "JPEA embedding output dimension does not match JPEA_IMAGE_CONCEPT_DIM";
-      return {};
-    }
-    ++samples_;
-    lastError_.clear();
-    return embedding;
+    cv::Mat image = decodeImage(imageBytes, width, height, mimeType);
+    if (image.empty()) return {};
+    return encodeImage(std::move(image), {});
 #endif
   }
 
   std::vector<float> encodeContext(const std::vector<uint8_t> &imageBytes, int width, int height,
-                                   const std::string &mimeType, const std::vector<bool> &) override {
-    return encode(imageBytes, width, height, mimeType);
+                                   const std::string &mimeType, const std::vector<bool> &mask) override {
+#if !JPEA_HAVE_OPENCV
+    lastError_ = "OpenCV image decoding is unavailable in this build";
+    return {};
+#else
+    cv::Mat image = decodeImage(imageBytes, width, height, mimeType);
+    if (image.empty()) return {};
+    return encodeImage(std::move(image), mask);
+#endif
   }
 
   std::vector<float> encodeTarget(const std::vector<uint8_t> &imageBytes, int width, int height,
                                   const std::string &mimeType,
                                   const std::vector<int> &) override {
-    // This model was compiled as a plain encoder, not a masked JPEA target graph.
-    // Returning the full-image embedding is a deterministic fallback for callers
-    // that expect a target concept.
-    return encode(imageBytes, width, height, mimeType);
+#if !JPEA_HAVE_OPENCV
+    lastError_ = "OpenCV image decoding is unavailable in this build";
+    return {};
+#else
+    cv::Mat image = decodeImage(imageBytes, width, height, mimeType);
+    if (image.empty()) return {};
+    return encodeImage(std::move(image), {});
+#endif
   }
 
   std::vector<float> predictTarget(const std::vector<float> &contextRepr,
                                    const std::vector<int> &) override {
-    // No learned predictor available; the best deterministic estimate is the
-    // context representation itself, especially before any adaptation has run.
-    return std::vector<float>(contextRepr.begin(), contextRepr.end());
+    if (contextRepr.size() != static_cast<size_t>(targetDim_)) {
+      lastError_ = "predictor input dimension mismatch";
+      return {};
+    }
+    std::vector<float> out(static_cast<size_t>(targetDim_), 0.0f);
+    for (int i = 0; i < targetDim_; ++i) {
+      float v = predictorBias_[static_cast<size_t>(i)];
+      for (int j = 0; j < targetDim_; ++j) {
+        v += predictorWeights_[static_cast<size_t>(i * targetDim_ + j)] * contextRepr[static_cast<size_t>(j)];
+      }
+      out[static_cast<size_t>(i)] = v;
+    }
+    return out;
   }
 
-  float adapt(const std::vector<uint8_t> &, int, int, const std::string &, int, float) override {
-    lastError_ = "runtime adaptation is not supported by an immutable Horizon model";
-    return -1.0f;
+  float adapt(const std::vector<uint8_t> &imageBytes, int width, int height,
+              const std::string &mimeType, int steps, float lr) override {
+    if (steps < 1 || lr < 0.0f) {
+      lastError_ = "invalid adaptation parameters";
+      return -1.0f;
+    }
+    if (targetDim_ <= 0) {
+      lastError_ = "target dimension not set";
+      return -1.0f;
+    }
+
+    std::vector<float> target = encode(imageBytes, width, height, mimeType);
+    if (target.size() != static_cast<size_t>(targetDim_)) {
+      lastError_ = "target encoding failed";
+      return -1.0f;
+    }
+
+    const int grid = cfg_.resolution / std::max(1, cfg_.patchSize);
+    const int patchCount = grid * grid;
+    if (patchCount < 2) {
+      lastError_ = "not enough patches for predictor adaptation";
+      return -1.0f;
+    }
+
+    std::mt19937 rng(static_cast<unsigned>(adaptSteps_ + 0x1DEA));
+    float totalLoss = 0.0f;
+    for (int step = 0; step < steps; ++step) {
+      std::vector<int> order(patchCount);
+      std::iota(order.begin(), order.end(), 0);
+      std::shuffle(order.begin(), order.end(), rng);
+      const int targetCount = std::max(1, patchCount / 3);
+      std::vector<bool> mask(static_cast<size_t>(patchCount), true);
+      for (int i = 0; i < targetCount; ++i) {
+        mask[static_cast<size_t>(order[i])] = false;
+      }
+
+      std::vector<float> context = encodeContext(imageBytes, width, height, mimeType, mask);
+      if (context.size() != static_cast<size_t>(targetDim_)) {
+        lastError_ = "context encoding failed";
+        return -1.0f;
+      }
+
+      std::vector<float> pred = predictTarget(context, {});
+      if (pred.size() != target.size()) {
+        lastError_ = "predictor output dimension mismatch";
+        return -1.0f;
+      }
+
+      double loss = 0.0;
+      std::vector<float> error(target.size());
+      for (size_t i = 0; i < target.size(); ++i) {
+        error[i] = pred[i] - target[i];
+        loss += static_cast<double>(error[i]) * error[i];
+      }
+      loss /= static_cast<double>(target.size());
+      totalLoss += static_cast<float>(loss);
+
+      for (int i = 0; i < targetDim_; ++i) {
+        for (int j = 0; j < targetDim_; ++j) {
+          predictorWeights_[static_cast<size_t>(i * targetDim_ + j)] -=
+              lr * error[static_cast<size_t>(i)] * context[static_cast<size_t>(j)];
+        }
+        predictorBias_[static_cast<size_t>(i)] -= lr * error[static_cast<size_t>(i)];
+      }
+      ++adaptSteps_;
+      ++samples_;
+    }
+    lastError_.clear();
+    return totalLoss / static_cast<float>(steps);
   }
 
   std::vector<uint8_t> decode(const std::vector<float> &conceptVector,
@@ -209,11 +249,12 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
       lastError_ = "concept vector dimension does not match targetDim";
       return {};
     }
+    const auto projected = applyDecoderInverseMatrix(conceptVector);
     const std::filesystem::path inputPath = temporaryInputPath();
     {
       std::ofstream output(inputPath, std::ios::binary | std::ios::trunc);
-      output.write(reinterpret_cast<const char *>(conceptVector.data()),
-                   static_cast<std::streamsize>(conceptVector.size() * sizeof(float)));
+      output.write(reinterpret_cast<const char *>(projected.data()),
+                   static_cast<std::streamsize>(projected.size() * sizeof(float)));
       if (!output) {
         lastError_ = "unable to write decoder concept tensor";
         return {};
@@ -296,11 +337,6 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
     return out;
   }
 
-  static std::string environment(const char *name, const std::string &defaultValue = {}) {
-    const char *value = std::getenv(name);
-    return value != nullptr ? std::string(value) : defaultValue;
-  }
-
   static std::vector<float> parseFloatVector(const std::string &s, std::size_t expected) {
     std::vector<float> out;
     std::istringstream iss(s);
@@ -310,11 +346,50 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
     return out;
   }
 
+  static std::string resolveColor() {
+    return phoenix::resolveConfig<std::string>("vision.colorSpace", std::string("bgr"),
+                                               "JPEA_IMAGE_INPUT_COLOR");
+  }
+
+  static std::vector<float> normalizeTo3(std::vector<float> v,
+                                         const std::vector<float> &fallback) {
+    if (v.empty()) return fallback;
+    if (v.size() < 3) v.resize(3, 0.0f);
+    if (v.size() > 3) v.resize(3);
+    return v;
+  }
+
+  static std::vector<float> resolvePixelMean() {
+    return normalizeTo3(
+        phoenix::resolveConfig<std::vector<float>>("vision.pixelMean",
+                                                   std::vector<float>{0.485f, 0.456f, 0.406f},
+                                                   "JPEA_IMAGE_PIXEL_MEAN"),
+        std::vector<float>{0.485f, 0.456f, 0.406f});
+  }
+
+  static std::vector<float> resolvePixelStd() {
+    return normalizeTo3(
+        phoenix::resolveConfig<std::vector<float>>("vision.pixelStd",
+                                                   std::vector<float>{0.229f, 0.224f, 0.225f},
+                                                   "JPEA_IMAGE_PIXEL_STD"),
+        std::vector<float>{0.229f, 0.224f, 0.225f});
+  }
+
   static std::filesystem::path temporaryInputPath() {
     static std::atomic<uint64_t> sequence{0};
     return std::filesystem::temp_directory_path() /
            ("phoenix-jpea-" + std::to_string(sequence.fetch_add(1)) + ".tensor");
   }
+
+  cv::Mat decodeImage(const std::vector<uint8_t> &imageBytes, int width, int height,
+                      const std::string &mimeType);
+  std::vector<float> imageToNchw(const cv::Mat &image, const std::vector<bool> &patchMask);
+  std::vector<float> runEncoderBpu(const std::vector<float> &nchw);
+  std::vector<float> encodeImage(cv::Mat image, const std::vector<bool> &patchMask);
+  void loadDecoderInverseMatrix();
+  std::vector<float> applyDecoderInverseMatrix(const std::vector<float> &conceptIn) const;
+  void loadEncoderHead();
+  std::vector<float> applyEncoderHead(const std::vector<float> &embedding) const;
 
   JpeaV2ImageWorldModelConfig cfg_;
   int targetDim_;
@@ -325,7 +400,223 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
   std::vector<float> std_;
   size_t samples_ = 0;
   std::string lastError_;
+  std::vector<float> predictorWeights_;
+  std::vector<float> predictorBias_;
+  size_t adaptSteps_ = 0;
+  std::vector<float> decoderMatrixW_;
+  std::vector<float> decoderMatrixB_;
+  bool decoderMatrixLoaded_ = false;
+  std::vector<float> headW_;
+  std::vector<float> headB_;
+  int headInDim_ = 0;
+  int headOutDim_ = 0;
+  bool headLoaded_ = false;
 };
+
+#if JPEA_HAVE_OPENCV
+cv::Mat JpeaV2ImageHbdnnModel::decodeImage(const std::vector<uint8_t> &imageBytes, int width, int height,
+                                           const std::string &mimeType) {
+  cv::Mat image;
+  if (mimeType == "application/x-bgr") {
+    if (width <= 0 || height <= 0 ||
+        imageBytes.size() != static_cast<size_t>(width) * static_cast<size_t>(height) * 3U) {
+      lastError_ = "direct BGR frame does not match its declared dimensions";
+      return {};
+    }
+    image = cv::Mat(height, width, CV_8UC3, const_cast<uint8_t *>(imageBytes.data())).clone();
+  } else if (!imageBytes.empty()) {
+    std::vector<uchar> compressed(imageBytes.begin(), imageBytes.end());
+    image = cv::imdecode(compressed, cv::IMREAD_COLOR);
+    if (image.empty()) {
+      lastError_ = "unable to decode image payload";
+      return {};
+    }
+  } else {
+    lastError_ = "empty image payload";
+    return {};
+  }
+  cv::resize(image, image, cv::Size(cfg_.resolution, cfg_.resolution), 0, 0, cv::INTER_AREA);
+  if (color_ == "rgb") cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
+  if (color_ != "bgr" && color_ != "rgb") {
+    lastError_ = "JPEA_IMAGE_INPUT_COLOR must be bgr or rgb";
+    return {};
+  }
+  return image;
+}
+
+std::vector<float> JpeaV2ImageHbdnnModel::imageToNchw(const cv::Mat &image,
+                                                       const std::vector<bool> &patchMask) {
+  cv::Mat floatImage;
+  image.convertTo(floatImage, CV_32FC3, 1.0 / 255.0);
+  cv::subtract(floatImage, cv::Scalar(mean_[2], mean_[1], mean_[0]), floatImage);  // BGR order
+  cv::divide(floatImage, cv::Scalar(std_[2], std_[1], std_[0]), floatImage);
+
+  if (!patchMask.empty()) {
+    const int patchGrid = cfg_.resolution / std::max(1, cfg_.patchSize);
+    for (int py = 0; py < patchGrid; ++py) {
+      for (int px = 0; px < patchGrid; ++px) {
+        const int patchIdx = py * patchGrid + px;
+        if (patchIdx < static_cast<int>(patchMask.size()) && patchMask[static_cast<size_t>(patchIdx)]) continue;
+        const int y0 = py * cfg_.patchSize;
+        const int x0 = px * cfg_.patchSize;
+        for (int y = y0; y < y0 + cfg_.patchSize && y < cfg_.resolution; ++y) {
+          for (int x = x0; x < x0 + cfg_.patchSize && x < cfg_.resolution; ++x) {
+            cv::Vec3f &pix = floatImage.at<cv::Vec3f>(y, x);
+            pix[0] = pix[1] = pix[2] = 0.0f;
+          }
+        }
+      }
+    }
+  }
+
+  std::vector<cv::Mat> channels;
+  cv::split(floatImage, channels);
+  std::vector<float> nchw(channels[0].total() * 3);
+  for (int c = 0; c < 3; ++c) {
+    const cv::Mat &ch = channels[c];
+    std::memcpy(nchw.data() + c * ch.total(), ch.ptr<float>(), ch.total() * sizeof(float));
+  }
+  return nchw;
+}
+#endif  // JPEA_HAVE_OPENCV
+
+std::vector<float> JpeaV2ImageHbdnnModel::runEncoderBpu(const std::vector<float> &nchw) {
+  const std::filesystem::path inputPath = temporaryInputPath();
+  {
+    std::ofstream output(inputPath, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char *>(nchw.data()),
+                 static_cast<std::streamsize>(nchw.size() * sizeof(float)));
+    if (!output) {
+      lastError_ = "unable to write BPU input tensor";
+      return {};
+    }
+  }
+  const auto result = rdk_x5_bpu::execute(nlohmann::json{{"bpuModelPath", modelPath_},
+                                                            {"bpuInputFloatsPath", inputPath.string()},
+                                                            {"maxBpuOutputValues", 4096}});
+  std::error_code ec;
+  std::filesystem::remove(inputPath, ec);
+  if (!result.value("executed", false)) {
+    lastError_ = result.value("error", std::string("hbDNN inference failed"));
+    return {};
+  }
+  const auto outputs = result.value("outputs", nlohmann::json::array());
+  if (!outputs.is_array() || outputs.empty() || !outputs[0].contains("values") || !outputs[0]["values"].is_array()) {
+    lastError_ = "JPEA Horizon model must expose a float embedding output";
+    return {};
+  }
+  const auto embedding = outputs[0]["values"].get<std::vector<float>>();
+  const auto conceptOut = applyEncoderHead(embedding);
+  if (static_cast<int>(conceptOut.size()) != targetDim_) {
+    lastError_ = "JPEA embedding output dimension does not match JPEA_IMAGE_CONCEPT_DIM";
+    return {};
+  }
+  return conceptOut;
+}
+
+#if JPEA_HAVE_OPENCV
+std::vector<float> JpeaV2ImageHbdnnModel::encodeImage(cv::Mat image, const std::vector<bool> &patchMask) {
+  std::vector<float> nchw = imageToNchw(image, patchMask);
+  if (nchw.empty()) {
+    if (lastError_.empty()) lastError_ = "image preprocessing failed";
+    return {};
+  }
+  std::vector<float> embedding = runEncoderBpu(nchw);
+  if (embedding.empty()) return {};
+  ++samples_;
+  lastError_.clear();
+  return embedding;
+}
+#endif  // JPEA_HAVE_OPENCV
+
+void JpeaV2ImageHbdnnModel::loadDecoderInverseMatrix() {
+  if (decoderPath_.empty()) return;
+  const std::filesystem::path matrixPath =
+      std::filesystem::path(decoderPath_).parent_path() / "decoder_inverse_matrix.json";
+  std::ifstream in(matrixPath, std::ios::binary);
+  if (!in) return;
+  try {
+    nlohmann::json j;
+    in >> j;
+    if (j.contains("W") && j["W"].is_array()) {
+      const auto w = j["W"].get<std::vector<float>>();
+      if (static_cast<int>(w.size()) == targetDim_ * targetDim_) {
+        decoderMatrixW_ = w;
+      }
+    }
+    if (j.contains("b") && j["b"].is_array()) {
+      const auto b = j["b"].get<std::vector<float>>();
+      if (static_cast<int>(b.size()) == targetDim_) {
+        decoderMatrixB_ = b;
+      }
+    }
+    decoderMatrixLoaded_ = true;
+  } catch (const std::exception &e) {
+    (void)e;
+  }
+}
+
+std::vector<float> JpeaV2ImageHbdnnModel::applyDecoderInverseMatrix(const std::vector<float> &conceptIn) const {
+  std::vector<float> out(static_cast<size_t>(targetDim_), 0.0f);
+  for (int i = 0; i < targetDim_; ++i) {
+    float v = decoderMatrixB_[static_cast<size_t>(i)];
+    for (int j = 0; j < targetDim_; ++j) {
+      v += decoderMatrixW_[static_cast<size_t>(i * targetDim_ + j)] * conceptIn[static_cast<size_t>(j)];
+    }
+    out[static_cast<size_t>(i)] = v;
+  }
+  return out;
+}
+
+void JpeaV2ImageHbdnnModel::loadEncoderHead() {
+  if (modelPath_.empty()) return;
+  const std::filesystem::path headPath =
+      std::filesystem::path(modelPath_).parent_path() / "encoder_head.json";
+  std::ifstream in(headPath, std::ios::binary);
+  if (!in) return;
+  try {
+    nlohmann::json j;
+    in >> j;
+    headInDim_ = j.value("inDim", 0);
+    headOutDim_ = j.value("outDim", 0);
+    if (j.contains("W") && j["W"].is_array()) {
+      const auto w = j["W"].get<std::vector<float>>();
+      if (static_cast<int>(w.size()) == headInDim_ * headOutDim_) {
+        headW_ = w;
+      } else {
+        headInDim_ = 0;
+        headOutDim_ = 0;
+      }
+    }
+    if (j.contains("b") && j["b"].is_array()) {
+      const auto b = j["b"].get<std::vector<float>>();
+      if (static_cast<int>(b.size()) == headOutDim_) {
+        headB_ = b;
+        headLoaded_ = true;
+      } else {
+        headLoaded_ = false;
+      }
+    }
+  } catch (const std::exception &e) {
+    (void)e;
+  }
+}
+
+std::vector<float> JpeaV2ImageHbdnnModel::applyEncoderHead(const std::vector<float> &embedding) const {
+  if (!headLoaded_ || headInDim_ <= 0 || headOutDim_ <= 0 ||
+      static_cast<int>(embedding.size()) != headInDim_) {
+    return embedding;
+  }
+  std::vector<float> out(static_cast<size_t>(headOutDim_), 0.0f);
+  for (int i = 0; i < headOutDim_; ++i) {
+    float v = headB_[static_cast<size_t>(i)];
+    for (int j = 0; j < headInDim_; ++j) {
+      v += headW_[static_cast<size_t>(i * headInDim_ + j)] * embedding[static_cast<size_t>(j)];
+    }
+    out[static_cast<size_t>(i)] = v;
+  }
+  return out;
+}
 
 /**
  * @brief Remote implementation of the image world model.
@@ -758,16 +1049,19 @@ std::unique_ptr<JpeaV2ImageWorldModel> createJpeaV2ImageWorldModel(
     const std::string &variantId, int targetDim, const std::string & /*backend*/) {
   const auto *v = findJpeaV2ImageVariant(variantId);
   if (!v) {
+    v = findJpeaV2ImageVariant("resnet18_224");
+  }
+  if (!v) {
     v = findJpeaV2ImageVariant("ijepa_vith14_1k");
   }
 
   const auto &deployment = phoenix::deployment::ModelDeploymentConfig::instance().vision();
 
+  // Server-client: the client runs the model and only sends concept vectors.
   if (deployment.placement == phoenix::deployment::ModelPlacement::ServerClient) {
     return std::make_unique<JpeaV2ImageFallbackModel>(*v, targetDim);
   }
 
-#if PHOENIX_EDGE_IMAGE_ENABLED
   const bool useRemote =
       (deployment.placement == phoenix::deployment::ModelPlacement::Remote ||
        deployment.placement == phoenix::deployment::ModelPlacement::Auto) &&
@@ -776,17 +1070,19 @@ std::unique_ptr<JpeaV2ImageWorldModel> createJpeaV2ImageWorldModel(
     return std::make_unique<JpeaV2ImageRemoteModel>(*v, targetDim, deployment.remote);
   }
 
-  // Local path: prefer HBDNN when BPU runtime + compiled model are present.
+#if PHOENIX_EDGE_IMAGE_ENABLED
+  // Prefer local HBDNN only when the compiled model and BPU runtime are both
+  // available.  On non-X5 builds this check fails gracefully and we fall back
+  // to the deterministic CPU implementation, preserving a working image<->concept
+  // bridge everywhere.
   auto hbdnn = std::make_unique<JpeaV2ImageHbdnnModel>(*v, targetDim);
   if (hbdnn->status().value("ready", false)) {
     return hbdnn;
   }
-  // Otherwise the JEPA fallback keeps image -> concept unit conversion alive.
-  return std::make_unique<JpeaV2ImageFallbackModel>(*v, targetDim);
-#else
+#endif
+
   (void)deployment;
   return std::make_unique<JpeaV2ImageFallbackModel>(*v, targetDim);
-#endif
 }
 
 }  // namespace io

@@ -1728,7 +1728,7 @@
             bool contextModuleDisabled = config_.disableContextModule;
             bool useGraphSelector = body.value("enableGraphSelector", false);
             bool hardDisableGraphSelector =
-                boolFrom(getEnv("AI_DISABLE_GRAPH_SELECTOR", "true"), true);
+                phoenix::resolveConfig<bool>("main.disableGraphSelector", true, "AI_DISABLE_GRAPH_SELECTOR");
             if (hardDisableGraphSelector)
               useGraphSelector = false;
             if (gnnModuleDisabled)
@@ -2400,7 +2400,7 @@
             bool contextModuleDisabled = config_.disableContextModule;
             bool useGraphSelector = body.value("enableGraphSelector", false);
             bool hardDisableGraphSelector =
-                boolFrom(getEnv("AI_DISABLE_GRAPH_SELECTOR", "true"), true);
+                phoenix::resolveConfig<bool>("main.disableGraphSelector", true, "AI_DISABLE_GRAPH_SELECTOR");
             if (hardDisableGraphSelector)
               useGraphSelector = false;
             if (gnnModuleDisabled)
@@ -6426,13 +6426,13 @@ thread_local bool GatewayServer::hasAuthError_ = false;
 // 注意事项：端口与组配置缺失会直接返回错误码。
 static int runGroupWorker(const Config &config) {
   initProcessMemoryReservation();
-  std::string groupId = trimString(getEnv("AI_GROUP_ID", "G1"));
+  std::string groupId = phoenix::resolveConfig<std::string>("main.groupId", "G1", "AI_GROUP_ID");
   if (groupId.empty())
     groupId = "G1";
-  int groupSize = std::max(1, (int)numberOr(getEnv("AI_GROUP_SIZE", "7"), 7));
+  int groupSize = std::max(1, phoenix::resolveConfig<int>("main.groupSize", 7, "AI_GROUP_SIZE"));
   int port = 0;
   try {
-    port = std::stoi(getEnv("AI_GROUP_WORKER_PORT", "0"));
+    port = phoenix::resolveConfig<int>("main.groupWorkerPort", 0, "AI_GROUP_WORKER_PORT");
   } catch (...) {
     port = 0;
   }
@@ -6440,16 +6440,11 @@ static int runGroupWorker(const Config &config) {
     return 2;
 
   fs::path lmdbRoot = getProjectRoot() / "lmdb";
-  auto lmdbRootEnv = getEnv("AI_LMDB_ROOT", "");
+  std::string lmdbRootEnv = phoenix::resolveConfig<std::string>("main.lmdbRoot", "", "AI_LMDB_ROOT");
   if (!lmdbRootEnv.empty())
     lmdbRoot = fs::path(lmdbRootEnv);
 
-  std::size_t lmdbMapBytes = 512ull * 1024ull * 1024ull;
-  auto raw = getEnv("AI_LMDB_MAP_BYTES", "");
-  if (!raw.empty()) {
-    lmdbMapBytes =
-        (std::size_t)numberOr(raw, (double)(512ull * 1024ull * 1024ull));
-  }
+  std::size_t lmdbMapBytes = phoenix::resolveConfig<std::size_t>("main.lmdbMapBytes", 512ull * 1024ull * 1024ull, "AI_LMDB_MAP_BYTES");
   lmdbMapBytes = std::max<std::size_t>(64ull * 1024ull * 1024ull, lmdbMapBytes);
 
   ensureDir(config.baseDir);
@@ -6800,7 +6795,7 @@ static int runGroupWorker(const Config &config) {
 
 static bool spawnFrontendProcess() {
   int spawnDepth =
-      std::max(0, (int)numberOr(getEnv("AI_FRONTEND_SPAWN_DEPTH", "0"), 0));
+      std::max(0, phoenix::resolveConfig<int>("main.frontendSpawnDepth", 0, "AI_FRONTEND_SPAWN_DEPTH"));
   if (spawnDepth >= 2)
     return false;
   std::string nextDepth = std::to_string(spawnDepth + 1);
@@ -6911,26 +6906,23 @@ int main(int argc, char **argv) {
   try {
     args = parseArgs(argc, argv);
 
-    auto parseIntArgOrEnv = [&](const std::string &argKey,
-                                const std::string &envKey, int fallback) {
-      auto it = args.find(argKey);
-      std::string raw = (it != args.end() && !it->second.empty())
-                            ? it->second
-                            : getEnv(envKey, std::to_string(fallback));
-      try {
-        return std::stoi(raw);
-      } catch (...) {
-        return fallback;
+    int forceExitMs = [&] {
+      auto it = args.find("sigint-force-exit-ms");
+      if (it != args.end() && !it->second.empty()) {
+        try {
+          return std::stoi(it->second);
+        } catch (...) {
+          return 12000;
+        }
       }
-    };
-    int forceExitMs = parseIntArgOrEnv("sigint-force-exit-ms",
-                                       "AI_SIGINT_FORCE_EXIT_MS", 12000);
+      return phoenix::resolveConfig<int>("main.sigintForceExitMs", 12000, "AI_SIGINT_FORCE_EXIT_MS");
+    }();
     forceExitMs = std::max(1000, std::min(forceExitMs, 600000));
 #ifdef _WIN32
     gCtrlForceExitMs.store(static_cast<DWORD>(forceExitMs),
                            std::memory_order_relaxed);
     // Disable watchdog if running as externally managed subprocess (e.g., benchmark)
-    bool disableWatchdog = boolFrom(getEnv("AI_DISABLE_WATCHDOG", "false"), false);
+    bool disableWatchdog = phoenix::resolveConfig<bool>("main.disableWatchdog", false, "AI_DISABLE_WATCHDOG");
     if (args.count("disable-watchdog") != 0 || disableWatchdog) {
       gDisableWatchdog = true;
       std::cout << "[startup] watchdog disabled (externally managed mode)" << std::endl;
@@ -6941,7 +6933,7 @@ int main(int argc, char **argv) {
 
     bool frontendOnlyRequested =
         args.count("frontend-only") != 0 ||
-        boolFrom(getEnv("AI_FRONTEND_SUBPROCESS", "false"), false);
+        phoenix::resolveConfig<bool>("main.frontendSubprocess", false, "AI_FRONTEND_SUBPROCESS");
     if (frontendOnlyRequested) {
       try {
         setupFrontendServer();
@@ -6956,8 +6948,10 @@ int main(int argc, char **argv) {
       }
     }
     fs::path pidPath = fs::path(
-        getEnv("AI_PID_FILE",
-               (fs::path("runtime_store") / "phoenix_main.pid").string()));
+        phoenix::resolveConfig<std::string>(
+            "main.pidFile",
+            (fs::path("runtime_store") / "phoenix_main.pid").string(),
+            "AI_PID_FILE"));
     if (args.count("pid-file"))
       pidPath = fs::path(args["pid-file"]);
     std::string pidError;
@@ -7286,9 +7280,9 @@ int main(int argc, char **argv) {
                                               rotation, study, db079, config);
   {
     bool frontendEnabled =
-        boolFrom(getEnv("AI_FRONTEND_ENABLED", "true"), true);
+        phoenix::resolveConfig<bool>("main.frontendEnabled", true, "AI_FRONTEND_ENABLED");
     bool isFrontendSubprocess =
-        boolFrom(getEnv("AI_FRONTEND_SUBPROCESS", "false"), false);
+        phoenix::resolveConfig<bool>("main.frontendSubprocess", false, "AI_FRONTEND_SUBPROCESS");
     if (frontendEnabled && !isFrontendSubprocess) {
       if (!spawnFrontendProcess()) {
         std::cerr << "frontend subprocess spawn failed" << std::endl;

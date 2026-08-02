@@ -146,6 +146,8 @@ class JpeaV2ImageWorldModel {
  */
 inline std::vector<JpeaV2ImageWorldModelConfig> jpeaV2ImageOfficialVariants() {
   return {
+      {"resnet18_224",     "resnet18",
+       "timm/resnet18.a1_in1k",  16, 224, 11689512LL, "IN1K"},
       {"ijepa_vith14_1k",  "vit_h14",
        "facebook/ijepa_vith14_1k",  14, 224, 632000000LL, "IN1K"},
       {"ijepa_vith16_448", "vit_h16",

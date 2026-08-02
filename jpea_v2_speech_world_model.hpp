@@ -140,7 +140,7 @@ class JpeaV2SpeechWorldModel {
  */
 inline std::vector<JpeaV2SpeechWorldModelConfig> jpeaV2SpeechOfficialVariants() {
   return {
-      {"jpea_v2_speech_16k", "jpea_1d", "facebook/jpea-v2-speech-16k", 16000, 400, 160, 0, "LibriSpeech"},
+      {"jpea_v2_speech_16k", "jpea_1d", "runtime_store/models/ijepa/speech_16k", 16000, 400, 160, 0, "LibriSpeech"},
       {"jpea_v2_speech_22k", "jpea_1d", "facebook/jpea-v2-speech-22k", 22050, 512, 256, 0, "LibriLight"},
       {"jpea_v2_speech_44k", "jpea_1d", "facebook/jpea-v2-speech-44k", 44100, 1024, 512, 0, "VoxPopuli"},
       {"jpea_v2_speech_48k", "jpea_1d", "facebook/jpea-v2-speech-48k", 48000, 1024, 512, 0, "VoxPopuli"}};
@@ -152,8 +152,8 @@ inline std::vector<JpeaV2SpeechWorldModelConfig> jpeaV2SpeechOfficialVariants() 
  * @param variantId   one of the ids returned by jpeaV2SpeechOfficialVariants().
  * @param targetDim   desired output concept dimension.
  * @param backend     retained for API compatibility.
- * @return a concrete implementation. Until a compiled RDK X5 speech JPEA model is
- *         integrated, encode() returns an empty vector and status() reports unavailable.
+ * @return a concrete implementation. Local execution uses the compiled RDK X5
+ *         speech JPEA BPU model; fallback is used when BPU runtime is unavailable.
  */
 std::unique_ptr<JpeaV2SpeechWorldModel> createJpeaV2SpeechWorldModel(
     const std::string &variantId = "jpea_v2_speech_16k",

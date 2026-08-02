@@ -1,0 +1,87 @@
+[
+  {
+    "name": "phoenix-ollama-functional-json",
+    "backend": "ollama",
+    "ollamaModel": "llama3.1:8b",
+    "componentConfig": "test/prof/component_presets/full_functional.json",
+    "benchmarkMode": "shared-local-qa",
+    "runHai": true
+  },
+  {
+    "name": "phoenix-ollama-structural-xml",
+    "backend": "ollama",
+    "ollamaModel": "llama3.1:8b",
+    "componentConfig": "test/prof/component_presets/structural_research.xml",
+    "benchmarkMode": "shared-local-qa",
+    "runHai": true
+  },
+  {
+    "name": "phoenix-ollama-minimal-cli",
+    "backend": "ollama",
+    "ollamaModel": "llama3.1:8b",
+    "components": "gnn=off,frontend-memory=off,brain=off,learning=true,collective-matching=storage-only",
+    "systemArgs": [
+      "--frontend-enabled=false"
+    ],
+    "benchmarkMode": "shared-local-qa",
+    "runHai": true
+  },
+  {
+    "name": "phoenix-ollama-all-off-cli",
+    "backend": "ollama",
+    "ollamaModel": "llama3.1:8b",
+    "components": "gnn=off,frontend-memory=off,brain=off,learning=false,rl=off,adv=off,gnn-ga=off,dialog-learning=off,collective.routingstorage=false,collective.ignorematchingforcomputenodes=false",
+    "systemArgs": [
+      "--frontend-enabled=false"
+    ],
+    "benchmarkMode": "shared-local-qa",
+    "runHai": true
+  },
+  {
+    "name": "phoenix-ollama-multiselect-cli",
+    "backend": "ollama",
+    "ollamaModel": "llama3.1:8b",
+    "components": "gnn=on,frontend-memory=on,brain=functional,reasoning=on,learning=true,rl=on,adv=on,gnn-ga=on,dialog-learning=on,dialog-graph-context=on,collective.routingstorage=true,collective.ignorematchingforcomputenodes=true,collective.matching=storage-only",
+    "benchmarkMode": "shared-local-qa",
+    "runHai": true
+  },
+  {
+    "name": "phoenix-llamacpp-functional-json",
+    "backend": "llamacpp",
+    "componentConfig": "test/prof/component_presets/full_functional.json",
+    "requireGguf": true,
+    "enableDirectLlamacpp": true,
+    "benchmarkMode": "shared-local-qa",
+    "runHai": true
+  },
+  {
+    "name": "phoenix-llamacpp-minimal-cli",
+    "backend": "llamacpp",
+    "requireGguf": true,
+    "components": "gnn=off,frontend-memory=off,brain=off,learning=false",
+    "systemArgs": [
+      "--frontend-enabled=false"
+    ],
+    "benchmarkMode": "shared-local-qa",
+    "runHai": true
+  },
+  {
+    "name": "phoenix-llamacpp-all-off-cli",
+    "backend": "llamacpp",
+    "requireGguf": true,
+    "components": "gnn=off,frontend-memory=off,brain=off,learning=false,rl=off,adv=off,gnn-ga=off,dialog-learning=off,collective.routingstorage=false,collective.ignorematchingforcomputenodes=false",
+    "systemArgs": [
+      "--frontend-enabled=false"
+    ],
+    "benchmarkMode": "shared-local-qa",
+    "runHai": true
+  },
+  {
+    "name": "phoenix-llamacpp-multiselect-cli",
+    "backend": "llamacpp",
+    "requireGguf": true,
+    "components": "gnn=on,frontend-memory=on,brain=functional,reasoning=on,learning=true,rl=on,adv=on,gnn-ga=on,dialog-learning=on,dialog-graph-context=on,collective.routingstorage=true,collective.ignorematchingforcomputenodes=true,collective.matching=storage-only",
+    "benchmarkMode": "shared-local-qa",
+    "runHai": true
+  }
+]

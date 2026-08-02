@@ -36,7 +36,7 @@ static std::vector<float> textToMiniEmbedding(const std::string &text,
   std::vector<float> vec(std::max(1, dim), 0.0f);
   auto words = tokenize(text);
 #ifdef HAVE_TORCH
-  if (boolFrom(getEnv("AI_USE_TORCH_EMBED", "false"), false)) {
+  if (phoenix::resolveConfig<bool>("main.useTorchEmbed", false, "AI_USE_TORCH_EMBED")) {
     auto &embedder = getTorchEmbedder();
     embedder.ensureInit(getProjectRoot() / "robots");
     if (embedder.ready) {

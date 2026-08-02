@@ -26,27 +26,24 @@ public:
       spark_ = sparkFactory(pool_, shards_, sparkOptions);
     else
       spark_ = std::make_shared<SparkArray>(pool_, shards_, sparkOptions);
-    {
-      std::string authFlag = getEnv("AI_AUTH_ENABLED", "true");
-      std::transform(authFlag.begin(), authFlag.end(), authFlag.begin(),
-                     ::tolower);
-      authEnabled_ = (authFlag != "false");
-    }
+    authEnabled_ =
+        phoenix::resolveConfig<bool>("auth.enabled", true, "AI_AUTH_ENABLED");
     acceptLocalToken_ =
-        boolFrom(getEnv("AI_AUTH_ACCEPT_LOCAL_TOKEN", "true"), true);
-    jwtSecret_ = getEnv("AI_AUTH_JWT_SECRET",
-                        getEnv("AUTH_JWT_SECRET", "dev-secret-change-me"));
+        phoenix::resolveConfig<bool>("auth.acceptLocalToken", true, "AI_AUTH_ACCEPT_LOCAL_TOKEN");
+    jwtSecret_ = phoenix::resolveConfig<std::string>(
+        "auth.jwtSecret", "dev-secret-change-me", "AI_AUTH_JWT_SECRET",
+        "AUTH_JWT_SECRET");
     cognitionAutonomyEnabled_ =
-        boolFrom(getEnv("AI_ENABLE_COGNITION_AUTONOMY", "true"), true);
+        phoenix::resolveConfig<bool>("main.cognitionAutonomyEnabled", true, "AI_ENABLE_COGNITION_AUTONOMY");
     rlDisabled_ = config_.disableLearning || config_.disableRL;
     advDisabled_ = config_.disableLearning || config_.disableADV;
     gnnGaDisabled_ = config_.disableLearning;
     dialogLearningEnabled_ = !(config_.disableLearning == true);
     dialogTransformerLearning_ =
-        boolFrom(getEnv("AI_DIALOG_TRANSFORMER_LEARNING", "false"), false);
+        phoenix::resolveConfig<bool>("dialog.transformerLearning", false, "AI_DIALOG_TRANSFORMER_LEARNING");
     dialogLearnGraphContext_ =
-        boolFrom(getEnv("AI_DIALOG_LEARN_GRAPH_CONTEXT", "false"), false);
-    retrainTrace_ = boolFrom(getEnv("AI_RETRAIN_TRACE", "false"), false);
+        phoenix::resolveConfig<bool>("dialog.learnGraphContext", false, "AI_DIALOG_LEARN_GRAPH_CONTEXT");
+    retrainTrace_ = phoenix::resolveConfig<bool>("learning.retrainTrace", false, "AI_RETRAIN_TRACE");
     loadDialogConfig();
     logger_.initialize(config_.logMode, config_.exportDir / "logs");
     if (logger_.enabled())
@@ -84,9 +81,9 @@ public:
   void listen() override {
     unsigned hw = std::thread::hardware_concurrency();
     unsigned defaultThreads = hw > 0 ? std::max(4u, std::min(16u, hw)) : 4u;
-    int threadNum = static_cast<int>(
-        numberOr(getEnv("AI_HTTP_THREADS", std::to_string(defaultThreads)),
-                 static_cast<long long>(defaultThreads)));
+    int threadNum = phoenix::resolveConfig<int>(
+        "frontend_server.httpThreads", static_cast<int>(defaultThreads),
+        "AI_HTTP_THREADS");
     if (threadNum < 2)
       threadNum = 2;
     drogon::app().setThreadNum(threadNum);
@@ -445,7 +442,7 @@ private:
       const nlohmann::json &r = iter.value("result", nlohmann::json::object());
       pack.inferenceOptions = r.value("inferenceOptions", nlohmann::json::object());
       pack.emotionTensor = r.value("emotionTensor", nlohmann::json::object());
-      pack.mixedModalOutputs = r.value("mixedModalOutputs", nlohmann::json::array());
+      pack.mixedModalOutputs = r.value("mixedModalOutputs", nlohmann::json::array()).get<std::vector<nlohmann::json>>();
       pack.worldEvidence = r.value("worldEvidence", nlohmann::json::array());
       std::string mod = r.value("cognitionModulation", "");
       if (!mod.empty()) {

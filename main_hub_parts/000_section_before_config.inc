@@ -603,16 +603,79 @@ static void installFatalHooks(const fs::path &baseDir) {
   std::signal(SIGTERM, onFatalSignal);
 }
 
-// 读取环境变量并提供回退值。
-// 调用方式：传入环境变量名和可选默认值。
-// 实现思路：调用 std::getenv，缺失时返回 fallback。
-// 注意事项：返回的是复制后的 std::string，可安全持有。
-static std::string getEnv(const std::string &key,
-                          const std::string &fallback = "") {
-  const char *v = std::getenv(key.c_str());
-  if (!v)
-    return fallback;
-  return std::string(v);
+// 将常见环境变量名映射到 config/phoenix.json 中的 dot path。
+// 未映射的变量返回空串，调用方应使用原始 fallback。
+static std::string dotPathForEnv(const std::string &env) {
+  if (env == "AI_BASE_DIR") return "main.baseDir";
+  if (env == "AI_GATEWAY_HOST") return "main.gateway.host";
+  if (env == "CONTROLLER_PORT") return "main.gateway.port";
+  if (env == "AI_STUDY_PORT") return "main.studyPort";
+  if (env == "AI_HTTP_LOG") return "main.httpLog";
+  if (env == "AI_COUNT" || env == "AI_NUM") return "main.aiCount";
+  if (env == "AI_GROUP_COUNT" || env == "GROUP_COUNT") return "main.groupCount";
+  if (env == "AI_GROUP_SIZE" || env == "GROUP_SIZE") return "main.groupSize";
+  if (env == "AI_SPARK_NUM_AI") return "main.sparkNumAI";
+  if (env == "AI_SPARK_BUDGET") return "main.spark.budget";
+  if (env == "AI_SINGLE_PROC") return "main.singleProc";
+  if (env == "AI_GROUP_PROC") return "main.groupProc";
+  if (env == "AI_GROUP_PROC_TIMEOUT_MS") return "main.groupProcTimeoutMs";
+  if (env == "AI_INFER_MP") return "main.inferMP";
+  if (env == "AI_INFER_WORKERS") return "main.inferWorkers";
+  if (env == "AI_REDIS_CONNECT_TIMEOUT_MS") return "main.redis.connectTimeoutMs";
+  if (env == "REDIS_URL") return "main.redis.url";
+  if (env == "AI_REDIS_CHANNEL") return "main.redis.channel";
+  if (env == "AI_DB_PATH") return "main.dbPath";
+  if (env == "AI_REDIS_CACHE_DB") return "main.redis.cacheDb";
+  if (env == "AI_REDIS_CACHE_PREFIX") return "main.redis.cachePrefix";
+  if (env == "AI_SNAPSHOT_DIR") return "main.snapshotDir";
+  if (env == "LMDB_DIR") return "main.lmdb.root";
+  if (env == "AI_LMDB_MAP_MB") return "main.lmdb.mapMb";
+  if (env == "AI_SEARCH_ENDPOINT") return "main.searchEndpoint";
+  if (env == "AI_ROBOTS_DIR") return "main.robots.dir";
+  if (env == "AI_LEMMA_CSV") return "main.lemma.csv";
+  if (env == "AI_LEMMA_AUTOLOAD") return "main.lemma.autoload";
+  if (env == "AI_LEMMA_MAX_MB") return "main.lemma.maxMb";
+  if (env == "AI_LEMMA_FORCE") return "main.lemma.force";
+  if (env == "AI_ROBOTS_LIMIT") return "main.robots.warmupLimit";
+  if (env == "AI_ROBOTS_AUTOLOAD") return "main.robots.autoload";
+  if (env == "AI_ROBOTS_WARMUP_SHUFFLE") return "main.robots.warmupShuffle";
+  if (env == "AI_ROBOTS_CHUNK_MIN") return "main.robots.chunkMinWords";
+  if (env == "AI_ROBOTS_CHUNK_MAX") return "main.robots.chunkMaxWords";
+  if (env == "AI_KVM_CACHE_MAX") return "main.kvmCacheMaxEntries";
+  if (env == "AI_LEARNING_WARMUP") return "main.learningWarmup";
+  if (env == "AI_SYNC_STANDBY_ON_BOOT") return "main.syncStandbyOnBoot";
+  if (env == "AI_TESTS_AUTOLOAD") return "main.tests.autoload";
+  if (env == "AI_DISABLE_MEMEBARRIER") return "main.disable.memebarrier";
+  if (env == "AI_DISABLE_RL") return "main.disable.rl";
+  if (env == "AI_DISABLE_ADV") return "main.disable.adv";
+  if (env == "AI_DISABLE_LEARNING") return "main.disable.learning";
+  if (env == "AI_DISABLE_GNN_MODULE") return "main.disable.gnnModule";
+  if (env == "AI_DISABLE_CONTEXT_MODULE") return "main.disable.contextModule";
+  if (env == "AI_USING_OLLAMA") return "main.inference.usingOllama";
+  if (env == "AI_OLLAMA_FINE_TUNING") return "main.inference.ollamaFineTuning";
+  if (env == "AI_INFERENCE_ENABLED") return "main.inference.enabled";
+  if (env == "AI_TRANSFORMER_MODE") return "main.inference.transformerMode";
+  if (env == "AI_OLLAMA_MODEL") return "main.inference.ollamaModel";
+  if (env == "AI_OLLAMA_BASE_URL") return "main.inference.ollamaBaseUrl";
+  if (env == "AI_OLLAMA_TIMEOUT_MS") return "main.inference.ollamaTimeoutMs";
+  if (env == "AI_LLAMACPP_MODEL") return "main.inference.llamaCppModel";
+  if (env == "AI_LLAMACPP_BASE_URL") return "main.inference.llamaCppBaseUrl";
+  if (env == "AI_LLAMACPP_TIMEOUT_MS") return "main.inference.llamaCppTimeoutMs";
+  if (env == "AI_LLAMACPP_LORA_FILES") return "main.inference.llamaCppLoraFiles";
+  if (env == "AI_LLAMACPP_LORA_INIT_WITHOUT_APPLY") return "main.inference.llamaCppLoraInitWithoutApply";
+  if (env == "AI_LLAMACPP_FINE_TUNING") return "main.inference.llamaCppFineTuning";
+  if (env == "AI_BITNET_MODEL") return "main.inference.bitnetModel";
+  if (env == "AI_BITNET_BASE_URL") return "main.inference.bitnetBaseUrl";
+  if (env == "AI_BITNET_TIMEOUT_MS") return "main.inference.bitnetTimeoutMs";
+  if (env == "AI_GGUF_MODELS_DIR") return "main.inference.ggufModelsDir";
+  if (env == "AI_EXTERNAL_STYLE_SIM" || env == "AI_EXTERNAL_BACKEND_STYLE_SIM") return "main.inference.externalBackendStyleSim";
+  if (env == "AI_TRANSFORMER_BOOTSTRAP") return "main.inference.transformerBootstrap";
+  if (env == "AI_TRANSFORMER_BOOTSTRAP_DOCS") return "main.inference.transformerBootstrapDocs";
+  if (env == "AI_LOG_MODE") return "main.logMode";
+  if (env == "AI_EXPORT_DIR") return "main.exportDir";
+  if (env == "PHOENIX_TUNED_CONFIG") return "main.tunedConfigPath";
+  if (env == "AI_MODEL_DEPLOYMENT_CONFIG") return "model_deployment.configPath";
+  return "";
 }
 
 static void setRuntimeEnvValue(const char *key, const std::string &value) {
@@ -664,8 +727,8 @@ applyFrontendEnvFromArgs(const std::map<std::string, std::string> &args) {
   if (itStudyPort != args.end() && !itStudyPort->second.empty())
     setRuntimeEnvValue("FRONTEND_PORT", itStudyPort->second);
 
-  std::string host = getEnv("AI_GATEWAY_HOST", "127.0.0.1");
-  std::string port = getEnv("CONTROLLER_PORT", "5080");
+  std::string host = phoenix::resolveConfigAsString("api.gatewayHost", "127.0.0.1", "AI_GATEWAY_HOST");
+  std::string port = phoenix::resolveConfigAsString("api.gatewayPort", "5080", "CONTROLLER_PORT");
   auto itHost = args.find("gateway-host");
   if (itHost != args.end() && !itHost->second.empty())
     host = itHost->second;
@@ -987,8 +1050,7 @@ static double numberOrNaN(const std::string &s, double fallback) {
 }
 
 static int64_t getRobotsRetrainLimitCap() {
-  int64_t cap = static_cast<int64_t>(std::llround(
-      numberOr(getEnv("AI_ROBOTS_RETRAIN_LIMIT_MAX", "10000"), 10000)));
+  int64_t cap = phoenix::resolveConfig<int64_t>("robots.retrain.limitMax", 10000, "AI_ROBOTS_RETRAIN_LIMIT_MAX");
   if (cap < 1)
     cap = 1;
   if (cap > 1000000)
@@ -997,8 +1059,7 @@ static int64_t getRobotsRetrainLimitCap() {
 }
 
 static int64_t getRobotsRetrainBatchDefault() {
-  int64_t batch = static_cast<int64_t>(
-      std::llround(numberOr(getEnv("AI_ROBOTS_RETRAIN_BATCH", "64"), 64)));
+  int64_t batch = phoenix::resolveConfig<int64_t>("robots.retrain.batch", 64, "AI_ROBOTS_RETRAIN_BATCH");
   if (batch < 16)
     batch = 16;
   if (batch > 512)
@@ -1007,8 +1068,7 @@ static int64_t getRobotsRetrainBatchDefault() {
 }
 
 static int64_t getRobotsRetrainBatchCharsBudget() {
-  int64_t budget = static_cast<int64_t>(std::llround(
-      numberOr(getEnv("AI_ROBOTS_RETRAIN_BATCH_CHARS", "4000000"), 4000000)));
+  int64_t budget = phoenix::resolveConfig<int64_t>("robots.retrain.batchChars", 4000000, "AI_ROBOTS_RETRAIN_BATCH_CHARS");
   if (budget < 200000)
     budget = 200000;
   if (budget > 100000000)
@@ -1017,8 +1077,7 @@ static int64_t getRobotsRetrainBatchCharsBudget() {
 }
 
 static int64_t getRobotsRetrainDocMaxChars() {
-  int64_t cap = static_cast<int64_t>(std::llround(
-      numberOr(getEnv("AI_ROBOTS_RETRAIN_DOC_MAX_CHARS", "6000"), 6000)));
+  int64_t cap = phoenix::resolveConfig<int64_t>("robots.retrain.docMaxChars", 6000, "AI_ROBOTS_RETRAIN_DOC_MAX_CHARS");
   if (cap < 512)
     cap = 512;
   if (cap > 200000)
@@ -1027,8 +1086,7 @@ static int64_t getRobotsRetrainDocMaxChars() {
 }
 
 static int64_t getRobotsRetrainDocMaxTokens() {
-  int64_t cap = static_cast<int64_t>(std::llround(
-      numberOr(getEnv("AI_ROBOTS_RETRAIN_DOC_MAX_TOKENS", "256"), 256)));
+  int64_t cap = phoenix::resolveConfig<int64_t>("robots.retrain.docMaxTokens", 256, "AI_ROBOTS_RETRAIN_DOC_MAX_TOKENS");
   if (cap < 16)
     cap = 16;
   if (cap > 2000)

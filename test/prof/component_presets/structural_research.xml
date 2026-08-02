@@ -1,0 +1,12 @@
+<components>
+  <component path="pipeline.gnn" enabled="true" />
+  <component path="pipeline.context" enabled="true" />
+  <component path="pipeline.brain.enabled" enabled="true" />
+  <component path="pipeline.brain.profile" value="structural" />
+  <component path="learning.enabled" enabled="true" />
+  <component path="learning.dialog" enabled="true" />
+  <component path="learning.dialogGraphContext" enabled="true" />
+  <component path="collective.routingStorage" enabled="true" />
+  <component path="collective.ignoreMatchingForComputeNodes" enabled="true" />
+  <component path="collective.matching" value="storage-only" />
+</components>
