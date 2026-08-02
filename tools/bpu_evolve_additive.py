@@ -59,6 +59,8 @@ from additive_jpea import (
     MODEL_INPUT_SHAPES,
     MODEL_OUTPUT_SHAPES,
     MODEL_INPUT_NAMES,
+    get_input_shape,
+    get_output_shape,
     build_block,
     export_to_onnx,
 )
@@ -122,8 +124,8 @@ class DataPool:
         self.pool_dir = Path(pool_dir)
         self.model_name = model_name
         self.concept = concept
-        self.input_shape = MODEL_INPUT_SHAPES[model_name]
-        self.output_shape = MODEL_OUTPUT_SHAPES[model_name]
+        self.input_shape = get_input_shape(model_name, concept)
+        self.output_shape = get_output_shape(model_name, concept)
 
     def load(self) -> Tuple[np.ndarray, np.ndarray]:
         inputs_path = self.pool_dir / "inputs.npy"
@@ -136,6 +138,12 @@ class DataPool:
         targets = np.load(targets_path).astype(np.float32)
         if len(inputs) != len(targets):
             raise ValueError("inputs and targets length mismatch in data pool")
+        if inputs.shape[1:] != self.input_shape or targets.shape[1:] != self.output_shape:
+            raise ValueError(
+                f"Data pool shape mismatch: found {inputs.shape[1:]}/{targets.shape[1:]} "
+                f"but expected {self.input_shape}/{self.output_shape}. "
+                f"Regenerate the pool with --concept {self.concept}."
+            )
         return inputs, targets
 
     def sample(self, batch_size: int, round_idx: int, seed: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -392,20 +400,29 @@ class X5Remote:
 def compile_candidate(
     cand_dir: Path,
     model_name: str,
+    concept: int,
     compile_script: Path,
     per_channel: bool,
     calib_type: str,
     run_hb_mapper: Optional[str],
     march: Optional[str] = None,
     timeout: int = 900,
+    skip_compile: bool = False,
 ) -> Optional[Path]:
     onnx_path = cand_dir / "model.onnx"
     calib_dir = cand_dir / "calibration"
     out_dir = cand_dir / "bpu"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if skip_compile:
+        # Local ORT debugging: create a placeholder .bin; the real model.onnx
+        # next to it will be used for evaluation.
+        bin_path = out_dir / f"{model_name}.bin"
+        bin_path.touch()
+        return bin_path
+
     input_name = MODEL_INPUT_NAMES[model_name]
-    input_shape = shape_to_str(MODEL_INPUT_SHAPES[model_name])
+    input_shape = shape_to_str(get_input_shape(model_name, concept))
 
     cmd = [
         "bash",
@@ -520,7 +537,7 @@ def parse_args():
     parser.add_argument("--pool-size", type=int, default=10000)
 
     # Compilation
-    parser.add_argument("--compile-script", default="tools/compile_bpu_jepa_v2.sh")
+    parser.add_argument("--compile-script", default="compile_bpu_jepa_v2.sh")
     parser.add_argument("--run-hb-mapper", default=None)
     parser.add_argument("--march", default=None)
 
@@ -566,7 +583,6 @@ def local_ort_evaluate(
     bin_dir: Path,
     inputs: np.ndarray,
     targets: np.ndarray,
-    model_name: str,
 ) -> Dict[str, dict]:
     """Local ORT fallback that evaluates the ONNX next to each compiled .bin."""
     try:
@@ -591,13 +607,18 @@ def local_ort_evaluate(
                 continue
 
         sess = ort.InferenceSession(str(onnx_path), sess_options, providers=provider)
-        in_name = sess.get_inputs()[0].name
+        input_meta = sess.get_inputs()
+        no_inputs = len(input_meta) == 0
+        in_name = input_meta[0].name if not no_inputs else None
         total = 0.0
         count = 0
         for inp, tgt in zip(inputs, targets):
-            inp = np.asarray(inp, dtype=np.float32)
             tgt = np.asarray(tgt, dtype=np.float32)
-            out = sess.run(None, {in_name: inp})[0]
+            if no_inputs:
+                out = sess.run(None, {})[0]
+            else:
+                inp = np.asarray(inp, dtype=np.float32)
+                out = sess.run(None, {in_name: inp})[0]
             out = out.reshape(-1)
             tgt = tgt.reshape(-1)
             min_len = min(out.size, tgt.size)
@@ -616,6 +637,7 @@ def x5_evaluate(
     x5_work: Path,
     round_dir: Path,
     model_name: str,
+    concept: int,
     input_bin: Path,
     target_bin: Path,
     eval_script: Path,
@@ -626,15 +648,16 @@ def x5_evaluate(
     if not any(eval_bins_dir.glob("*.bin")):
         raise RuntimeError(f"no compiled .bin files in {eval_bins_dir}")
 
-    input_shape = shape_to_str(MODEL_INPUT_SHAPES[model_name])
-    target_shape = shape_to_str(MODEL_OUTPUT_SHAPES[model_name])
+    in_shape = get_input_shape(model_name, concept)
+    out_shape = get_output_shape(model_name, concept)
+    input_shape_str = shape_to_str(in_shape)
+    target_shape_str = shape_to_str(out_shape)
 
     if no_bpu or eval_local:
         # For local ORT we need the original inputs/targets arrays, not the bin files.
-        pool = DataPool(Path(), model_name)  # dummy, used only for shapes
-        inputs = np.fromfile(input_bin, dtype=np.float32).reshape(-1, *MODEL_INPUT_SHAPES[model_name])
-        targets = np.fromfile(target_bin, dtype=np.float32).reshape(-1, *MODEL_OUTPUT_SHAPES[model_name])
-        return local_ort_evaluate(eval_bins_dir, inputs, targets, model_name)
+        inputs = np.fromfile(input_bin, dtype=np.float32).reshape(-1, *in_shape)
+        targets = np.fromfile(target_bin, dtype=np.float32).reshape(-1, *out_shape)
+        return local_ort_evaluate(eval_bins_dir, inputs, targets)
 
     if x5 is None:
         raise RuntimeError("--x5-host required for BPU evaluation (or use --no-bpu / --eval-local)")
@@ -658,8 +681,8 @@ def x5_evaluate(
         f"--bin-dir bins "
         f"--inputs inputs.bin "
         f"--targets targets.bin "
-        f"--input-shape {input_shape} "
-        f"--target-shape {target_shape} "
+        f"--input-shape {input_shape_str} "
+        f"--target-shape {target_shape_str} "
         f"--format bin "
         f"--out {losses_remote}"
     )
@@ -698,12 +721,17 @@ def run_round(
     print(f"[round {round_idx}] batch inputs={inputs.shape} targets={targets.shape}")
 
     # Baseline parent .bin/.onnx (if it exists)
+    skip_compile = args.no_bpu or args.eval_local
     best_bin = work_dir / "best.bin"
     best_onnx = work_dir / "best.onnx"
     if best_bin.is_file():
         shutil.copy(best_bin, eval_bins_dir / "candidate_parent.bin")
         if best_onnx.is_file():
             shutil.copy(best_onnx, eval_bins_dir / "candidate_parent.onnx")
+    elif skip_compile and best_onnx.is_file():
+        # Local ORT debug mode: use the ONNX without a real .bin.
+        (eval_bins_dir / "candidate_parent.bin").touch()
+        shutil.copy(best_onnx, eval_bins_dir / "candidate_parent.onnx")
 
     # Generate lambda candidates
     candidate_dirs: List[Path] = []
@@ -732,11 +760,14 @@ def run_round(
                 compile_candidate,
                 d,
                 args.model_name,
+                args.concept,
                 compile_script,
                 per_channel,
                 calib_type,
                 args.run_hb_mapper,
                 args.march,
+                900,
+                skip_compile,
             ): i
             for i, d in enumerate(candidate_dirs)
         }
@@ -763,6 +794,7 @@ def run_round(
         Path(args.x5_work),
         round_dir,
         args.model_name,
+        args.concept,
         input_bin,
         target_bin,
         eval_script,
@@ -831,11 +863,19 @@ def main() -> int:
 
     compile_script = Path(args.compile_script)
     if not compile_script.is_absolute():
-        compile_script = Path(_TOOLS_DIR) / compile_script
+        # Try relative to CWD, then fall back to the tools directory.
+        cwd_candidate = Path.cwd() / compile_script
+        if cwd_candidate.is_file():
+            compile_script = cwd_candidate
+        else:
+            compile_script = _TOOLS_DIR / compile_script.name
     eval_script = _TOOLS_DIR / "x5_bpu_evaluate.py"
 
     # Data pool preparation (one-shot)
     if args.prepare_synthetic_pool is not None:
+        if not args.data_pool:
+            print("--data-pool is required for --prepare-synthetic-pool", file=sys.stderr)
+            return 1
         pool = DataPool(Path(args.data_pool), args.model_name, args.concept)
         pool.prepare_synthetic(args.prepare_synthetic_pool, args.seed)
         return 0
@@ -892,9 +932,10 @@ def main() -> int:
             state["n_blocks"] = 1
 
         export_to_onnx(model, best_onnx.parent, n_calib=10, source_checkpoint=None, save_pt=True)
-        if best_onnx.parent != work_dir:
-            # export_to_onnx writes to its out_dir; we want best.pt/onnx in work_dir.
+        # export_to_onnx writes model.pt and model.onnx in out_dir; rename to best.*.
+        if (best_onnx.parent / "model.pt").is_file():
             shutil.move(best_onnx.parent / "model.pt", best_pt)
+        if (best_onnx.parent / "model.onnx").is_file():
             shutil.move(best_onnx.parent / "model.onnx", best_onnx)
         save_state(state_path, state)
         print(f"[init] {args.model_name} n_blocks={len(model.blocks)} best.pt -> {best_pt}")

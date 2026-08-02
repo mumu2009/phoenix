@@ -590,6 +590,7 @@
     "configPath": "",
     "llm": {
       "placement": "local",
+      "localBackend": "auto",
       "remoteUrl": "",
       "remoteMethod": "POST",
       "remoteModel": "",
@@ -598,6 +599,7 @@
     },
     "vision": {
       "placement": "local",
+      "localBackend": "auto",
       "remoteUrl": "",
       "remoteMethod": "POST",
       "remoteModel": "",
@@ -606,6 +608,7 @@
     },
     "speech": {
       "placement": "local",
+      "localBackend": "auto",
       "remoteUrl": "",
       "remoteMethod": "POST",
       "remoteModel": "",
