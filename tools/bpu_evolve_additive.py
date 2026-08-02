@@ -560,9 +560,15 @@ def parse_args():
 
 def build_initial_model(args) -> AdditiveResidualModel:
     base = None
-    if args.model_name == "vision_encoder" and args.base_path:
+    if args.model_name == "vision_encoder":
         from additive_jpea import ResNet18Base
-        base = ResNet18Base(concept=args.concept, base_path=args.base_path)
+        # Always start from a pretrained ImageNet ResNet18 for the vision encoder.
+        # If a custom base .pt is supplied, it is loaded on top of that.
+        base = ResNet18Base(
+            concept=args.concept,
+            base_path=args.base_path if args.base_path else None,
+            pretrained=True,
+        )
 
     block_config = {}
     if args.model_name == "speech_decoder":
