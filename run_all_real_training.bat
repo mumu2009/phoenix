@@ -26,7 +26,7 @@ python tools\run_all_additive_training.py ^
     --work-dir /home/kali/phoenix/additive_work/real ^
     --x5-work /home/sunrise/phoenix/evolve_real ^
     --concept 128 ^
-    --pool-size 2000 ^
+    --pool-size 500 ^
     --max-rounds 3 ^
     --lambda 2 ^
     --batch-size 50 ^
