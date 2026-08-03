@@ -5,7 +5,6 @@ remote_phoenix_manager.py
 A single, self-contained Windows 10 Pro / remote training box manager for
 Phoenix.  Supports:
 
-  tune      : search Phoenix runtime or training hyperparameters
   pretrain  : stream-download public image / speech datasets and continue
               self-supervised / contrastive pre-training on GPU
   export    : convert a trained checkpoint to ONNX
@@ -48,9 +47,6 @@ Examples:
   python tools/remote_phoenix_manager.py pretrain --modality image \
       --target-samples 100000000 --target-dim 128 --batch-size 8
 
-  python tools/remote_phoenix_manager.py tune --mode phoenix \
-      --max-evals 20 --benchmark-cmd "python tools/memory_tier_benchmark_v1.py"
-
   python tools/remote_phoenix_manager.py export --modality image \
       --checkpoint runtime_store/models/phoenix_remote/image/best.pth
 
@@ -60,17 +56,14 @@ License: GNU Lesser General Public License v3
 from __future__ import annotations
 
 import argparse
-import copy
 import datetime
 import importlib
 import importlib.util
-import itertools
 import json
 import math
 import os
 import random
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -86,9 +79,7 @@ BUILD_DIR = ROOT / "build"
 RUNTIME_STORE = ROOT / "runtime_store"
 MODEL_DIR = RUNTIME_STORE / "models" / "phoenix_remote"
 STATE_FILE = RUNTIME_STORE / "remote_manager_state.json"
-CHECKPOINT_FILE = RUNTIME_STORE / "remote_tune_checkpoint.json"
 DEFAULT_PHOENIX_JSON = ROOT / "config" / "phoenix.json"
-DEFAULT_SCHEMA = ROOT / "config" / "universal_optimizer_schema.json"
 
 
 # ---------------------------------------------------------------------------
@@ -120,14 +111,6 @@ def dot_path_get(obj: Any, dot_path: str) -> Any:
     return cur
 
 
-def dot_path_set(obj: Any, dot_path: str, value: Any) -> None:
-    cur = obj
-    parts = dot_path.split(".")
-    for part in parts[:-1]:
-        if part not in cur or not isinstance(cur[part], dict):
-            cur[part] = {}
-        cur = cur[part]
-    cur[parts[-1]] = value
 
 
 def human_count(n: float) -> str:
@@ -218,315 +201,6 @@ def load_state() -> dict[str, Any]:
 
 def save_state(state: dict[str, Any]) -> None:
     save_json(STATE_FILE, state)
-
-
-# ---------------------------------------------------------------------------
-# Section A : Hyper-parameter tuning
-# ---------------------------------------------------------------------------
-class Tuner:
-    def __init__(self, args: argparse.Namespace):
-        self.args = args
-
-    def _make_serializable(self, value: Any) -> Any:
-        if isinstance(value, Path):
-            return str(value)
-        if isinstance(value, list):
-            return [self._make_serializable(v) for v in value]
-        if isinstance(value, dict):
-            return {k: self._make_serializable(v) for k, v in value.items()}
-        return value
-
-    def _param_space_from_schema(self, schema: dict[str, Any]) -> dict[str, list[Any]]:
-        flat: dict[str, list[Any]] = {}
-
-        def walk(obj: Any, prefix: str = "") -> None:
-            if isinstance(obj, list):
-                for item in obj:
-                    walk(item, prefix)
-                return
-            if isinstance(obj, dict):
-                if "path" in obj:
-                    path = obj["path"]
-                    typ = obj.get("type", "string")
-                    values: list[Any] = []
-                    if "choices" in obj:
-                        values = list(obj["choices"])
-                    elif typ == "bool":
-                        values = [False, True]
-                    elif typ in ("int", "float"):
-                        mn = obj.get("min")
-                        mx = obj.get("max")
-                        if mn is not None and mx is not None:
-                            steps = obj.get("steps", 5)
-                            if typ == "int":
-                                mn = int(mn)
-                                mx = int(mx)
-                                step = max(1, (mx - mn) // (steps - 1) if steps > 1 else 1)
-                                values = list(range(mn, mx + 1, step))
-                                values = list(sorted(set(values)))
-                            else:
-                                values = [round(mn + (mx - mn) * i / (steps - 1), 6) for i in range(steps)]
-                    if values:
-                        flat[path] = values
-                    return
-                for k, v in obj.items():
-                    walk(v, f"{prefix}.{k}" if prefix else k)
-
-        walk(schema)
-        return flat
-
-    def _space_from_bounds(self, bounds_path: Path) -> dict[str, list[Any]]:
-        data = load_json(bounds_path)
-        space: dict[str, list[Any]] = {}
-        for path, spec in data.items():
-            spec = spec if isinstance(spec, dict) else {"type": spec}
-            typ = spec.get("type", "string")
-            values: list[Any] = []
-            if "values" in spec:
-                values = list(spec["values"])
-            elif "choices" in spec:
-                values = list(spec["choices"])
-            elif typ == "bool":
-                values = [False, True]
-            elif typ in ("int", "float"):
-                mn = spec["min"]
-                mx = spec["max"]
-                steps = spec.get("steps", 8)
-                if typ == "int":
-                    mn = int(mn)
-                    mx = int(mx)
-                    step = max(1, (mx - mn) // (steps - 1) if steps > 1 else 1)
-                    values = list(range(mn, mx + 1, step))
-                    values = list(sorted(set(values)))
-                else:
-                    values = [round(mn + (mx - mn) * i / (steps - 1), 6) for i in range(steps)]
-            if values:
-                space[path] = values
-        return space
-
-    def _sample_point(self, space: dict[str, list[Any]]) -> dict[str, Any]:
-        return {k: random.choice(v) for k, v in space.items()}
-
-    def _make_grid_points(self, space: dict[str, list[Any]]) -> list[dict[str, Any]]:
-        keys = list(space.keys())
-        value_lists = [space[k] for k in keys]
-        return [dict(zip(keys, combo)) for combo in itertools.product(*value_lists)]
-
-    def _materialize_config(self, point: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
-        cfg = copy.deepcopy(base)
-        for dot_path, value in point.items():
-            dot_path_set(cfg, dot_path, value)
-        return cfg
-
-    def _render_command(self, template: str, point: dict[str, Any], report_path: Path) -> str:
-        out = template
-        for k, v in point.items():
-            out = out.replace(f"{{{{{k}}}}}", str(v))
-        out = out.replace("{{report}}", str(report_path))
-        return out
-
-    def _parse_metric(self, metric_spec: str, work_dir: Path) -> Optional[float]:
-        if metric_spec.startswith("stdout:") or metric_spec.startswith("stderr:"):
-            stream, pattern = metric_spec.split(":", 1)
-            log_path = work_dir / f"{stream}.txt"
-            if not log_path.exists():
-                return None
-            text = log_path.read_text(encoding="utf-8", errors="ignore")
-            compiled = re.compile(pattern)
-            for line in reversed(text.splitlines()):
-                m = compiled.search(line)
-                if m:
-                    try:
-                        return float(m.group(1))
-                    except (IndexError, ValueError):
-                        return None
-            return None
-
-        if ":" in metric_spec:
-            file_part, key_path = metric_spec.rsplit(":", 1)
-        else:
-            file_part, key_path = metric_spec, "score"
-        if Path(file_part).is_absolute():
-            json_path = Path(file_part)
-        else:
-            candidates = [work_dir / file_part, ROOT / file_part]
-            json_path = next((p for p in candidates if p.exists()), candidates[0])
-        if not json_path.exists():
-            return None
-        try:
-            data = load_json(json_path)
-            return float(dot_path_get(data, key_path))
-        except Exception:
-            return None
-
-    def _run_benchmark(self, cmd: list[str], timeout: float, work_dir: Path, env: dict[str, str]) -> dict[str, Any]:
-        start = time.time()
-        stdout_path = work_dir / "stdout.txt"
-        stderr_path = work_dir / "stderr.txt"
-        proc = subprocess.Popen(
-            cmd,
-            cwd=ROOT,
-            stdout=stdout_path.open("w", encoding="utf-8"),
-            stderr=stderr_path.open("w", encoding="utf-8"),
-            env=env,
-        )
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-        return {
-            "returncode": proc.returncode,
-            "duration": time.time() - start,
-            "stdout_path": str(stdout_path),
-            "stderr_path": str(stderr_path),
-        }
-
-    def _is_better(self, metric: float, best: Optional[float], direction: str) -> bool:
-        if best is None:
-            return True
-        return metric < best if direction == "min" else metric > best
-
-    def run(self) -> int:
-        args = self.args
-        _ensure_core_deps()
-        BUILD_DIR.mkdir(parents=True, exist_ok=True)
-        random.seed(args.seed)
-
-        if args.param_space:
-            space = self._space_from_bounds(args.param_space)
-        else:
-            schema = load_json(DEFAULT_SCHEMA)
-            space = self._param_space_from_schema(schema)
-        if not space:
-            print("[tune] no tunable parameters found; exiting", file=sys.stderr)
-            return 1
-
-        print(f"[tune] parameter space: {len(space)} dimensions", flush=True)
-        for k, v in sorted(space.items()):
-            print(f"  {k}: {v[:5]}{'...' if len(v) > 5 else ''}", flush=True)
-
-        if args.strategy == "grid":
-            candidates = self._make_grid_points(space)
-            if len(candidates) > args.max_evals:
-                random.shuffle(candidates)
-                candidates = candidates[:args.max_evals]
-        else:
-            seen: set[str] = set()
-            candidates = []
-            attempts = 0
-            while len(candidates) < args.max_evals and attempts < args.max_evals * 1000:
-                attempts += 1
-                p = self._sample_point(space)
-                sig = json.dumps(p, sort_keys=True, ensure_ascii=False)
-                if sig in seen:
-                    continue
-                seen.add(sig)
-                candidates.append(p)
-
-        serial_args = self._make_serializable(vars(args))
-        state: dict[str, Any] = {"args": serial_args, "evaluated": [], "best": None}
-        if args.resume and CHECKPOINT_FILE.exists():
-            old = load_json(CHECKPOINT_FILE)
-            if old.get("args") == serial_args:
-                state = old
-                print(f"[tune] resumed {len(state['evaluated'])} prior evaluations", flush=True)
-
-        base_config: dict[str, Any] = {}
-        backup_path = BUILD_DIR / "phoenix.json.bak"
-        if args.mode == "phoenix" and args.base_config.exists():
-            base_config = load_json(args.base_config)
-            if not backup_path.exists():
-                save_json(backup_path, base_config)
-                print(f"[tune] backed up {DEFAULT_PHOENIX_JSON}", flush=True)
-
-        env = os.environ.copy()
-        for kv in args.env:
-            if "=" in kv:
-                k, v = kv.split("=", 1)
-                env[k] = v
-
-        evaluated_sigs = {json.dumps(e["point"], sort_keys=True, ensure_ascii=False) for e in state["evaluated"]}
-
-        for i, point in enumerate(candidates, start=1):
-            sig = json.dumps(point, sort_keys=True, ensure_ascii=False)
-            if sig in evaluated_sigs:
-                print(f"[tune] trial {i}/{len(candidates)} already evaluated, skipping", flush=True)
-                continue
-            print(f"\n[tune] trial {i}/{len(candidates)}: {point}", flush=True)
-
-            work_dir = BUILD_DIR / f"tune_trial_{i:04d}_{int(time.time()*1000)}"
-            work_dir.mkdir(parents=True, exist_ok=True)
-
-            if args.mode == "phoenix":
-                cfg = self._materialize_config(point, base_config)
-                save_json(DEFAULT_PHOENIX_JSON, cfg)
-                if not args.benchmark_cmd:
-                    print("[tune] --benchmark-cmd required in phoenix mode", file=sys.stderr)
-                    return 1
-                cmd = shlex.split(args.benchmark_cmd)
-            else:
-                if not args.command_template:
-                    print("[tune] --command-template required in command mode", file=sys.stderr)
-                    return 1
-                report_path = work_dir / "last_report.json"
-                rendered = self._render_command(args.command_template, point, report_path)
-                cmd = shlex.split(rendered)
-
-            # simple cleanup of previous benchmark if it spawns a Phoenix server
-            for name in ("phoenix_main", "llama-server"):
-                try:
-                    subprocess.run(["taskkill", "/F", "/IM", f"{name}.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10)
-                except Exception:
-                    pass
-
-            result = self._run_benchmark(cmd, args.timeout, work_dir, env)
-            metric = self._parse_metric(args.metric, work_dir)
-            print(f"[tune] trial {i} rc={result['returncode']} dur={result['duration']:.1f}s metric={metric}", flush=True)
-
-            record = {
-                "trial": i,
-                "point": point,
-                "metric": metric,
-                "returncode": result["returncode"],
-                "duration": result["duration"],
-                "work_dir": str(work_dir),
-            }
-            state["evaluated"].append(record)
-
-            if metric is not None and self._is_better(metric, state["best"]["metric"] if state["best"] else None, args.direction):
-                state["best"] = record
-                if args.mode == "phoenix":
-                    best_cfg = self._materialize_config(point, base_config)
-                    save_json(args.output_config, best_cfg)
-                else:
-                    save_json(args.output_config, {"point": point, "metric": metric})
-                print(f"[tune] new best: {metric} at trial {i}", flush=True)
-
-            evaluated_sigs.add(sig)
-            save_json(CHECKPOINT_FILE, state)
-
-        if state["best"]:
-            best = state["best"]
-            print(f"\n[tune] best trial: {best['trial']} metric={best['metric']} point={best['point']}", flush=True)
-            if args.mode == "phoenix":
-                best_cfg = self._materialize_config(best["point"], base_config)
-                save_json(args.output_config, best_cfg)
-                if not args.no_apply:
-                    save_json(DEFAULT_PHOENIX_JSON, best_cfg)
-                    print(f"[tune] applied best config to {DEFAULT_PHOENIX_JSON}", flush=True)
-                elif backup_path.exists():
-                    save_json(DEFAULT_PHOENIX_JSON, load_json(backup_path))
-                    print(f"[tune] restored original {DEFAULT_PHOENIX_JSON} (--no-apply)", flush=True)
-            else:
-                save_json(args.output_config, {"point": best["point"], "metric": best["metric"]})
-        else:
-            if args.mode == "phoenix" and backup_path.exists():
-                save_json(DEFAULT_PHOENIX_JSON, load_json(backup_path))
-            print("[tune] no successful evaluation", file=sys.stderr)
-            return 1
-
-        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1041,24 +715,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Remote Phoenix manager (single-file Windows/GPU)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    # tune
-    p_tune = sub.add_parser("tune", help="hyper-parameter tuning")
-    p_tune.add_argument("--param-space", type=Path, default=None)
-    p_tune.add_argument("--mode", choices=["phoenix", "command"], default="phoenix")
-    p_tune.add_argument("--base-config", type=Path, default=DEFAULT_PHOENIX_JSON)
-    p_tune.add_argument("--output-config", type=Path, default=ROOT / "config" / "phoenix_tuned.json")
-    p_tune.add_argument("--command-template", type=str, default=None)
-    p_tune.add_argument("--benchmark-cmd", type=str, default=None)
-    p_tune.add_argument("--metric", type=str, default="build/tune_report.json:score")
-    p_tune.add_argument("--max-evals", type=int, default=12)
-    p_tune.add_argument("--strategy", choices=["random", "grid"], default="random")
-    p_tune.add_argument("--direction", choices=["min", "max"], default="min")
-    p_tune.add_argument("--timeout", type=float, default=1800)
-    p_tune.add_argument("--seed", type=int, default=42)
-    p_tune.add_argument("--no-apply", action="store_true")
-    p_tune.add_argument("--resume", action="store_true")
-    p_tune.add_argument("--env", action="append", default=[])
-
     # pretrain
     p_pre = sub.add_parser("pretrain", help="stream data and continue pre-training on GPU")
     p_pre.add_argument("--modality", choices=["image", "speech"], required=True)
@@ -1092,8 +748,6 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    if args.cmd == "tune":
-        return Tuner(args).run()
     if args.cmd == "pretrain":
         args.target_samples = parse_sample_count(args.target_samples)
         if args.sources:
