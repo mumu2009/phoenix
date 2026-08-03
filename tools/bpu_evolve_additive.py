@@ -404,6 +404,7 @@ def compile_candidate(
     model_name: str,
     concept: int,
     compile_script: Path,
+    compile_backend: str,
     per_channel: bool,
     calib_type: str,
     run_hb_mapper: Optional[str],
@@ -426,25 +427,22 @@ def compile_candidate(
     input_name = MODEL_INPUT_NAMES[model_name]
     input_shape = shape_to_str(get_input_shape(model_name, concept))
 
-    cmd = [
-        "bash",
-        str(compile_script),
-        "--model-name",
-        model_name,
-        "--onnx",
-        str(onnx_path),
-        "--calib-dir",
-        str(calib_dir),
-        "--input-name",
-        input_name,
-        "--input-shape",
-        input_shape,
-        "--out-dir",
-        str(out_dir),
-        "--per-channel",
-        str(per_channel),
-        "--calib-type",
-        calib_type,
+    # Use python3 for .py compile scripts, bash for .sh.
+    if compile_script.suffix == ".py":
+        runner = ["python3", str(compile_script)]
+    else:
+        runner = ["bash", str(compile_script)]
+
+    cmd = runner + [
+        "--backend", compile_backend,
+        "--model-name", model_name,
+        "--onnx", str(onnx_path),
+        "--calib-dir", str(calib_dir),
+        "--input-name", input_name,
+        "--input-shape", input_shape,
+        "--out-dir", str(out_dir),
+        "--per-channel", str(per_channel),
+        "--calib-type", calib_type,
     ]
     if march:
         cmd += ["--march", march]
@@ -469,7 +467,10 @@ def compile_candidate(
         return None
 
     bin_path = out_dir / f"{model_name}.bin"
-    return bin_path if bin_path.is_file() else None
+    if bin_path.is_file():
+        return bin_path
+    onnx_path = out_dir / f"{model_name}.onnx"
+    return onnx_path if onnx_path.is_file() else None
 
 
 def compile_model_pt_to_onnx(
@@ -539,16 +540,20 @@ def parse_args():
     parser.add_argument("--pool-size", type=int, default=10000)
 
     # Compilation
-    parser.add_argument("--compile-script", default="compile_bpu_jepa_v2.sh")
+    parser.add_argument("--compile-script", default="compile_bpu_docker.sh")
+    parser.add_argument("--compile-backend", default="horizon_bpu",
+                        help="Target compile backend (horizon_bpu, rockchip_rknn, nvidia_tensorrt)")
     parser.add_argument("--run-hb-mapper", default=None)
     parser.add_argument("--march", default=None)
 
-    # X5 evaluation
+    # Edge-device evaluation
+    parser.add_argument("--eval-script", default="x5_bpu_evaluate.py",
+                        help="Remote evaluation script to push and run")
     parser.add_argument("--x5-host", default=None)
     parser.add_argument("--x5-user", default=None)
     parser.add_argument("--x5-pass", default=None)
     parser.add_argument("--x5-port", type=int, default=22)
-    parser.add_argument("--x5-work", default="/home/sunrise/phoenix/evolve_additive")
+    parser.add_argument("--x5-work", default="/tmp/phoenix_evolve_real")
     parser.add_argument("--eval-local", action="store_true", help="Evaluate on local CPU with onnxruntime")
     parser.add_argument(
         "--no-bpu",
@@ -604,18 +609,27 @@ def local_ort_evaluate(
     sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     provider = ["CPUExecutionProvider"]
 
-    for bin_path in sorted(bin_dir.glob("*.bin")):
-        onnx_path = bin_path.with_suffix(".onnx")
-        if not onnx_path.is_file():
-            # Try candidate ONNX directory.
-            candidate_onnx = bin_path.parent.parent / "model.onnx"
-            if candidate_onnx.is_file():
-                onnx_path = candidate_onnx
-            else:
-                results[bin_path.name] = {"loss": float("inf"), "ok": False, "error": "ONNX not found"}
-                continue
+    # Evaluate both .bin (BPU) and .onnx (ORT/RKNN/TensorRT fallback) artifacts.
+    artifacts = sorted(bin_dir.glob("*.bin")) + sorted(bin_dir.glob("*.onnx"))
+    for model_path in artifacts:
+        if model_path.suffix == ".bin":
+            # For BPU .bin we need the corresponding ONNX for ORT.
+            onnx_path = model_path.with_suffix(".onnx")
+            if not onnx_path.is_file():
+                candidate_onnx = model_path.parent.parent / "model.onnx"
+                if candidate_onnx.is_file():
+                    onnx_path = candidate_onnx
+                else:
+                    results[model_path.name] = {"loss": float("inf"), "ok": False, "error": "ONNX not found"}
+                    continue
+            model_path = onnx_path
 
-        sess = ort.InferenceSession(str(onnx_path), sess_options, providers=provider)
+        try:
+            sess = ort.InferenceSession(str(model_path), sess_options, providers=provider)
+        except Exception as e:
+            results[model_path.name] = {"loss": float("inf"), "ok": False, "error": str(e)}
+            continue
+
         input_meta = sess.get_inputs()
         no_inputs = len(input_meta) == 0
         in_name = input_meta[0].name if not no_inputs else None
@@ -636,8 +650,8 @@ def local_ort_evaluate(
             total += float(np.mean((out - tgt) ** 2))
             count += 1
         loss = total / count if count else float("inf")
-        results[bin_path.name] = {"loss": loss, "ok": True}
-        print(f"[local-ort] {bin_path.name}: loss={loss:.6f}")
+        results[model_path.name] = {"loss": loss, "ok": True}
+        print(f"[local-ort] {model_path.name}: loss={loss:.6f}")
     return results
 
 
@@ -654,8 +668,8 @@ def x5_evaluate(
     no_bpu: bool,
 ) -> Dict[str, dict]:
     eval_bins_dir = round_dir / "eval_bins"
-    if not any(eval_bins_dir.glob("*.bin")):
-        raise RuntimeError(f"no compiled .bin files in {eval_bins_dir}")
+    if not any(eval_bins_dir.glob("*.bin")) and not any(eval_bins_dir.glob("*.onnx")):
+        raise RuntimeError(f"no compiled .bin or .onnx files in {eval_bins_dir}")
 
     in_shape = get_input_shape(model_name, concept)
     out_shape = get_output_shape(model_name, concept)
@@ -677,16 +691,17 @@ def x5_evaluate(
     x5_bins = x5_round / "bins"
     x5.mkdir(x5_bins)
 
-    # Upload bin files
-    for bin_path in sorted(eval_bins_dir.glob("*.bin")):
-        x5.put(bin_path, x5_bins / bin_path.name)
+    # Upload compiled artifacts (.bin for BPU, .onnx for ORT/RKNN/TensorRT)
+    for artifact in sorted(eval_bins_dir.glob("*.bin")) + sorted(eval_bins_dir.glob("*.onnx")):
+        x5.put(artifact, x5_bins / artifact.name)
     x5.put(input_bin, x5_round / "inputs.bin")
     x5.put(target_bin, x5_round / "targets.bin")
-    x5.put(eval_script, x5_round / "x5_bpu_evaluate.py")
+    eval_name = eval_script.name
+    x5.put(eval_script, x5_round / eval_name)
 
     losses_remote = x5_round / "losses.json"
     cmd = (
-        f"cd {x5_round} && python3 x5_bpu_evaluate.py "
+        f"cd {x5_round} && python3 {eval_name} "
         f"--bin-dir bins "
         f"--inputs inputs.bin "
         f"--targets targets.bin "
@@ -773,6 +788,7 @@ def run_round(
                 args.model_name,
                 args.concept,
                 compile_script,
+                args.compile_backend,
                 per_channel,
                 calib_type,
                 args.run_hb_mapper,
@@ -786,16 +802,17 @@ def run_round(
             i = futures[future]
             bin_path = future.result()
             if bin_path is not None:
-                shutil.copy(bin_path, eval_bins_dir / f"candidate_{i:04d}.bin")
+                suffix = bin_path.suffix
+                shutil.copy(bin_path, eval_bins_dir / f"candidate_{i:04d}{suffix}")
                 cand_onnx = candidate_dirs[i] / "model.onnx"
-                if cand_onnx.is_file():
+                if cand_onnx.is_file() and suffix != ".onnx":
                     shutil.copy(cand_onnx, eval_bins_dir / f"candidate_{i:04d}.onnx")
 
-    missing = [i for i, d in enumerate(candidate_dirs) if not (eval_bins_dir / f"candidate_{i:04d}.bin").is_file()]
+    missing = [i for i, d in enumerate(candidate_dirs) if not any(eval_bins_dir.glob(f"candidate_{i:04d}.*"))]
     if missing:
         print(f"[warn] round {round_idx}: candidates {missing} failed to compile")
 
-    if not any(eval_bins_dir.glob("candidate_*.bin")):
+    if not any(eval_bins_dir.glob("candidate_*.bin")) and not any(eval_bins_dir.glob("candidate_*.onnx")):
         print(f"[error] no candidates compiled for round {round_idx}; skipping")
         return model, state
 
@@ -821,10 +838,15 @@ def run_round(
     best_loss = results[best_key].get("loss", float("inf"))
     print(f"[round {round_idx}] best={best_key} loss={best_loss:.6f}")
 
-    parent_loss = results.get("candidate_parent.bin", {}).get("loss", float("inf"))
+    parent_key = None
+    for k in results:
+        if k.startswith("candidate_parent"):
+            parent_key = k
+            break
+    parent_loss = results.get(parent_key, {}).get("loss", float("inf")) if parent_key else float("inf")
     new_block_added = False
 
-    if best_key == "candidate_parent.bin":
+    if best_key == parent_key:
         # Keep existing best
         print(f"[round {round_idx}] parent retained (loss {best_loss:.6f})")
         state["best_loss"] = best_loss
@@ -834,7 +856,14 @@ def run_round(
         # Promote candidate to best
         shutil.copy(cand_dir / "model.pt", work_dir / "best.pt")
         shutil.copy(cand_dir / "model.onnx", work_dir / "best.onnx")
-        shutil.copy(eval_bins_dir / best_key, work_dir / "best.bin")
+        best_artifact = eval_bins_dir / best_key
+        if best_artifact.suffix == ".onnx":
+            shutil.copy(best_artifact, work_dir / "best.onnx")
+        else:
+            shutil.copy(best_artifact, work_dir / "best.bin")
+        # Keep an ONNX copy next to best.bin when possible.
+        if cand_dir.joinpath("model.onnx").is_file() and not (work_dir / "best.onnx").is_file():
+            shutil.copy(cand_dir / "model.onnx", work_dir / "best.onnx")
         model = AdditiveResidualModel.from_checkpoint(work_dir / "best.pt")
         new_block_added = True
         state["best_loss"] = best_loss
@@ -880,7 +909,9 @@ def main() -> int:
             compile_script = cwd_candidate
         else:
             compile_script = _TOOLS_DIR / compile_script.name
-    eval_script = _TOOLS_DIR / "x5_bpu_evaluate.py"
+    eval_script = Path(args.eval_script)
+    if not eval_script.is_absolute():
+        eval_script = _TOOLS_DIR / eval_script.name
 
     # Data pool preparation (one-shot)
     if args.prepare_synthetic_pool is not None:

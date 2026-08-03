@@ -27,6 +27,11 @@ import sys
 import time
 from pathlib import Path, PurePosixPath
 
+# Add project root to path so we can import tools.edge_device_manager
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from tools.edge_device_manager import load_edge_device, _resolve_config_path
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 KALI_DEFAULTS = {
@@ -55,6 +60,8 @@ KALI_FILES = [
     "tools/export_additive_jpea.py",
     "tools/compile_bpu_jepa_v2.sh",
     "tools/compile_bpu_docker.sh",
+    "tools/compile_target_model.py",
+    "tools/edge_device_manager.py",
     "tools/run_hb_mapper.py",
     "tools/hb_mapper_patch.py",
     "tools/x5_bpu_evaluate.py",
@@ -71,11 +78,19 @@ def parse_args():
     parser.add_argument("--kali-user", default=KALI_DEFAULTS["user"])
     parser.add_argument("--kali-pass", default=KALI_DEFAULTS["pass"])
     parser.add_argument("--kali-repo-path", default=KALI_DEFAULTS["repo_path"])
-    parser.add_argument("--x5-host", default=X5_DEFAULTS["host"])
-    parser.add_argument("--x5-user", default=X5_DEFAULTS["user"])
-    parser.add_argument("--x5-pass", default=X5_DEFAULTS["pass"])
-    parser.add_argument("--x5-port", type=int, default=22)
-    parser.add_argument("--x5-work", default=X5_DEFAULTS["work"])
+    parser.add_argument("--x5-host", default=None)
+    parser.add_argument("--x5-user", default=None)
+    parser.add_argument("--x5-pass", default=None)
+    parser.add_argument("--x5-port", type=int, default=None)
+    parser.add_argument("--x5-work", default=None)
+    parser.add_argument("--edge-device", default=None,
+                        help="Device name from config/edge_devices.json")
+    parser.add_argument("--edge-device-config", default=None,
+                        help="Path to edge device config (default: config/edge_devices.json)")
+    parser.add_argument("--compile-backend", default=None,
+                        help="Override compile backend (horizon_bpu, rockchip_rknn, nvidia_tensorrt)")
+    parser.add_argument("--eval-script", default=None,
+                        help="Override remote evaluation script")
 
     parser.add_argument(
         "--models",
@@ -318,7 +333,9 @@ def start_evolution(c, model, pool_dir, args):
         "--x5-pass", args.x5_pass,
         "--x5-port", str(args.x5_port),
         "--x5-work", x5_work,
-        "--compile-script", "tools/compile_bpu_docker.sh",
+        "--compile-script", "tools/compile_target_model.py",
+        "--compile-backend", args.compile_backend,
+        "--eval-script", args.eval_script,
         "--max-rounds", str(args.max_rounds),
         "--lambda", str(args.lambda_),
         "--batch-size", str(batch_size),
@@ -346,6 +363,32 @@ def tail_log(c, log, n=30):
     return out
 
 
+def resolve_edge_device(args):
+    """If --edge-device is given, load its config and fill in x5_* fields."""
+    if not args.edge_device:
+        return
+    try:
+        dev = load_edge_device(args.edge_device, config_path=args.edge_device_config)
+    except FileNotFoundError:
+        print(f"[error] edge device config not found: {_resolve_config_path()}", file=sys.stderr)
+        print("        Copy config/edge_devices.example.json to config/edge_devices.json", file=sys.stderr)
+        sys.exit(1)
+    if args.x5_host is None:
+        args.x5_host = dev.cfg.get("host")
+    if args.x5_port is None:
+        args.x5_port = dev.cfg.get("port", 22)
+    if args.x5_user is None:
+        args.x5_user = dev.cfg.get("user")
+    if args.x5_pass is None:
+        args.x5_pass = dev.password
+    if args.x5_work is None:
+        args.x5_work = dev.cfg.get("work_dir", "/root/phoenix/evolve_real")
+    if args.compile_backend is None:
+        args.compile_backend = dev.cfg.get("compile_backend", "horizon_bpu")
+    if args.eval_script is None:
+        args.eval_script = dev.cfg.get("eval_script", "x5_bpu_evaluate.py")
+
+
 def is_running(c, pid):
     out = run_kali(c, f"ps -p {pid} -o pid 2>/dev/null | tail -n +2", timeout=10)
     return bool(out.strip())
@@ -353,6 +396,7 @@ def is_running(c, pid):
 
 def main() -> int:
     args = parse_args()
+    resolve_edge_device(args)
     models = [m.strip() for m in args.models.split(",") if m.strip()]
 
     if not args.no_local_build:
