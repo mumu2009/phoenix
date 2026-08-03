@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 chcp 65001 >nul
 cd /d "%~dp0"
 
@@ -14,7 +14,7 @@ cd /d "%~dp0"
 :: config/edge_devices.env and set PHOENIX_EDGE_PASS.
 
 if exist "config\edge_devices.env" (
-    for /f "usebackq tokens=1,* delims==" %%a in ("config\edge_devices.env") do (
+    for /f "usebackq tokens=1,* delims==" %%a in (`findstr /r /c:"^[^#].*=.*" "config\edge_devices.env"`) do (
         set "%%a=%%b"
     )
 )
