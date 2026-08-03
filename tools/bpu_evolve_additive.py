@@ -565,6 +565,11 @@ def parse_args():
     )
 
     parser.add_argument("--keep-candidates", action="store_true")
+    parser.add_argument(
+        "--keep-rounds",
+        action="store_true",
+        help="Keep per-round eval_bins/eval_data and X5 round directories (default: prune to save space)",
+    )
     return parser.parse_args()
 
 
@@ -690,9 +695,15 @@ def x5_evaluate(
 
     x5.mkdir(x5_work)
     x5_round = x5_work / round_dir.name
-    # Remove any stale files from a previous (interrupted) run so the
-    # evaluator does not pick up leftover .bin files from a different lambda.
-    x5.exec(f"rm -rf {x5_round}")
+    # Remove any stale files from previous (interrupted) runs so the
+    # evaluator does not pick up leftover .bin files and disk does not fill.
+    clean_cmd = f"rm -rf {x5_work}/round_*"
+    rc_clean, out_clean, err_clean = x5.exec(clean_cmd, timeout=300)
+    if rc_clean != 0:
+        print(
+            f"[warn] X5 pre-round cleanup failed: rc={rc_clean} err={err_clean.strip()}",
+            file=sys.stderr,
+        )
     x5.mkdir(x5_round)
     x5_bins = x5_round / "bins"
     x5.mkdir(x5_bins)
@@ -724,8 +735,31 @@ def x5_evaluate(
 
     local_json = round_dir / "losses.json"
     x5.get(losses_remote, local_json)
+
+    # Free X5 disk immediately; the next round also cleans stale rounds, but
+    # doing it here prevents accumulation if the process crashes before the
+    # next round starts.
+    post_clean_cmd = f"rm -rf {x5_round}"
+    rc_post, out_post, err_post = x5.exec(post_clean_cmd, timeout=300)
+    if rc_post != 0:
+        print(
+            f"[warn] X5 post-round cleanup failed: rc={rc_post} err={err_post.strip()}",
+            file=sys.stderr,
+        )
+
     with open(local_json, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def prune_eval_artifacts(round_dir: Path) -> None:
+    """Remove per-round compiled/evaluation artifacts that are no longer needed."""
+    for sub in ("eval_bins", "eval_data"):
+        p = round_dir / sub
+        if p.exists():
+            try:
+                shutil.rmtree(p)
+            except Exception as exc:
+                print(f"[warn] failed to prune {p}: {exc}", file=sys.stderr)
 
 
 def run_round(
@@ -901,6 +935,10 @@ def run_round(
             except Exception:
                 pass
 
+    if not args.keep_rounds:
+        # Compiled/eval artifacts are copied to best.* or kept in losses.json.
+        prune_eval_artifacts(round_dir)
+
     return model, state
 
 
@@ -1009,6 +1047,13 @@ def main() -> int:
             print(f"[round {round_idx}] elapsed {time.time() - t0:.1f}s")
     finally:
         if x5:
+            try:
+                if not args.keep_rounds:
+                    # Best artifacts are already copied back to Kali; the X5
+                    # work directory only contains temporary eval files.
+                    x5.exec(f"rm -rf {Path(args.x5_work)}/{args.model_name}/round_*", timeout=300)
+            except Exception as exc:
+                print(f"[warn] X5 final cleanup failed: {exc}", file=sys.stderr)
             x5.close()
 
     print(f"\n[done] best_loss={state['best_loss']:.6f} n_blocks={state['n_blocks']}")
