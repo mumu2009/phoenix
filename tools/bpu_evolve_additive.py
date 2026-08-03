@@ -45,6 +45,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
+from vboxsf_safe import safe_copy, safe_tofile
+
 # Allow importing additive_jpea.py from the tools directory.
 _TOOLS_DIR = Path(__file__).resolve().parent
 if str(_TOOLS_DIR) not in sys.path:
@@ -166,8 +168,8 @@ class DataPool:
         out_dir.mkdir(parents=True, exist_ok=True)
         inp_path = out_dir / f"round_{round_idx:04d}_inputs.bin"
         tgt_path = out_dir / f"round_{round_idx:04d}_targets.bin"
-        inputs.astype(np.float32).tofile(inp_path)
-        targets.astype(np.float32).tofile(tgt_path)
+        safe_tofile(inputs, inp_path)
+        safe_tofile(targets, tgt_path)
         return inp_path, tgt_path
 
     def prepare_synthetic(self, n: int, seed: int = 0):
@@ -367,6 +369,7 @@ class X5Remote:
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         self.client.connect(self.host, port=self.port, username=self.user, password=self.password, timeout=self.timeout)
+        self.client.get_transport().set_keepalive(30)
         self.sftp = self.client.open_sftp()
 
     def close(self):
@@ -687,6 +690,9 @@ def x5_evaluate(
 
     x5.mkdir(x5_work)
     x5_round = x5_work / round_dir.name
+    # Remove any stale files from a previous (interrupted) run so the
+    # evaluator does not pick up leftover .bin files from a different lambda.
+    x5.exec(f"rm -rf {x5_round}")
     x5.mkdir(x5_round)
     x5_bins = x5_round / "bins"
     x5.mkdir(x5_bins)
@@ -751,13 +757,13 @@ def run_round(
     best_bin = work_dir / "best.bin"
     best_onnx = work_dir / "best.onnx"
     if best_bin.is_file():
-        shutil.copy(best_bin, eval_bins_dir / "candidate_parent.bin")
+        safe_copy(best_bin, eval_bins_dir / "candidate_parent.bin")
         if best_onnx.is_file():
-            shutil.copy(best_onnx, eval_bins_dir / "candidate_parent.onnx")
+            safe_copy(best_onnx, eval_bins_dir / "candidate_parent.onnx")
     elif skip_compile and best_onnx.is_file():
         # Local ORT debug mode: use the ONNX without a real .bin.
         (eval_bins_dir / "candidate_parent.bin").touch()
-        shutil.copy(best_onnx, eval_bins_dir / "candidate_parent.onnx")
+        safe_copy(best_onnx, eval_bins_dir / "candidate_parent.onnx")
 
     # Generate lambda candidates
     candidate_dirs: List[Path] = []
@@ -803,10 +809,10 @@ def run_round(
             bin_path = future.result()
             if bin_path is not None:
                 suffix = bin_path.suffix
-                shutil.copy(bin_path, eval_bins_dir / f"candidate_{i:04d}{suffix}")
+                safe_copy(bin_path, eval_bins_dir / f"candidate_{i:04d}{suffix}")
                 cand_onnx = candidate_dirs[i] / "model.onnx"
                 if cand_onnx.is_file() and suffix != ".onnx":
-                    shutil.copy(cand_onnx, eval_bins_dir / f"candidate_{i:04d}.onnx")
+                    safe_copy(cand_onnx, eval_bins_dir / f"candidate_{i:04d}.onnx")
 
     missing = [i for i, d in enumerate(candidate_dirs) if not any(eval_bins_dir.glob(f"candidate_{i:04d}.*"))]
     if missing:
@@ -854,18 +860,18 @@ def run_round(
         idx = int(best_key.split("_")[1].split(".")[0])
         cand_dir = candidate_dirs[idx]
         # Promote candidate to best
-        shutil.copy(cand_dir / "model.pt", work_dir / "best.pt")
-        shutil.copy(cand_dir / "model.onnx", work_dir / "best.onnx")
+        safe_copy(cand_dir / "model.pt", work_dir / "best.pt")
+        safe_copy(cand_dir / "model.onnx", work_dir / "best.onnx")
         best_artifact = eval_bins_dir / best_key
         suffix = best_artifact.suffix
         # Copy the native compiled artifact (.bin / .rknn / .trt / .onnx).
         if suffix in (".bin", ".rknn", ".trt", ".onnx"):
-            shutil.copy(best_artifact, work_dir / f"best{suffix}")
+            safe_copy(best_artifact, work_dir / f"best{suffix}")
         # Always keep an ONNX fallback.
         if (work_dir / "best.onnx").is_file():
             pass
         elif cand_dir.joinpath("model.onnx").is_file():
-            shutil.copy(cand_dir / "model.onnx", work_dir / "best.onnx")
+            safe_copy(cand_dir / "model.onnx", work_dir / "best.onnx")
         model = AdditiveResidualModel.from_checkpoint(work_dir / "best.pt")
         new_block_added = True
         state["best_loss"] = best_loss

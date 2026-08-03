@@ -101,6 +101,7 @@ def main():
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
         client.connect(args.kali_host, username=args.kali_user, password=args.kali_pass, timeout=30)
+        client.get_transport().set_keepalive(30)
     except Exception as e:
         print(f"[tunnel] failed to connect to Kali: {e}", file=sys.stderr, flush=True)
         sys.exit(1)

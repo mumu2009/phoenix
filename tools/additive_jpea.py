@@ -12,6 +12,7 @@ RDK X5 BPU using MSE on a fresh batch from a local data pool.
 """
 
 import argparse
+import io
 import json
 import math
 import os
@@ -20,6 +21,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+from vboxsf_safe import safe_tofile, safe_write_bytes
 import torch.nn as nn
 
 CONCEPT = 128
@@ -435,8 +438,7 @@ def write_calibration(
     rng = np.random.default_rng(42)
     for i in range(count):
         arr = rng.normal(mean, scale, size=shape).astype(np.float32)
-        with open(calib_dir / f"cal_{i:04d}.bin", "wb") as f:
-            f.write(struct.pack(f"<{numel}f", *arr.flatten()))
+        safe_tofile(arr, calib_dir / f"cal_{i:04d}.bin")
     print(f"[calibration] wrote {count} samples to {calib_dir}")
     return calib_dir
 
@@ -486,16 +488,24 @@ def export_to_onnx(
 
     with torch.no_grad():
         dummy = get_dummy_input(model.model_name, model.concept)
+        # Some VirtualBox shared folders (vboxsf) return invalid lengths from
+        # raw write() for large single writes.  Export to a BytesIO first and
+        # then flush the bytes to disk in small chunks.
+        buffer = io.BytesIO()
         torch.onnx.export(
             model,
             dummy,
-            out_dir / "model.onnx",
+            buffer,
             input_names=[MODEL_INPUT_NAMES[model.model_name]],
             output_names=[MODEL_OUTPUT_NAMES[model.model_name]],
             opset_version=11,
             do_constant_folding=True,
             dynamo=False,
         )
+        onnx_bytes = buffer.getvalue()
+        onnx_path = out_dir / "model.onnx"
+        safe_write_bytes(onnx_path, onnx_bytes)
+        print(f"[export] wrote {onnx_path} ({len(onnx_bytes)} bytes)")
 
     if save_pt:
         model.save_checkpoint(out_dir / "model.pt", extra={"source": str(source_checkpoint)})

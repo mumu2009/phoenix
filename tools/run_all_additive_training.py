@@ -186,6 +186,7 @@ def ssh_connect(host, user, password, timeout=30):
     c = paramiko.SSHClient()
     c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     c.connect(host, username=user, password=password, timeout=timeout)
+    c.get_transport().set_keepalive(30)
     return c
 
 
