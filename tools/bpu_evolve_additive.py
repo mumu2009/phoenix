@@ -728,7 +728,9 @@ def run_round(
     print(f"[round {round_idx}] batch inputs={inputs.shape} targets={targets.shape}")
 
     # Baseline parent .bin/.onnx (if it exists)
-    skip_compile = args.no_bpu or args.eval_local
+    # eval_local still compiles real .bin (for deployment) but evaluates on the
+    # local CPU with ONNX Runtime instead of copying to the X5 BPU.
+    skip_compile = args.no_bpu
     best_bin = work_dir / "best.bin"
     best_onnx = work_dir / "best.onnx"
     if best_bin.is_file():
