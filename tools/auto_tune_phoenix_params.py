@@ -2,13 +2,13 @@
 """
 auto_tune_phoenix_params.py
 
-Single-variable / grid / OFAT auto-tuner for Phoenix runtime parameters.
+Auto-tuner for Phoenix runtime parameters.
 
 Scope:
   * remote Windows box -> --scope non-vision-speech
     Tunes context, dialog, learning, memebarrier, summary, model_defaults,
     llama_server, frontend, edge-platform (non-NPU), emotion, spark, etc.
-    Benchmark is the memory-tier TUI (text/dialog latency & cosine similarity).
+    Benchmark is the memory-tier TUI (text/dialog latency & semantic similarity).
 
   * RDK X5 -> --scope vision-speech
     Tunes vision.*, jpea.*, edge_platform.npu.*, speech.*.
@@ -19,12 +19,27 @@ Single-variable experiment:
   python tools/auto_tune_phoenix_params.py --scope non-vision-speech \
       --vary-key context.maxTokens --vary-values "[2048,4096,8192]"
 
-Config-driven OFAT (one factor at a time) sweep:
+Static strategies:
+  --strategy ofat   one-factor-at-a-time (baseline + each value)
+  --strategy grid   ordered Cartesian product
+  --strategy random random sampling
+
+Adaptive strategies:
+  --strategy coordinate   greedy coordinate descent, restarting from the best point
+  --strategy bayesian     model-based acquisition search (Random-Forest surrogate + UCB)
+
+Config-driven OFAT:
   python tools/auto_tune_phoenix_params.py --param-space config/universal_optimizer_schema.json \
       --strategy ofat --max-evals 100
 
-Ordered full grid:
-  python tools/auto_tune_phoenix_params.py --strategy grid --max-evals 24
+Bayesian search (fewer evaluations, full parameter-space view):
+  python tools/auto_tune_phoenix_params.py --param-space config/universal_optimizer_schema.json \
+      --strategy bayesian --max-evals 50
+
+Semantic scoring modes (passed to the benchmark):
+  --similarity-mode bow       fast bag-of-word/char n-gram cosine
+  --similarity-mode sentence  sentence-transformer embedding cosine
+  --similarity-mode hybrid    ensemble of embedding + BOW + LCS + Jaccard (default)
 """
 from __future__ import annotations
 
@@ -45,6 +60,8 @@ import time
 import queue
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +600,7 @@ _RELEVANT_ARGS = frozenset({
     "tune_mode", "fix_similarity", "vary_key", "vary_values", "best_of", "scope",
     "benchmark_command", "x5_host", "x5_port", "x5_warmup",
     "param_space", "param_filter", "strategy",
+    "similarity_mode", "sentence_model", "bayesian_kappa", "bayesian_random_init",
 })
 
 
@@ -702,6 +720,278 @@ def make_point(args: argparse.Namespace, point: dict[str, Any]) -> dict[str, Any
 
 
 # ---------------------------------------------------------------------------
+# Model-based / adaptive candidate generation
+# ---------------------------------------------------------------------------
+
+class ParameterSpace:
+    """Flat parameter space wrapper used by adaptive search strategies."""
+
+    def __init__(self, space: dict[str, list[Any]]):
+        self.names = list(space.keys())
+        self.values = [list(space[k]) for k in self.names]
+        for i, vals in enumerate(self.values):
+            if not vals:
+                raise ValueError(f"parameter {self.names[i]!r} has no values")
+
+    def random_point(self) -> dict[str, Any]:
+        return {name: random.choice(vals) for name, vals in zip(self.names, self.values)}
+
+    def encode(self, point: dict[str, Any]) -> np.ndarray:
+        vec = np.zeros(len(self.names), dtype=float)
+        for i, name in enumerate(self.names):
+            idx = self.values[i].index(point[name])
+            n = len(self.values[i])
+            vec[i] = idx / max(1, n - 1)
+        return vec
+
+    def decode(self, vec: np.ndarray) -> dict[str, Any]:
+        point: dict[str, Any] = {}
+        for i, name in enumerate(self.names):
+            n = len(self.values[i])
+            idx = int(round(vec[i] * max(1, n - 1)))
+            idx = max(0, min(n - 1, idx))
+            point[name] = self.values[i][idx]
+        return point
+
+    def random_candidates(self, n: int) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        attempts = 0
+        max_attempts = n * 100
+        while len(out) < n and attempts < max_attempts:
+            attempts += 1
+            p = self.random_point()
+            sig = point_signature(p)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            out.append(p)
+        return out
+
+    def as_dict(self) -> dict[str, list[Any]]:
+        return {name: list(vals) for name, vals in zip(self.names, self.values)}
+
+    def total_combinations(self) -> int:
+        total = 1
+        for vals in self.values:
+            total *= len(vals)
+        return total
+
+    def all_candidates(self) -> list[dict[str, Any]]:
+        keys = self.names
+        value_lists = self.values
+        out: list[dict[str, Any]] = []
+        for combo in itertools.product(*value_lists):
+            out.append(dict(zip(keys, combo)))
+        return out
+
+
+class CandidateGenerator:
+    """Generate the next configuration to evaluate.
+
+    Supports static strategies (ofat/grid/random) and adaptive strategies
+    (coordinate, bayesian).  Adaptive strategies use evaluated results from
+    the checkpoint state to decide the next point.
+    """
+
+    def __init__(self, args: argparse.Namespace, space: dict[str, list[Any]]):
+        self.args = args
+        self.strategy = args.strategy
+        self.max_evals = args.max_evals
+        self.space = ParameterSpace(space)
+        self._static_points: list[dict[str, Any]] | None = None
+        if self.strategy in ("ofat", "grid", "random"):
+            self._static_points = self._build_static()
+
+    def _build_static(self) -> list[dict[str, Any]]:
+        flat = self.space.as_dict()
+        if self.strategy == "ofat":
+            pts = ofat_points(flat, self.max_evals)
+        elif self.strategy == "grid":
+            pts = grid_points(flat, self.max_evals)
+        else:
+            pts = random_points(flat, self.max_evals)
+        return [make_point(self.args, p) for p in pts]
+
+    def is_dynamic(self) -> bool:
+        return self.strategy in ("bayesian", "coordinate")
+
+    def initial_points(self) -> list[dict[str, Any]]:
+        return self._static_points or []
+
+    def suggest(self, state: dict[str, Any]) -> dict[str, Any] | None:
+        evaluated = state.get("evaluated", [])
+        evaluated_sigs = {point_signature(e["point"]) for e in evaluated}
+        suggested_sigs = {point_signature(p) for p in state.get("points", [])}
+        forbidden = evaluated_sigs | suggested_sigs
+
+        if self.strategy == "bayesian":
+            point = self._suggest_bayesian(evaluated, forbidden)
+        elif self.strategy == "coordinate":
+            point = self._suggest_coordinate(state, evaluated, forbidden)
+        else:
+            return None
+
+        if point is None:
+            return None
+        return make_point(self.args, point)
+
+    def _random_ungenerated(self, forbidden: set[str]) -> dict[str, Any] | None:
+        # Small spaces: enumerate all candidates and pick one not yet seen.
+        if self.space.total_combinations() <= 5000:
+            for combo in itertools.product(*self.space.values):
+                point = dict(zip(self.space.names, combo))
+                if point_signature(point) not in forbidden:
+                    return point
+        # Large spaces: sample randomly.
+        for _ in range(1000):
+            point = self.space.random_point()
+            if point_signature(point) not in forbidden:
+                return point
+        return None
+
+    def _suggest_bayesian(
+        self, evaluated: list[dict[str, Any]], forbidden: set[str]
+    ) -> dict[str, Any] | None:
+        if len(evaluated) < self._bayesian_init_count():
+            return self._random_ungenerated(forbidden)
+
+        # Filter out failed/time-out runs whose score is a penalty constant.
+        train = [e for e in evaluated if e.get("score", -1e9) > -1e8]
+        if len(train) < 2:
+            return self._random_ungenerated(forbidden)
+
+        try:
+            from sklearn.ensemble import RandomForestRegressor
+        except Exception as exc:
+            print(f"[tune] scikit-learn unavailable ({exc}); falling back to random search", flush=True)
+            return self._random_ungenerated(forbidden)
+
+        X = np.vstack([self.space.encode(e["point"]) for e in train])
+        y = np.array([e["score"] for e in train], dtype=float)
+        # Robustify against constant y and numeric issues.
+        y_std = np.std(y)
+        if y_std < 1e-9:
+            return self._random_ungenerated(forbidden)
+
+        rng = self.args.seed if self.args.seed is not None else 42
+        model = RandomForestRegressor(
+            n_estimators=64,
+            max_depth=None,
+            min_samples_split=2,
+            random_state=rng,
+            n_jobs=-1,
+        )
+        try:
+            model.fit(X, y)
+        except Exception as exc:
+            print(f"[tune] surrogate model fit failed ({exc}); falling back to random", flush=True)
+            return self._random_ungenerated(forbidden)
+
+        # Candidate pool: enumerate if small, otherwise random sample.
+        if self.space.total_combinations() <= 5000:
+            candidates = [dict(zip(self.space.names, combo)) for combo in itertools.product(*self.space.values)]
+        else:
+            candidates = self.space.random_candidates(2000)
+        candidates = [c for c in candidates if point_signature(c) not in forbidden]
+        if not candidates:
+            return self._random_ungenerated(forbidden)
+
+        X_cand = np.vstack([self.space.encode(c) for c in candidates])
+        try:
+            mean, std = model.predict(X_cand, return_std=True)
+        except Exception as exc:
+            print(f"[tune] surrogate prediction failed ({exc}); falling back to random", flush=True)
+            return self._random_ungenerated(forbidden)
+
+        kappa = self.args.bayesian_kappa
+        acquisition = mean + kappa * std
+        best_idx = int(np.argmax(acquisition))
+        return candidates[best_idx]
+
+    def _bayesian_init_count(self) -> int:
+        if self.args.bayesian_random_init > 0:
+            return min(self.args.bayesian_random_init, self.max_evals)
+        return max(2, min(self.max_evals // 3, 10))
+
+    def _suggest_coordinate(
+        self, state: dict[str, Any], evaluated: list[dict[str, Any]], forbidden: set[str]
+    ) -> dict[str, Any] | None:
+        meta = state.setdefault("meta", {})
+
+        def fresh_tried() -> list[list[int]]:
+            return [[] for _ in self.space.names]
+
+        def ensure_tried() -> list[list[int]]:
+            tv = meta.get("tried_values")
+            if not isinstance(tv, list) or len(tv) != len(self.space.names):
+                tv = fresh_tried()
+                meta["tried_values"] = tv
+            else:
+                tv = [list(v) if isinstance(v, (list, tuple, set)) else [] for v in tv]
+                meta["tried_values"] = tv
+            return tv
+
+        # If no evaluations yet, start from the default baseline.
+        if not evaluated:
+            baseline = {k: self.space.values[i][0] for i, k in enumerate(self.space.names)}
+            meta["current_best"] = baseline
+            meta["best_score"] = -1e18
+            meta["param_idx"] = 0
+            meta["tried_values"] = fresh_tried()
+            return baseline
+
+        # Refresh best known point from evaluated entries.
+        best_entry = max(evaluated, key=lambda e: e.get("score", -1e18))
+        best_point = best_entry["point"]
+        best_score = best_entry.get("score", -1e18)
+        current_best = meta.get("current_best", best_point)
+
+        # If the best point changed, restart the coordinate cycle from the new best.
+        if best_score > meta.get("best_score", -1e18) + 1e-9:
+            meta["current_best"] = best_point
+            meta["best_score"] = best_score
+            meta["param_idx"] = 0
+            meta["tried_values"] = fresh_tried()
+            current_best = best_point
+
+        param_idx = int(meta.get("param_idx", 0)) % len(self.space.names)
+        tried_values = ensure_tried()
+
+        # Cycle through parameters, suggesting each un-tried value of the current parameter.
+        for _ in range(len(self.space.names)):
+            name = self.space.names[param_idx]
+            current_value = current_best[name]
+            # Mark current best value as already evaluated.
+            try:
+                current_index = self.space.values[param_idx].index(current_value)
+                if current_index not in tried_values[param_idx]:
+                    tried_values[param_idx].append(current_index)
+            except ValueError:
+                pass
+
+            for v_idx, value in enumerate(self.space.values[param_idx]):
+                if v_idx in tried_values[param_idx]:
+                    continue
+                tried_values[param_idx].append(v_idx)
+                point = copy.deepcopy(current_best)
+                point[name] = value
+                sig = point_signature(point)
+                if sig in forbidden:
+                    continue
+                meta["param_idx"] = param_idx
+                return point
+
+            # Current parameter exhausted; advance to the next one.
+            tried_values[param_idx] = []
+            param_idx = (param_idx + 1) % len(self.space.names)
+            meta["param_idx"] = param_idx
+
+        # No improvement path found; explore randomly to escape plateaus.
+        return self._random_ungenerated(forbidden)
+
+
+# ---------------------------------------------------------------------------
 # Benchmarks
 # ---------------------------------------------------------------------------
 
@@ -792,6 +1082,8 @@ def run_text_benchmark(cfg: dict[str, Any], args: argparse.Namespace) -> dict[st
         "--fps", "0.2",
         "--stall-seconds", str(args.stall_seconds),
         "--out-prefix", out_prefix,
+        "--similarity-mode", args.similarity_mode,
+        "--sentence-model", args.sentence_model,
     ]
     print("[tune] running:", " ".join(cmd), flush=True)
 
@@ -1076,11 +1368,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scope", default="non-vision-speech", choices=["non-vision-speech", "vision-speech", "sim"], help="which parameter domain to tune")
     parser.add_argument("--param-space", type=Path, default=None, help="JSON schema file with parameter ranges/choices (overrides built-in scope)")
     parser.add_argument("--param-filter", default=None, help="comma-separated dot-path prefixes to keep when --param-space is used")
-    parser.add_argument("--strategy", default="ofat", choices=["ofat", "grid", "random"], help="ofat: one factor at a time; grid: ordered cartesian product; random: random samples")
+    parser.add_argument(
+        "--strategy",
+        default="ofat",
+        choices=["ofat", "grid", "random", "coordinate", "bayesian"],
+        help="ofat: one factor at a time; grid: ordered cartesian product; random: random samples; "
+             "coordinate: greedy coordinate descent; bayesian: model-based acquisition search",
+    )
     parser.add_argument("--benchmark-command", default=None, help="custom shell command to run instead of the default benchmark")
     parser.add_argument("--x5-host", default=None, help="X5 HTTP host for vision/speech benchmark")
     parser.add_argument("--x5-port", type=int, default=5081, help="X5 HTTP port")
     parser.add_argument("--x5-warmup", type=float, default=3.0, help="seconds to wait after restarting X5 phoenix_main")
+    parser.add_argument(
+        "--similarity-mode",
+        default="hybrid",
+        choices=["bow", "sentence", "hybrid"],
+        help="semantic similarity metric passed to the memory benchmark (default: hybrid)",
+    )
+    parser.add_argument(
+        "--sentence-model",
+        default="all-MiniLM-L6-v2",
+        help="sentence-transformer model name for hybrid/sentence scoring",
+    )
+    parser.add_argument(
+        "--bayesian-kappa",
+        type=float,
+        default=1.96,
+        help="UCB exploration factor for --strategy bayesian (default: 1.96)",
+    )
+    parser.add_argument(
+        "--bayesian-random-init",
+        type=int,
+        default=0,
+        help="number of random evaluations before Bayesian acquisition (default: auto)",
+    )
     return parser.parse_args()
 
 
@@ -1103,6 +1424,7 @@ def choose_param_space(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> int:
     args = parse_args()
     space = choose_param_space(args)
+    flat_space = _space_to_flat(space)
 
     output_json_path = Path(args.output_json)
     if not output_json_path.is_absolute():
@@ -1116,29 +1438,50 @@ def main() -> int:
         print(f"[tune] dry-run wrote {path}", flush=True)
         return 0
 
+    generator = CandidateGenerator(args, flat_space)
+
     state = load_checkpoint(args)
     if state is None:
-        points = build_candidates(args, space)
         state = {
-            "version": 1,
+            "version": 2,
             "args": args_signature(args),
-            "points": points,
+            "points": generator.initial_points(),
             "evaluated": [],
             "best": [],
         }
+        if generator.is_dynamic():
+            state["meta"] = {}
     else:
-        points = state.get("points", [])
+        if generator.is_dynamic() and "meta" not in state:
+            state["meta"] = {}
+        if not generator.is_dynamic() and not state.get("points"):
+            state["points"] = generator.initial_points()
 
-    if not points:
+    if not generator.is_dynamic() and not state.get("points"):
         print("[tune] no candidate points to evaluate", flush=True)
         return 1
 
     evaluated_sigs = {point_signature(e["point"]) for e in state.get("evaluated", [])}
-    remaining = [p for p in points if point_signature(p) not in evaluated_sigs]
-    print(f"[tune] {len(remaining)}/{len(points)} candidates remaining", flush=True)
+    pending_sigs = {point_signature(p) for p in state.get("points", [])}
+    total_target = generator.max_evals
+    print(f"[tune] strategy={args.strategy} target_evals={total_target} already_evaluated={len(evaluated_sigs)}", flush=True)
 
-    for point in remaining:
+    while len(state["evaluated"]) < total_target:
+        if generator.is_dynamic():
+            point = generator.suggest(state)
+        else:
+            remaining = [p for p in state["points"] if point_signature(p) not in evaluated_sigs]
+            point = remaining[0] if remaining else None
+
+        if point is None:
+            print("[tune] no further candidate to evaluate", flush=True)
+            break
+
         sig = point_signature(point)
+        if generator.is_dynamic() and sig not in pending_sigs:
+            state["points"].append(point)
+            pending_sigs.add(sig)
+
         print(f"\n[tune] evaluating {sig}", flush=True)
         cfg = make_config_candidate(point)
 
@@ -1154,6 +1497,7 @@ def main() -> int:
         score = score_candidate(metrics, args.latency_budget)
         entry = {"point": point, "metrics": metrics, "score": score, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
         state["evaluated"].append(entry)
+        evaluated_sigs.add(sig)
 
         best = state.get("best", [])
         best.append(entry)

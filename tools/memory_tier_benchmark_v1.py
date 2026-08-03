@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
+import numpy as np
+
 DEFAULT_PHOENIX_URL = "http://127.0.0.1:5081/api/chat"
 DEFAULT_PHOENIX_TOKEN = "local-dev"
 DEFAULT_LLAMA_SERVER_URL = "http://127.0.0.1:8083/v1/chat/completions"
@@ -26,7 +28,7 @@ DEFAULT_MODEL = "llama3.1:8b"
 DEFAULT_JSON_OUTPUT = "build/memory_tier_benchmark_v1.json"
 DEFAULT_MD_OUTPUT = "build/memory_tier_benchmark_v1.md"
 DEFAULT_CACHE_OUTPUT = "build/memory_tier_benchmark_v1_cache.json"
-SCORING_VERSION = 3
+SCORING_VERSION = 4
 
 WORD_RE = re.compile(r"[a-z0-9]+")
 SPACE_RE = re.compile(r"\s+")
@@ -325,29 +327,150 @@ def cosine_similarity_text(pred: str, ref: str) -> float:
     return dot / (norm_p * norm_r)
 
 
+def token_lcs_ratio(pred: str, ref: str) -> float:
+    """ROUGE-L style token longest-common-subsequence F1."""
+    p = tokenize(pred)
+    r = tokenize(ref)
+    if not p or not r:
+        return 0.0
+    # Dynamic programming LCS length
+    prev = [0] * (len(r) + 1)
+    for i in range(1, len(p) + 1):
+        cur = [0] * (len(r) + 1)
+        for j in range(1, len(r) + 1):
+            if p[i - 1] == r[j - 1]:
+                cur[j] = prev[j - 1] + 1
+            else:
+                cur[j] = max(prev[j], cur[j - 1])
+        prev = cur
+    lcs = prev[len(r)]
+    if lcs == 0:
+        return 0.0
+    return 2 * lcs / (len(p) + len(r))
+
+
+DEFAULT_SENTENCE_MODEL = "all-MiniLM-L6-v2"
+
+
+class SemanticScorer:
+    """Configurable semantic similarity scorer.
+
+    Modes:
+      * bow      -- fast bag-of-word/char n-gram cosine.
+      * hybrid   -- ensemble of BOW cosine, ROUGE-L style token LCS,
+                    char n-gram Jaccard and sacrebleu sentence BLEU.
+      * sentence -- cosine of sentence-transformer embeddings (falls back
+                    to hybrid when the model is unavailable).
+    """
+
+    def __init__(self, mode: str = "hybrid", model_name: str = DEFAULT_SENTENCE_MODEL) -> None:
+        self.mode = mode.lower().strip()
+        self.model_name = model_name
+        self._st = None
+        self._ref_cache: dict[str, np.ndarray] = {}
+        if self.mode == "sentence":
+            self._load_model()
+            if self._st is None:
+                self.mode = "hybrid"
+
+    def _load_model(self) -> None:
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            self._st = SentenceTransformer(self.model_name)
+            print(f"[scorer] loaded sentence-transformer {self.model_name}", flush=True)
+        except Exception as exc:
+            print(f"[warn] sentence-transformers unavailable ({exc}); using hybrid fallback", flush=True)
+            self._st = None
+
+    def _sentence_embedding(self, text: str) -> np.ndarray | None:
+        if self._st is None:
+            return None
+        try:
+            return self._st.encode(text, show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True)
+        except Exception:
+            return None
+
+    def sentence_cosine(self, pred: str, ref: str) -> float:
+        e_ref = self._ref_cache.get(ref)
+        if e_ref is None:
+            e_ref = self._sentence_embedding(ref)
+            if e_ref is not None:
+                self._ref_cache[ref] = e_ref
+        e_pred = self._sentence_embedding(pred)
+        if e_ref is None or e_pred is None:
+            return cosine_similarity_text(pred, ref)
+        return float(np.dot(e_pred, e_ref))
+
+    def _bleu_score(self, pred: str, ref: str) -> float:
+        try:
+            from sacrebleu import sentence_bleu
+        except Exception:
+            return 0.0
+        try:
+            return sentence_bleu(pred, [ref]).score / 100.0
+        except Exception:
+            return 0.0
+
+    def hybrid_score(self, pred: str, ref: str) -> float:
+        bow = cosine_similarity_text(pred, ref)
+        lcs = token_lcs_ratio(pred, ref)
+        char_j = char_ngram_jaccard(pred, ref, n=3)
+        bleu = self._bleu_score(pred, ref)
+        # Sentence embedding adds semantic signal when available.
+        if self._st is not None:
+            sent = self.sentence_cosine(pred, ref)
+            return 0.35 * sent + 0.25 * bow + 0.20 * lcs + 0.10 * char_j + 0.10 * bleu
+        return 0.40 * bow + 0.25 * lcs + 0.15 * char_j + 0.20 * bleu
+
+    def score(self, pred: str, ref: str) -> float:
+        if not pred.strip() or not ref.strip():
+            return 0.0
+        if self.mode == "sentence" and self._st is not None:
+            return self.sentence_cosine(pred, ref)
+        if self.mode in ("hybrid", "sentence"):
+            return self.hybrid_score(pred, ref)
+        return cosine_similarity_text(pred, ref)
+
+    def score_short(self, pred: str, ref: str) -> float:
+        base = self.score(pred, ref)
+        pred_norm = normalize_text(pred)
+        ref_norm = normalize_text(ref)
+        if not pred_norm or not ref_norm:
+            return base
+
+        ref_tokens = tokenize(ref_norm)
+        pred_tokens = tokenize(pred_norm)
+
+        # Keyword-style answers (e.g. sports/business) are semantically correct
+        # even when the model wraps them in a sentence.
+        if ref_norm in pred_norm and len(ref_tokens) <= 4:
+            return max(base, 0.90)
+
+        if ref_tokens and len(ref_tokens) <= 4 and all(tok in pred_tokens for tok in ref_tokens):
+            return max(base, 0.90)
+
+        return base
+
+
+_SCORER: SemanticScorer | None = None
+
+
+def set_scorer_mode(mode: str = "hybrid", model_name: str = DEFAULT_SENTENCE_MODEL) -> None:
+    global _SCORER
+    _SCORER = SemanticScorer(mode=mode, model_name=model_name)
+
+
 def semantic_similarity(pred: str, ref: str) -> float:
+    if _SCORER is not None:
+        return _SCORER.score(pred, ref)
     return cosine_similarity_text(pred, ref)
 
 
 def semantic_similarity_short(pred: str, ref: str) -> float:
-    base = cosine_similarity_text(pred, ref)
-    pred_norm = normalize_text(pred)
-    ref_norm = normalize_text(ref)
-    if not pred_norm or not ref_norm:
-        return base
-
-    ref_tokens = tokenize(ref_norm)
-    pred_tokens = tokenize(pred_norm)
-
-    # Keyword-style answers (e.g. sports/business) are semantically correct
-    # even when the model wraps them in a sentence.
-    if ref_norm in pred_norm and len(ref_tokens) <= 4:
-        return max(base, 0.90)
-
-    if ref_tokens and len(ref_tokens) <= 4 and all(tok in pred_tokens for tok in ref_tokens):
-        return max(base, 0.90)
-
-    return base
+    if _SCORER is not None:
+        return _SCORER.score_short(pred, ref)
+    return cosine_similarity_text(pred, ref)
 
 
 def post_json(url: str, payload: dict[str, Any], timeout_s: float, headers: dict[str, str] | None = None) -> tuple[int, Any, str]:
@@ -1752,9 +1875,21 @@ def main() -> int:
     )
     parser.add_argument("--cache-path", default=DEFAULT_CACHE_OUTPUT)
     parser.add_argument("--use-cache", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--similarity-mode",
+        default="hybrid",
+        choices=["bow", "sentence", "hybrid"],
+        help="semantic similarity metric used to grade answers (default: hybrid)",
+    )
+    parser.add_argument(
+        "--sentence-model",
+        default=DEFAULT_SENTENCE_MODEL,
+        help="sentence-transformer model name for sentence/hybrid modes",
+    )
     parser.add_argument("--json-output", default=DEFAULT_JSON_OUTPUT)
     parser.add_argument("--md-output", default=DEFAULT_MD_OUTPUT)
     args = parser.parse_args()
+    set_scorer_mode(args.similarity_mode, args.sentence_model)
 
     if args.sweep_thresholds:
         root = workspace_root()
@@ -1836,6 +1971,8 @@ def main() -> int:
             "cachePath": str(args.cache_path),
             "cacheEnabled": bool(args.use_cache),
             "scoreVersion": SCORING_VERSION,
+            "similarityMode": args.similarity_mode,
+            "sentenceModel": args.sentence_model,
         },
         "providers": {},
     }
