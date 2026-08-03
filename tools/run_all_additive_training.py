@@ -135,6 +135,12 @@ def parse_args():
     parser.add_argument("--skip-push", action="store_true",
                         help="Skip pushing files to Kali (assume they are already there)")
 
+    # X5 / eval
+    parser.add_argument("--eval-local", action="store_true",
+                        help="Evaluate on Kali CPU with ONNX Runtime; do not connect to the X5")
+    parser.add_argument("--no-bpu", action="store_true",
+                        help="Skip BPU compilation and evaluate ONNX with ONNX Runtime")
+
     # Monitoring
     parser.add_argument("--wait", action="store_true",
                         help="Wait for all evolutions to finish (default: start and report PIDs)")
@@ -319,6 +325,10 @@ def start_evolution(c, model, pool_dir, args):
         "--concept", str(args.concept),
         "--seed", str(args.seed),
     ]
+    if args.eval_local:
+        cmd_parts.append("--eval-local")
+    if args.no_bpu:
+        cmd_parts.append("--no-bpu")
 
     if model == "vision_encoder" and args.vision_base_pt:
         cmd_parts += ["--base-path", args.vision_base_pt]

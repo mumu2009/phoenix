@@ -57,11 +57,12 @@ def musan_text_description(path: Path) -> str:
         -> "an environmental noise recording from freesound"
     """
     parts = path.stem.split("_")
-    if len(parts) < 2:
+    if len(parts) < 3:
         return "an audio recording"
 
-    category = parts[0]
-    source = parts[1] if len(parts) > 1 else ""
+    # MUSAN filenames: musan_<category>_<source>_...
+    category = parts[1]
+    source = parts[2]
 
     category_map = {
         "music": "music",
@@ -113,15 +114,21 @@ def load_musan_samples(
                 sampwidth = w.getsampwidth()
                 framerate = w.getframerate()
                 nframes = w.getnframes()
-                raw = w.readframes(nframes)
+
+                if framerate != 16000:
+                    print(f"[warn] {wf} samplerate {framerate}, skipping")
+                    continue
+
+                if nframes < encoder_input_samples:
+                    # Read whole short file and pad.
+                    raw = w.readframes(nframes)
+                else:
+                    # Seek to a random start and read only the needed samples.
+                    start_sample = rng.integers(0, nframes - encoder_input_samples + 1)
+                    w.setpos(start_sample)
+                    raw = w.readframes(encoder_input_samples)
         except Exception as e:
             print(f"[warn] cannot read {wf}: {e}")
-            continue
-
-        if framerate != 16000:
-            # Simple nearest-neighbour resample is not great, but MUSAN is already 16 kHz.
-            # If a file differs, skip it.
-            print(f"[warn] {wf} samplerate {framerate}, skipping")
             continue
 
         if sampwidth == 2:
@@ -137,13 +144,11 @@ def load_musan_samples(
 
         data = data.astype(np.float32) / 32768.0
 
-        # Take a random contiguous chunk of encoder_input_samples.
+        # Pad if the file was too short.
         if len(data) < encoder_input_samples:
-            # Pad with zeros.
             data = np.concatenate([data, np.zeros(encoder_input_samples - len(data), dtype=np.float32)])
-        start = rng.integers(0, max(1, len(data) - encoder_input_samples + 1))
-        chunk = data[start : start + encoder_input_samples]
 
+        chunk = data[:encoder_input_samples]
         enc_in = chunk.reshape(1, 1, 1, encoder_input_samples)
         dec_out = chunk[:decoder_target_samples].reshape(1, 1, 1, decoder_target_samples)
         samples.append({"text": text, "encoder_input": enc_in, "decoder_target": dec_out})
@@ -205,7 +210,7 @@ def load_imagenet_samples(imagenet_dir: Path, max_samples: int, seed: int):
         left = (w - s) // 2
         top = (h - s) // 2
         pil = pil.crop((left, top, left + s, top + s))
-        pil = pil.resize((224, 224), Image.BILINEAR)
+        pil = pil.resize((224, 224), getattr(Image, "Resampling", Image).BILINEAR)
         arr = np.array(pil, dtype=np.float32) / 255.0  # HWC, 0..1
         arr = arr.transpose(2, 0, 1)  # CHW
         img_tensor = arr.reshape(1, 3, 224, 224).astype(np.float32)
