@@ -17,13 +17,18 @@ Usage is identical to compile_bpu_docker.sh:
         --out-dir .../bpu
 """
 import argparse
+import glob
 import os
+import platform
+import re
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-import shutil
+import numpy as np
 
 TOOLS_DIR = Path(__file__).resolve().parent
 
@@ -52,34 +57,189 @@ def compile_horizon(args) -> int:
     return subprocess.run(cmd, env=env, timeout=args.timeout).returncode
 
 
+def _parse_shape(s: str):
+    parts = re.split(r"[x,]", s)
+    return [int(p.strip()) for p in parts if p.strip()]
+
+
+def _calib_bin_to_npy(calibration_dir: Path, out_dir: Path, input_shape):
+    """Convert .bin float32 calibration files to .npy files for RKNN."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    txt = out_dir / "dataset.txt"
+    bins = sorted(glob.glob(str(calibration_dir / "*.bin")))
+    if not bins:
+        return None
+    with open(txt, "w", encoding="utf-8") as f:
+        for b in bins:
+            arr = Path(b)
+            npy = out_dir / arr.with_suffix(".npy").name
+            data = np.fromfile(arr, dtype=np.float32)
+            data = data.reshape(input_shape)
+            np.save(npy, data)
+            f.write(f"{npy}\n")
+    return txt
+
+
 def compile_rockchip(args) -> int:
-    print(f"[rockchip_rknn] {args.model_name}: RKNN conversion is not yet implemented.", file=sys.stderr)
-    print("              Install rknn-toolkit on a Linux x86/aarch64 host and convert the ONNX to .rknn", file=sys.stderr)
-    print("              Falling back to ONNX Runtime evaluation (CPU on the device).", file=sys.stderr)
+    """Try rknn-toolkit2 conversion; fall back to ONNX if unavailable or fails."""
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     onnx_src = Path(args.onnx)
-    onnx_dst = out_dir / f"{args.model_name}.onnx"
-    if onnx_src.is_file():
-        shutil.copy(onnx_src, onnx_dst)
-    else:
-        (out_dir / f"{args.model_name}.bin").touch()
-    return 0
+    if not onnx_src.is_file():
+        print(f"[rockchip_rknn] {args.model_name}: ONNX not found: {args.onnx}", file=sys.stderr)
+        return 1
+
+    # Try rknn-toolkit2 first.
+    try:
+        import numpy as np
+        from rknn.api import RKNN
+    except Exception as e:
+        print(f"[rockchip_rknn] {args.model_name}: rknn-toolkit2 not installed ({e}).", file=sys.stderr)
+        print("              Falling back to ONNX Runtime evaluation (CPU on the device).", file=sys.stderr)
+        shutil.copy(onnx_src, out_dir / f"{args.model_name}.onnx")
+        return 0
+
+    input_shape = _parse_shape(args.input_shape)
+    calib_dir = Path(args.calib_dir)
+    dataset_txt = None
+    if calib_dir.is_dir():
+        dataset_dir = out_dir / "rknn_calib"
+        dataset_txt = _calib_bin_to_npy(calib_dir, dataset_dir, input_shape)
+
+    rknn_path = out_dir / f"{args.model_name}.rknn"
+    try:
+        rknn = RKNN(verbose=False)
+        # Single input. mean/std = 0/1 because the model already consumes raw floats.
+        rknn.config(
+            mean_values=[[0] * input_shape[1]],
+            std_values=[[1] * input_shape[1]],
+            target_platform="rk3588",
+        )
+        rknn.load_onnx(
+            model=str(onnx_src),
+            inputs=[args.input_name],
+            input_size_list=[input_shape],
+        )
+        rknn.build(do_quantization=dataset_txt is not None, dataset=str(dataset_txt) if dataset_txt else None)
+        rknn.export_rknn(str(rknn_path))
+        print(f"[rockchip_rknn] {args.model_name}: exported {rknn_path}")
+        return 0
+    except Exception as e:
+        print(f"[rockchip_rknn] {args.model_name}: conversion failed ({e}).", file=sys.stderr)
+        print("              Falling back to ONNX Runtime evaluation.", file=sys.stderr)
+        # Ensure a usable artifact remains.
+        shutil.copy(onnx_src, out_dir / f"{args.model_name}.onnx")
+        if rknn_path.is_file():
+            rknn_path.unlink()
+        return 0
+
+
+def _has_trt():
+    try:
+        import tensorrt
+        return True
+    except Exception:
+        return False
 
 
 def compile_tensorrt(args) -> int:
-    print(f"[nvidia_tensorrt] {args.model_name}: TensorRT conversion is not yet implemented.", file=sys.stderr)
-    print("                Install TensorRT on the Jetson and build an engine from the ONNX.", file=sys.stderr)
-    print("                Falling back to ONNX Runtime evaluation (CPU on the device).", file=sys.stderr)
+    """Build a TensorRT engine from ONNX. If the toolchain is missing or the host
+    is x86 and cannot produce a Jetson-compatible engine, fall back to ONNX."""
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     onnx_src = Path(args.onnx)
-    onnx_dst = out_dir / f"{args.model_name}.onnx"
-    if onnx_src.is_file():
-        shutil.copy(onnx_src, onnx_dst)
-    else:
-        (out_dir / f"{args.model_name}.bin").touch()
-    return 0
+    if not onnx_src.is_file():
+        print(f"[nvidia_tensorrt] {args.model_name}: ONNX not found: {args.onnx}", file=sys.stderr)
+        return 1
+
+    trt_path = out_dir / f"{args.model_name}.trt"
+    arch = platform.machine().lower()
+    is_jetson = arch in ("aarch64", "arm64") and _has_trt()
+
+    if not is_jetson:
+        print(f"[nvidia_tensorrt] {args.model_name}: x86 host cannot produce a Jetson-compatible .trt engine.", file=sys.stderr)
+        print("                ONNX will be deployed and the Jetson can build the engine on-device.", file=sys.stderr)
+        shutil.copy(onnx_src, out_dir / f"{args.model_name}.onnx")
+        return 0
+
+    # 1) Try trtexec (TensorRT >= 7.0) on an aarch64 host.
+    trtexec = shutil.which("trtexec")
+    if trtexec:
+        input_shape = _parse_shape(args.input_shape)
+        shape_arg = "x".join(str(s) for s in input_shape)
+        cmd = [
+            trtexec,
+            f"--onnx={onnx_src}",
+            f"--saveEngine={trt_path}",
+            f"--minShapes={args.input_name}:{shape_arg}",
+            f"--optShapes={args.input_name}:{shape_arg}",
+            f"--maxShapes={args.input_name}:{shape_arg}",
+            "--explicitBatch",
+        ]
+        try:
+            rc = subprocess.run(cmd, timeout=args.timeout).returncode
+            if rc == 0 and trt_path.is_file():
+                print(f"[nvidia_tensorrt] {args.model_name}: built {trt_path} with trtexec")
+                return 0
+        except Exception as e:
+            print(f"[nvidia_tensorrt] {args.model_name}: trtexec failed ({e}).", file=sys.stderr)
+
+    # 2) Try Python TensorRT API on an aarch64 host.
+    try:
+        import tensorrt as trt
+    except Exception as e:
+        print(f"[nvidia_tensorrt] {args.model_name}: TensorRT not installed ({e}).", file=sys.stderr)
+        print("                Falling back to ONNX Runtime evaluation.", file=sys.stderr)
+        shutil.copy(onnx_src, out_dir / f"{args.model_name}.onnx")
+        return 0
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    parser = trt.OnnxParser(network, logger)
+    with open(onnx_src, "rb") as f:
+        if not parser.parse(f.read()):
+            for i in range(parser.num_errors):
+                print(parser.get_error(i), file=sys.stderr)
+            return 1
+
+    config = builder.create_builder_config()
+    if hasattr(config, "set_memory_pool_limit"):
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    elif hasattr(config, "max_workspace_size"):
+        config.max_workspace_size = 1 << 30
+
+    input_shape = _parse_shape(args.input_shape)
+    profile = builder.create_optimization_profile()
+    profile.set_shape(
+        args.input_name,
+        tuple(input_shape),
+        tuple(input_shape),
+        tuple(input_shape),
+    )
+    config.add_optimization_profile(profile)
+
+    try:
+        if hasattr(builder, "build_serialized_network"):
+            # TensorRT 8.5+ / 10
+            engine = builder.build_serialized_network(network, config)
+            if engine is None:
+                raise RuntimeError("build_serialized_network returned None")
+            with open(trt_path, "wb") as f:
+                f.write(engine)
+        else:
+            engine = builder.build_engine(network, config)
+            if engine is None:
+                raise RuntimeError("build_engine returned None")
+            with open(trt_path, "wb") as f:
+                f.write(engine.serialize())
+        print(f"[nvidia_tensorrt] {args.model_name}: built {trt_path} with Python API")
+        return 0
+    except Exception as e:
+        print(f"[nvidia_tensorrt] {args.model_name}: build failed ({e}).", file=sys.stderr)
+        print("                Falling back to ONNX Runtime evaluation.", file=sys.stderr)
+        shutil.copy(onnx_src, out_dir / f"{args.model_name}.onnx")
+        return 0
 
 
 BACKENDS = {

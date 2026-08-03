@@ -29,36 +29,45 @@ def mkdir_p(sftp, path: str):
             pass
 
 
+def _best_artifact(src: Path, compile_backend: str) -> Path:
+    """Pick the best compiled artifact for the target backend."""
+    if compile_backend in ("horizon_bpu", "rdk_x5", "rdk_s100"):
+        candidates = ["best.bin", "best.onnx"]
+    elif compile_backend in ("rockchip_rknn", "rk3588"):
+        candidates = ["best.rknn", "best.onnx"]
+    elif compile_backend in ("nvidia_tensorrt", "jetson_nano"):
+        candidates = ["best.trt", "best.onnx"]
+    else:
+        candidates = ["best.bin", "best.onnx"]
+    for c in candidates:
+        p = src / c
+        if p.is_file():
+            return p
+    raise FileNotFoundError(f"No best artifact in {src}; run training first")
+
+
 def deploy_one(sftp, src_dir: Path, x5_root: PurePosixPath, name: str, compile_backend: str):
     """Copy the best compiled artifact and manifest to the edge runtime_store path."""
     src = src_dir / name / name
     manifest = src / "model.manifest.json"
-
-    # Prefer .bin for BPU; otherwise use .onnx for ORT/RKNN/TensorRT.
-    if compile_backend in ("horizon_bpu", "rdk_x5", "rdk_s100"):
-        bin_file = src / "best.bin"
-    else:
-        bin_file = src / "best.bin" if (src / "best.bin").is_file() else src / "best.onnx"
-
-    if not bin_file.is_file():
-        raise FileNotFoundError(f"{bin_file} not found; run training first")
+    best = _best_artifact(src, compile_backend)
 
     dst_dir = x5_root / "models" / "additive_jpea" / name
     mkdir_p(sftp, str(dst_dir.parent))
     mkdir_p(sftp, str(dst_dir))
 
-    sftp.put(str(bin_file), str(dst_dir / bin_file.name))
+    sftp.put(str(best), str(dst_dir / best.name))
     if manifest.exists():
         sftp.put(str(manifest), str(dst_dir / "model.manifest.json"))
 
     # C++ factory tries model_encoder/decoder with the same extension.
-    ext = bin_file.suffix
+    ext = best.suffix
     if "encoder" in name:
-        sftp.put(str(bin_file), str(dst_dir / f"model_encoder{ext}"))
+        sftp.put(str(best), str(dst_dir / f"model_encoder{ext}"))
     else:
-        sftp.put(str(bin_file), str(dst_dir / f"model_decoder{ext}"))
+        sftp.put(str(best), str(dst_dir / f"model_decoder{ext}"))
 
-    print(f"[deploy] {name} -> {dst_dir} ({bin_file.name})")
+    print(f"[deploy] {name} -> {dst_dir} ({best.name})")
 
 
 def main():
