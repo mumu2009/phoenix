@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import random
@@ -10,6 +11,7 @@ import re
 import statistics
 import string
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,7 +26,7 @@ DEFAULT_MODEL = "llama3.1:8b"
 DEFAULT_JSON_OUTPUT = "build/memory_tier_benchmark_v1.json"
 DEFAULT_MD_OUTPUT = "build/memory_tier_benchmark_v1.md"
 DEFAULT_CACHE_OUTPUT = "build/memory_tier_benchmark_v1_cache.json"
-SCORING_VERSION = 2
+SCORING_VERSION = 3
 
 WORD_RE = re.compile(r"[a-z0-9]+")
 SPACE_RE = re.compile(r"\s+")
@@ -292,16 +294,43 @@ def char_ngram_jaccard(pred: str, ref: str, n: int = 3) -> float:
     return len(p_set & r_set) / len(union)
 
 
-def semantic_similarity(pred: str, ref: str) -> float:
+def _feature_vector(text: str) -> Counter:
+    """Build a bag-of-features vector for cosine similarity.
+
+    Features include word tokens and 2/3/4-character n-grams.
+    """
+    vec = Counter()
+    for tok in tokenize(text):
+        vec[f"w:{tok}"] += 1
+    norm = normalize_text(text)
+    for n in (2, 3, 4):
+        for i in range(len(norm) - n + 1):
+            vec[f"c{n}:{norm[i:i+n]}"] += 1
+    return vec
+
+
+def cosine_similarity_text(pred: str, ref: str) -> float:
+    """Cosine similarity between pred and ref using token/word + char n-gram vectors."""
     if not pred.strip() or not ref.strip():
         return 0.0
-    f1 = token_f1(pred, ref)
-    tri = char_ngram_jaccard(pred, ref)
-    return 0.6 * f1 + 0.4 * tri
+    p = _feature_vector(pred)
+    r = _feature_vector(ref)
+    if not p or not r:
+        return 0.0
+    dot = sum(p[k] * r.get(k, 0) for k in p)
+    norm_p = math.sqrt(sum(v * v for v in p.values()))
+    norm_r = math.sqrt(sum(v * v for v in r.values()))
+    if norm_p == 0 or norm_r == 0:
+        return 0.0
+    return dot / (norm_p * norm_r)
+
+
+def semantic_similarity(pred: str, ref: str) -> float:
+    return cosine_similarity_text(pred, ref)
 
 
 def semantic_similarity_short(pred: str, ref: str) -> float:
-    base = semantic_similarity(pred, ref)
+    base = cosine_similarity_text(pred, ref)
     pred_norm = normalize_text(pred)
     ref_norm = normalize_text(ref)
     if not pred_norm or not ref_norm:

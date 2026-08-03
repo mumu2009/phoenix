@@ -2,13 +2,13 @@
 """
 auto_tune_phoenix_params.py
 
-Single-variable / grid auto-tuner for Phoenix runtime parameters.
+Single-variable / grid / OFAT auto-tuner for Phoenix runtime parameters.
 
 Scope:
   * remote Windows box -> --scope non-vision-speech
     Tunes context, dialog, learning, memebarrier, summary, model_defaults,
     llama_server, frontend, edge-platform (non-NPU), emotion, spark, etc.
-    Benchmark is the memory-tier TUI (text/dialog latency & similarity).
+    Benchmark is the memory-tier TUI (text/dialog latency & cosine similarity).
 
   * RDK X5 -> --scope vision-speech
     Tunes vision.*, jpea.*, edge_platform.npu.*, speech.*.
@@ -19,8 +19,12 @@ Single-variable experiment:
   python tools/auto_tune_phoenix_params.py --scope non-vision-speech \
       --vary-key context.maxTokens --vary-values "[2048,4096,8192]"
 
-Grid search:
-  python tools/auto_tune_phoenix_params.py --scope non-vision-speech --max-evals 24
+Config-driven OFAT (one factor at a time) sweep:
+  python tools/auto_tune_phoenix_params.py --param-space config/universal_optimizer_schema.json \
+      --strategy ofat --max-evals 100
+
+Ordered full grid:
+  python tools/auto_tune_phoenix_params.py --strategy grid --max-evals 24
 """
 from __future__ import annotations
 
@@ -362,6 +366,183 @@ def sim_param_space() -> dict[str, Any]:
     return out
 
 
+def _space_to_flat(space: dict[str, Any]) -> dict[str, list[Any]]:
+    flat: dict[str, list[Any]] = {}
+
+    def walk(obj: Any, prefix: str = "") -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                walk(v, f"{prefix}.{k}" if prefix else k)
+        elif isinstance(obj, list):
+            flat[prefix] = obj
+        else:
+            raise ValueError(f"unexpected value in parameter space at {prefix}: {obj!r}")
+
+    walk(space)
+    return flat
+
+
+def _values_for_spec(spec: dict[str, Any]) -> list[Any]:
+    """Convert a schema parameter spec into a concrete list of values to try."""
+    if "values" in spec:
+        return list(spec["values"])
+
+    typ = spec.get("type", "string")
+
+    if typ == "bool":
+        return [False, True]
+
+    if typ == "enum" or "choices" in spec:
+        return list(spec.get("choices", []))
+
+    if typ in ("int", "float"):
+        mn = spec.get("min")
+        mx = spec.get("max")
+        if mn is None or mx is None:
+            raise ValueError(f"{spec.get('path')} needs min/max")
+
+        step = spec.get("step")
+        count = spec.get("count")
+
+        if typ == "int":
+            mn = int(mn)
+            mx = int(mx)
+            if step is not None:
+                step = int(step)
+                return list(range(mn, mx + 1, step))
+            if count is not None:
+                count = max(2, int(count))
+                if count == 2:
+                    return [mn, mx]
+                step = max(1, (mx - mn) // (count - 1))
+                return list(sorted(set(range(mn, mx + 1, step))))[:count]
+            # old schema without step/count: default to 5 evenly spaced values
+            step = max(1, (mx - mn) // 4)
+            return list(sorted(set(range(mn, mx + 1, step))))[:5]
+
+        if typ == "float":
+            mn = float(mn)
+            mx = float(mx)
+            if step is not None:
+                step = float(step)
+                out = []
+                v = mn
+                while v <= mx + 1e-9:
+                    out.append(round(v, 6))
+                    v += step
+                return out
+            if count is not None:
+                count = max(2, int(count))
+                if count == 2:
+                    return [mn, mx]
+                step = (mx - mn) / (count - 1)
+                return [round(mn + i * step, 6) for i in range(count)]
+            step = (mx - mn) / 4
+            return [round(mn + i * step, 6) for i in range(5)]
+
+    raise ValueError(f"unsupported parameter spec type: {typ!r}")
+
+
+def load_param_space_from_schema(path: Path, filter_prefixes: list[str] | None = None) -> dict[str, list[Any]]:
+    """Load a parameter space from a JSON schema file.
+
+    Supported formats:
+      * { "parameters": [ { "path": "...", "type": "int", "min": a, "max": b, "step": c }, ... ] }
+      * { "dot.path": [v1, v2, ...], ... }
+      * [ { "path": "...", "values": [...] }, ... ]
+    """
+    data = _load_json_file(path)
+    if data is None:
+        raise ValueError(f"could not load parameter space from {path}")
+
+    params: list[dict[str, Any]] = []
+    if isinstance(data, list):
+        params = data
+    elif isinstance(data, dict):
+        if "parameters" in data and isinstance(data["parameters"], list):
+            params = data["parameters"]
+        else:
+            # Treat as flat {dot-path: [values]} space
+            return {k: list(v) for k, v in data.items() if isinstance(v, list)}
+    else:
+        raise ValueError(f"unrecognized parameter space format in {path}")
+
+    space: dict[str, list[Any]] = {}
+    for spec in params:
+        dot_path = spec.get("path") or spec.get("dot_path")
+        if not dot_path:
+            continue
+        if filter_prefixes:
+            if not any(str(dot_path).startswith(p) for p in filter_prefixes):
+                continue
+        try:
+            values = _values_for_spec(spec)
+        except ValueError as e:
+            print(f"[tune] skipping {dot_path}: {e}", flush=True)
+            continue
+        if not values:
+            continue
+        space[dot_path] = values
+
+    if not space:
+        raise ValueError(f"no tunable parameters found in {path}")
+    return space
+
+
+def random_points(space: dict[str, Any], max_evals: int) -> list[dict[str, Any]]:
+    """Random sampling with de-duplication."""
+    flat = _space_to_flat(space)
+    keys = list(flat.keys())
+    value_lists = [flat[k] for k in keys]
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    attempts = 0
+    max_attempts = max_evals * 1000
+    while len(out) < max_evals and attempts < max_attempts:
+        combo = [random.choice(v) for v in value_lists]
+        attempts += 1
+        point = dict(zip(keys, combo))
+        sig = point_signature(point)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(point)
+    return out
+
+
+def grid_points(space: dict[str, Any], max_evals: int) -> list[dict[str, Any]]:
+    """Deterministic full grid (Cartesian product) truncated to max_evals."""
+    flat = _space_to_flat(space)
+    keys = list(flat.keys())
+    value_lists = [flat[k] for k in keys]
+    out: list[dict[str, Any]] = []
+    for combo in itertools.product(*value_lists):
+        if len(out) >= max_evals:
+            break
+        out.append(dict(zip(keys, combo)))
+    return out
+
+
+def ofat_points(space: dict[str, Any], max_evals: int) -> list[dict[str, Any]]:
+    """One-factor-at-a-time: baseline + each value of each parameter."""
+    flat = _space_to_flat(space)
+    keys = list(flat.keys())
+    if not keys:
+        return []
+    baseline = {k: flat[k][0] for k in keys}
+    out: list[dict[str, Any]] = [baseline]
+    for k in keys:
+        for v in flat[k]:
+            if v == baseline[k]:
+                continue
+            if len(out) >= max_evals:
+                return out
+            point = copy.deepcopy(baseline)
+            point[k] = v
+            out.append(point)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Config write / checkpoint
 # ---------------------------------------------------------------------------
@@ -401,6 +582,7 @@ _RELEVANT_ARGS = frozenset({
     "timeout", "warmup_timeout", "warmup_retries", "stall_seconds", "max_evals",
     "tune_mode", "fix_similarity", "vary_key", "vary_values", "best_of", "scope",
     "benchmark_command", "x5_host", "x5_port", "x5_warmup",
+    "param_space", "param_filter", "strategy",
 })
 
 
@@ -478,7 +660,7 @@ def build_candidates(args: argparse.Namespace, space: dict[str, Any]) -> list[di
     if args.vary_key or args.vary_values:
         if not args.vary_key or not args.vary_values:
             raise ValueError("--vary-key and --vary-values must be used together")
-        baseline_point = make_point(args, list_grid_points(space, 1)[0])
+        baseline_point = make_point(args, ofat_points(space, 1)[0])
         vary_values = parse_vary_values(args.vary_values)
         if args.vary_key not in baseline_point:
             baseline_point[args.vary_key] = vary_values[0]
@@ -491,7 +673,13 @@ def build_candidates(args: argparse.Namespace, space: dict[str, Any]) -> list[di
             point[args.vary_key] = value
             points.append(point)
         return points
-    points = list_grid_points(space, args.max_evals)
+
+    if args.strategy == "ofat":
+        points = ofat_points(space, args.max_evals)
+    elif args.strategy == "grid":
+        points = grid_points(space, args.max_evals)
+    else:
+        points = random_points(space, args.max_evals)
     return [make_point(args, p) for p in points]
 
 
@@ -511,37 +699,6 @@ def make_point(args: argparse.Namespace, point: dict[str, Any]) -> dict[str, Any
     except (TypeError, ValueError):
         pass
     return point
-
-
-def list_grid_points(space: dict[str, Any], max_evals: int) -> list[dict[str, Any]]:
-    flat: dict[str, list[Any]] = {}
-
-    def walk(obj: Any, prefix: str = "") -> None:
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                walk(v, f"{prefix}.{k}" if prefix else k)
-        elif isinstance(obj, list):
-            flat[prefix] = obj
-        else:
-            raise ValueError(f"unexpected value in parameter space at {prefix}: {obj!r}")
-
-    walk(space)
-    keys = list(flat.keys())
-    value_lists = [flat[k] for k in keys]
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    attempts = 0
-    max_attempts = max_evals * 1000
-    while len(out) < max_evals and attempts < max_attempts:
-        combo = [random.choice(v) for v in value_lists]
-        attempts += 1
-        point = dict(zip(keys, combo))
-        sig = point_signature(point)
-        if sig in seen:
-            continue
-        seen.add(sig)
-        out.append(point)
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -917,6 +1074,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fix-similarity", type=float, default=None, help="fixed similarityThreshold for tune-mode=other")
     parser.add_argument("--reset-state", action="store_true", help="ignore/delete existing checkpoint and start fresh")
     parser.add_argument("--scope", default="non-vision-speech", choices=["non-vision-speech", "vision-speech", "sim"], help="which parameter domain to tune")
+    parser.add_argument("--param-space", type=Path, default=None, help="JSON schema file with parameter ranges/choices (overrides built-in scope)")
+    parser.add_argument("--param-filter", default=None, help="comma-separated dot-path prefixes to keep when --param-space is used")
+    parser.add_argument("--strategy", default="ofat", choices=["ofat", "grid", "random"], help="ofat: one factor at a time; grid: ordered cartesian product; random: random samples")
     parser.add_argument("--benchmark-command", default=None, help="custom shell command to run instead of the default benchmark")
     parser.add_argument("--x5-host", default=None, help="X5 HTTP host for vision/speech benchmark")
     parser.add_argument("--x5-port", type=int, default=5081, help="X5 HTTP port")
@@ -925,6 +1085,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def choose_param_space(args: argparse.Namespace) -> dict[str, Any]:
+    if args.param_space:
+        path = Path(args.param_space)
+        if not path.is_absolute():
+            path = root_dir() / path
+        prefixes = None
+        if args.param_filter:
+            prefixes = [p.strip() for p in args.param_filter.split(",") if p.strip()]
+        return load_param_space_from_schema(path, prefixes)
     if args.tune_mode == "sim":
         return sim_param_space()
     if args.scope == "vision-speech":
