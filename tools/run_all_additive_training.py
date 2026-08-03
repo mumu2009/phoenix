@@ -64,6 +64,7 @@ KALI_FILES = [
     "tools/edge_device_manager.py",
     "tools/run_hb_mapper.py",
     "tools/hb_mapper_patch.py",
+    "tools/vboxsf_safe.py",
     "tools/x5_bpu_evaluate.py",
     "tools/rk3588_npu_evaluate.py",
     "tools/jetson_trt_evaluate.py",
