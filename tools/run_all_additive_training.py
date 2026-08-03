@@ -74,6 +74,7 @@ def parse_args():
     parser.add_argument("--x5-host", default=X5_DEFAULTS["host"])
     parser.add_argument("--x5-user", default=X5_DEFAULTS["user"])
     parser.add_argument("--x5-pass", default=X5_DEFAULTS["pass"])
+    parser.add_argument("--x5-port", type=int, default=22)
     parser.add_argument("--x5-work", default=X5_DEFAULTS["work"])
 
     parser.add_argument(
@@ -315,6 +316,7 @@ def start_evolution(c, model, pool_dir, args):
         "--x5-host", args.x5_host,
         "--x5-user", args.x5_user,
         "--x5-pass", args.x5_pass,
+        "--x5-port", str(args.x5_port),
         "--x5-work", x5_work,
         "--compile-script", "tools/compile_bpu_docker.sh",
         "--max-rounds", str(args.max_rounds),
