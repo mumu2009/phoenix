@@ -76,6 +76,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-prefix", default="memory_tier_benchmark_v1_no_ollama_tui")
     parser.add_argument("--phoenix-url", default="http://127.0.0.1:5080/api/chat")
     parser.add_argument("--phoenix-token", default="local-dev")
+    parser.add_argument(
+        "--similarity-mode",
+        default="hybrid",
+        choices=["bow", "sentence", "hybrid"],
+        help="semantic similarity metric passed to memory_tier_benchmark_v1.py",
+    )
+    parser.add_argument(
+        "--sentence-model",
+        default="all-MiniLM-L6-v2",
+        help="sentence-transformer model name passed to memory_tier_benchmark_v1.py",
+    )
     return parser.parse_args()
 
 
@@ -346,6 +357,8 @@ def main() -> int:
                         cmd.append("--no-launch-local-stack")
                     cmd.extend(["--phoenix-url", args.phoenix_url])
                     cmd.extend(["--phoenix-token", args.phoenix_token])
+                    cmd.extend(["--similarity-mode", args.similarity_mode])
+                    cmd.extend(["--sentence-model", args.sentence_model])
 
                     run_log.write(f"[INFO] command: {' '.join(cmd)}\n")
                     run_log.flush()
