@@ -857,12 +857,14 @@ def run_round(
         shutil.copy(cand_dir / "model.pt", work_dir / "best.pt")
         shutil.copy(cand_dir / "model.onnx", work_dir / "best.onnx")
         best_artifact = eval_bins_dir / best_key
-        if best_artifact.suffix == ".onnx":
-            shutil.copy(best_artifact, work_dir / "best.onnx")
-        else:
-            shutil.copy(best_artifact, work_dir / "best.bin")
-        # Keep an ONNX copy next to best.bin when possible.
-        if cand_dir.joinpath("model.onnx").is_file() and not (work_dir / "best.onnx").is_file():
+        suffix = best_artifact.suffix
+        # Copy the native compiled artifact (.bin / .rknn / .trt / .onnx).
+        if suffix in (".bin", ".rknn", ".trt", ".onnx"):
+            shutil.copy(best_artifact, work_dir / f"best{suffix}")
+        # Always keep an ONNX fallback.
+        if (work_dir / "best.onnx").is_file():
+            pass
+        elif cand_dir.joinpath("model.onnx").is_file():
             shutil.copy(cand_dir / "model.onnx", work_dir / "best.onnx")
         model = AdditiveResidualModel.from_checkpoint(work_dir / "best.pt")
         new_block_added = True

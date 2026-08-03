@@ -35,7 +35,7 @@
       "pass_env": "PHOENIX_EDGE_PASS",
       "work_dir": "/root/phoenix/evolve_real",
       "runtime_store": "/root/phoenix/runtime_store",
-      "eval_script": "tools/edge_ort_evaluate.py",
+      "eval_script": "tools/rk3588_npu_evaluate.py",
       "compile_backend": "rockchip_rknn"
     },
     "lab_jetson_nano": {
@@ -47,7 +47,7 @@
       "pass_env": "PHOENIX_EDGE_PASS",
       "work_dir": "/root/phoenix/evolve_real",
       "runtime_store": "/root/phoenix/runtime_store",
-      "eval_script": "tools/edge_ort_evaluate.py",
+      "eval_script": "tools/jetson_trt_evaluate.py",
       "compile_backend": "nvidia_tensorrt"
     }
   }
