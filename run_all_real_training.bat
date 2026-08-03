@@ -15,16 +15,17 @@ python tools\run_all_additive_training.py ^
     --kali-host 192.168.0.100 ^
     --kali-user kali ^
     --kali-pass kali ^
-    --x5-host 192.168.0.107 ^
-    --x5-user sunrise ^
-    --x5-pass sunrise ^
+    --x5-host 127.0.0.1 ^
+    --x5-user root ^
+    --x5-pass root ^
+    --x5-port 2222 ^
     --models speech_encoder,speech_decoder,vision_encoder,vision_decoder ^
     --real-data ^
     --speech-dataset /home/kali/phoenix/datasets/musan_16k ^
     --vision-image-dir /home/kali/datasets/tiny-imagenet-200 ^
     --bge-dir /home/kali/models/bge-small-en ^
     --work-dir /home/kali/phoenix/additive_work/real ^
-    --x5-work /home/sunrise/phoenix/evolve_real ^
+    --x5-work /root/phoenix/evolve_real ^
     --concept 128 ^
     --pool-size 200 ^
     --max-rounds 3 ^

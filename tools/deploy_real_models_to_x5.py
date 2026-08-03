@@ -12,6 +12,18 @@ import paramiko
 from pathlib import Path, PurePosixPath
 
 
+def mkdir_p(sftp, path: str):
+    """Recursively create remote directory if it does not exist."""
+    parts = []
+    for part in path.strip("/").split("/"):
+        parts.append(part)
+        current = "/" + "/".join(parts)
+        try:
+            sftp.mkdir(current)
+        except IOError:
+            pass
+
+
 def deploy_one(sftp, src_dir: Path, x5_root: PurePosixPath, name: str, kind: str):
     """Copy best.bin + manifest to the X5 runtime_store path."""
     src = src_dir / name / name
@@ -22,8 +34,8 @@ def deploy_one(sftp, src_dir: Path, x5_root: PurePosixPath, name: str, kind: str
 
     # C++ factory tries runtime_store/models/additive_jpea/<name>/best.bin
     dst_dir = x5_root / "models" / "additive_jpea" / name
-    sftp.mkdir(str(dst_dir.parent), ignore_existing=True)
-    sftp.mkdir(str(dst_dir), ignore_existing=True)
+    mkdir_p(sftp, str(dst_dir.parent))
+    mkdir_p(sftp, str(dst_dir))
 
     sftp.put(str(bin_file), str(dst_dir / "best.bin"))
     if manifest.exists():
@@ -42,10 +54,11 @@ def deploy_one(sftp, src_dir: Path, x5_root: PurePosixPath, name: str, kind: str
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--x5-host", default="192.168.0.107")
-    parser.add_argument("--x5-user", default="sunrise")
-    parser.add_argument("--x5-pass", default="sunrise")
+    parser.add_argument("--x5-user", default="root")
+    parser.add_argument("--x5-pass", default="root")
+    parser.add_argument("--x5-port", type=int, default=22)
     parser.add_argument("--work-dir", default="/home/kali/phoenix/additive_work/real")
-    parser.add_argument("--x5-runtime", default="/home/sunrise/phoenix/runtime_store")
+    parser.add_argument("--x5-runtime", default="/root/phoenix/runtime_store")
     parser.add_argument(
         "--models",
         default="speech_encoder,speech_decoder,vision_encoder,vision_decoder",
@@ -55,7 +68,7 @@ def main():
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(args.x5_host, username=args.x5_user, password=args.x5_pass, timeout=30)
+    client.connect(args.x5_host, port=args.x5_port, username=args.x5_user, password=args.x5_pass, timeout=30)
     sftp = client.open_sftp()
 
     work = Path(args.work_dir)

@@ -352,10 +352,11 @@ def _iter_vision_dataset(data_dir: Path, max_samples: int, seed: int):
 class X5Remote:
     """Minimal paramiko wrapper to copy files and run commands on the X5."""
 
-    def __init__(self, host: str, user: str, password: str, timeout: int = 30):
+    def __init__(self, host: str, user: str, password: str, port: int = 22, timeout: int = 30):
         self.host = host
         self.user = user
         self.password = password
+        self.port = port
         self.timeout = timeout
         self.client = None
         self.sftp = None
@@ -365,7 +366,7 @@ class X5Remote:
             raise RuntimeError("paramiko is not installed; install it to use X5 SSH")
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.client.connect(self.host, username=self.user, password=self.password, timeout=self.timeout)
+        self.client.connect(self.host, port=self.port, username=self.user, password=self.password, timeout=self.timeout)
         self.sftp = self.client.open_sftp()
 
     def close(self):
@@ -546,6 +547,7 @@ def parse_args():
     parser.add_argument("--x5-host", default=None)
     parser.add_argument("--x5-user", default=None)
     parser.add_argument("--x5-pass", default=None)
+    parser.add_argument("--x5-port", type=int, default=22)
     parser.add_argument("--x5-work", default="/home/sunrise/phoenix/evolve_additive")
     parser.add_argument("--eval-local", action="store_true", help="Evaluate on local CPU with onnxruntime")
     parser.add_argument(
@@ -913,7 +915,7 @@ def main() -> int:
         if paramiko is None:
             print("paramiko not installed; cannot connect to X5", file=sys.stderr)
             return 1
-        x5 = X5Remote(args.x5_host, args.x5_user, args.x5_pass)
+        x5 = X5Remote(args.x5_host, args.x5_user, args.x5_pass, port=args.x5_port)
         x5.connect()
 
     # Load or initialize model and state
