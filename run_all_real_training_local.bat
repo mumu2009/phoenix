@@ -27,6 +27,7 @@ python tools\run_all_additive_training.py ^
     --eval-local ^
     --no-local-build ^
     --wait ^
+    --resume ^
     %*
 
 if %errorlevel% neq 0 (

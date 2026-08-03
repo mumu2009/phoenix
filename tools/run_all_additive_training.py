@@ -159,6 +159,8 @@ def parse_args():
                         help="Evaluate on Kali CPU with ONNX Runtime; do not connect to the X5")
     parser.add_argument("--no-bpu", action="store_true",
                         help="Skip BPU compilation and evaluate ONNX with ONNX Runtime")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume each bpu_evolve from evolve_state.json if present")
 
     # Monitoring
     parser.add_argument("--wait", action="store_true",
@@ -351,6 +353,8 @@ def start_evolution(c, model, pool_dir, args):
         cmd_parts.append("--eval-local")
     if args.no_bpu:
         cmd_parts.append("--no-bpu")
+    if args.resume:
+        cmd_parts.append("--resume")
 
     if model == "vision_encoder" and args.vision_base_pt:
         cmd_parts += ["--base-path", args.vision_base_pt]
