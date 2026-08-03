@@ -36,14 +36,15 @@ python tools\run_all_additive_training.py ^
     --work-dir /home/kali/phoenix/additive_work/real ^
     --concept 128 ^
     --pool-size 200 ^
-    --max-rounds 3 ^
-    --lambda 2 ^
-    --batch-size 50 ^
+    --max-rounds 1000 ^
+    --lambda 10 ^
+    --batch-size 500 ^
     --parallel 1 ^
     --max-concurrent 1 ^
     --block-size small ^
     --no-local-build ^
     --wait ^
+    --resume ^
     %*
 
 if %errorlevel% neq 0 (
