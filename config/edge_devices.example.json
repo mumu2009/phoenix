@@ -1,0 +1,54 @@
+{
+  "_comment": "Copy this file to config/edge_devices.json and fill in your real devices.  This example file contains no secrets and can be committed.",
+  "default_device": "lab_x5",
+  "devices": {
+    "lab_x5": {
+      "type": "rdk_x5",
+      "host": "192.168.0.107",
+      "port": 22,
+      "user": "root",
+      "auth": "env",
+      "pass_env": "PHOENIX_EDGE_PASS",
+      "work_dir": "/root/phoenix/evolve_real",
+      "runtime_store": "/root/phoenix/runtime_store",
+      "eval_script": "tools/x5_bpu_evaluate.py",
+      "compile_backend": "horizon_bpu"
+    },
+    "lab_rdk_s100": {
+      "type": "rdk_s100",
+      "host": "192.168.0.108",
+      "port": 22,
+      "user": "root",
+      "auth": "env",
+      "pass_env": "PHOENIX_EDGE_PASS",
+      "work_dir": "/root/phoenix/evolve_real",
+      "runtime_store": "/root/phoenix/runtime_store",
+      "eval_script": "tools/x5_bpu_evaluate.py",
+      "compile_backend": "horizon_bpu"
+    },
+    "lab_rk3588": {
+      "type": "rk3588",
+      "host": "192.168.0.120",
+      "port": 22,
+      "user": "root",
+      "auth": "env",
+      "pass_env": "PHOENIX_EDGE_PASS",
+      "work_dir": "/root/phoenix/evolve_real",
+      "runtime_store": "/root/phoenix/runtime_store",
+      "eval_script": "tools/edge_ort_evaluate.py",
+      "compile_backend": "rockchip_rknn"
+    },
+    "lab_jetson_nano": {
+      "type": "jetson_nano",
+      "host": "192.168.0.130",
+      "port": 22,
+      "user": "root",
+      "auth": "env",
+      "pass_env": "PHOENIX_EDGE_PASS",
+      "work_dir": "/root/phoenix/evolve_real",
+      "runtime_store": "/root/phoenix/runtime_store",
+      "eval_script": "tools/edge_ort_evaluate.py",
+      "compile_backend": "nvidia_tensorrt"
+    }
+  }
+}

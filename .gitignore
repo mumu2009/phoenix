@@ -56,6 +56,12 @@ dump.rdb
 *.log
 *.rdb
 
+# ─── Edge device credentials / local config (do not commit) ─────────────────────
+config/edge_devices.json
+config/edge_devices.local.json
+.env
+*.env
+
 # ─── Bundled third-party binaries / large vendor trees ─────────────────────────
 Python314/
 Redis-8.0.3-Windows-x64-cygwin-with-Service/

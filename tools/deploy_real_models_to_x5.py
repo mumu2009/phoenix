@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""Deploy the four trained real-data BPU models to an RDK X5.
+"""Deploy the four trained real-data models to an edge device runtime store.
 
-Usage:
+Supports any device registered in config/edge_devices.json (rdk_x5, rdk_s100,
+rk3588, jetson_nano).  The best artifact (.bin for BPU, .onnx for ORT) is copied
+under runtime_store/models/additive_jpea/<model>/.
+
+Usage (from Kali, through reverse tunnel):
+    python tools/deploy_real_models_to_x5.py --edge-device lab_x5
+
+Usage (from Windows, direct to X5):
     python tools/deploy_real_models_to_x5.py \
-        --x5-host 192.168.0.107 --x5-user sunrise --x5-pass sunrise \
-        --work-dir /home/kali/phoenix/additive_work/real \
-        --x5-runtime /home/sunrise/phoenix/runtime_store
+        --edge-device-config config/edge_devices.json --edge-device lab_x5_direct
 """
 import argparse
-import paramiko
+import os
+import sys
 from pathlib import Path, PurePosixPath
 
 
 def mkdir_p(sftp, path: str):
-    """Recursively create remote directory if it does not exist."""
     parts = []
     for part in path.strip("/").split("/"):
         parts.append(part)
@@ -24,61 +29,89 @@ def mkdir_p(sftp, path: str):
             pass
 
 
-def deploy_one(sftp, src_dir: Path, x5_root: PurePosixPath, name: str, kind: str):
-    """Copy best.bin + manifest to the X5 runtime_store path."""
+def deploy_one(sftp, src_dir: Path, x5_root: PurePosixPath, name: str, compile_backend: str):
+    """Copy the best compiled artifact and manifest to the edge runtime_store path."""
     src = src_dir / name / name
-    bin_file = src / "best.bin"
     manifest = src / "model.manifest.json"
-    if not bin_file.exists():
+
+    # Prefer .bin for BPU; otherwise use .onnx for ORT/RKNN/TensorRT.
+    if compile_backend in ("horizon_bpu", "rdk_x5", "rdk_s100"):
+        bin_file = src / "best.bin"
+    else:
+        bin_file = src / "best.bin" if (src / "best.bin").is_file() else src / "best.onnx"
+
+    if not bin_file.is_file():
         raise FileNotFoundError(f"{bin_file} not found; run training first")
 
-    # C++ factory tries runtime_store/models/additive_jpea/<name>/best.bin
     dst_dir = x5_root / "models" / "additive_jpea" / name
     mkdir_p(sftp, str(dst_dir.parent))
     mkdir_p(sftp, str(dst_dir))
 
-    sftp.put(str(bin_file), str(dst_dir / "best.bin"))
+    sftp.put(str(bin_file), str(dst_dir / bin_file.name))
     if manifest.exists():
         sftp.put(str(manifest), str(dst_dir / "model.manifest.json"))
 
-    # Also create a model_encoder/decoder alias for the config paths used by
-    # jpea_v2_image_world_model.cpp and jpea_v2_speech_world_model.cpp.
+    # C++ factory tries model_encoder/decoder with the same extension.
+    ext = bin_file.suffix
     if "encoder" in name:
-        sftp.put(str(bin_file), str(dst_dir / "model_encoder.bin"))
+        sftp.put(str(bin_file), str(dst_dir / f"model_encoder{ext}"))
     else:
-        sftp.put(str(bin_file), str(dst_dir / "model_decoder.bin"))
+        sftp.put(str(bin_file), str(dst_dir / f"model_decoder{ext}"))
 
-    print(f"[deploy] {name} -> {dst_dir}")
+    print(f"[deploy] {name} -> {dst_dir} ({bin_file.name})")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--x5-host", default="192.168.0.107")
-    parser.add_argument("--x5-user", default="root")
-    parser.add_argument("--x5-pass", default="root")
-    parser.add_argument("--x5-port", type=int, default=22)
+    parser.add_argument("--edge-device", default=None,
+                        help="Device name from config/edge_devices.json")
+    parser.add_argument("--edge-device-config", default=None)
     parser.add_argument("--work-dir", default="/home/kali/phoenix/additive_work/real")
-    parser.add_argument("--x5-runtime", default="/root/phoenix/runtime_store")
-    parser.add_argument(
-        "--models",
-        default="speech_encoder,speech_decoder,vision_encoder,vision_decoder",
-        help="Comma-separated models to deploy",
-    )
+    parser.add_argument("--models",
+                        default="speech_encoder,speech_decoder,vision_encoder,vision_decoder")
+    # Legacy args for direct use without a config.
+    parser.add_argument("--x5-host", default=None)
+    parser.add_argument("--x5-user", default=None)
+    parser.add_argument("--x5-pass", default=None)
+    parser.add_argument("--x5-port", type=int, default=22)
+    parser.add_argument("--x5-runtime", default=None)
     args = parser.parse_args()
 
+    # Prefer the new edge-device manager; fall back to legacy direct args.
+    if args.edge_device:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from tools.edge_device_manager import load_edge_device
+        dev = load_edge_device(args.edge_device, config_path=args.edge_device_config)
+        x5_host = dev.host
+        x5_user = dev.user
+        x5_pass = dev.password
+        x5_port = dev.port
+        x5_runtime = args.x5_runtime or dev.cfg.get("runtime_store", "/root/phoenix/runtime_store")
+        compile_backend = dev.cfg.get("compile_backend", "horizon_bpu")
+    else:
+        if not all([args.x5_host, args.x5_user, args.x5_pass, args.x5_runtime]):
+            raise SystemExit("--edge-device or all --x5-* arguments are required")
+        x5_host = args.x5_host
+        x5_user = args.x5_user
+        x5_pass = args.x5_pass
+        x5_port = args.x5_port
+        x5_runtime = args.x5_runtime
+        compile_backend = "horizon_bpu"
+
+    import paramiko
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(args.x5_host, port=args.x5_port, username=args.x5_user, password=args.x5_pass, timeout=30)
+    client.connect(x5_host, port=x5_port, username=x5_user, password=x5_pass, timeout=30)
     sftp = client.open_sftp()
 
     work = Path(args.work_dir)
-    x5_root = PurePosixPath(args.x5_runtime)
+    x5_root = PurePosixPath(x5_runtime)
     for name in [m.strip() for m in args.models.split(",") if m.strip()]:
-        deploy_one(sftp, work, x5_root, name, "encoder" if "encoder" in name else "decoder")
+        deploy_one(sftp, work, x5_root, name, compile_backend)
 
     sftp.close()
     client.close()
-    print("[done] deployed to X5")
+    print("[done] deployed to edge device")
 
 
 if __name__ == "__main__":

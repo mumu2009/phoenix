@@ -4,22 +4,18 @@ cd /d "%~dp0"
 
 :: Same as run_all_real_training.bat but evaluates candidates on the Kali CPU
 :: with ONNX Runtime.  The real BPU .bin files are still produced by the
-:: hb_mapper on Kali and can be copied to the X5 later.
+:: hb_mapper on Kali and can be copied to the edge device later.
 
 python tools\run_all_additive_training.py ^
     --kali-host 192.168.0.100 ^
     --kali-user kali ^
     --kali-pass kali ^
-    --x5-host 192.168.0.107 ^
-    --x5-user sunrise ^
-    --x5-pass sunrise ^
     --models speech_encoder,speech_decoder,vision_encoder,vision_decoder ^
     --real-data ^
     --speech-dataset /home/kali/phoenix/datasets/musan_16k ^
     --vision-image-dir /home/kali/datasets/tiny-imagenet-200 ^
     --bge-dir /home/kali/models/bge-small-en ^
     --work-dir /home/kali/phoenix/additive_work/real ^
-    --x5-work /home/sunrise/phoenix/evolve_real ^
     --concept 128 ^
     --pool-size 200 ^
     --max-rounds 3 ^

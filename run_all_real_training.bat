@@ -2,30 +2,38 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 
-:: Run all four additive residual models on real data.
+:: Run all four additive residual models on real data, evaluating on a real edge device.
 ::
 :: Audio:   MUSAN 16 kHz WAV files under Kali /home/kali/phoenix/datasets/musan_16k
 :: Images:  Tiny-ImageNet-200 under Kali /home/kali/datasets/tiny-imagenet-200
 :: Concept: BGE-small-en downloaded from ModelScope to /home/kali/models/bge-small-en
 ::
-:: The text description of each sample is encoded by the LLM into a shared 128-D
-:: Unit concept.  No teacher model is required.
+:: The edge device is read from config/edge_devices.json (gitignored).
+:: Copy config/edge_devices.example.json to config/edge_devices.json and fill it in.
+:: For password auth via env, copy config/edge_devices.env.example to
+:: config/edge_devices.env and set PHOENIX_EDGE_PASS.
+
+if exist "config\edge_devices.env" (
+    for /f "usebackq tokens=1,* delims==" %%a in ("config\edge_devices.env") do (
+        set "%%a=%%b"
+    )
+)
+
+if not defined PHOENIX_EDGE_PASS (
+    echo [WARN] PHOENIX_EDGE_PASS not set.  Add it to config\edge_devices.env or use --x5-pass.
+)
 
 python tools\run_all_additive_training.py ^
     --kali-host 192.168.0.100 ^
     --kali-user kali ^
     --kali-pass kali ^
-    --x5-host 127.0.0.1 ^
-    --x5-user root ^
-    --x5-pass root ^
-    --x5-port 2222 ^
+    --edge-device lab_x5 ^
     --models speech_encoder,speech_decoder,vision_encoder,vision_decoder ^
     --real-data ^
     --speech-dataset /home/kali/phoenix/datasets/musan_16k ^
     --vision-image-dir /home/kali/datasets/tiny-imagenet-200 ^
     --bge-dir /home/kali/models/bge-small-en ^
     --work-dir /home/kali/phoenix/additive_work/real ^
-    --x5-work /root/phoenix/evolve_real ^
     --concept 128 ^
     --pool-size 200 ^
     --max-rounds 3 ^
