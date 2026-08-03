@@ -38,9 +38,9 @@ python tools\run_all_additive_training.py ^
     --pool-size 200 ^
     --max-rounds 1000 ^
     --lambda 10 ^
-    --batch-size 500 ^
+    --batch-size 200 ^
     --parallel 1 ^
-    --max-concurrent 1 ^
+    --max-concurrent 4 ^
     --block-size small ^
     --no-local-build ^
     --wait ^
