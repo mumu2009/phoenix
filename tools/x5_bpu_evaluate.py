@@ -35,6 +35,7 @@ import json
 import os
 import re
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -173,22 +174,46 @@ def main() -> int:
             print(f"[ERROR] no .bin files in {bin_dir}", file=sys.stderr)
             return 1
 
+    # Evaluate each .bin in its own child process so a BPU runtime crash/segfault
+    # in one model does not abort the whole round.
     results = {}
+    out_dir = Path(args.out).parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     for bin_path in bin_paths:
         name = os.path.basename(bin_path)
+        tmp_out = out_dir / f".tmp_{Path(name).stem}_eval.json"
+        cmd = [
+            sys.executable, __file__,
+            "--bin", bin_path,
+            "--inputs", args.inputs,
+            "--targets", args.targets,
+            "--out", str(tmp_out),
+            "--input-shape", args.input_shape or "",
+            "--target-shape", args.target_shape or "",
+            "--format", args.format,
+        ]
         try:
-            loss = evaluate_bin(bin_path, inputs, targets)
-            results[name] = {"loss": loss, "ok": True}
-            print(f"{name}: loss={loss:.6f}")
+            rc = subprocess.run(cmd, timeout=600, check=False).returncode
         except Exception as e:
-            results[name] = {"loss": float("inf"), "ok": False, "error": str(e)}
-            print(f"{name}: ERROR {e}")
+            rc = -1
+            print(f"{name}: subprocess exception {e}")
+        if rc == 0 and tmp_out.is_file():
+            try:
+                with open(tmp_out, "r", encoding="utf-8") as f:
+                    one_result = json.load(f)
+                results.update(one_result)
+            except Exception as e:
+                results[name] = {"loss": float("inf"), "ok": False, "error": f"bad json: {e}"}
+                print(f"{name}: ERROR reading json: {e}")
+            tmp_out.unlink(missing_ok=True)
+        else:
+            results[name] = {"loss": float("inf"), "ok": False, "error": f"subprocess rc={rc}"}
+            print(f"{name}: ERROR subprocess rc={rc}")
 
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
+    with open(args.out, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
-    print(f"[DONE] wrote {out_path}")
+    print(f"[DONE] wrote {args.out}")
     return 0
 
 
