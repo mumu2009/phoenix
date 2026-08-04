@@ -30,11 +30,14 @@ To generate a synthetic smoke-test pool:
 """
 
 import argparse
+import atexit
 import concurrent.futures
 import copy
 import json
 import os
+import shlex
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -386,9 +389,129 @@ class X5Remote:
             self.close()
             self._connect()
 
-    def exec(self, cmd: str, timeout: int = 300):
+    def pkill(self, pattern: str):
+        """Best-effort kill of any remote process whose command line matches
+        ``pattern``.  Used to clean up orphaned processes left behind by a
+        dropped SSH channel before (re)launching the same logical job, so
+        retries never pile up duplicate long-running processes on the X5
+        (this previously caused an OOM that killed Xorg / crashed the box).
+
+        Waits for the remote ``pkill`` to actually finish (reads its exit
+        status) instead of firing-and-forgetting; otherwise the channel can
+        be torn down before the kill is actually delivered, letting the
+        "orphan" race right back in.
+        """
+        try:
+            self._ensure()
+            stdin, stdout, stderr = self.client.exec_command(
+                f"pkill -9 -f {shlex.quote(pattern)}", timeout=15
+            )
+            stdout.channel.recv_exit_status()
+        except Exception as exc:
+            print(f"[x5 ssh] pkill({pattern!r}) failed (non-fatal): {exc}", file=sys.stderr)
+
+    def reap_stale_evaluators(self, max_age_s: int = 650) -> None:
+        """Kill any single-candidate ``x5_bpu_evaluate.py --bin ...`` child
+        process older than ``max_age_s``.
+
+        Each training round evaluates candidates under a *fresh* round
+        directory, so a ``kill_pattern`` scoped to the current round can
+        never clean up a process that got stuck (e.g. the BPU runtime
+        hanging in an uninterruptible D-state on a bad candidate) in a
+        *previous* round -- that process is simply abandoned and leaks
+        forever, one per affected round, until the X5 runs out of memory.
+        This age-based reaper is a round-independent safety net.
+
+        Only the per-candidate ``--bin <file>`` child processes are
+        targeted (not the ``--bin-dir`` parent, which legitimately runs for
+        ``n_candidates * 600s`` and must not be killed early).  Each child
+        is already given a hard 600s budget by its own parent's
+        ``subprocess.run(..., timeout=600)``; anything still alive past
+        that is by definition stuck, regardless of which round spawned it.
+        """
+        cmd = (
+            "ps -eo pid,etimes,cmd | "
+            "awk -v age=" + str(max_age_s) + " "
+            "'$2 > age && /x5_bpu_evaluate\\.py/ && / --bin / && !/--bin-dir/ {print $1}' | "
+            "xargs -r kill -9"
+        )
+        try:
+            self._ensure()
+            stdin, stdout, stderr = self.client.exec_command(cmd, timeout=20)
+            stdout.channel.recv_exit_status()
+        except Exception as exc:
+            print(f"[x5 ssh] reap_stale_evaluators failed (non-fatal): {exc}", file=sys.stderr)
+            return
+        # Report anything that survived kill -9 (almost certainly stuck in an
+        # uninterruptible kernel/driver wait -- e.g. a BPU runtime hang).
+        # Those need a physical/power reboot of the X5 to clear; we can only
+        # warn loudly so a human notices instead of the box silently OOMing.
+        try:
+            stdin, stdout, stderr = self.client.exec_command(
+                "ps -eo pid,stat,etimes,cmd | "
+                "awk -v age=" + str(max_age_s) + " "
+                "'$2 ~ /D/ && $3 > age && /x5_bpu_evaluate\\.py/ && / --bin / && !/--bin-dir/'",
+                timeout=15,
+            )
+            leftover = stdout.read().decode("utf-8", errors="replace").strip()
+            if leftover:
+                print(
+                    "[x5 WARNING] uninterruptible (D-state) evaluator process(es) "
+                    "survived kill -9 -- the X5 BPU driver is likely wedged and "
+                    "needs a physical reboot:\n" + leftover,
+                    file=sys.stderr,
+                )
+        except Exception:
+            pass
+
+    def raise_if_memory_critical(self, min_available_mb: int = 300) -> None:
+        """Abort the current round rather than push a nearly-OOM X5 further.
+
+        If a BPU runtime hang has left unkillable (D-state) processes
+        holding memory (see ``reap_stale_evaluators``), kill -9 cannot free
+        it and every subsequent round just adds more pressure until the
+        kernel OOM-killer starts shooting essential system processes
+        (observed: it killed Xorg and froze the device with a black
+        HDMI/dbus-launch error).  Refusing to schedule new work while
+        memory is critically low turns that silent slow-motion crash into a
+        clear, actionable error instead.
+        """
+        try:
+            self._ensure()
+            stdin, stdout, stderr = self.client.exec_command(
+                "awk '/MemAvailable/ {print $2}' /proc/meminfo", timeout=10
+            )
+            out = stdout.read().decode("utf-8", errors="replace").strip()
+            stdout.channel.recv_exit_status()
+            available_mb = int(out) // 1024
+        except Exception as exc:
+            print(f"[x5 ssh] memory check failed (non-fatal): {exc}", file=sys.stderr)
+            return
+        if available_mb < min_available_mb:
+            raise RuntimeError(
+                f"X5 available memory critically low ({available_mb} MiB < "
+                f"{min_available_mb} MiB) -- likely a wedged BPU runtime "
+                "holding unkillable D-state processes. Refusing to schedule "
+                "more evaluation work; the X5 needs a physical reboot."
+            )
+
+    def exec(self, cmd: str, timeout: int = 300, kill_pattern: Optional[str] = None):
+        """Run ``cmd`` on the X5, retrying on transient SSH failures.
+
+        If ``kill_pattern`` is given, any previous process matching it is
+        killed before every attempt (including the first).  This guarantees
+        that a retry -- triggered by a dropped channel, a client-side read
+        timeout, etc. -- can never result in two copies of the same
+        long-running remote job (e.g. the per-round BPU evaluator) running
+        at once.  Without this, transient network hiccups silently
+        accumulate orphaned evaluator processes on the X5 until it runs out
+        of memory (observed: OOM killer eventually killing Xorg/dbus and
+        freezing the device).
+        """
         last_exc = None
         for attempt in range(3):
+            if kill_pattern:
+                self.pkill(kill_pattern)
             try:
                 self._ensure()
                 stdin, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
@@ -400,6 +523,10 @@ class X5Remote:
                 print(f"[x5 ssh] exec failed ({exc}), reconnect attempt {attempt + 1}/3", file=sys.stderr)
                 self.close()
                 time.sleep(2 ** attempt)
+        # Make sure we don't leave a dangling process behind for the caller
+        # to accidentally race with a subsequent call.
+        if kill_pattern:
+            self.pkill(kill_pattern)
         raise last_exc
 
     def put(self, local: Path, remote: Path):
@@ -753,6 +880,14 @@ def x5_evaluate(
     if x5 is None:
         raise RuntimeError("--x5-host required for BPU evaluation (or use --no-bpu / --eval-local)")
 
+    # Round-independent safety net: kill any evaluator process from an
+    # earlier round that got stuck past its own timeout.  Must run before
+    # every round (not just retries of the current one), since a stuck
+    # process from round N is otherwise never revisited once round N+1's
+    # eval uses a brand new round directory / kill_pattern.
+    x5.reap_stale_evaluators()
+    x5.raise_if_memory_critical()
+
     x5.mkdir(x5_work)
     x5_round = x5_work / round_dir.name
     # Remove any stale files from previous (interrupted) runs so the
@@ -787,7 +922,21 @@ def x5_evaluate(
         f"--format bin "
         f"--out {losses_remote}"
     )
-    rc, out, err = x5.exec(cmd, timeout=600)
+    # x5_bpu_evaluate.py evaluates each candidate in its own 600s-capped
+    # subprocess, sequentially.  Size the client-side channel timeout to the
+    # worst case (all candidates take the full 600s) plus margin, so a
+    # slow-but-healthy round never looks like a dropped connection.  Using a
+    # fixed 600s here caused `exec()` to time out mid-evaluation as models
+    # grew larger / candidate counts increased, which triggered a retry that
+    # relaunched the *entire* --bin-dir evaluation while the original one was
+    # still running on the X5 -- orphaned duplicates piled up over time and
+    # eventually exhausted the X5's RAM (OOM-killer killing Xorg/dbus and
+    # freezing the device).  `kill_pattern` below also guarantees any such
+    # leftover process is killed before each attempt, so retries can no
+    # longer create duplicates even if the timeout estimate is still wrong.
+    n_candidates = len(list(eval_bins_dir.glob("*.bin"))) + len(list(eval_bins_dir.glob("*.onnx")))
+    eval_timeout = max(600, 650 * max(n_candidates, 1))
+    rc, out, err = x5.exec(cmd, timeout=eval_timeout, kill_pattern=str(x5_round))
     print(out)
     if rc != 0:
         print(err, file=sys.stderr)
@@ -1039,10 +1188,75 @@ def run_round(
     return model, state
 
 
+def _is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)  # signal 0: check liveness without killing
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by someone else -- assume alive
+
+
+def _acquire_work_dir_lock(work_dir: Path) -> None:
+    """Ensure only one live process owns this work_dir, killing any other.
+
+    Two independent ``bpu_evolve_additive.py`` instances for the same model
+    were previously able to run concurrently (e.g. the orchestrator restarts
+    a model in the background while the user also manually re-runs
+    ``run_all_real_training.bat`` in the foreground -- the user has no way
+    to know about or reach the background instance to stop it first).  Both
+    write the same ``evolve_state.json`` / ``best.pt`` and drive the same X5
+    work directory, whose per-round cleanup (``rm -rf round_*``) deletes
+    whatever the *other* instance is currently uploading/evaluating.  That
+    produced spurious X5 evaluation failures, which triggered SSH retries,
+    which (before the ``exec()`` fix above) piled up orphaned evaluator
+    processes on the X5 until it ran out of memory.
+
+    Since progress is checkpointed to ``evolve_state.json``/``best.pt`` every
+    round and reloaded via ``--resume``, it is always safe to kill whichever
+    instance was here first and take over -- so we do that automatically
+    instead of refusing to start.
+    """
+    lock_path = work_dir / ".evolve.lock"
+    if lock_path.is_file():
+        try:
+            old_pid = int(lock_path.read_text().strip())
+        except (ValueError, OSError):
+            old_pid = None
+        if old_pid is not None and old_pid != os.getpid() and _is_alive(old_pid):
+            print(
+                f"[lock] {work_dir} is locked by running PID {old_pid}; killing it and "
+                "taking over (state is checkpointed every round, so --resume picks up "
+                "cleanly). This replaces the old 'refuse to start' behavior since the "
+                "user has no way to reach/stop a background-started instance before "
+                "manually re-running the training script.",
+                file=sys.stderr,
+            )
+            try:
+                os.kill(old_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            for _ in range(20):  # up to ~10s for a graceful exit
+                if not _is_alive(old_pid):
+                    break
+                time.sleep(0.5)
+            else:
+                print(f"[lock] PID {old_pid} did not exit after SIGTERM, sending SIGKILL", file=sys.stderr)
+                try:
+                    os.kill(old_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                time.sleep(1)
+    lock_path.write_text(str(os.getpid()))
+    atexit.register(lambda: lock_path.unlink(missing_ok=True))
+
+
 def main() -> int:
     args = parse_args()
     work_dir = Path(args.work_dir) / args.model_name
     work_dir.mkdir(parents=True, exist_ok=True)
+    _acquire_work_dir_lock(work_dir)
 
     compile_script = Path(args.compile_script)
     if not compile_script.is_absolute():
@@ -1091,6 +1305,11 @@ def main() -> int:
             return 1
         x5 = X5Remote(args.x5_host, args.x5_user, args.x5_pass, port=args.x5_port)
         x5.connect()
+        # Kill any evaluator process orphaned by a previous crash/restart of
+        # this model's controller (e.g. after a Ctrl-C, SSH drop, or a prior
+        # OOM freeze).  Scoped to this model's work dir so it never touches
+        # the other models' concurrent evaluations on the same X5.
+        x5.pkill(f"{Path(args.x5_work)}/round_")
 
     # Load or initialize model and state
     state_path = work_dir / "evolve_state.json"
