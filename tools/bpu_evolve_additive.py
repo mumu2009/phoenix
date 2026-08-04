@@ -436,6 +436,10 @@ class X5Remote:
                 time.sleep(2 ** attempt)
         raise RuntimeError(f"failed to get {remote} -> {local}")
 
+    def connect(self):
+        """Public entry point used by main(); ensures the SSH/SFTP channel exists."""
+        self._ensure()
+
     def mkdir(self, remote: Path):
         self.exec(f"mkdir -p {remote}")
 
