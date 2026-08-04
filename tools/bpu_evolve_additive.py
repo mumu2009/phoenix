@@ -352,7 +352,8 @@ def _iter_vision_dataset(data_dir: Path, max_samples: int, seed: int):
 # ---------------------------------------------------------------------------
 
 class X5Remote:
-    """Minimal paramiko wrapper to copy files and run commands on the X5."""
+    """Paramiko wrapper to copy files and run commands on the X5, with reconnect and
+    SFTP size verification so a single transfer glitch does not corrupt a .bin."""
 
     def __init__(self, host: str, user: str, password: str, port: int = 22, timeout: int = 30):
         self.host = host
@@ -363,39 +364,94 @@ class X5Remote:
         self.client = None
         self.sftp = None
 
-    def connect(self):
+    def _connect(self):
         if paramiko is None:
             raise RuntimeError("paramiko is not installed; install it to use X5 SSH")
-        self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.client.connect(self.host, port=self.port, username=self.user, password=self.password, timeout=self.timeout)
-        self.client.get_transport().set_keepalive(30)
-        self.sftp = self.client.open_sftp()
+        c = paramiko.SSHClient()
+        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        c.connect(self.host, port=self.port, username=self.user, password=self.password, timeout=self.timeout)
+        c.get_transport().set_keepalive(30)
+        self.client = c
+        self.sftp = c.open_sftp()
 
-    def close(self):
-        if self.sftp:
-            self.sftp.close()
-            self.sftp = None
-        if self.client:
-            self.client.close()
-            self.client = None
+    def _ensure(self):
+        if self.client is None:
+            self._connect()
+            return
+        try:
+            transport = self.client.get_transport()
+            if transport is None or not transport.is_active():
+                raise OSError("transport inactive")
+        except Exception:
+            self.close()
+            self._connect()
 
     def exec(self, cmd: str, timeout: int = 300):
-        if self.client is None:
-            raise RuntimeError("not connected")
-        stdin, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
-        out = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace")
-        return stdout.channel.recv_exit_status(), out, err
+        last_exc = None
+        for attempt in range(3):
+            try:
+                self._ensure()
+                stdin, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
+                out = stdout.read().decode("utf-8", errors="replace")
+                err = stderr.read().decode("utf-8", errors="replace")
+                return stdout.channel.recv_exit_status(), out, err
+            except (paramiko.SSHException, OSError, EOFError) as exc:
+                last_exc = exc
+                print(f"[x5 ssh] exec failed ({exc}), reconnect attempt {attempt + 1}/3", file=sys.stderr)
+                self.close()
+                time.sleep(2 ** attempt)
+        raise last_exc
 
     def put(self, local: Path, remote: Path):
-        self.sftp.put(str(local), str(remote))
+        local = Path(local)
+        remote = Path(remote)
+        expected = local.stat().st_size
+        self.mkdir(remote.parent)
+        for attempt in range(3):
+            try:
+                self._ensure()
+                self.sftp.put(str(local), str(remote))
+                actual = self.sftp.stat(str(remote)).st_size
+                if actual != expected:
+                    raise RuntimeError(f"size mismatch after put: {actual} != {expected}")
+                return
+            except Exception as exc:
+                print(f"[x5 sftp] put {local.name} failed ({exc}), retry {attempt + 1}/3", file=sys.stderr)
+                self.close()
+                time.sleep(2 ** attempt)
+        raise RuntimeError(f"failed to put {local} -> {remote}")
 
     def get(self, remote: Path, local: Path):
-        self.sftp.get(str(remote), str(local))
+        remote = Path(remote)
+        local = Path(local)
+        local.parent.mkdir(parents=True, exist_ok=True)
+        for attempt in range(3):
+            try:
+                self._ensure()
+                self.sftp.get(str(remote), str(local))
+                return
+            except Exception as exc:
+                print(f"[x5 sftp] get {remote.name} failed ({exc}), retry {attempt + 1}/3", file=sys.stderr)
+                self.close()
+                time.sleep(2 ** attempt)
+        raise RuntimeError(f"failed to get {remote} -> {local}")
 
     def mkdir(self, remote: Path):
         self.exec(f"mkdir -p {remote}")
+
+    def close(self):
+        if self.sftp:
+            try:
+                self.sftp.close()
+            except Exception:
+                pass
+            self.sftp = None
+        if self.client:
+            try:
+                self.client.close()
+            except Exception:
+                pass
+            self.client = None
 
 
 # ---------------------------------------------------------------------------
@@ -857,18 +913,55 @@ def run_round(
         return model, state
 
     # Evaluate on X5 (or local)
-    results = x5_evaluate(
-        x5,
-        Path(args.x5_work),
-        round_dir,
-        args.model_name,
-        args.concept,
-        input_bin,
-        target_bin,
-        eval_script,
-        args.eval_local,
-        args.no_bpu,
-    )
+    try:
+        results = x5_evaluate(
+            x5,
+            Path(args.x5_work),
+            round_dir,
+            args.model_name,
+            args.concept,
+            input_bin,
+            target_bin,
+            eval_script,
+            args.eval_local,
+            args.no_bpu,
+        )
+    except Exception as exc:
+        print(f"[error] round {round_idx}: X5 evaluation failed: {exc}; skipping round", file=sys.stderr)
+        state["round"] = round_idx
+        state["history"].append({
+            "round": round_idx,
+            "best_loss": state.get("best_loss", float("inf")),
+            "best_key": "none",
+            "n_blocks": len(model.blocks),
+            "new_block_added": False,
+            "error": str(exc),
+        })
+        save_state(work_dir / "evolve_state.json", state)
+        if not args.keep_candidates:
+            for d in candidate_dirs:
+                shutil.rmtree(d, ignore_errors=True)
+        if not args.keep_rounds:
+            prune_eval_artifacts(round_dir)
+        return model, state
+
+    if not results:
+        print(f"[warn] round {round_idx}: no eval results; treating as no improvement")
+        state["round"] = round_idx
+        state["history"].append({
+            "round": round_idx,
+            "best_loss": state.get("best_loss", float("inf")),
+            "best_key": "none",
+            "n_blocks": len(model.blocks),
+            "new_block_added": False,
+        })
+        save_state(work_dir / "evolve_state.json", state)
+        if not args.keep_candidates:
+            for d in candidate_dirs:
+                shutil.rmtree(d, ignore_errors=True)
+        if not args.keep_rounds:
+            prune_eval_artifacts(round_dir)
+        return model, state
 
     # Select best
     best_key = min(
