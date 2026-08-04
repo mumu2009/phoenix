@@ -9,11 +9,13 @@ kernel reports a count larger than requested, clamp it to the requested
 size (the data cannot physically be larger than what we passed down).
 """
 import errno
+import io
+import json
 import os
 import shutil
 import time
 from pathlib import Path
-from typing import Union
+from typing import Any, Union
 
 import numpy as np
 
@@ -112,3 +114,16 @@ def safe_copy(src: PathLike, dst: PathLike, chunk: int = SAFE_CHUNK) -> Path:
         os.close(dst_fd)
     shutil.copymode(src, dst)
     return dst
+
+
+def safe_np_save(path: PathLike, arr: np.ndarray) -> None:
+    """Equivalent to ``np.save(path, arr)`` but writes through the vboxsf-safe helper."""
+    buffer = io.BytesIO()
+    np.save(buffer, arr, allow_pickle=False)
+    safe_write_bytes(path, buffer.getvalue())
+
+
+def safe_json_dump(path: PathLike, data: Any, indent: int = 2) -> None:
+    """Atomic JSON write that goes through the vboxsf-safe helper."""
+    text = json.dumps(data, indent=indent, ensure_ascii=False)
+    safe_write_bytes(path, text.encode("utf-8"))

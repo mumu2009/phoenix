@@ -22,8 +22,32 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from vboxsf_safe import safe_tofile, safe_write_bytes
+from vboxsf_safe import safe_json_dump, safe_tofile, safe_write_bytes
 import torch.nn as nn
+
+# If set to 0, skip the post-write onnx/torch load verification.
+_VERIFY_WRITES = os.environ.get("PHOENIX_VERIFY_WRITES", "1").lower() in ("1", "true", "yes")
+
+
+def _verify_onnx_file(path: Path, expected_size: int) -> None:
+    actual = path.stat().st_size
+    if actual != expected_size:
+        raise RuntimeError(f"ONNX size mismatch for {path}: {actual} != {expected_size}")
+    if _VERIFY_WRITES:
+        try:
+            import onnx
+
+            onnx.load(str(path))
+        except Exception as exc:
+            raise RuntimeError(f"ONNX verification failed for {path}: {exc}") from exc
+
+
+def _verify_pt_file(path: Path) -> None:
+    if _VERIFY_WRITES:
+        try:
+            _torch_load_safe(path)
+        except Exception as exc:
+            raise RuntimeError(f"PT verification failed for {path}: {exc}") from exc
 
 
 def _torch_load_safe(path: Path):
@@ -399,7 +423,9 @@ class AdditiveResidualModel(nn.Module):
         # write the zip into memory and flush it with the vboxsf-safe helper.
         buffer = io.BytesIO()
         torch.save(ckpt, buffer)
-        safe_write_bytes(path, buffer.getvalue())
+        data = buffer.getvalue()
+        safe_write_bytes(path, data)
+        _verify_pt_file(path)
 
     @classmethod
     def from_checkpoint(cls, path: Path, base_path=None, base_pretrained=False):
@@ -481,8 +507,7 @@ def write_manifest(
     if "vision" in model_name:
         manifest["resolution"] = VISION_RES
 
-    with open(out_dir / "model.manifest.json", "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
+    safe_json_dump(out_dir / "model.manifest.json", manifest, indent=2)
     print(f"[manifest] wrote {out_dir}/model.manifest.json")
 
 
@@ -517,6 +542,7 @@ def export_to_onnx(
         onnx_bytes = buffer.getvalue()
         onnx_path = out_dir / "model.onnx"
         safe_write_bytes(onnx_path, onnx_bytes)
+        _verify_onnx_file(onnx_path, len(onnx_bytes))
         print(f"[export] wrote {onnx_path} ({len(onnx_bytes)} bytes)")
 
     if save_pt:

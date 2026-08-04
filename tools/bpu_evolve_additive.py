@@ -45,7 +45,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from vboxsf_safe import safe_copy, safe_tofile
+from vboxsf_safe import safe_copy, safe_json_dump, safe_np_save, safe_tofile
 
 # Allow importing additive_jpea.py from the tools directory.
 _TOOLS_DIR = Path(__file__).resolve().parent
@@ -65,6 +65,7 @@ from additive_jpea import (
     get_output_shape,
     build_block,
     export_to_onnx,
+    _torch_load_safe,
 )
 
 try:
@@ -106,8 +107,7 @@ def shape_to_str(shape: Tuple[int, ...]) -> str:
 
 def save_state(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+    safe_json_dump(path, state, indent=2)
 
 
 def load_state(path: Path) -> dict:
@@ -179,8 +179,8 @@ class DataPool:
         # Use float32 directly so large image pools do not allocate float64.
         inputs = rng.standard_normal(size=(n, *self.input_shape), dtype=np.float32) * 0.5
         targets = rng.standard_normal(size=(n, *self.output_shape), dtype=np.float32) * 0.5
-        np.save(self.pool_dir / "inputs.npy", inputs)
-        np.save(self.pool_dir / "targets.npy", targets)
+        safe_np_save(self.pool_dir / "inputs.npy", inputs)
+        safe_np_save(self.pool_dir / "targets.npy", targets)
         print(f"[pool] synthetic {n} samples -> {self.pool_dir}")
 
     def prepare_from_dataset(
@@ -231,8 +231,8 @@ class DataPool:
         if not inputs:
             raise RuntimeError(f"no samples found in {dataset_dir}")
 
-        np.save(self.pool_dir / "inputs.npy", np.stack(inputs).astype(np.float32))
-        np.save(self.pool_dir / "targets.npy", np.stack(targets).astype(np.float32))
+        safe_np_save(self.pool_dir / "inputs.npy", np.stack(inputs).astype(np.float32))
+        safe_np_save(self.pool_dir / "targets.npy", np.stack(targets).astype(np.float32))
         print(f"[pool] generated {len(inputs)} samples -> {self.pool_dir}")
 
 
@@ -242,7 +242,7 @@ def load_teacher(path: Path, concept: int) -> torch.nn.Module:
     if not path.is_file():
         raise FileNotFoundError(f"teacher checkpoint not found: {path}")
 
-    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    ckpt = _torch_load_safe(path)
 
     # 1) AdditiveResidualModel checkpoint
     if isinstance(ckpt, dict) and ckpt.get("model_name") in MODEL_INPUT_SHAPES:
