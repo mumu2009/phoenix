@@ -182,13 +182,74 @@ def ensure_paramiko():
         sys.exit(1)
 
 
+class KaliClient:
+    """Paramiko SSH client that auto-reconnects on stale / timed-out channels."""
+
+    def __init__(self, host, user, password, timeout=30):
+        self.host = host
+        self.user = user
+        self.password = password
+        self.timeout = timeout
+        self._c = None
+        self._paramiko = ensure_paramiko()
+
+    def _connect(self):
+        c = self._paramiko.SSHClient()
+        c.set_missing_host_key_policy(self._paramiko.AutoAddPolicy())
+        c.connect(self.host, username=self.user, password=self.password, timeout=self.timeout)
+        c.get_transport().set_keepalive(30)
+        return c
+
+    def _client(self):
+        if self._c is not None:
+            try:
+                transport = self._c.get_transport()
+                if transport is not None and transport.is_active():
+                    return self._c
+            except Exception:
+                pass
+            try:
+                self._c.close()
+            except Exception:
+                pass
+            self._c = None
+        print(f"[ssh] reconnecting to {self.user}@{self.host} ...")
+        self._c = self._connect()
+        return self._c
+
+    def exec_command(self, cmd, timeout=300):
+        last_exc = None
+        for attempt in range(3):
+            try:
+                return self._client().exec_command(cmd, timeout=timeout)
+            except (self._paramiko.SSHException, OSError, EOFError) as exc:
+                last_exc = exc
+                print(f"[ssh] exec_command failed ({exc}), reconnect attempt {attempt + 1}/3")
+                self._c = None
+                time.sleep(2 ** attempt)
+        raise last_exc
+
+    def open_sftp(self):
+        for attempt in range(3):
+            try:
+                return self._client().open_sftp()
+            except (self._paramiko.SSHException, OSError, EOFError) as exc:
+                print(f"[ssh] open_sftp failed ({exc}), reconnect attempt {attempt + 1}/3")
+                self._c = None
+                time.sleep(2 ** attempt)
+        raise last_exc
+
+    def close(self):
+        if self._c is not None:
+            try:
+                self._c.close()
+            except Exception:
+                pass
+            self._c = None
+
+
 def ssh_connect(host, user, password, timeout=30):
-    paramiko = ensure_paramiko()
-    c = paramiko.SSHClient()
-    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    c.connect(host, username=user, password=password, timeout=timeout)
-    c.get_transport().set_keepalive(30)
-    return c
+    return KaliClient(host, user, password, timeout=timeout)
 
 
 def run_kali(c, cmd, timeout=300):
@@ -368,8 +429,10 @@ def start_evolution(c, model, pool_dir, args):
 
 
 def tail_log(c, log, n=30):
-    out = run_kali(c, f"tail -n {n} {log}", timeout=30)
-    return out
+    try:
+        return run_kali(c, f"tail -n {n} {log}", timeout=30)
+    except Exception as exc:
+        return f"[ssh] could not tail {log}: {exc}"
 
 
 def resolve_edge_device(args):
@@ -399,8 +462,12 @@ def resolve_edge_device(args):
 
 
 def is_running(c, pid):
-    out = run_kali(c, f"ps -p {pid} -o pid 2>/dev/null | tail -n +2", timeout=10)
-    return bool(out.strip())
+    try:
+        out = run_kali(c, f"ps -p {pid} -o pid 2>/dev/null | tail -n +2", timeout=10)
+        return bool(out.strip())
+    except Exception as exc:
+        print(f"[ssh] is_running({pid}) failed: {exc}; assuming process still alive")
+        return True
 
 
 def main() -> int:
