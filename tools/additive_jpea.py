@@ -25,6 +25,14 @@ import torch
 from vboxsf_safe import safe_tofile, safe_write_bytes
 import torch.nn as nn
 
+
+def _torch_load_safe(path: Path):
+    """Load a PyTorch checkpoint via an in-memory buffer to avoid vboxsf read glitches."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        data = f.read()
+    return torch.load(io.BytesIO(data), map_location="cpu", weights_only=False)
+
 CONCEPT = 128
 SPEECH_CHUNK = 16000
 SPEECH_TARGET = 15872
@@ -222,7 +230,7 @@ class ResNet18Base(nn.Module):
             p.requires_grad = False
 
     def _load_from_path(self, base_path):
-        ckpt = torch.load(base_path, map_location="cpu", weights_only=False)
+        ckpt = _torch_load_safe(base_path)
         if isinstance(ckpt, dict):
             if "base_state" in ckpt:
                 state = ckpt["base_state"]
@@ -387,13 +395,17 @@ class AdditiveResidualModel(nn.Module):
             "n_blocks": len(self.blocks),
             "extra": extra or {},
         }
-        torch.save(ckpt, path)
+        # torch.save directly hits VirtualBox shared-folder write-count bugs;
+        # write the zip into memory and flush it with the vboxsf-safe helper.
+        buffer = io.BytesIO()
+        torch.save(ckpt, buffer)
+        safe_write_bytes(path, buffer.getvalue())
 
     @classmethod
     def from_checkpoint(cls, path: Path, base_path=None, base_pretrained=False):
         """Load an AdditiveResidualModel from a checkpoint."""
         path = Path(path)
-        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        ckpt = _torch_load_safe(path)
         model_name = ckpt["model_name"]
         concept = ckpt.get("concept", CONCEPT)
         block_config = ckpt.get("block_config", {})
