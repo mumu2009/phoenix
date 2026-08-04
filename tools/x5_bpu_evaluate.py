@@ -163,19 +163,37 @@ def main() -> int:
         return 1
 
     if args.bin:
-        bin_paths = [args.bin]
-    else:
-        bin_dir = Path(args.bin_dir)
-        if not bin_dir.is_dir():
-            print(f"[ERROR] {bin_dir} is not a directory", file=sys.stderr)
-            return 1
-        bin_paths = sorted(glob.glob(str(bin_dir / args.pattern)))
-        if not bin_paths:
-            print(f"[ERROR] no .bin files in {bin_dir}", file=sys.stderr)
-            return 1
+        # Single-file mode: evaluate directly in this process (no fork).
+        # This is the leaf invocation spawned by --bin-dir mode below.
+        # It MUST NOT subprocess itself again or it creates an infinite fork
+        # recursion that eats all RAM on the X5 until OOM-killer fires.
+        name = os.path.basename(args.bin)
+        results = {}
+        try:
+            loss = evaluate_bin(args.bin, inputs, targets)
+            results[name] = {"loss": loss, "ok": True}
+            print(f"{name}: loss={loss:.6f}")
+        except Exception as e:
+            results[name] = {"loss": float("inf"), "ok": False, "error": str(e)}
+            print(f"{name}: ERROR {e}")
 
-    # Evaluate each .bin in its own child process so a BPU runtime crash/segfault
-    # in one model does not abort the whole round.
+        out_dir = Path(args.out).parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+        return 0
+
+    # --bin-dir mode: evaluate each .bin in its own child process so a BPU
+    # runtime crash/segfault in one model does not abort the whole round.
+    bin_dir = Path(args.bin_dir)
+    if not bin_dir.is_dir():
+        print(f"[ERROR] {bin_dir} is not a directory", file=sys.stderr)
+        return 1
+    bin_paths = sorted(glob.glob(str(bin_dir / args.pattern)))
+    if not bin_paths:
+        print(f"[ERROR] no .bin files in {bin_dir}", file=sys.stderr)
+        return 1
+
     results = {}
     out_dir = Path(args.out).parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -194,7 +212,12 @@ def main() -> int:
             "--format", args.format,
         ]
         try:
+            # subprocess.run with timeout kills the child on TimeoutExpired,
+            # then raises.  We catch it and record failure cleanly.
             rc = subprocess.run(cmd, timeout=600, check=False).returncode
+        except subprocess.TimeoutExpired:
+            rc = -1
+            print(f"{name}: TIMEOUT after 600s (child killed)")
         except Exception as e:
             rc = -1
             print(f"{name}: subprocess exception {e}")
