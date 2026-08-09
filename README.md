@@ -77,8 +77,8 @@ Phoenix can place the three heavy model roles on the local host or on separate
 edge devices at startup.  Each role is configured independently:
 
 - `llm` — text generation backend (Ollama / llama.cpp server / BitNet).
-- `vision` — image encoder / JPEA world model.
-- `speech` — audio / 1D JPEA world model.
+- `vision` — image encoder / JEPA world model.
+- `speech` — audio / 1D JEPA world model.
 
 Configuration comes from command-line arguments, environment variables, or a
 JSON file; later sources override earlier ones.  Examples:

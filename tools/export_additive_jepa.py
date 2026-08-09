@@ -2,7 +2,7 @@
 """Export a trained/prepared AdditiveResidualModel checkpoint to ONNX.
 
 Usage:
-    python tools/export_additive_jpea.py \
+    python tools/export_additive_jepa.py \
         --model-name speech_encoder \
         --checkpoint work_dir/speech_encoder/best.pt \
         --out-dir work_dir/speech_encoder/export
@@ -19,7 +19,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from additive_jpea import (
+from additive_jepa import (
     AdditiveResidualModel,
     export_to_onnx,
 )

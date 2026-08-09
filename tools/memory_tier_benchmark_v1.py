@@ -267,12 +267,8 @@ def token_f1(pred: str, ref: str) -> float:
     r = tokenize(ref)
     if not p or not r:
         return 0.0
-    p_counts: dict[str, int] = {}
-    r_counts: dict[str, int] = {}
-    for token in p:
-        p_counts[token] = p_counts.get(token, 0) + 1
-    for token in r:
-        r_counts[token] = r_counts.get(token, 0) + 1
+    p_counts = Counter(p)
+    r_counts = Counter(r)
     overlap = 0
     for token, count in p_counts.items():
         overlap += min(count, r_counts.get(token, 0))

@@ -94,6 +94,9 @@ export default function ConfigPanel({ onError, chatProvider = 'core', onChatProv
 
   const [robotsFiles, setRobotsFiles] = useState([]);
   const [robotsSelected, setRobotsSelected] = useState([]);
+  // O(1) membership checks for the checklist render below instead of
+  // Array.prototype.includes (O(n)) on every row of every re-render.
+  const robotsSelectedSet = useMemo(() => new Set(robotsSelected), [robotsSelected]);
   const [robotsLimit, setRobotsLimit] = useState('10');
   const [robotsShuffle, setRobotsShuffle] = useState(true);
   const [robotsEnqueueStudy, setRobotsEnqueueStudy] = useState(true);
@@ -1360,7 +1363,7 @@ export default function ConfigPanel({ onError, chatProvider = 'core', onChatProv
           <div className="card-subtitle">选择文件（可多选）</div>
           <div className="cfg-checklist">
             {(robotsFiles || []).slice(0, 80).map((f) => {
-              const checked = robotsSelected.includes(f);
+              const checked = robotsSelectedSet.has(f);
               return (
                 <label key={f} className="check">
                   <input

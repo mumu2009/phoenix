@@ -50,12 +50,12 @@ import torch
 
 from vboxsf_safe import safe_copy, safe_json_dump, safe_np_save, safe_tofile
 
-# Allow importing additive_jpea.py from the tools directory.
+# Allow importing additive_jepa.py from the tools directory.
 _TOOLS_DIR = Path(__file__).resolve().parent
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from additive_jpea import (
+from additive_jepa import (
     AdditiveResidualModel,
     CONCEPT,
     SPEECH_CHUNK,
@@ -240,7 +240,7 @@ class DataPool:
 
 
 def load_teacher(path: Path, concept: int) -> torch.nn.Module:
-    """Load a teacher checkpoint. Supports AdditiveResidualModel or standard JPEA autoencoders."""
+    """Load a teacher checkpoint. Supports AdditiveResidualModel or standard JEPA autoencoders."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"teacher checkpoint not found: {path}")
@@ -251,25 +251,25 @@ def load_teacher(path: Path, concept: int) -> torch.nn.Module:
     if isinstance(ckpt, dict) and ckpt.get("model_name") in MODEL_INPUT_SHAPES:
         return AdditiveResidualModel.from_checkpoint(path)
 
-    # 2) JPEA autoencoder state dict
+    # 2) JEPA autoencoder state dict
     if isinstance(ckpt, dict) and "model" in ckpt:
         state = ckpt["model"]
         if "enc_channels" in ckpt or "dec_channels" in ckpt:
-            from train_jpea_v2_speech import JpeaV2SpeechAutoencoder
+            from train_jepa_v2_speech import JepaV2SpeechAutoencoder
             enc_channels = ckpt.get("enc_channels", [32, 64, 128, 256])
             dec_channels = ckpt.get("dec_channels", [256, 128, 64, 32, 1])
             blocks = ckpt.get("blocks", 0)
-            model = JpeaV2SpeechAutoencoder(
+            model = JepaV2SpeechAutoencoder(
                 enc_channels, dec_channels, concept=concept, blocks=blocks
             )
             model.load_state_dict(state)
             return model
         else:
-            from train_jpea_v2_vision import JpeaV2ImageAutoencoder
+            from train_jepa_v2_vision import JepaV2ImageAutoencoder
             resnet = ckpt.get("resnet", "resnet18")
             dec_channels = ckpt.get("dec_channels")
             dec_depth = ckpt.get("dec_depth", 0)
-            model = JpeaV2ImageAutoencoder(
+            model = JepaV2ImageAutoencoder(
                 resnet_name=resnet,
                 concept=concept,
                 pretrained=False,
@@ -663,6 +663,158 @@ def compile_candidate(
     return onnx_path if onnx_path.is_file() else None
 
 
+# ---------------------------------------------------------------------------
+# Batch compilation via persistent Docker worker
+# ---------------------------------------------------------------------------
+
+_PERSISTENT_SCRIPT = Path(__file__).resolve().parent / "compile_bpu_docker_persistent.sh"
+_HOST_WORK = "/home/kali/phoenix"
+_CONTAINER_WORK = "/workspace"
+_WORKER_VERIFIED = False  # Cache: once verified running, skip rechecking
+
+
+def _ensure_persistent_worker() -> bool:
+    """Start the persistent Docker compile worker if not running.
+    Returns True if worker is available."""
+    global _WORKER_VERIFIED
+    if _WORKER_VERIFIED:
+        return True
+    if not _PERSISTENT_SCRIPT.is_file():
+        return False
+    try:
+        status = subprocess.run(
+            ["bash", str(_PERSISTENT_SCRIPT), "status"],
+            capture_output=True, text=True, timeout=60,
+        ).stdout.strip()
+        if status == "running":
+            _WORKER_VERIFIED = True
+            return True
+        rc = subprocess.run(
+            ["bash", str(_PERSISTENT_SCRIPT), "start"],
+            timeout=180,
+        ).returncode
+        if rc == 0:
+            _WORKER_VERIFIED = True
+        return rc == 0
+    except Exception as e:
+        print(f"[compile] persistent worker startup failed: {e}")
+        return False
+
+
+def _path_to_container(p: str) -> str:
+    """Rewrite a host path under HOST_WORK to the container mount."""
+    if p.startswith(_HOST_WORK):
+        return _CONTAINER_WORK + p[len(_HOST_WORK):]
+    return p
+
+
+def compile_candidates_batch(
+    candidate_dirs: List[Path],
+    model_name: str,
+    concept: int,
+    per_channel: bool,
+    calib_type: str,
+    march: Optional[str] = None,
+    parallel: int = 2,
+    skip_compile: bool = False,
+) -> List[Optional[Path]]:
+    """Compile all candidates in a single batch request to the persistent Docker worker.
+
+    Returns a list of Path (or None) in the same order as candidate_dirs.
+    Falls back to individual compile_candidate() calls if the worker is unavailable.
+    """
+    n = len(candidate_dirs)
+    results: List[Optional[Path]] = [None] * n
+
+    if skip_compile:
+        for i, cand_dir in enumerate(candidate_dirs):
+            out_dir = cand_dir / "bpu"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            bin_path = out_dir / f"{model_name}.bin"
+            bin_path.touch()
+            results[i] = bin_path
+        return results
+
+    input_name = MODEL_INPUT_NAMES[model_name]
+    input_shape = shape_to_str(get_input_shape(model_name, concept))
+
+    # Build job list
+    jobs = []
+    for i, cand_dir in enumerate(candidate_dirs):
+        onnx_path = cand_dir / "model.onnx"
+        calib_dir_path = cand_dir / "calibration"
+        out_dir = cand_dir / "bpu"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "mapper_work").mkdir(parents=True, exist_ok=True)
+
+        jobs.append({
+            "job_id": f"candidate_{i:04d}",
+            "model_name": model_name,
+            "onnx_path": _path_to_container(str(onnx_path)),
+            "calib_dir": _path_to_container(str(calib_dir_path)),
+            "input_name": input_name,
+            "input_shape": input_shape,
+            "out_dir": _path_to_container(str(out_dir)),
+            "per_channel": per_channel,
+            "calib_type": calib_type,
+            "march": march or "bayes-e",
+        })
+
+    request = json.dumps({
+        "action": "compile",
+        "jobs": jobs,
+        "parallel": parallel,
+    })
+
+    # Send to persistent worker
+    try:
+        proc = subprocess.run(
+            ["bash", str(_PERSISTENT_SCRIPT), "compile"],
+            input=request,
+            capture_output=True,
+            text=True,
+            timeout=960,
+        )
+        if proc.returncode != 0:
+            print(f"[compile] batch compile failed: {proc.stderr}")
+            return results
+
+        resp = json.loads(proc.stdout.strip())
+        if resp.get("status") != "ok":
+            print(f"[compile] batch compile error: {resp.get('error')}")
+            return results
+
+        elapsed = resp.get("elapsed", 0)
+        batch_results = resp.get("results", [])
+        print(f"[compile] batch done: {len(batch_results)} jobs in {elapsed:.1f}s")
+
+        # Map results back
+        job_id_to_idx = {f"candidate_{i:04d}": i for i in range(n)}
+        for r in batch_results:
+            idx = job_id_to_idx.get(r.get("job_id"))
+            if idx is None:
+                continue
+            if r.get("ok") and r.get("bin"):
+                # The .bin path is inside the container; rewrite to host path
+                bin_container = r["bin"]
+                bin_host = bin_container.replace(_CONTAINER_WORK, _HOST_WORK, 1)
+                results[idx] = Path(bin_host) if Path(bin_host).is_file() else None
+                if results[idx] is None:
+                    # Try original path as-is (might already be host path)
+                    if Path(bin_container).is_file():
+                        results[idx] = Path(bin_container)
+            else:
+                err = r.get("error", "unknown")
+                print(f"[compile] {r.get('job_id')} failed: {err}")
+
+    except subprocess.TimeoutExpired:
+        print("[compile] batch compile timed out (960s)")
+    except Exception as e:
+        print(f"[compile] batch compile exception: {e}")
+
+    return results
+
+
 def compile_model_pt_to_onnx(
     pt_path: Path,
     out_dir: Path,
@@ -763,7 +915,7 @@ def parse_args():
 def build_initial_model(args) -> AdditiveResidualModel:
     base = None
     if args.model_name == "vision_encoder":
-        from additive_jpea import ResNet18Base
+        from additive_jepa import ResNet18Base
         # Always start from a pretrained ImageNet ResNet18 for the vision encoder.
         # If a custom base .pt is supplied, it is loaded on top of that.
         base = ResNet18Base(
@@ -910,6 +1062,11 @@ def x5_evaluate(
     x5.put(target_bin, x5_round / "targets.bin")
     eval_name = eval_script.name
     x5.put(eval_script, x5_round / eval_name)
+    # x5_bpu_evaluate.py imports helpers from edge_evaluate_common.py; make sure
+    # the dependency is also present on the X5 in the same round directory.
+    common_helper = eval_script.parent / "edge_evaluate_common.py"
+    if common_helper.is_file():
+        x5.put(common_helper, x5_round / common_helper.name)
 
     losses_remote = x5_round / "losses.json"
     cmd = (
@@ -1028,34 +1185,63 @@ def run_round(
         )
         candidate_dirs.append(cand_dir)
 
-    # Compile in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as ex:
-        futures = {
-            ex.submit(
-                compile_candidate,
-                d,
-                args.model_name,
-                args.concept,
-                compile_script,
-                args.compile_backend,
-                per_channel,
-                calib_type,
-                args.run_hb_mapper,
-                args.march,
-                900,
-                skip_compile,
-            ): i
-            for i, d in enumerate(candidate_dirs)
-        }
-        for future in concurrent.futures.as_completed(futures):
-            i = futures[future]
-            bin_path = future.result()
+    # Compile candidates
+    # Try batch compilation via persistent Docker worker first (much faster:
+    # eliminates ~19s/candidate Docker+hb_mapper cold-start overhead).
+    # Falls back to the old per-candidate subprocess approach if unavailable.
+    use_batch = (
+        args.compile_backend == "horizon_bpu"
+        and _PERSISTENT_SCRIPT.is_file()
+        and not skip_compile
+    )
+    if use_batch and _ensure_persistent_worker():
+        print(f"[compile] using persistent worker (batch of {len(candidate_dirs)}, parallel={args.parallel})")
+        batch_results = compile_candidates_batch(
+            candidate_dirs,
+            args.model_name,
+            args.concept,
+            per_channel,
+            calib_type,
+            args.march,
+            parallel=args.parallel,
+            skip_compile=skip_compile,
+        )
+        for i, bin_path in enumerate(batch_results):
             if bin_path is not None:
                 suffix = bin_path.suffix
                 safe_copy(bin_path, eval_bins_dir / f"candidate_{i:04d}{suffix}")
                 cand_onnx = candidate_dirs[i] / "model.onnx"
                 if cand_onnx.is_file() and suffix != ".onnx":
                     safe_copy(cand_onnx, eval_bins_dir / f"candidate_{i:04d}.onnx")
+    else:
+        # Legacy: per-candidate subprocess compilation
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as ex:
+            futures = {
+                ex.submit(
+                    compile_candidate,
+                    d,
+                    args.model_name,
+                    args.concept,
+                    compile_script,
+                    args.compile_backend,
+                    per_channel,
+                    calib_type,
+                    args.run_hb_mapper,
+                    args.march,
+                    900,
+                    skip_compile,
+                ): i
+                for i, d in enumerate(candidate_dirs)
+            }
+            for future in concurrent.futures.as_completed(futures):
+                i = futures[future]
+                bin_path = future.result()
+                if bin_path is not None:
+                    suffix = bin_path.suffix
+                    safe_copy(bin_path, eval_bins_dir / f"candidate_{i:04d}{suffix}")
+                    cand_onnx = candidate_dirs[i] / "model.onnx"
+                    if cand_onnx.is_file() and suffix != ".onnx":
+                        safe_copy(cand_onnx, eval_bins_dir / f"candidate_{i:04d}.onnx")
 
     missing = [i for i, d in enumerate(candidate_dirs) if not any(eval_bins_dir.glob(f"candidate_{i:04d}.*"))]
     if missing:

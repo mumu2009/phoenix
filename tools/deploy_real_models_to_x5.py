@@ -3,7 +3,7 @@
 
 Supports any device registered in config/edge_devices.json (rdk_x5, rdk_s100,
 rk3588, jetson_nano).  The best artifact (.bin for BPU, .onnx for ORT) is copied
-under runtime_store/models/additive_jpea/<model>/.
+under runtime_store/models/additive_jepa/<model>/.
 
 Usage (from Kali, through reverse tunnel):
     python tools/deploy_real_models_to_x5.py --edge-device lab_x5
@@ -52,7 +52,7 @@ def deploy_one(sftp, src_dir: Path, x5_root: PurePosixPath, name: str, compile_b
     manifest = src / "model.manifest.json"
     best = _best_artifact(src, compile_backend)
 
-    dst_dir = x5_root / "models" / "additive_jpea" / name
+    dst_dir = x5_root / "models" / "additive_jepa" / name
     mkdir_p(sftp, str(dst_dir.parent))
     mkdir_p(sftp, str(dst_dir))
 

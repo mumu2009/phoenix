@@ -749,13 +749,18 @@ def main() -> int:
         if restore_patch is not None:
             patch_runtime_features(args.phoenix_runtime_url, args.phoenix_token, restore_patch, args.timeout)
 
-    inst_ollama_hits = sum(1 for r in instruction_results if semantic_match(r.ollama.reply, next(ex.reference for ex in instruction_examples if ex.example_id == r.example_id))[0] and r.ollama.status == 200)
-    inst_llama_server_hits = sum(1 for r in instruction_results if semantic_match(r.llama_server.reply, next(ex.reference for ex in instruction_examples if ex.example_id == r.example_id))[0] and r.llama_server.status == 200)
-    inst_phoenix_hits = sum(1 for r in instruction_results if semantic_match(r.phoenix.reply, next(ex.reference for ex in instruction_examples if ex.example_id == r.example_id))[0] and r.phoenix.status == 200)
+    # Build example_id -> reference lookups once instead of re-scanning the
+    # full examples list for every result/model combination (was O(n*m), now O(n+m)).
+    instruction_reference_by_id = {ex.example_id: ex.reference for ex in instruction_examples}
+    window_reference_by_id = {ex.example_id: ex.reference for ex in window_examples}
 
-    win_ollama_hits = sum(1 for r in window_results if semantic_match(r.ollama.reply, next(ex.reference for ex in window_examples if ex.example_id == r.example_id))[0] and r.ollama.status == 200)
-    win_llama_server_hits = sum(1 for r in window_results if semantic_match(r.llama_server.reply, next(ex.reference for ex in window_examples if ex.example_id == r.example_id))[0] and r.llama_server.status == 200)
-    win_phoenix_hits = sum(1 for r in window_results if semantic_match(r.phoenix.reply, next(ex.reference for ex in window_examples if ex.example_id == r.example_id))[0] and r.phoenix.status == 200)
+    inst_ollama_hits = sum(1 for r in instruction_results if semantic_match(r.ollama.reply, instruction_reference_by_id[r.example_id])[0] and r.ollama.status == 200)
+    inst_llama_server_hits = sum(1 for r in instruction_results if semantic_match(r.llama_server.reply, instruction_reference_by_id[r.example_id])[0] and r.llama_server.status == 200)
+    inst_phoenix_hits = sum(1 for r in instruction_results if semantic_match(r.phoenix.reply, instruction_reference_by_id[r.example_id])[0] and r.phoenix.status == 200)
+
+    win_ollama_hits = sum(1 for r in window_results if semantic_match(r.ollama.reply, window_reference_by_id[r.example_id])[0] and r.ollama.status == 200)
+    win_llama_server_hits = sum(1 for r in window_results if semantic_match(r.llama_server.reply, window_reference_by_id[r.example_id])[0] and r.llama_server.status == 200)
+    win_phoenix_hits = sum(1 for r in window_results if semantic_match(r.phoenix.reply, window_reference_by_id[r.example_id])[0] and r.phoenix.status == 200)
 
     inst_ollama_calls = [r.ollama for r in instruction_results]
     inst_llama_server_calls = [r.llama_server for r in instruction_results]

@@ -11,7 +11,7 @@ is performed on the compile host.
 
 ## Architecture
 
-`tools/additive_jpea.py` defines `AdditiveResidualModel`, a generic container
+`tools/additive_jepa.py` defines `AdditiveResidualModel`, a generic container
 that owns:
 
 * an optional **frozen base** (e.g. ResNet18 for the vision encoder)
@@ -59,13 +59,13 @@ ops are used.
 The evolved additive residual models are consumed at runtime by the Phoenix
 mixed-modal bridge:
 
-* **x86_64 / cpu / gpu** — `jpea_v2_image_world_model.cpp` and
-  `jpea_v2_speech_world_model.cpp` resolve
-  `runtime_store/models/additive_jpea/{speech,vision}_{encoder,decoder}/best.onnx`,
+* **x86_64 / cpu / gpu** — `jepa_v2_image_world_model.cpp` and
+  `jepa_v2_speech_world_model.cpp` resolve
+  `runtime_store/models/additive_jepa/{speech,vision}_{encoder,decoder}/best.onnx`,
   then call `tools/local_onnx_runner.py` through a `popen` pipe.  The Python
   runner loads the ONNX with `onnxruntime`, reads the float32 input binary, and
   writes the float32 output binary.
-* **RDK X5 / bpu** — the same `runtime_store/models/additive_jpea/.../best.bin`
+* **RDK X5 / bpu** — the same `runtime_store/models/additive_jepa/.../best.bin`
   compiled with `tools/compile_bpu_jepa_v2.sh` is executed through
   `rdk_x5_bpu::execute`.
 * **Server-client / js** — the backend does not run the model.  Use
@@ -79,8 +79,8 @@ uses them to configure the local runner or BPU call.
 
 | File | Purpose |
 |------|---------|
-| `tools/additive_jpea.py` | `AdditiveResidualModel`, block builders, export helpers |
-| `tools/export_additive_jpea.py` | CLI to export one `.pt` checkpoint to ONNX + calibration + manifest |
+| `tools/additive_jepa.py` | `AdditiveResidualModel`, block builders, export helpers |
+| `tools/export_additive_jepa.py` | CLI to export one `.pt` checkpoint to ONNX + calibration + manifest |
 | `tools/bpu_evolve_additive.py` | `(1+lambda)` evolution controller |
 | `tools/compile_bpu_jepa_v2.sh` | Updated to compile a **single** generic ONNX or a speech/image pair |
 | `tools/x5_bpu_evaluate.py` | Updated to evaluate a single `.bin` or a directory of `.bin` files against `.npy` or `.bin` input/target batches |
@@ -115,7 +115,7 @@ ResNet18 base with `--base-path`.
 ### 1. Create an additive model checkpoint manually
 
 ```bash
-python tools/additive_jpea.py \
+python tools/additive_jepa.py \
     --model-name speech_encoder \
     --n-blocks 0 \
     --out-dir /tmp/additive_speech_encoder_init
@@ -124,7 +124,7 @@ python tools/additive_jpea.py \
 For the vision encoder with a ResNet18 base:
 
 ```bash
-python tools/additive_jpea.py \
+python tools/additive_jepa.py \
     --model-name vision_encoder \
     --base-path /path/to/resnet18_base.pt \
     --n-blocks 0 \
@@ -134,7 +134,7 @@ python tools/additive_jpea.py \
 ### 2. Export a checkpoint to ONNX
 
 ```bash
-python tools/export_additive_jpea.py \
+python tools/export_additive_jepa.py \
     --model-name speech_encoder \
     --checkpoint /tmp/additive_speech_encoder_init/model.pt \
     --out-dir /tmp/additive_speech_encoder_onnx
@@ -258,7 +258,7 @@ a raw float32 `.bin` batch for the X5.
 
 ## Calibration
 
-`export_additive_jpea.py` and `AdditiveResidualModel.export_to_onnx` write a
+`export_additive_jepa.py` and `AdditiveResidualModel.export_to_onnx` write a
 `calibration/` directory containing raw float32 `.bin` files.  The generic
 compile command uses this directory directly.  For encoders, `per_channel=True`
 and `calib_type=kl` work well.  For decoders, `per_channel=False` and

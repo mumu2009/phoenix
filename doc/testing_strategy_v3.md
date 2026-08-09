@@ -51,7 +51,14 @@
 ./test-tools/api_regression.ps1 -BaseUrl http://127.0.0.1:5080 -Token local-dev
 ```
 
-## 6. 新增回归点（监控/清洗）
+## 6. 接口回归脚本增强（2026）
+
+`test-tools/api_regression.ps1` 已增强为默认"跑完全部步骤 + 结尾汇总 PASS/FAIL/SKIP"，并补充了
+未授权/错误密码/缺字段/未知路由等负向用例，以及本节第 6 部分列出的数据清洗回归点的显式断言。
+详见 `doc/algorithm/performance_optimization_2026.md` 第 4 节。旧的"遇错即停"行为可用 `-FailFast`
+参数恢复；`-SkipExtendedChecks` 可跳过负向/清洗类用例做快速冒烟。
+
+## 7. 新增回归点（监控/清洗）
 
 - 监控接口：
   - `GET /api/monitoring/stats` 返回 `ok=true` 且包含 `routes` 与 `cleaning`。

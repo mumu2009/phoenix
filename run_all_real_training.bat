@@ -1,6 +1,13 @@
 @echo off
+setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
+
+:: Single concurrency knob: how many model evolutions run at the same time.
+:: The per-model compile parallelism is auto-derived so the total number of
+:: concurrent BPU compile jobs stays around 8 (safe for the Kali VM).
+set "MAX_CONCURRENT=4"
+set /a PARALLEL=8/MAX_CONCURRENT
 
 :: Run all four additive residual models on real data, evaluating on a real edge device.
 ::
@@ -38,9 +45,9 @@ python tools\run_all_additive_training.py ^
     --pool-size 200 ^
     --max-rounds 1000 ^
     --lambda 10 ^
-    --batch-size 200 ^
-    --parallel 1 ^
-    --max-concurrent 4 ^
+    --batch-size 500 ^
+    --parallel %PARALLEL% ^
+    --max-concurrent %MAX_CONCURRENT% ^
     --block-size small ^
     --no-local-build ^
     --wait ^

@@ -1,4 +1,4 @@
-"""Train a scalable 1D JPEA-v2 speech autoencoder on 16 kHz mono WAV files.
+"""Train a scalable 1D JEPA-v2 speech autoencoder on 16 kHz mono WAV files.
 
 The architecture is a 1-D Conv / ConvTranspose autoencoder that treats the
 waveform as a 2-D tensor of shape [N, 1, 1, 16000].  The encoder strided-convs
@@ -6,7 +6,7 @@ with kernel/stride (1, 4) four times to reach [N, C, 1, 62], global-pools to a
 vector, and projects to the concept dimension.  The decoder reshapes the
 concept back to [N, C, 1, 62] and upsamples four times with (1, 4) stride to
 reach [N, 1, 1, 15872], matching kDecoderOutputSamples in
-jpea_v2_speech_world_model.cpp.
+jepa_v2_speech_world_model.cpp.
 
 Supports scale presets from tiny (~1 M params) to xlarge (~100 M params) with
 the default concept dim fixed at 128 so the compiled BPU binaries remain
@@ -56,7 +56,7 @@ class ResBlock1D(nn.Module):
         return x + torch.relu(self.bn(self.conv(x)))
 
 
-class JpeaV2SpeechEncoder(nn.Module):
+class JepaV2SpeechEncoder(nn.Module):
     def __init__(self, channels, concept, blocks=0):
         super().__init__()
         self.concept = concept
@@ -81,7 +81,7 @@ class JpeaV2SpeechEncoder(nn.Module):
         return self.fc(x)           # [N,concept]
 
 
-class JpeaV2SpeechDecoder(nn.Module):
+class JepaV2SpeechDecoder(nn.Module):
     def __init__(self, channels, concept, blocks=0):
         super().__init__()
         self.concept = concept
@@ -108,12 +108,12 @@ class JpeaV2SpeechDecoder(nn.Module):
         return x
 
 
-class JpeaV2SpeechAutoencoder(nn.Module):
+class JepaV2SpeechAutoencoder(nn.Module):
     def __init__(self, enc_channels, dec_channels, concept=128, blocks=0):
         super().__init__()
         self.concept = concept
-        self.encoder = JpeaV2SpeechEncoder(enc_channels, concept, blocks=blocks)
-        self.decoder = JpeaV2SpeechDecoder(dec_channels, concept, blocks=blocks)
+        self.encoder = JepaV2SpeechEncoder(enc_channels, concept, blocks=blocks)
+        self.decoder = JepaV2SpeechDecoder(dec_channels, concept, blocks=blocks)
 
     def forward(self, x):
         concept = self.encoder(x)
@@ -239,7 +239,7 @@ def _get_device(device_arg):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True, help='directory with 16 kHz mono WAV files')
-    parser.add_argument('--out-dir', default='checkpoints/jpea_v2_speech', help='checkpoint directory')
+    parser.add_argument('--out-dir', default='checkpoints/jepa_v2_speech', help='checkpoint directory')
     parser.add_argument('--scale', default='small',
                         choices=['tiny', 'small', 'medium', 'large', 'xlarge', 'legacy'],
                         help='model size preset (default small ~5M params)')
@@ -283,7 +283,7 @@ def main():
         args.concept, args.blocks, args.width)
     print(f'[train] encoder channels={enc_channels}  decoder channels={dec_channels}  blocks={blocks}')
 
-    model = JpeaV2SpeechAutoencoder(enc_channels, dec_channels, concept=args.concept, blocks=blocks).to(device)
+    model = JepaV2SpeechAutoencoder(enc_channels, dec_channels, concept=args.concept, blocks=blocks).to(device)
     print(f'[train] trainable parameters: {count_parameters(model) / 1e6:.2f} M')
 
     if args.compile:

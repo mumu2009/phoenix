@@ -85,7 +85,17 @@ public:
   json dispatch(const json &payload,
                 const json &options = json::object()) override {
     std::string text = payload.value("text", "");
-    auto requestEmbedding = textToMiniEmbedding(text, 64);
+    // Perturbation variants and the request text are re-embedded once per
+    // controller per layer below; cache by text so repeats across
+    // controllers/layers reuse the same embedding instead of recomputing it.
+    std::unordered_map<std::string, std::vector<float>> embCache;
+    auto emb = [&](const std::string &s) -> const std::vector<float> & {
+      auto it = embCache.find(s);
+      if (it != embCache.end())
+        return it->second;
+      return embCache.emplace(s, textToMiniEmbedding(s, 64)).first->second;
+    };
+    auto requestEmbedding = emb(text);
     auto variants = buildVariants(text, options.value("perturbations", 0));
     json layers =
         options.value("multiLayer", true)
@@ -151,8 +161,7 @@ public:
           continue;
         }
         double affinity =
-            cosineSim(requestEmbedding,
-                      textToMiniEmbedding(baseResult.value("reply", ""), 64));
+            cosineSim(requestEmbedding, emb(baseResult.value("reply", "")));
         shards_->record(controllerName, requestEmbedding,
                         baseResult.value("reply", ""),
                         baseResult.value("latency", 0));
@@ -165,8 +174,7 @@ public:
           try {
             auto vr = callRespond(controllerName, vrPayload);
             double vAffinity =
-                cosineSim(textToMiniEmbedding(variant, 64),
-                          textToMiniEmbedding(vr.value("reply", ""), 64));
+                cosineSim(emb(variant), emb(vr.value("reply", "")));
             variantResults.push_back(json{
                 {"text", variant}, {"response", vr}, {"affinity", vAffinity}});
           } catch (const std::exception &e) {

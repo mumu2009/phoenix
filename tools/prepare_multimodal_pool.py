@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build paired real-data pools for the four additive residual JPEA models.
+"""Build paired real-data pools for the four additive residual JEPA models.
 
 The shared "Unit" concept is produced by an LLM text encoder (BGE-small-en)
 from a text description of each sample.  No teacher model is required:

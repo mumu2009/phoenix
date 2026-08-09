@@ -26,7 +26,7 @@ semanticVector  : 统一语义向量（浮点）
 content         : 可选原始内容或摘要
 confidence      : [0, 1]
 timestampMs     : UTC 毫秒
-metadata        : 键值对（如 jpeaVariant、jpeaBackend、conceptEncoder 等）
+metadata        : 键值对（如 jepaVariant、jepaBackend、conceptEncoder 等）
 associationIds  : 关联单元 id
 modalWeights    : 各模态在融合中的权重
 ```
@@ -90,11 +90,11 @@ L_total = α * L_contrastive + β * L_reconstruction + γ * L_semantic_consisten
 
 ---
 
-## 3. I-JEPA / JPEA-v2 图像世界模型
+## 3. I-JEPA / JEPA-v2 图像世界模型
 
 ### 3.1 官方变体
 
-定义在 `jpea_v2_image_world_model.hpp`：
+定义在 `jepa_v2_image_world_model.hpp`：
 
 | id | arch | repo | patchSize | resolution | params | dataset |
 |---|---|---|---|---|---|---|
@@ -109,23 +109,23 @@ L_total = α * L_contrastive + β * L_reconstruction + γ * L_semantic_consisten
 runtime_store/models/ijepa/<id>/model.safetensors
 ```
 
-由 `jpeaV2ImageExpectedWeightsPath(cfg)` 计算。
+由 `jepaV2ImageExpectedWeightsPath(cfg)` 计算。
 
 ### 3.2 接口语义
 
-`JpeaV2ImageWorldModel` 接口：`encode`、`encodeContext`、`encodeTarget`、`predictTarget`、`adapt`、`decode`、`status`。
+`JepaV2ImageWorldModel` 接口：`encode`、`encodeContext`、`encodeTarget`、`predictTarget`、`adapt`、`decode`、`status`。
 
 工厂根据部署配置选择后端：
 
 ```text
-local(cpu|gpu)  -> JpeaV2ImageLocalOnnxModel  运行 additive_jpea/.../best.onnx
-local(bpu)     -> JpeaV2ImageHbdnnModel      加载 best.bin / model_encoder.bin
-remote         -> JpeaV2ImageRemoteModel      POST JSON 到 remote url
-server-client  -> JpeaV2ImageServerClientModel 仅接受客户端发来的 concept vector
-missing        -> JpeaV2ImageUnavailableModel  status() 报错，encode/decode 返回空
+local(cpu|gpu)  -> JepaV2ImageLocalOnnxModel  运行 additive_jepa/.../best.onnx
+local(bpu)     -> JepaV2ImageHbdnnModel      加载 best.bin / model_encoder.bin
+remote         -> JepaV2ImageRemoteModel      POST JSON 到 remote url
+server-client  -> JepaV2ImageServerClientModel 仅接受客户端发来的 concept vector
+missing        -> JepaV2ImageUnavailableModel  status() 报错，encode/decode 返回空
 ```
 
-`JpeaV2ImageLocalOnnxModel` 在 x86_64 上通过 `tools/local_onnx_runner.py` 调用 ONNX Runtime；`JpeaV2ImageHbdnnModel` 在 RDK X5 上调用 `rdk_x5_bpu::execute`。不再有确定性统计 fallback。
+`JepaV2ImageLocalOnnxModel` 在 x86_64 上通过 `tools/local_onnx_runner.py` 调用 ONNX Runtime；`JepaV2ImageHbdnnModel` 在 RDK X5 上调用 `rdk_x5_bpu::execute`。不再有确定性统计 fallback。
 
 ### 3.3 JEPA 预测流程
 
@@ -141,9 +141,9 @@ missing        -> JpeaV2ImageUnavailableModel  status() 报错，encode/decode �
 
 ---
 
-## 4. 1D JPEA 语音世界模型
+## 4. 1D JEPA 语音世界模型
 
-实现：`jpea_v2_speech_world_model.{hpp,cpp}`
+实现：`jepa_v2_speech_world_model.{hpp,cpp}`
 
 ### 4.1 编码
 
@@ -201,11 +201,11 @@ encode(packet, targetDim, contentHint):
     if text:
         semanticVector = textEncoder.encode(packet.payload 解码为 UTF-8)
     else if image or video:
-        variant = metadata["jpeaVariant"] or "ijepa_vith14_1k"
+        variant = metadata["jepaVariant"] or "ijepa_vith14_1k"
         semanticVector = imageWorldModel(variant, targetDim).encode(payload)
         if empty: semanticVector = mediaConcept(payload, targetDim, 0x494D4147U)
     else if audio:
-        variant = metadata["jpeaSpeechVariant"] or "jpea_v2_speech_16k"
+        variant = metadata["jepaSpeechVariant"] or "jepa_v2_speech_16k"
         semanticVector = speechWorldModel(variant, targetDim).encode(payload)
         if empty: semanticVector = mediaConcept(payload, targetDim, 0x41554449U)
         if SpeechConceptModel.meanAlignment 存在且同维度：
@@ -263,13 +263,13 @@ decode(unit, target, source):
 pretrainImage(image, caption, targetDim):
     if 不是 image/video 或 payload 空：返回 false
     dim = conceptDimension(targetDim)
-    variant = image.metadata["jpeaVariant"] or "ijepa_vith14_1k"
+    variant = image.metadata["jepaVariant"] or "ijepa_vith14_1k"
     model = imageWorldModel(variant, dim)
     model.adapt(image.payload, width, height, mimeType, steps=1, lr=1e-3)
     visual = model.encode(image.payload, width, height, mimeType)
     if visual 空: visual = mediaConcept(image.payload, dim, 0x494D4147U)
     if visual.size != dim: 返回 false
-    imageUnit = SemanticUnit(..., visual, conceptEncoder="jpea-v2-image-world-model")
+    imageUnit = SemanticUnit(..., visual, conceptEncoder="jepa-v2-image-world-model")
     PersistentConceptMatrix::addOrUpdate(imageUnit, true)
     if caption 非空:
         textConcept = transformerTextEncoderConcept(caption, dim)
@@ -294,7 +294,7 @@ reset():
 `status()` 返回一个 JSON，包括：
 - `speechWorldModel`：persistent、dimension、samples。
 - `imageWorldModel`：当前图像 world model 的 `status()`。
-- `jpeaSpeechWorldModel`：当前语音 world model 的 `status()`。
+- `jepaSpeechWorldModel`：当前语音 world model 的 `status()`。
 - `textEncoder`：`TransformerTextEncoder` 的加载/错误状态。
 - `conceptMatrix`：`PersistentConceptMatrix::status()` 的结果。
 
@@ -539,8 +539,8 @@ frontend_server.cpp 路由处理
                     MixedModalConceptBridge::encode
                                |
                                +---> 文本  --> TransformerTextEncoder
-                               +---> 图像  --> JpeaV2ImageWorldModel
-                               +---> 音频  --> JpeaV2SpeechWorldModel
+                               +---> 图像  --> JepaV2ImageWorldModel
+                               +---> 音频  --> JepaV2SpeechWorldModel
                                +---> 其他  --> mediaConcept
                                |
                                v

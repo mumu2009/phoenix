@@ -139,24 +139,63 @@ private:
     int k = std::max(2, std::min(nNeighbors, nRows - 1));
     double target = std::log2((double)k);
 
+    // The brute-force O(nRows^2 * nCols) distance matrix itself is the
+    // dominant cost here. Building an exact KD-Tree/Ball-Tree would only pay
+    // off for low-dimensional embeddings (KNN structures degrade back to
+    // near-linear scans once nCols is more than a couple dozen, which is
+    // typical for the embeddings this function receives), and an
+    // approximate-NN structure would change which neighbors are picked
+    // (a real behavior change, not just a performance one). Instead, since
+    // each row's neighbor search only reads the shared, read-only `data`
+    // array and writes to its own disjoint `knn[i]` slot, the per-row work
+    // is embarrassingly parallel: split rows across worker threads to use
+    // all available cores while leaving the numeric result identical to the
+    // single-threaded version.
     std::vector<std::vector<std::pair<int, float>>> knn(nRows);
-    for (int i = 0; i < nRows; i++) {
-      std::vector<std::pair<float, int>> dists;
-      dists.reserve(nRows - 1);
-      for (int j = 0; j < nRows; j++) {
-        if (i == j)
-          continue;
-        double acc = 0.0;
-        for (int c = 0; c < nCols; c++) {
-          double diff = data[i * nCols + c] - data[j * nCols + c];
-          acc += diff * diff;
+    auto computeKnnRange = [&](int begin, int end) {
+      for (int i = begin; i < end; i++) {
+        // Rank candidates by squared distance first (sqrt is monotonic for
+        // non-negative inputs, so ordering is identical) and only take the
+        // sqrt for the k nearest survivors below. This turns an O(nRows)
+        // sqrt call per row into O(k), which matters once nRows >> k.
+        std::vector<std::pair<float, int>> dists;
+        dists.reserve(nRows - 1);
+        for (int j = 0; j < nRows; j++) {
+          if (i == j)
+            continue;
+          double acc = 0.0;
+          for (int c = 0; c < nCols; c++) {
+            double diff = data[i * nCols + c] - data[j * nCols + c];
+            acc += diff * diff;
+          }
+          dists.push_back({(float)acc, j});
         }
-        dists.push_back({(float)std::sqrt(acc), j});
+        std::partial_sort(dists.begin(), dists.begin() + k, dists.end(),
+                          [](auto &a, auto &b) { return a.first < b.first; });
+        for (int t = 0; t < k; t++)
+          knn[i].push_back(
+              {dists[t].second, (float)std::sqrt((double)dists[t].first)});
       }
-      std::partial_sort(dists.begin(), dists.begin() + k, dists.end(),
-                        [](auto &a, auto &b) { return a.first < b.first; });
-      for (int t = 0; t < k; t++)
-        knn[i].push_back({dists[t].second, dists[t].first});
+    };
+    unsigned int nThreads = std::max(1u, std::thread::hardware_concurrency());
+    nThreads = std::min<unsigned int>(nThreads, (unsigned int)nRows);
+    // Below a small row count the thread-creation overhead would dominate
+    // the actual work, so just run inline.
+    if (nThreads <= 1 || nRows < 64) {
+      computeKnnRange(0, nRows);
+    } else {
+      std::vector<std::thread> workers;
+      workers.reserve(nThreads);
+      int chunk = (nRows + (int)nThreads - 1) / (int)nThreads;
+      for (unsigned int t = 0; t < nThreads; t++) {
+        int begin = (int)t * chunk;
+        int end = std::min(nRows, begin + chunk);
+        if (begin >= end)
+          break;
+        workers.emplace_back(computeKnnRange, begin, end);
+      }
+      for (auto &th : workers)
+        th.join();
     }
 
     std::vector<float> rhos(nRows, 0.0f);

@@ -8,7 +8,7 @@ try:
     sftp.mkdir('/home/kali/phoenix/tools')
 except IOError:
     pass
-sftp.put(r'<repo>\tools\train_jpea_v2_speech.py', '/home/kali/phoenix/tools/train_jpea_v2_speech.py')
+sftp.put(r'<repo>\tools\train_jepa_v2_speech.py', '/home/kali/phoenix/tools/train_jepa_v2_speech.py')
 sftp.put(r'<repo>\tools\create_musan_manifest.py', '/home/kali/phoenix/tools/create_musan_manifest.py')
 sftp.close()
 c.close()
