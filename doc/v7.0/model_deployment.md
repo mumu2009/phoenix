@@ -29,7 +29,7 @@ configuration file.
 Each of the three model types has its own record:
 
 - `llm`  - text generation (Ollama, llama.cpp server, BitNet server).
-- `vision` - image world model (JPEA / I-JEPA style encoder).
+- `vision` - image world model (JEPA / I-JEPA style encoder).
 - `speech` - audio / 1D world model.
 
 ## Configuration Sources (precedence high to low)
@@ -319,9 +319,9 @@ On failure the remote service should return `{"ok":false,"error":"..."}`.
 - `tools/local_onnx_runner.py` — one-shot ONNX Runtime runner used by the x86_64
   `cpu`/`gpu` local backend.  It reads a float32 binary input, runs the model,
   and writes a float32 binary output.
-- `tools/additive_jpea.py` — builds additive residual speech/vision encoders and
+- `tools/additive_jepa.py` — builds additive residual speech/vision encoders and
   decoders and exports them to `best.pt/.onnx/.bin` under
-  `runtime_store/models/additive_jpea/{speech,vision}_{encoder,decoder}/`.
+  `runtime_store/models/additive_jepa/{speech,vision}_{encoder,decoder}/`.
 - `static/js/client_onnx_runner.js` — browser-side JS runner stub for
   server-client mode.
 
@@ -356,8 +356,8 @@ compile.bat
 
 | Macro | Default | When set to `0` at compile time |
 |---|---|---|
-| `PHOENIX_EDGE_IMAGE_ENABLED` | `1` | `rdk_x5_bpu.cpp` does not include or link `dnn/hb_dnn.h`; `createJpeaV2ImageWorldModel()` cannot select the BPU backend and falls through to the configured `localBackend`. |
-| `PHOENIX_EDGE_SPEECH_ENABLED` | `1` | `createJpeaV2SpeechWorldModel()` cannot select the BPU backend and falls through to the configured `localBackend`. |
+| `PHOENIX_EDGE_IMAGE_ENABLED` | `1` | `rdk_x5_bpu.cpp` does not include or link `dnn/hb_dnn.h`; `createJepaV2ImageWorldModel()` cannot select the BPU backend and falls through to the configured `localBackend`. |
+| `PHOENIX_EDGE_SPEECH_ENABLED` | `1` | `createJepaV2SpeechWorldModel()` cannot select the BPU backend and falls through to the configured `localBackend`. |
 
 The defaults keep the existing v7.0 behavior (BPU/local and remote endpoints are
 enabled and selected by runtime deployment configuration).
@@ -367,18 +367,18 @@ enabled and selected by runtime deployment configuration).
 - `model_deployment.{hpp,cpp}` defines the topology, parses configuration and
   provides `RemoteModelClient` for synchronous HTTP calls.  v7.0 adds
   `LocalBackendType` (`cpu`/`gpu`/`bpu`/`js`/`auto`) to `ModelDeploymentRecord`.
-- `jpea_v2_image_world_model.cpp` and `jpea_v2_speech_world_model.cpp` query
+- `jepa_v2_image_world_model.cpp` and `jepa_v2_speech_world_model.cpp` query
   `ModelDeploymentConfig::instance()` in their factories and create a remote,
   server-client, BPU, local ONNX, or unavailable model as appropriate.  No
   deterministic statistical fallback is returned.
 - Additive residual models are loaded from
-  `runtime_store/models/additive_jpea/{speech,vision}_{encoder,decoder}/best.onnx`
+  `runtime_store/models/additive_jepa/{speech,vision}_{encoder,decoder}/best.onnx`
   (x86_64 `cpu`/`gpu`) or `best.bin` (RDK X5 `bpu`).
 - Legacy `runtime_store/models/ijepa/<variant>/` BPU `.bin` files are still
   supported as a fallback path resolution.
 - When a model is not ready the factory returns a `*UnavailableModel` whose
   `status()` contains `"ready": false` and an `error` message; encode/decode
-  return empty vectors and the mixed-modal bridge sets `jpeaError` /
+  return empty vectors and the mixed-modal bridge sets `jepaError` /
   `imageDecodeError` / `audioDecodeError` metadata.
 - `loadConfig` first applies the legacy `transformer-mode` and Ollama /
   llama.cpp / BitNet flags, then overwrites the corresponding `Config` fields

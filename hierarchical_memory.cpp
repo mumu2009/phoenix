@@ -154,38 +154,36 @@ void HierarchicalMemory::del(const std::string &key) {
 std::vector<std::pair<std::string, nlohmann::json>>
 HierarchicalMemory::query(const std::string &prefix, size_t topK) const {
   std::lock_guard<std::mutex> lock(mu_);
-  std::vector<std::pair<std::string, nlohmann::json>> out;
+  // Collect (key, value, score) together so the sort below never has to
+  // re-locate each key across the three tiers (previously up to 3 map
+  // lookups per side, per comparison). The score formula matches the
+  // original: activation + 1e-6 * lastAccessMs (recency tie-break).
+  struct Scored {
+    std::string key;
+    nlohmann::json value;
+    double score;
+  };
+  std::vector<Scored> scored;
   auto collect = [&](const std::map<std::string, MemorySlot> &tier) {
     for (const auto &kv : tier) {
       if (!prefix.empty() && kv.first.rfind(prefix, 0) != 0)
         continue;
-      out.push_back({kv.first, kv.second.value});
+      double score =
+          kv.second.activation + 1e-6 * static_cast<double>(kv.second.lastAccessMs);
+      scored.push_back(Scored{kv.first, kv.second.value, score});
     }
   };
   collect(working_);
   collect(shortTerm_);
   collect(longTerm_);
-  std::sort(out.begin(), out.end(),
-            [&](const auto &a, const auto &b) {
-              // Higher activation / more recent first.
-              auto itA = working_.find(a.first);
-              if (itA == working_.end())
-                itA = shortTerm_.find(a.first);
-              if (itA == shortTerm_.end())
-                itA = longTerm_.find(a.first);
-              auto itB = working_.find(b.first);
-              if (itB == working_.end())
-                itB = shortTerm_.find(b.first);
-              if (itB == shortTerm_.end())
-                itB = longTerm_.find(b.first);
-              double scoreA = (itA == longTerm_.end() ? 0.0 : itA->second.activation) +
-                              1e-6 * itA->second.lastAccessMs;
-              double scoreB = (itB == longTerm_.end() ? 0.0 : itB->second.activation) +
-                              1e-6 * itB->second.lastAccessMs;
-              return scoreA > scoreB;
-            });
-  if (out.size() > topK)
-    out.resize(topK);
+  std::sort(scored.begin(), scored.end(),
+            [](const Scored &a, const Scored &b) { return a.score > b.score; });
+  if (scored.size() > topK)
+    scored.resize(topK);
+  std::vector<std::pair<std::string, nlohmann::json>> out;
+  out.reserve(scored.size());
+  for (auto &s : scored)
+    out.emplace_back(std::move(s.key), std::move(s.value));
   return out;
 }
 

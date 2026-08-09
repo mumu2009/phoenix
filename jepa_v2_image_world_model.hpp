@@ -1,4 +1,4 @@
-/* jpea_v2_image_world_model.hpp - Semantic interface for image world models
+/* jepa_v2_image_world_model.hpp - Semantic interface for image world models
    Copyright (C) 2026 079 Project
 
    This file is part of 079 Project.
@@ -20,13 +20,13 @@ namespace phoenix {
 namespace io {
 
 /**
- * @brief Description of an official I-JEPA / JPEA-v2 image world-model variant.
+ * @brief Description of an official I-JEPA / JEPA-v2 image world-model variant.
  *
  * The four shipped variants below correspond to the official Meta I-JEPA
  * checkpoints (see https://github.com/facebookresearch/ijepa).  The default
  * is the lowest-compute variant: ViT-H/14 trained on ImageNet-1K at 224x224.
  */
-struct JpeaV2ImageWorldModelConfig {
+struct JepaV2ImageWorldModelConfig {
   std::string id;            /**< internal variant id, e.g. "ijepa_vith14_1k" */
   std::string arch;          /**< architecture string, e.g. "vit_h14" */
   std::string repo;          /**< HuggingFace repo or checkpoint URL */
@@ -39,7 +39,7 @@ struct JpeaV2ImageWorldModelConfig {
 };
 
 /**
- * @brief Semantic interface for an image JPEA-v2 world model.
+ * @brief Semantic interface for an image JEPA-v2 world model.
  *
  * The interface is organised around the JEPA joint-embedding predictive
  * architecture.  Implementations must be able to:
@@ -51,9 +51,9 @@ struct JpeaV2ImageWorldModelConfig {
  * This is not just a format wrapper: it exposes the model's internal
  * representation contract so downstream modules can reason about concepts.
  */
-class JpeaV2ImageWorldModel {
+class JepaV2ImageWorldModel {
  public:
-  virtual ~JpeaV2ImageWorldModel() = default;
+  virtual ~JepaV2ImageWorldModel() = default;
 
   /**
    * @brief Encode an image into a semantic concept vector.
@@ -136,7 +136,7 @@ class JpeaV2ImageWorldModel {
   virtual nlohmann::json status() const = 0;
 
   /** @brief Configuration of this model instance. */
-  virtual const JpeaV2ImageWorldModelConfig &config() const = 0;
+  virtual const JepaV2ImageWorldModelConfig &config() const = 0;
 };
 
 /**
@@ -144,10 +144,12 @@ class JpeaV2ImageWorldModel {
  *
  * Order is from lowest to highest compute / parameter count.
  */
-inline std::vector<JpeaV2ImageWorldModelConfig> jpeaV2ImageOfficialVariants() {
+inline std::vector<JepaV2ImageWorldModelConfig> jepaV2ImageOfficialVariants() {
   return {
       {"resnet18_224",     "resnet18",
        "timm/resnet18.a1_in1k",  16, 224, 11689512LL, "IN1K"},
+      {"vision_encoder",   "additive_resnet18",
+       "runtime_store/models/additive_jepa/vision_encoder",  16, 224, 0, "additive", "best.onnx", "vision_encoder"},
       {"ijepa_vith14_1k",  "vit_h14",
        "facebook/ijepa_vith14_1k",  14, 224, 632000000LL, "IN1K"},
       {"ijepa_vith16_448", "vit_h16",
@@ -161,13 +163,13 @@ inline std::vector<JpeaV2ImageWorldModelConfig> jpeaV2ImageOfficialVariants() {
 /**
  * @brief Factory: create an image world model instance.
  *
- * @param variantId   one of the ids returned by jpeaV2ImageOfficialVariants().
+ * @param variantId   one of the ids returned by jepaV2ImageOfficialVariants().
  * @param targetDim   desired output concept dimension.
  * @param backend     retained for API compatibility; production always uses Horizon hbDNN.
  * @return a concrete implementation. Missing BPU runtime or a compiled model is reported
  *         through status() and encode() returns an empty vector.
  */
-std::unique_ptr<JpeaV2ImageWorldModel> createJpeaV2ImageWorldModel(
+std::unique_ptr<JepaV2ImageWorldModel> createJepaV2ImageWorldModel(
     const std::string &variantId = "ijepa_vith14_1k",
     int targetDim = 0,
     const std::string &backend = "auto");
@@ -175,10 +177,10 @@ std::unique_ptr<JpeaV2ImageWorldModel> createJpeaV2ImageWorldModel(
 /**
  * @brief Find an official variant config by id.
  */
-inline const JpeaV2ImageWorldModelConfig *findJpeaV2ImageVariant(
+inline const JepaV2ImageWorldModelConfig *findJepaV2ImageVariant(
     const std::string &id) {
-  static const std::vector<JpeaV2ImageWorldModelConfig> kVariants =
-      jpeaV2ImageOfficialVariants();
+  static const std::vector<JepaV2ImageWorldModelConfig> kVariants =
+      jepaV2ImageOfficialVariants();
   for (const auto &v : kVariants) {
     if (v.id == id) return &v;
   }
@@ -191,7 +193,7 @@ inline const JpeaV2ImageWorldModelConfig *findJpeaV2ImageVariant(
  * This matches the layout created by tools/download_ijepa_models.py:
  * runtime_store/models/ijepa/<id>/.
  */
-inline std::string jpeaV2ImageLocalWeightsDir(const JpeaV2ImageWorldModelConfig &cfg) {
+inline std::string jepaV2ImageLocalWeightsDir(const JepaV2ImageWorldModelConfig &cfg) {
   return cfg.localWeightsDir.empty() ? cfg.id : cfg.localWeightsDir;
 }
 
@@ -200,9 +202,9 @@ inline std::string jpeaV2ImageLocalWeightsDir(const JpeaV2ImageWorldModelConfig 
  *
  * Example: "runtime_store/models/ijepa/ijepa_vith14_1k/model.safetensors".
  */
-inline std::string jpeaV2ImageExpectedWeightsPath(const JpeaV2ImageWorldModelConfig &cfg) {
+inline std::string jepaV2ImageExpectedWeightsPath(const JepaV2ImageWorldModelConfig &cfg) {
   return std::string("runtime_store/models/ijepa/") +
-         jpeaV2ImageLocalWeightsDir(cfg) + "/" + cfg.weightsFile;
+         jepaV2ImageLocalWeightsDir(cfg) + "/" + cfg.weightsFile;
 }
 
 }  // namespace io

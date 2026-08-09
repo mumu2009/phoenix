@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Windows batch runner for the four additive residual JPEA-v2 models.
+"""Windows batch runner for the four additive residual JEPA-v2 models.
 
 This script runs on the Windows host, connects to the Kali compile box and the
 RDK X5, and starts / monitors BPU evolutions for the four models.  It can also
@@ -55,17 +55,20 @@ KALI_ENV = "env PYTHONPATH=/usr/lib/python3/dist-packages"
 
 # Files that must be present on Kali for this to work (and that we sync on every run).
 KALI_FILES = [
-    "tools/additive_jpea.py",
+    "tools/additive_jepa.py",
     "tools/bpu_evolve_additive.py",
-    "tools/export_additive_jpea.py",
+    "tools/export_additive_jepa.py",
     "tools/compile_bpu_jepa_v2.sh",
     "tools/compile_bpu_docker.sh",
+    "tools/compile_bpu_docker_persistent.sh",
+    "tools/compile_bpu_worker.py",
     "tools/compile_target_model.py",
     "tools/edge_device_manager.py",
     "tools/run_hb_mapper.py",
     "tools/hb_mapper_patch.py",
     "tools/vboxsf_safe.py",
     "tools/x5_bpu_evaluate.py",
+    "tools/edge_evaluate_common.py",
     "tools/rk3588_npu_evaluate.py",
     "tools/jetson_trt_evaluate.py",
     "tools/edge_ort_evaluate.py",
@@ -461,6 +464,20 @@ def resolve_edge_device(args):
         args.eval_script = dev.cfg.get("eval_script", "x5_bpu_evaluate.py")
 
 
+def _kill_existing_evolutions(c):
+    """Kill any previously launched bpu_evolve_additive.py / compile_target_model.py
+    processes on Kali before starting a new run.  This makes the .bat safe to
+    re-run from the user's terminal without worrying about nohup'd leftovers."""
+    for pattern in ["bpu_evolve_additive.py", "compile_target_model.py"]:
+        cmd = f"pkill -9 -f '{pattern}' 2>/dev/null || true"
+        try:
+            out = run_kali(c, cmd, timeout=30)
+            if out and out.strip():
+                print(f"[kali] killed old {pattern} processes: {out.strip()}")
+        except Exception as exc:
+            print(f"[warn] killing old {pattern} processes failed: {exc}")
+
+
 def is_running(c, pid):
     try:
         out = run_kali(c, f"ps -p {pid} -o pid 2>/dev/null | tail -n +2", timeout=10)
@@ -497,6 +514,26 @@ def main() -> int:
     # The bpu_evolve_additive.py controller creates the X5 work dir and pushes
     # x5_bpu_evaluate.py via paramiko, so no separate scp/ssh is needed here.
     print(f"[x5] will use work dir {args.x5_work} (created by controller)")
+
+    # Avoid duplicate evolutions when the user re-runs the batch while previous
+    # bpu_evolve processes are still running (they are nohup'd and otherwise
+    # invisible from the Windows host).  We kill any existing instance before
+    # starting the new set; --resume will pick up from evolve_state.json.
+    _kill_existing_evolutions(c)
+
+    # Start the persistent Docker compile worker on Kali (one-time ~15s init,
+    # then all compile jobs reuse it without Docker/hb_mapper cold-start overhead).
+    if args.compile_backend in (None, "horizon_bpu") and not args.no_bpu:
+        print("[kali] starting persistent BPU compile worker ...")
+        try:
+            worker_cmd = (
+                f"cd {args.kali_repo_path} && "
+                f"bash tools/compile_bpu_docker_persistent.sh start"
+            )
+            out = run_kali(c, worker_cmd, timeout=180)
+            print(out)
+        except Exception as exc:
+            print(f"[warn] persistent worker start failed ({exc}); will fall back to per-candidate Docker")
 
     # Prepare all pools first (quick on CPU).
     pools = prepare_pools(c, args, models)

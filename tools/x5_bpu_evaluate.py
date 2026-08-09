@@ -33,63 +33,19 @@ import argparse
 import glob
 import json
 import os
-import re
-import struct
 import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
 
+from edge_evaluate_common import evaluate_batch_mse, load_batch, parse_shape
+
 try:
     from hobot_dnn import pyeasy_dnn as dnn
 except Exception as e:
     print(f"[ERROR] cannot import hobot_dnn/pyeasy_dnn: {e}", file=sys.stderr)
     sys.exit(1)
-
-
-def parse_shape(s: str):
-    """Parse '1x1x1x16000' or '1,1,1,16000' into a tuple of ints."""
-    if not s:
-        return None
-    parts = re.split(r"[x,]", s)
-    return tuple(int(p.strip()) for p in parts if p.strip())
-
-
-def load_batch(path: str, shape=None, format_hint=None):
-    """Load an input or target batch.
-
-    For ``.npy`` files, the first dimension is the batch.
-    For ``.bin`` files, ``shape`` is the per-sample shape (including batch=1).
-    The total file length determines the actual batch size.
-    """
-    p = Path(path)
-    if not p.is_file():
-        raise FileNotFoundError(f"batch file not found: {path}")
-
-    ext = p.suffix.lower()
-    if format_hint == "npy" or (format_hint is None and ext == ".npy"):
-        arr = np.load(path, allow_pickle=False)
-        if isinstance(arr, np.ndarray):
-            return arr
-        # list of arrays
-        return np.stack([np.asarray(a) for a in arr])
-
-    if format_hint == "bin" or (format_hint is None and ext == ".bin"):
-        if shape is None:
-            raise ValueError(f"--input-shape/--target-shape required for .bin batch: {path}")
-        arr = np.fromfile(path, dtype=np.float32)
-        per = int(np.prod(shape))
-        if per == 0:
-            raise ValueError(f"invalid shape {shape}")
-        if arr.size % per != 0:
-            raise ValueError(
-                f"bin file size {arr.size} not divisible by sample size {per} ({shape})"
-            )
-        n = arr.size // per
-        return arr.reshape((n, *shape))
-
-    raise ValueError(f"unsupported batch format: {path}")
 
 
 def evaluate_bin(bin_path: str, inputs: np.ndarray, targets: np.ndarray) -> float:
@@ -99,35 +55,13 @@ def evaluate_bin(bin_path: str, inputs: np.ndarray, targets: np.ndarray) -> floa
         raise RuntimeError(f"failed to load {bin_path}")
     model = models[0]
 
-    total = 0.0
-    count = 0
-    for inp, tgt in zip(inputs, targets):
-        inp = np.asarray(inp, dtype=np.float32)
-        tgt = np.asarray(tgt, dtype=np.float32)
-
+    def infer(inp: np.ndarray) -> np.ndarray:
         out_tensors = model.forward([inp])
         if not out_tensors:
             raise RuntimeError(f"{bin_path} produced no output")
-        out = np.asarray(out_tensors[0].buffer, dtype=np.float32)
+        return np.asarray(out_tensors[0].buffer, dtype=np.float32)
 
-        # Match target length / shape robustly.  Some BPU models return the
-        # output with a trailing length that may not exactly match the target
-        # dimensions.  Flatten both and compute MSE over the common prefix.
-        out = out.reshape(-1)
-        tgt = tgt.reshape(-1)
-        min_len = min(out.size, tgt.size)
-        if out.size != tgt.size:
-            print(f"  [shape] {bin_path} out={out.size} tgt={tgt.size} using first {min_len}")
-        out = out[:min_len]
-        tgt = tgt[:min_len]
-
-        mse = float(np.mean((out - tgt) ** 2))
-        total += mse
-        count += 1
-
-    if count == 0:
-        return float("inf")
-    return total / count
+    return evaluate_batch_mse(inputs, targets, infer, mismatch_context=bin_path)
 
 
 def main() -> int:

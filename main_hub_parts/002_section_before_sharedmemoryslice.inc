@@ -152,9 +152,9 @@ static Config loadConfig(int argc, char **argv) {
       boolFrom(argOrEnv("lemma-force", "AI_LEMMA_FORCE", "false"), false);
 
   c.robotsWarmupLimit = std::max(
-      0, (int)numberOr(argOrEnv("robots-limit", "AI_ROBOTS_LIMIT", "200"), 0));
+      0, (int)numberOr(argOrEnv("robots-limit", "AI_ROBOTS_LIMIT", "0"), 0));
   c.robotsAutoload =
-      boolFrom(argOrEnv("robots-autoload", "AI_ROBOTS_AUTOLOAD", "true"), true);
+      boolFrom(argOrEnv("robots-autoload", "AI_ROBOTS_AUTOLOAD", "false"), false);
   c.robotsWarmupShuffle = boolFrom(
       argOrEnv("robots-warmup-shuffle", "AI_ROBOTS_WARMUP_SHUFFLE", "false"),
       false);
@@ -174,7 +174,7 @@ static Config loadConfig(int argc, char **argv) {
   c.syncStandbyOnBoot = boolFrom(
       argOrEnv("sync-standby", "AI_SYNC_STANDBY_ON_BOOT", "false"), false);
   c.testsAutoload =
-      boolFrom(argOrEnv("tests-autoload", "AI_TESTS_AUTOLOAD", "true"), true);
+      boolFrom(argOrEnv("tests-autoload", "AI_TESTS_AUTOLOAD", "false"), false);
   c.testsDir = fs::absolute(rootDir / "tests");
 
   c.disableBarrier = boolFrom(
@@ -194,47 +194,57 @@ static Config loadConfig(int argc, char **argv) {
   c.usingOllama =
       boolFrom(argOrEnv("using-ollama", "AI_USING_OLLAMA", "false"), false);
   c.ollamaFineTuning = boolFrom(
-      argOrEnv("ollama-fine-tuning", "AI_OLLAMA_FINE_TUNING", "true"), true);
+      argOrEnv("ollama-fine-tuning", "AI_OLLAMA_FINE_TUNING", "false"), false);
   c.inferenceEnabled = boolFrom(
       argOrEnv("inference-enabled", "AI_INFERENCE_ENABLED", "true"), true);
-  c.transformerBackend =
-      c.usingOllama ? (c.ollamaFineTuning ? "ollama-fine-tuning" : "ollama")
-                    : "native";
+
   {
-    std::string mode =
+    std::string explicitMode =
         trimCopy(argOrEnv("transformer-mode", "AI_TRANSFORMER_MODE", ""));
     std::transform(
-        mode.begin(), mode.end(), mode.begin(),
+        explicitMode.begin(), explicitMode.end(), explicitMode.begin(),
         [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    if (mode == "native") {
+    if (explicitMode == "native") {
       c.inferenceEnabled = true;
       c.usingOllama = false;
       c.ollamaFineTuning = false;
       c.transformerBackend = "native";
-    } else if (mode == "ollama") {
+    } else if (explicitMode == "ollama") {
       c.inferenceEnabled = true;
       c.usingOllama = true;
       c.ollamaFineTuning = false;
       c.transformerBackend = "ollama";
-    } else if (mode == "ollama-fine-tuning" || mode == "ollama_fine_tuning") {
+    } else if (explicitMode == "ollama-fine-tuning" ||
+               explicitMode == "ollama_fine_tuning") {
       c.inferenceEnabled = true;
       c.usingOllama = true;
       c.ollamaFineTuning = true;
       c.transformerBackend = "ollama-fine-tuning";
-    } else if (mode == "llamacpp" || mode == "llama.cpp" ||
-               mode == "llama_cpp") {
+    } else if (explicitMode == "llamacpp" || explicitMode == "llama.cpp" ||
+               explicitMode == "llama_cpp") {
       c.inferenceEnabled = true;
       c.usingOllama = false;
       c.ollamaFineTuning = false;
       c.transformerBackend = "llamacpp";
-    } else if (mode == "bitnet") {
+    } else if (explicitMode == "bitnet") {
       c.inferenceEnabled = true;
       c.usingOllama = false;
       c.ollamaFineTuning = false;
       c.transformerBackend = "bitnet";
-    } else if (mode == "off" || mode == "false" || mode == "disabled") {
+    } else if (explicitMode == "off" || explicitMode == "false" ||
+               explicitMode == "disabled") {
       c.inferenceEnabled = false;
       c.transformerBackend = "off";
+    } else {
+      // No explicit transformer mode.  Default to a real backend; do NOT
+      // silently fall back to the slow native Python transformer.
+      if (c.inferenceEnabled) {
+        c.usingOllama = false;
+        c.ollamaFineTuning = false;
+        c.transformerBackend = "llamacpp";
+      } else {
+        c.transformerBackend = "off";
+      }
     }
   }
 
@@ -264,6 +274,19 @@ static Config loadConfig(int argc, char **argv) {
       std::max(1000, (int)numberOr(argOrEnv("bitnet-timeout-ms",
                                             "AI_BITNET_TIMEOUT_MS", "120000"),
                                    120000));
+  c.tinyllamaModel = argOrEnv("tinyllama-model", "AI_TINYLLAMA_MODEL", "");
+  c.tinyllamaBaseUrl = argOrEnv("tinyllama-base-url", "AI_TINYLLAMA_BASE_URL",
+                                "http://127.0.0.1:8085");
+  c.tinyllamaRequestTimeoutMs =
+      std::max(1000, (int)numberOr(argOrEnv("tinyllama-timeout-ms",
+                                            "AI_TINYLLAMA_TIMEOUT_MS", "120000"),
+                                   120000));
+  c.tinyllamaEnabled = boolFrom(
+      argOrEnv("tinyllama-enabled", "AI_TINYLLAMA_ENABLED", "false"), false);
+  c.conceptMatrixEnabled = boolFrom(
+      argOrEnv("concept-matrix-enabled", "AI_CONCEPT_MATRIX_ENABLED", "false"), false);
+  c.conceptMatrixClearPerRequest = boolFrom(
+      argOrEnv("concept-matrix-clear-per-request", "AI_CONCEPT_MATRIX_CLEAR_PER_REQUEST", "true"), true);
   c.ggufModelsDir = pathArgOrEnv("gguf-models-dir", "AI_GGUF_MODELS_DIR",
                                  rootDir / "GGUF_models");
   {
@@ -395,9 +418,9 @@ static Config loadConfig(int argc, char **argv) {
       std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
         return static_cast<char>(std::tolower(ch));
       });
-      if (ext != ".gguf")
+      if (ext != ".gguf" && !ext.empty())
         throw std::runtime_error(
-            backend + " model must be a .gguf file: " + modelPath.string());
+            backend + " model must be a .gguf file or an extensionless raw blob: " + modelPath.string());
 
       modelField = modelPath.string();
     };

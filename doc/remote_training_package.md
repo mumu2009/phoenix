@@ -1,6 +1,6 @@
-# Remote JPEA-v2 Training Package
+# Remote JEPA-v2 Training Package
 
-This package trains the Phoenix JPEA-v2 speech and vision autoencoders on the
+This package trains the Phoenix JEPA-v2 speech and vision autoencoders on the
 remote Windows 10 Pro GPU box and produces ONNX / BPU-compatible `.bin` files
 for the RDK X5.
 
@@ -9,14 +9,14 @@ for the RDK X5.
 From `D:\_phoenix\_079\v6.0Alixander\phoenix`:
 
 ```
-tools/train_jpea_v2_speech.py
-tools/train_jpea_v2_vision.py
-tools/export_jpea_v2_multimodal.py
-tools/export_jpea_v2_speech.py
+tools/train_jepa_v2_speech.py
+tools/train_jepa_v2_vision.py
+tools/export_jepa_v2_multimodal.py
+tools/export_jepa_v2_speech.py
 tools/compile_bpu_jepa_v2.sh
 tools/run_hb_mapper.py
 tools/hb_mapper_patch.py
-tools/train_jpea_v2_pilot.py
+tools/train_jepa_v2_pilot.py
 doc/remote_training_package.md
 ```
 
@@ -53,7 +53,7 @@ pip install torch-tensorrt  # only if you plan to experiment with torch.compile
 
 ```powershell
 # speech ~1 M params, 3 epochs, quick smoke test
-python tools\train_jpea_v2_pilot.py `
+python tools\train_jepa_v2_pilot.py `
     --data-dir D:\datasets\musan_16k `
     --out-dir D:\checkpoints\speech_pilot `
     --epochs 3 --batch-size 8 --device auto
@@ -64,9 +64,9 @@ This creates `D:\checkpoints\speech_pilot\best.pt` and `model_*.onnx`.
 ## Example: 5 M "small" speech run
 
 ```powershell
-python tools\train_jpea_v2_speech.py `
+python tools\train_jepa_v2_speech.py `
     --data-dir D:\datasets\musan_16k `
-    --out-dir D:\checkpoints\jpea_v2_speech_small `
+    --out-dir D:\checkpoints\jepa_v2_speech_small `
     --scale small `
     --epochs 50 `
     --batch-size 32 `
@@ -77,10 +77,10 @@ python tools\train_jpea_v2_speech.py `
 After training, export and compile on Kali (or copy back to Kali):
 
 ```powershell
-python tools\export_jpea_v2_multimodal.py `
+python tools\export_jepa_v2_multimodal.py `
     --modality speech `
-    --checkpoint D:\checkpoints\jpea_v2_speech_small\best.pt `
-    --out-dir D:\checkpoints\jpea_v2_speech_small\onnx
+    --checkpoint D:\checkpoints\jepa_v2_speech_small\best.pt `
+    --out-dir D:\checkpoints\jepa_v2_speech_small\onnx
 ```
 
 Then on Kali, inside the OpenExplorer Docker:
@@ -88,16 +88,16 @@ Then on Kali, inside the OpenExplorer Docker:
 ```bash
 bash /workspace/tools/compile_bpu_jepa_v2.sh \
     --modality speech \
-    --onnx-dir /workspace/checkpoints/jpea_v2_speech_small/onnx \
-    --out-dir /workspace/checkpoints/jpea_v2_speech_small/bin
+    --onnx-dir /workspace/checkpoints/jepa_v2_speech_small/onnx \
+    --out-dir /workspace/checkpoints/jepa_v2_speech_small/bin
 ```
 
 ## Example: 5 M "small" vision run
 
 ```powershell
-python tools\train_jpea_v2_vision.py `
+python tools\train_jepa_v2_vision.py `
     --data-dir D:\datasets\images `
-    --out-dir D:\checkpoints\jpea_v2_vision_small `
+    --out-dir D:\checkpoints\jepa_v2_vision_small `
     --resnet resnet18 `
     --concept 128 `
     --decoder-pt none `
@@ -115,10 +115,10 @@ python tools\train_jpea_v2_vision.py `
 Export and compile:
 
 ```powershell
-python tools\export_jpea_v2_multimodal.py `
+python tools\export_jepa_v2_multimodal.py `
     --modality image `
-    --checkpoint D:\checkpoints\jpea_v2_vision_small\best.pt `
-    --out-dir D:\checkpoints\jpea_v2_vision_small\onnx
+    --checkpoint D:\checkpoints\jepa_v2_vision_small\best.pt `
+    --out-dir D:\checkpoints\jepa_v2_vision_small\onnx
 ```
 
 This writes:
@@ -130,8 +130,8 @@ This writes:
 ```bash
 bash /workspace/tools/compile_bpu_jepa_v2.sh \
     --modality image \
-    --onnx-dir /workspace/checkpoints/jpea_v2_vision_small/onnx \
-    --out-dir /workspace/checkpoints/jpea_v2_vision_small/bin
+    --onnx-dir /workspace/checkpoints/jepa_v2_vision_small/onnx \
+    --out-dir /workspace/checkpoints/jepa_v2_vision_small/bin
 ```
 
 ## Larger scales
@@ -195,9 +195,9 @@ Because the remote is Windows, use `Start-Process` with a log file rather than
 ```powershell
 $log = "D:\checkpoints\speech_medium.log"
 Start-Process -FilePath python -ArgumentList @(
-    "tools\train_jpea_v2_speech.py",
+    "tools\train_jepa_v2_speech.py",
     "--data-dir", "D:\datasets\musan_16k",
-    "--out-dir", "D:\checkpoints\jpea_v2_speech_medium",
+    "--out-dir", "D:\checkpoints\jepa_v2_speech_medium",
     "--scale", "medium",
     "--epochs", "100",
     "--batch-size", "16",
@@ -209,7 +209,7 @@ Start-Process -FilePath python -ArgumentList @(
 On Kali/X5, continue to use `nohup`:
 
 ```bash
-nohup python tools/train_jpea_v2_pilot.py \
+nohup python tools/train_jepa_v2_pilot.py \
     --data-dir /home/kali/phoenix/datasets/musan_16k \
     --out-dir /tmp/speech_pilot > /tmp/speech_pilot.log 2>&1 &
 echo $!
@@ -217,7 +217,7 @@ echo $!
 
 ## Calibration notes
 
-`export_jpea_v2_multimodal.py` writes synthetic random calibration bins by
+`export_jepa_v2_multimodal.py` writes synthetic random calibration bins by
 default.  For the best BPU accuracy on real data, you can later replace those
 with real samples:
 
@@ -245,4 +245,4 @@ runtime_store/models/ijepa/resnet18_224/
   model.manifest.json
 ```
 
-Then set `JPEA_SPEECH_HORIZON_MODEL` or `JPEA_IMAGE_HORIZON_MODEL` accordingly.
+Then set `JEPA_SPEECH_HORIZON_MODEL` or `JEPA_IMAGE_HORIZON_MODEL` accordingly.

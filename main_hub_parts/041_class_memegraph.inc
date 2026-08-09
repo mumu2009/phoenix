@@ -43,7 +43,7 @@ public:
   void ensureNodeLocked(const std::string &memeId) {
     if (!nodes_.count(memeId)) {
       nodes_[memeId] = NodeEdges{};
-      nodeOrder_.push_back(memeId);
+      pushNodeOrderIfNew(memeId);
     }
     if (!meta_.count(memeId)) {
       json meta;
@@ -51,7 +51,7 @@ public:
       meta["lastTouched"] =
           (int64_t)std::chrono::system_clock::now().time_since_epoch().count();
       meta_[memeId] = meta;
-      metaOrder_.push_back(memeId);
+      pushMetaOrderIfNew(memeId);
       store_->put("node:" + memeId, meta);
     }
     if (!store_->get("row:" + memeId)) {
@@ -67,13 +67,14 @@ public:
     ensureNodeLocked(fromId);
     ensureNodeLocked(toId);
     auto &table = nodes_[fromId];
-    auto it = table.map.find(toId);
-    if (it == table.map.end()) {
-      table.order.push_back(toId);
-      table.map[toId] = {weight, direction};
+    bool isNew = table.map.find(toId) == table.map.end();
+    Edge &edge = ensureEdgeSlot(table, fromId, toId);
+    if (isNew) {
+      edge.weight = weight;
+      edge.direction = direction;
     } else {
-      it->second.weight += weight;
-      it->second.direction = direction;
+      edge.weight += weight;
+      edge.direction = direction;
     }
     meta_[fromId]["degree"] = (int)table.map.size();
     meta_[fromId]["lastTouched"] =
@@ -81,13 +82,14 @@ public:
     persistNode(fromId);
     if (direction == 0) {
       auto &back = nodes_[toId];
-      auto it2 = back.map.find(fromId);
-      if (it2 == back.map.end()) {
-        back.order.push_back(fromId);
-        back.map[fromId] = {weight, direction};
+      bool isNewBack = back.map.find(fromId) == back.map.end();
+      Edge &backEdge = ensureEdgeSlot(back, toId, fromId);
+      if (isNewBack) {
+        backEdge.weight = weight;
+        backEdge.direction = direction;
       } else {
-        it2->second.weight += weight;
-        it2->second.direction = direction;
+        backEdge.weight += weight;
+        backEdge.direction = direction;
       }
       meta_[toId]["degree"] = (int)back.map.size();
       meta_[toId]["lastTouched"] =
@@ -107,10 +109,9 @@ public:
       return;
     it->second.weight *= factor;
     if (it->second.weight < 1e-5) {
+      table->order.erase(it->second.orderIt);
+      dropIncomingEdge(toId, fromId);
       table->map.erase(it);
-      table->order.erase(
-          std::remove(table->order.begin(), table->order.end(), toId),
-          table->order.end());
     }
     meta_[fromId]["degree"] = (int)table->map.size();
     meta_[fromId]["lastTouched"] =
@@ -309,6 +310,7 @@ public:
       auto itEdge = table.map.find(*it);
       if (itEdge != table.map.end() && itEdge->second.direction == 2) {
         std::string targetId = *it;
+        dropIncomingEdge(targetId, memeId);
         table.map.erase(itEdge);
         it = table.order.erase(it);
         cut++;
@@ -319,6 +321,7 @@ public:
             auto itEdge2 = t.map.find(*it2);
             if (itEdge2 != t.map.end() && *it2 == memeId &&
                 itEdge2->second.direction == 1) {
+              dropIncomingEdge(memeId, targetId);
               t.map.erase(itEdge2);
               it2 = t.order.erase(it2);
             } else {
@@ -345,28 +348,43 @@ public:
   bool removeNode(const std::string &memeId) {
     std::lock_guard<std::mutex> lock(graphMu_);
     loadAll();
-    if (!nodes_.count(memeId))
+    auto nodeIt = nodes_.find(memeId);
+    if (nodeIt == nodes_.end())
       return false;
-    nodes_.erase(memeId);
+    // Drop memeId's own outgoing edges from the reverse index before the
+    // node itself (and its order/map) is erased below.
+    for (auto &to : nodeIt->second.order)
+      dropIncomingEdge(to, memeId);
+    nodes_.erase(nodeIt);
     store_->del("row:" + memeId);
     meta_.erase(memeId);
     store_->del("node:" + memeId);
-    nodeOrder_.erase(std::remove(nodeOrder_.begin(), nodeOrder_.end(), memeId),
-                     nodeOrder_.end());
-    metaOrder_.erase(std::remove(metaOrder_.begin(), metaOrder_.end(), memeId),
-                     metaOrder_.end());
-    for (auto &kv : nodes_) {
-      auto &table = kv.second;
-      if (table.map.erase(memeId)) {
-        table.order.erase(
-            std::remove(table.order.begin(), table.order.end(), memeId),
-            table.order.end());
-        meta_[kv.first]["degree"] = (int)table.map.size();
-        meta_[kv.first]["lastTouched"] =
+    eraseFromNodeOrder(memeId);
+    eraseFromMetaOrder(memeId);
+    // incomingEdges_[memeId] tracks exactly which other nodes hold an edge
+    // pointing at memeId, so only those nodes need to be touched here
+    // instead of scanning every node in the graph on every removal.
+    auto refIt = incomingEdges_.find(memeId);
+    if (refIt != incomingEdges_.end()) {
+      std::vector<std::string> referencers(refIt->second.begin(),
+                                           refIt->second.end());
+      incomingEdges_.erase(refIt);
+      for (auto &fromId : referencers) {
+        auto it = nodes_.find(fromId);
+        if (it == nodes_.end())
+          continue;
+        auto &table = it->second;
+        auto eit = table.map.find(memeId);
+        if (eit == table.map.end())
+          continue;
+        table.order.erase(eit->second.orderIt);
+        table.map.erase(eit);
+        meta_[fromId]["degree"] = (int)table.map.size();
+        meta_[fromId]["lastTouched"] =
             (int64_t)std::chrono::system_clock::now()
                 .time_since_epoch()
                 .count();
-        persistNode(kv.first);
+        persistNode(fromId);
       }
     }
     return true;
@@ -381,8 +399,7 @@ public:
 
   void setMeta(const std::string &memeId, const json &meta) {
     std::lock_guard<std::mutex> lock(graphMu_);
-    if (!meta_.count(memeId))
-      metaOrder_.push_back(memeId);
+    pushMetaOrderIfNew(memeId);
     meta_[memeId] = meta;
     store_->put("node:" + memeId, meta);
   }
@@ -452,8 +469,11 @@ public:
     nodes_.clear();
     meta_.clear();
     nodeOrder_.clear();
+    nodeOrderSet_.clear();
     metaOrder_.clear();
+    metaOrderSet_.clear();
     nodeSemanticUnits_.clear();
+    incomingEdges_.clear();
     for (auto &item : snapshot.value("nodes", json::array())) {
       std::string id = item.value("id", "");
       if (id.empty())
@@ -463,12 +483,11 @@ public:
         std::string to = n.value("to", "");
         if (to.empty())
           continue;
-        if (node.map.find(to) == node.map.end())
-          node.order.push_back(to);
-        node.map[to] = {n.value("weight", 0.0), n.value("direction", 0)};
+        loadEdgeFromStorage(node, id, to, n.value("weight", 0.0),
+                           n.value("direction", 0));
       }
       nodes_[id] = std::move(node);
-      nodeOrder_.push_back(id);
+      pushNodeOrderIfNew(id);
       persistNode(id);
     }
     if (snapshot.contains("semanticUnits") && snapshot["semanticUnits"].is_object()) {
@@ -484,7 +503,7 @@ public:
     json meta = snapshot.value("meta", json::object());
     for (auto it = meta.begin(); it != meta.end(); ++it) {
       meta_[it.key()] = it.value();
-      metaOrder_.push_back(it.key());
+      pushMetaOrderIfNew(it.key());
       store_->put("node:" + it.key(), it.value());
     }
   }
@@ -494,18 +513,94 @@ private:
   struct Edge {
     double weight{0};
     int direction{0};
+    // Iterator into the owning NodeEdges::order list pointing at this edge's
+    // neighbor id, so a single edge can be dropped from `order` in O(1)
+    // instead of an O(degree) std::find/std::remove scan.
+    std::list<std::string>::iterator orderIt;
   };
   struct NodeEdges {
-    std::vector<std::string> order;
+    std::list<std::string> order;
     std::unordered_map<std::string, Edge> map;
   };
   std::shared_ptr<KeyValueStore> store_;
   std::unordered_map<std::string, NodeEdges> nodes_;
   std::vector<std::string> nodeOrder_;
+  // Mirrors the set of ids already present in nodeOrder_ so membership checks
+  // during bulk loads are O(1) instead of an O(n) std::find per id (which
+  // made loadAll()/ensureRowLoaded() effectively O(n^2) on large graphs).
+  std::unordered_set<std::string> nodeOrderSet_;
   std::unordered_map<std::string, json> meta_;
   std::vector<std::string> metaOrder_;
+  std::unordered_set<std::string> metaOrderSet_;
   std::unordered_map<std::string, std::vector<phoenix::multimodal::SemanticUnit>> nodeSemanticUnits_;
+  // Reverse-edge index: incomingEdges_[toId] is the set of fromIds holding an
+  // edge that points at toId. This lets removeNode() find exactly the nodes
+  // that reference a deleted id in O(indegree) instead of scanning every
+  // node in the graph (previously O(totalNodes) per removeNode() call).
+  std::unordered_map<std::string, std::unordered_set<std::string>> incomingEdges_;
   bool fullyLoaded_{false};
+
+  void pushNodeOrderIfNew(const std::string &id) {
+    if (nodeOrderSet_.insert(id).second)
+      nodeOrder_.push_back(id);
+  }
+  void pushMetaOrderIfNew(const std::string &id) {
+    if (metaOrderSet_.insert(id).second)
+      metaOrder_.push_back(id);
+  }
+  void eraseFromNodeOrder(const std::string &id) {
+    if (nodeOrderSet_.erase(id))
+      nodeOrder_.erase(std::remove(nodeOrder_.begin(), nodeOrder_.end(), id),
+                       nodeOrder_.end());
+  }
+  void eraseFromMetaOrder(const std::string &id) {
+    if (metaOrderSet_.erase(id))
+      metaOrder_.erase(std::remove(metaOrder_.begin(), metaOrder_.end(), id),
+                       metaOrder_.end());
+  }
+
+  // Records that `fromId` now holds an edge pointing at `toId` in the
+  // reverse index used by removeNode().
+  void addIncomingEdge(const std::string &fromId, const std::string &toId) {
+    incomingEdges_[toId].insert(fromId);
+  }
+  // Removes the (fromId -> toId) entry from the reverse index, pruning the
+  // bucket once it becomes empty.
+  void dropIncomingEdge(const std::string &toId, const std::string &fromId) {
+    auto rit = incomingEdges_.find(toId);
+    if (rit == incomingEdges_.end())
+      return;
+    rit->second.erase(fromId);
+    if (rit->second.empty())
+      incomingEdges_.erase(rit);
+  }
+  // Returns the existing edge slot for (fromId -> toId) in `table`, or
+  // creates a new one (appending to `table.order` and updating the reverse
+  // index) if it doesn't exist yet. Caller is responsible for setting
+  // weight/direction on a freshly created slot.
+  Edge &ensureEdgeSlot(NodeEdges &table, const std::string &fromId,
+                      const std::string &toId) {
+    auto it = table.map.find(toId);
+    if (it != table.map.end())
+      return it->second;
+    Edge e;
+    e.orderIt = table.order.insert(table.order.end(), toId);
+    auto res = table.map.emplace(toId, std::move(e));
+    addIncomingEdge(fromId, toId);
+    return res.first->second;
+  }
+  // Used when rebuilding a NodeEdges row from persisted storage (loadAll /
+  // ensureRowLoaded / importSnapshot): the neighbor's weight/direction are
+  // taken verbatim from storage (last entry for a given `to` wins, matching
+  // the pre-existing behavior), while `order`/incomingEdges_ only gain a
+  // single entry the first time `to` is seen for this row.
+  void loadEdgeFromStorage(NodeEdges &node, const std::string &fromId,
+                           const std::string &to, double weight,
+                           int direction) {
+    Edge &edge = ensureEdgeSlot(node, fromId, to);
+    edge.weight = weight;
+    edge.direction = direction;
+  }
 
   void loadAll() {
     if (fullyLoaded_)
@@ -514,9 +609,7 @@ private:
     for (auto &kv : metaEntries) {
       std::string id = kv.first.substr(5);
       meta_[id] = kv.second;
-      if (std::find(metaOrder_.begin(), metaOrder_.end(), id) ==
-          metaOrder_.end())
-        metaOrder_.push_back(id);
+      pushMetaOrderIfNew(id);
     }
     auto rowEntries = store_->entries("row:");
     for (auto &kv : rowEntries) {
@@ -526,13 +619,10 @@ private:
         std::string to = n.value("to", "");
         if (to.empty())
           continue;
-        if (node.map.find(to) == node.map.end())
-          node.order.push_back(to);
-        node.map[to] = {n.value("weight", 0.0), n.value("direction", 0)};
+        loadEdgeFromStorage(node, id, to, n.value("weight", 0.0),
+                           n.value("direction", 0));
       }
-      if (std::find(nodeOrder_.begin(), nodeOrder_.end(), id) ==
-          nodeOrder_.end())
-        nodeOrder_.push_back(id);
+      pushNodeOrderIfNew(id);
       nodes_[id] = std::move(node);
     }
     fullyLoaded_ = true;
@@ -549,14 +639,11 @@ private:
         std::string to = n.value("to", "");
         if (to.empty())
           continue;
-        if (node.map.find(to) == node.map.end())
-          node.order.push_back(to);
-        node.map[to] = {n.value("weight", 0.0), n.value("direction", 0)};
+        loadEdgeFromStorage(node, id, to, n.value("weight", 0.0),
+                           n.value("direction", 0));
       }
       nodes_[id] = std::move(node);
-      if (std::find(nodeOrder_.begin(), nodeOrder_.end(), id) ==
-          nodeOrder_.end())
-        nodeOrder_.push_back(id);
+      pushNodeOrderIfNew(id);
       return &nodes_[id];
     }
     return nullptr;

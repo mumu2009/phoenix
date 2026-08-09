@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Download the four official I-JEPA / JPEA-v2 image world model weights.
+"""Download the four official I-JEPA / JEPA-v2 image world model weights.
 
 Models are placed under runtime_store/models/ijepa/<variant>/, mirroring the
-JpeaV2ImageWorldModelConfig ids in jpea_v2_image_world_model.hpp.
+JepaV2ImageWorldModelConfig ids in jepa_v2_image_world_model.hpp.
 
 Requires an internet connection.  Uses huggingface_hub if available, otherwise
 falls back to urllib.  To use the original research .pth.tar checkpoints, pass
@@ -156,7 +156,7 @@ def download_safetensors_modelscope(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Download I-JEPA / JPEA-v2 image model weights")
+    parser = argparse.ArgumentParser(description="Download I-JEPA / JEPA-v2 image model weights")
     parser.add_argument(
         "--format",
         choices=["safetensors", "pth_tar"],

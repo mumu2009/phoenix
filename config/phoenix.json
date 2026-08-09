@@ -423,9 +423,9 @@
     "pass": "",
     "from": ""
   },
-  "jpea": {
+  "jepa": {
     "image": {
-      "variant": "resnet18_224",
+      "variant": "vision_encoder",
       "conceptDim": 128,
       "backend": "auto",
       "horizonModel": "runtime_store/models/ijepa/resnet18_224/model_encoder.bin",
@@ -438,7 +438,7 @@
       "fps": 30
     },
     "speech": {
-      "variant": "speech_16k",
+      "variant": "speech_encoder",
       "conceptDim": 128,
       "backend": "auto",
       "horizonModel": "runtime_store/models/ijepa/speech_16k/model_encoder.bin",
@@ -541,6 +541,12 @@
       "bitnetModel": "",
       "bitnetBaseUrl": "http://127.0.0.1:8090",
       "bitnetTimeoutMs": 120000,
+      "tinyllamaModel": "GGUF_models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+      "tinyllamaBaseUrl": "http://127.0.0.1:8085",
+      "tinyllamaTimeoutMs": 120000,
+      "tinyllamaEnabled": true,
+      "conceptMatrixEnabled": false,
+      "conceptMatrixClearPerRequest": true,
       "ggufModelsDir": "GGUF_models",
       "externalBackendStyleSim": false,
       "transformerBootstrap": false,
@@ -564,15 +570,15 @@
       "connectTimeoutMs": 1500
     },
     "robots": {
-      "autoload": true,
+      "autoload": false,
       "chunkMaxWords": 20,
       "chunkMinWords": 3,
       "dir": "robots",
-      "warmupLimit": 200,
+      "warmupLimit": 0,
       "warmupShuffle": false
     },
     "disable": {
-      "memebarrier": false,
+      "memebarrier": true,
       "rl": false,
       "adv": false,
       "learning": false,
@@ -580,7 +586,7 @@
       "contextModule": false
     },
     "tests": {
-      "autoload": true
+      "autoload": false
     },
     "spark": {
       "budget": "default"
@@ -599,7 +605,7 @@
     },
     "vision": {
       "placement": "local",
-      "localBackend": "auto",
+      "localBackend": "cpu",
       "remoteUrl": "",
       "remoteMethod": "POST",
       "remoteModel": "",
@@ -608,7 +614,7 @@
     },
     "speech": {
       "placement": "local",
-      "localBackend": "auto",
+      "localBackend": "cpu",
       "remoteUrl": "",
       "remoteMethod": "POST",
       "remoteModel": "",

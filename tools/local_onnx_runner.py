@@ -7,7 +7,7 @@ stdout JSON plus temporary binary files.
 
 Example:
     python tools/local_onnx_runner.py \
-        --model runtime_store/models/additive_jpea/vision_encoder/best.onnx \
+        --model runtime_store/models/additive_jepa/vision_encoder/best.onnx \
         --input /tmp/in.tensor --input-name pixel_values --input-shape 1x3x224x224 \
         --output /tmp/out.tensor --output-name concept --output-shape 1x128x1x1
 """
@@ -98,6 +98,14 @@ def run(args) -> dict:
     }
 
 
+def log_debug(msg: str) -> None:
+    from pathlib import Path
+    p = Path("build/tmp/onnx_debug.log")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as f:
+        f.write(msg + "\n")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="One-shot local ONNX runner")
     parser.add_argument("--model", required=True)
@@ -109,8 +117,10 @@ def main() -> int:
     parser.add_argument("--output-shape", required=True)
     parser.add_argument("--gpu", action="store_true")
     args = parser.parse_args()
+    log_debug(f"local_onnx_runner args: {args}")
 
     result = run(args)
+    log_debug(f"local_onnx_runner result: {result}")
     print(json.dumps(result))
     return 0 if result.get("ok") else 1
 

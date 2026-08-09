@@ -57,12 +57,18 @@ const Eigen::MatrixXf &getProjectionMatrix(size_t sourceDim,
                                            size_t targetDim,
                                            unsigned int seed) {
   ProjectionKey key{sourceDim, targetDim, seed};
-  std::lock_guard<std::mutex> lock(gProjectionCacheMu);
-  auto it = gProjectionCache.find(key);
-  if (it != gProjectionCache.end()) {
-    return it->second;
+  {
+    std::lock_guard<std::mutex> lock(gProjectionCacheMu);
+    auto it = gProjectionCache.find(key);
+    if (it != gProjectionCache.end()) {
+      return it->second;
+    }
   }
 
+  // Generation is deterministic given (sourceDim, targetDim, seed), so it is
+  // safe to build the matrix outside the lock; if two threads race on the
+  // same brand-new key they simply compute the same matrix twice and only
+  // one copy is kept in the cache.
   std::mt19937 rng(static_cast<unsigned int>(sourceDim + targetDim * 1315423911u + seed));
   std::normal_distribution<float> dist(0.0f,
                                        std::sqrt(2.0f / static_cast<float>(sourceDim + targetDim)));
@@ -72,6 +78,12 @@ const Eigen::MatrixXf &getProjectionMatrix(size_t sourceDim,
     for (Eigen::Index c = 0; c < mat.cols(); ++c) {
       mat(r, c) = dist(rng);
     }
+  }
+
+  std::lock_guard<std::mutex> lock(gProjectionCacheMu);
+  auto it = gProjectionCache.find(key);
+  if (it != gProjectionCache.end()) {
+    return it->second;  // another thread already inserted the same matrix
   }
   auto &ref = gProjectionCache[key];
   ref = std::move(mat);

@@ -11,7 +11,7 @@ Scope:
     Benchmark is the memory-tier TUI (text/dialog latency & semantic similarity).
 
   * RDK X5 -> --scope vision-speech
-    Tunes vision.*, jpea.*, edge_platform.npu.*, speech.*.
+    Tunes vision.*, jepa.*, edge_platform.npu.*, speech.*.
     Benchmark is a vision/speech latency & accuracy test against the local
     phoenix_main HTTP endpoint or a supplied command.
 
@@ -116,7 +116,7 @@ def base_config() -> dict[str, Any]:
 # Parameter spaces
 # ---------------------------------------------------------------------------
 
-VISION_SPEECH_PREFIXES = {"vision", "jpea", "speech", "edge_platform"}
+VISION_SPEECH_PREFIXES = {"vision", "jepa", "speech", "edge_platform"}
 
 
 def non_vision_speech_param_space() -> dict[str, Any]:
@@ -332,7 +332,7 @@ def vision_speech_param_space() -> dict[str, Any]:
                 "topK": [3, 5, 10],
             },
         },
-        "jpea": {
+        "jepa": {
             "image": {
                 "conceptDim": [64, 128, 256],
                 "backend": ["auto", "bpu", "cpu"],
@@ -732,6 +732,18 @@ class ParameterSpace:
         for i, vals in enumerate(self.values):
             if not vals:
                 raise ValueError(f"parameter {self.names[i]!r} has no values")
+        # Precomputed value -> index lookup per parameter so encode()/index
+        # lookups are O(1) instead of a linear scan of self.values[i].
+        self._value_index: list[dict[Any, int]] = [
+            {v: idx for idx, v in enumerate(vals)} for vals in self.values
+        ]
+
+    def index_of(self, param_idx: int, value: Any) -> int:
+        """O(1) equivalent of self.values[param_idx].index(value)."""
+        try:
+            return self._value_index[param_idx][value]
+        except KeyError:
+            raise ValueError(f"{value!r} is not in list") from None
 
     def random_point(self) -> dict[str, Any]:
         return {name: random.choice(vals) for name, vals in zip(self.names, self.values)}
@@ -739,7 +751,7 @@ class ParameterSpace:
     def encode(self, point: dict[str, Any]) -> np.ndarray:
         vec = np.zeros(len(self.names), dtype=float)
         for i, name in enumerate(self.names):
-            idx = self.values[i].index(point[name])
+            idx = self.index_of(i, point[name])
             n = len(self.values[i])
             vec[i] = idx / max(1, n - 1)
         return vec
@@ -964,7 +976,7 @@ class CandidateGenerator:
             current_value = current_best[name]
             # Mark current best value as already evaluated.
             try:
-                current_index = self.space.values[param_idx].index(current_value)
+                current_index = self.space.index_of(param_idx, current_value)
                 if current_index not in tried_values[param_idx]:
                     tried_values[param_idx].append(current_index)
             except ValueError:

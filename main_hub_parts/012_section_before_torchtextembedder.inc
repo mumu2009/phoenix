@@ -213,14 +213,23 @@ static bool loadNaturalStopwords(std::unordered_set<std::string> &out) {
   };
 
   std::vector<fs::path> roots;
-  roots.push_back(fs::current_path());
+  try { roots.push_back(fs::current_path()); } catch (...) {}
   if (!g_selfPath.empty()) {
-    auto exeDir = fs::absolute(fs::path(g_selfPath)).parent_path();
-    roots.push_back(exeDir);
-    roots.push_back(exeDir.parent_path());
+    try {
+      auto exeDir = fs::absolute(fs::path(g_selfPath)).parent_path();
+      if (!exeDir.empty()) roots.push_back(exeDir);
+      if (exeDir.has_parent_path()) roots.push_back(exeDir.parent_path());
+    } catch (...) {}
   }
-  roots.push_back(fs::absolute(fs::path(__FILE__).parent_path()));
-  roots.push_back(fs::absolute(fs::path(__FILE__).parent_path().parent_path()));
+  {
+    fs::path selfParent = fs::path(__FILE__).parent_path();
+    if (!selfParent.empty()) {
+      try { roots.push_back(fs::absolute(selfParent)); } catch (...) {}
+      if (selfParent.has_parent_path()) {
+        try { roots.push_back(fs::absolute(selfParent.parent_path())); } catch (...) {}
+      }
+    }
+  }
 
   std::vector<fs::path> candidates;
   for (const auto &root : roots) {

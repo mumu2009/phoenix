@@ -9,42 +9,12 @@ import argparse
 import glob
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
 import numpy as np
 
-
-def parse_shape(s: str):
-    if not s:
-        return None
-    parts = re.split(r"[x,]", s)
-    return tuple(int(p.strip()) for p in parts if p.strip())
-
-
-def load_batch(path: str, shape=None, format_hint=None):
-    p = Path(path)
-    if not p.is_file():
-        raise FileNotFoundError(f"batch file not found: {path}")
-    ext = p.suffix.lower()
-    if format_hint == "npy" or (format_hint is None and ext == ".npy"):
-        arr = np.load(path, allow_pickle=False)
-        if isinstance(arr, np.ndarray):
-            return arr
-        return np.stack([np.asarray(a) for a in arr])
-    if format_hint == "bin" or (format_hint is None and ext == ".bin"):
-        if shape is None:
-            raise ValueError(f"--input-shape/--target-shape required for .bin batch: {path}")
-        arr = np.fromfile(path, dtype=np.float32)
-        per = int(np.prod(shape))
-        if per == 0:
-            raise ValueError(f"invalid shape {shape}")
-        if arr.size % per != 0:
-            raise ValueError(f"bin file size {arr.size} not divisible by sample size {per}")
-        n = arr.size // per
-        return arr.reshape((n, *shape))
-    raise ValueError(f"unsupported batch format: {path}")
+from edge_evaluate_common import evaluate_batch_mse, find_model_variant, load_batch, parse_shape
 
 
 def _load_rknn_runtime():
@@ -69,22 +39,10 @@ def evaluate_rknn(model_path: str, inputs: np.ndarray, targets: np.ndarray):
     except Exception:
         rknn.init_runtime()
 
-    total = 0.0
-    count = 0
-    for inp, tgt in zip(inputs, targets):
-        inp = np.asarray(inp, dtype=np.float32)
-        tgt = np.asarray(tgt, dtype=np.float32)
-        out = rknn.inference(inputs=[inp])[0]
-        out = out.reshape(-1)
-        tgt = tgt.reshape(-1)
-        min_len = min(out.size, tgt.size)
-        out = out[:min_len]
-        tgt = tgt[:min_len]
-        mse = float(np.mean((out - tgt) ** 2))
-        total += mse
-        count += 1
-    rknn.release()
-    return total / count if count else float("inf")
+    try:
+        return evaluate_batch_mse(inputs, targets, lambda inp: rknn.inference(inputs=[inp])[0])
+    finally:
+        rknn.release()
 
 
 def evaluate_onnx(model_path: str, inputs: np.ndarray, targets: np.ndarray):
@@ -93,31 +51,11 @@ def evaluate_onnx(model_path: str, inputs: np.ndarray, targets: np.ndarray):
     in_name = sess.get_inputs()[0].name
     out_name = sess.get_outputs()[0].name
 
-    total = 0.0
-    count = 0
-    for inp, tgt in zip(inputs, targets):
-        inp = np.asarray(inp, dtype=np.float32)
-        tgt = np.asarray(tgt, dtype=np.float32)
-        out = sess.run([out_name], {in_name: inp})[0]
-        out = out.reshape(-1)
-        tgt = tgt.reshape(-1)
-        min_len = min(out.size, tgt.size)
-        out = out[:min_len]
-        tgt = tgt[:min_len]
-        mse = float(np.mean((out - tgt) ** 2))
-        total += mse
-        count += 1
-    return total / count if count else float("inf")
+    return evaluate_batch_mse(inputs, targets, lambda inp: sess.run([out_name], {in_name: inp})[0])
 
 
 def find_model(model_dir: Path, model_path: Path):
-    if model_path.is_file() and model_path.suffix in (".rknn", ".onnx"):
-        return model_path
-    candidates = [model_dir / f"{model_path.stem}.rknn", model_dir / f"{model_path.stem}.onnx"]
-    for c in candidates:
-        if c.is_file():
-            return c
-    return None
+    return find_model_variant(model_path, (".rknn", ".onnx"))
 
 
 def main() -> int:

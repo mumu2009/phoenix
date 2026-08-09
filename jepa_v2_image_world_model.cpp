@@ -1,4 +1,4 @@
-/* jpea_v2_image_world_model.cpp - Factory and fallback for image world model interface
+/* jepa_v2_image_world_model.cpp - Factory and fallback for image world model interface
    Copyright (C) 2026 079 Project
 
    This file is part of 079 Project.
@@ -8,7 +8,7 @@
    the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version. */
 
-#include "jpea_v2_image_world_model.hpp"
+#include "jepa_v2_image_world_model.hpp"
 #include "model_deployment.hpp"
 #include "phoenix_config.hpp"
 #include "rdk_x5_bpu.hpp"
@@ -28,10 +28,10 @@
 #include <string>
 
 #if __has_include(<opencv2/opencv.hpp>)
-#define JPEA_HAVE_OPENCV 1
+#define JEPA_HAVE_OPENCV 1
 #include <opencv2/opencv.hpp>
 #else
-#define JPEA_HAVE_OPENCV 0
+#define JEPA_HAVE_OPENCV 0
 #endif
 
 #ifndef PHOENIX_EDGE_IMAGE_ENABLED
@@ -43,9 +43,24 @@ namespace io {
 
 namespace {
 
+std::string additiveDirFor(const std::string &ijepaDir, const std::string &modelKind) {
+  std::string dir = ijepaDir;
+  const bool isEncoder = (modelKind == "encoder");
+  auto pos = dir.find("_decoder");
+  if (isEncoder && pos != std::string::npos) {
+    dir.replace(pos, 8, "_encoder");
+    return dir;
+  }
+  pos = dir.find("_encoder");
+  if (!isEncoder && pos != std::string::npos) {
+    dir.replace(pos, 8, "_decoder");
+  }
+  return dir;
+}
+
 std::string resolveBpuModelPath(const std::string &envOverride,
                                 const std::string &modelKind,
-                                const std::string &variantId) {
+                                const std::string &ijepaDir) {
   if (!envOverride.empty()) return envOverride;
 
   const std::vector<std::string> names = [modelKind]() {
@@ -54,23 +69,12 @@ std::string resolveBpuModelPath(const std::string &envOverride,
     return std::vector<std::string>{"best.bin", "model.bin"};
   }();
 
-  // Additive residual BPU models live under their own per-model directory.
-  const std::vector<std::string> additiveTypes = {
-      std::string("runtime_store/models/additive_jpea/") + (modelKind == "encoder" ? "vision_encoder" : "vision_decoder"),
-  };
-
   const std::vector<std::string> roots = {
-      std::string("runtime_store/models/ijepa/") + variantId,
-      std::string("runtime_store/models/ijepa/"),
+      std::string("runtime_store/models/additive_jepa/") + additiveDirFor(ijepaDir, modelKind),
+      std::string("runtime_store/models/ijepa/") + ijepaDir,
   };
 
   std::error_code ec;
-  for (const auto &root : additiveTypes) {
-    for (const auto &name : names) {
-      std::filesystem::path p = std::filesystem::path(root) / name;
-      if (std::filesystem::is_regular_file(p, ec)) return p.string();
-    }
-  }
   for (const auto &root : roots) {
     for (const auto &name : names) {
       std::filesystem::path p = std::filesystem::path(root) / name;
@@ -80,11 +84,12 @@ std::string resolveBpuModelPath(const std::string &envOverride,
   return {};
 }
 
-std::string resolveOnnxModelPath(const std::string &modelKind) {
+std::string resolveOnnxModelPath(const std::string &modelKind,
+                                 const std::string &ijepaDir) {
   const std::vector<std::string> names = {"best.onnx", "model.onnx"};
   const std::vector<std::string> roots = {
-      std::string("runtime_store/models/additive_jpea/") + (modelKind == "encoder" ? "vision_encoder" : "vision_decoder"),
-      std::string("runtime_store/models/ijepa/"),
+      std::string("runtime_store/models/additive_jepa/") + additiveDirFor(ijepaDir, modelKind),
+      std::string("runtime_store/models/ijepa/") + ijepaDir,
   };
 
   std::error_code ec;
@@ -118,12 +123,12 @@ nlohmann::json readModelManifest(const std::filesystem::path &modelDir) {
  * an empty vector so the multimodal concept bridge can fall back to a
  * deterministic media concept.
  */
-class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
+class JepaV2ImageHbdnnModel : public JepaV2ImageWorldModel {
  public:
-  JpeaV2ImageHbdnnModel(JpeaV2ImageWorldModelConfig cfg, int targetDim)
+  JepaV2ImageHbdnnModel(JepaV2ImageWorldModelConfig cfg, int targetDim)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128),
-        modelPath_(resolveBpuModelPath(phoenix::resolveConfig<std::string>("jpea.image.horizonModel", "", "JPEA_IMAGE_HORIZON_MODEL"), "encoder", cfg_.id)),
-        decoderPath_(resolveBpuModelPath(phoenix::resolveConfig<std::string>("jpea.image.horizonDecoderModel", "", "JPEA_IMAGE_HORIZON_DECODER_MODEL"), "decoder", cfg_.id)),
+        modelPath_(resolveBpuModelPath(phoenix::resolveConfig<std::string>("jepa.image.horizonModel", "", "JEPA_IMAGE_HORIZON_MODEL"), "encoder", cfg_.id)),
+        decoderPath_(resolveBpuModelPath(phoenix::resolveConfig<std::string>("jepa.image.horizonDecoderModel", "", "JEPA_IMAGE_HORIZON_DECODER_MODEL"), "decoder", cfg_.id)),
         color_(resolveColor()),
         mean_(resolvePixelMean()),
         std_(resolvePixelStd()),
@@ -143,12 +148,12 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
 
   std::vector<float> encode(const std::vector<uint8_t> &imageBytes, int width, int height,
                             const std::string &mimeType) override {
-#if !JPEA_HAVE_OPENCV
+#if !JEPA_HAVE_OPENCV
     lastError_ = "OpenCV image decoding is unavailable in this build";
     return {};
 #else
     if (modelPath_.empty()) {
-      lastError_ = "JPEA_IMAGE_HORIZON_MODEL is required";
+      lastError_ = "JEPA_IMAGE_HORIZON_MODEL is required";
       return {};
     }
     if (!rdk_x5_bpu::available()) {
@@ -163,7 +168,7 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
 
   std::vector<float> encodeContext(const std::vector<uint8_t> &imageBytes, int width, int height,
                                    const std::string &mimeType, const std::vector<bool> &mask) override {
-#if !JPEA_HAVE_OPENCV
+#if !JEPA_HAVE_OPENCV
     lastError_ = "OpenCV image decoding is unavailable in this build";
     return {};
 #else
@@ -176,7 +181,7 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
   std::vector<float> encodeTarget(const std::vector<uint8_t> &imageBytes, int width, int height,
                                   const std::string &mimeType,
                                   const std::vector<int> &) override {
-#if !JPEA_HAVE_OPENCV
+#if !JEPA_HAVE_OPENCV
     lastError_ = "OpenCV image decoding is unavailable in this build";
     return {};
 #else
@@ -276,12 +281,12 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
 
   std::vector<uint8_t> decode(const std::vector<float> &conceptVector,
                               const std::string &mimeType) override {
-#if !JPEA_HAVE_OPENCV
+#if !JEPA_HAVE_OPENCV
     lastError_ = "OpenCV image encoding is unavailable in this build";
     return {};
 #else
     if (decoderPath_.empty()) {
-      lastError_ = "JPEA_IMAGE_HORIZON_DECODER_MODEL is required for decode";
+      lastError_ = "JEPA_IMAGE_HORIZON_DECODER_MODEL is required for decode";
       return {};
     }
     if (!rdk_x5_bpu::available()) {
@@ -315,7 +320,7 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
     }
     const auto outputs = result.value("outputs", nlohmann::json::array());
     if (!outputs.is_array() || outputs.empty() || !outputs[0].contains("values") || !outputs[0]["values"].is_array()) {
-      lastError_ = "JPEA Horizon decoder must expose a float image output";
+      lastError_ = "JEPA Horizon decoder must expose a float image output";
       return {};
     }
     const auto values = outputs[0]["values"].get<std::vector<float>>();
@@ -368,7 +373,7 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
                           {"error", lastError_}};
   }
 
-  const JpeaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
 
  private:
   static std::vector<float> parseFloatVectorFromJson(const nlohmann::json &j) {
@@ -391,7 +396,7 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
 
   static std::string resolveColor() {
     return phoenix::resolveConfig<std::string>("vision.colorSpace", std::string("bgr"),
-                                               "JPEA_IMAGE_INPUT_COLOR");
+                                               "JEPA_IMAGE_INPUT_COLOR");
   }
 
   static std::vector<float> normalizeTo3(std::vector<float> v,
@@ -406,7 +411,7 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
     return normalizeTo3(
         phoenix::resolveConfig<std::vector<float>>("vision.pixelMean",
                                                    std::vector<float>{0.485f, 0.456f, 0.406f},
-                                                   "JPEA_IMAGE_PIXEL_MEAN"),
+                                                   "JEPA_IMAGE_PIXEL_MEAN"),
         std::vector<float>{0.485f, 0.456f, 0.406f});
   }
 
@@ -414,14 +419,14 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
     return normalizeTo3(
         phoenix::resolveConfig<std::vector<float>>("vision.pixelStd",
                                                    std::vector<float>{0.229f, 0.224f, 0.225f},
-                                                   "JPEA_IMAGE_PIXEL_STD"),
+                                                   "JEPA_IMAGE_PIXEL_STD"),
         std::vector<float>{0.229f, 0.224f, 0.225f});
   }
 
   static std::filesystem::path temporaryInputPath() {
     static std::atomic<uint64_t> sequence{0};
     return std::filesystem::temp_directory_path() /
-           ("phoenix-jpea-" + std::to_string(sequence.fetch_add(1)) + ".tensor");
+           ("phoenix-jepa-" + std::to_string(sequence.fetch_add(1)) + ".tensor");
   }
 
   cv::Mat decodeImage(const std::vector<uint8_t> &imageBytes, int width, int height,
@@ -434,7 +439,7 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
   void loadEncoderHead();
   std::vector<float> applyEncoderHead(const std::vector<float> &embedding) const;
 
-  JpeaV2ImageWorldModelConfig cfg_;
+  JepaV2ImageWorldModelConfig cfg_;
   int targetDim_;
   std::string modelPath_;
   std::string decoderPath_;
@@ -456,8 +461,8 @@ class JpeaV2ImageHbdnnModel : public JpeaV2ImageWorldModel {
   bool headLoaded_ = false;
 };
 
-#if JPEA_HAVE_OPENCV
-cv::Mat JpeaV2ImageHbdnnModel::decodeImage(const std::vector<uint8_t> &imageBytes, int width, int height,
+#if JEPA_HAVE_OPENCV
+cv::Mat JepaV2ImageHbdnnModel::decodeImage(const std::vector<uint8_t> &imageBytes, int width, int height,
                                            const std::string &mimeType) {
   cv::Mat image;
   if (mimeType == "application/x-bgr") {
@@ -481,13 +486,13 @@ cv::Mat JpeaV2ImageHbdnnModel::decodeImage(const std::vector<uint8_t> &imageByte
   cv::resize(image, image, cv::Size(cfg_.resolution, cfg_.resolution), 0, 0, cv::INTER_AREA);
   if (color_ == "rgb") cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
   if (color_ != "bgr" && color_ != "rgb") {
-    lastError_ = "JPEA_IMAGE_INPUT_COLOR must be bgr or rgb";
+    lastError_ = "JEPA_IMAGE_INPUT_COLOR must be bgr or rgb";
     return {};
   }
   return image;
 }
 
-std::vector<float> JpeaV2ImageHbdnnModel::imageToNchw(const cv::Mat &image,
+std::vector<float> JepaV2ImageHbdnnModel::imageToNchw(const cv::Mat &image,
                                                        const std::vector<bool> &patchMask) {
   cv::Mat floatImage;
   image.convertTo(floatImage, CV_32FC3, 1.0 / 255.0);
@@ -521,9 +526,9 @@ std::vector<float> JpeaV2ImageHbdnnModel::imageToNchw(const cv::Mat &image,
   }
   return nchw;
 }
-#endif  // JPEA_HAVE_OPENCV
+#endif  // JEPA_HAVE_OPENCV
 
-std::vector<float> JpeaV2ImageHbdnnModel::runEncoderBpu(const std::vector<float> &nchw) {
+std::vector<float> JepaV2ImageHbdnnModel::runEncoderBpu(const std::vector<float> &nchw) {
   const std::filesystem::path inputPath = temporaryInputPath();
   {
     std::ofstream output(inputPath, std::ios::binary | std::ios::trunc);
@@ -545,20 +550,20 @@ std::vector<float> JpeaV2ImageHbdnnModel::runEncoderBpu(const std::vector<float>
   }
   const auto outputs = result.value("outputs", nlohmann::json::array());
   if (!outputs.is_array() || outputs.empty() || !outputs[0].contains("values") || !outputs[0]["values"].is_array()) {
-    lastError_ = "JPEA Horizon model must expose a float embedding output";
+    lastError_ = "JEPA Horizon model must expose a float embedding output";
     return {};
   }
   const auto embedding = outputs[0]["values"].get<std::vector<float>>();
   const auto conceptOut = applyEncoderHead(embedding);
   if (static_cast<int>(conceptOut.size()) != targetDim_) {
-    lastError_ = "JPEA embedding output dimension does not match JPEA_IMAGE_CONCEPT_DIM";
+    lastError_ = "JEPA embedding output dimension does not match JEPA_IMAGE_CONCEPT_DIM";
     return {};
   }
   return conceptOut;
 }
 
-#if JPEA_HAVE_OPENCV
-std::vector<float> JpeaV2ImageHbdnnModel::encodeImage(cv::Mat image, const std::vector<bool> &patchMask) {
+#if JEPA_HAVE_OPENCV
+std::vector<float> JepaV2ImageHbdnnModel::encodeImage(cv::Mat image, const std::vector<bool> &patchMask) {
   std::vector<float> nchw = imageToNchw(image, patchMask);
   if (nchw.empty()) {
     if (lastError_.empty()) lastError_ = "image preprocessing failed";
@@ -570,9 +575,9 @@ std::vector<float> JpeaV2ImageHbdnnModel::encodeImage(cv::Mat image, const std::
   lastError_.clear();
   return embedding;
 }
-#endif  // JPEA_HAVE_OPENCV
+#endif  // JEPA_HAVE_OPENCV
 
-void JpeaV2ImageHbdnnModel::loadDecoderInverseMatrix() {
+void JepaV2ImageHbdnnModel::loadDecoderInverseMatrix() {
   if (decoderPath_.empty()) return;
   const std::filesystem::path matrixPath =
       std::filesystem::path(decoderPath_).parent_path() / "decoder_inverse_matrix.json";
@@ -599,7 +604,7 @@ void JpeaV2ImageHbdnnModel::loadDecoderInverseMatrix() {
   }
 }
 
-std::vector<float> JpeaV2ImageHbdnnModel::applyDecoderInverseMatrix(const std::vector<float> &conceptIn) const {
+std::vector<float> JepaV2ImageHbdnnModel::applyDecoderInverseMatrix(const std::vector<float> &conceptIn) const {
   std::vector<float> out(static_cast<size_t>(targetDim_), 0.0f);
   for (int i = 0; i < targetDim_; ++i) {
     float v = decoderMatrixB_[static_cast<size_t>(i)];
@@ -611,7 +616,7 @@ std::vector<float> JpeaV2ImageHbdnnModel::applyDecoderInverseMatrix(const std::v
   return out;
 }
 
-void JpeaV2ImageHbdnnModel::loadEncoderHead() {
+void JepaV2ImageHbdnnModel::loadEncoderHead() {
   if (modelPath_.empty()) return;
   const std::filesystem::path headPath =
       std::filesystem::path(modelPath_).parent_path() / "encoder_head.json";
@@ -645,7 +650,7 @@ void JpeaV2ImageHbdnnModel::loadEncoderHead() {
   }
 }
 
-std::vector<float> JpeaV2ImageHbdnnModel::applyEncoderHead(const std::vector<float> &embedding) const {
+std::vector<float> JepaV2ImageHbdnnModel::applyEncoderHead(const std::vector<float> &embedding) const {
   if (!headLoaded_ || headInDim_ <= 0 || headOutDim_ <= 0 ||
       static_cast<int>(embedding.size()) != headInDim_) {
     return embedding;
@@ -678,9 +683,9 @@ std::vector<float> JpeaV2ImageHbdnnModel::applyEncoderHead(const std::vector<flo
  * self-supervised adaptation.  This makes the image <-> concept unit
  * conversion functional and testable even without a real I-JEPA checkpoint.
  */
-class JpeaV2ImageFallbackModel : public JpeaV2ImageWorldModel {
+class JepaV2ImageFallbackModel : public JepaV2ImageWorldModel {
  public:
-  JpeaV2ImageFallbackModel(JpeaV2ImageWorldModelConfig cfg, int targetDim)
+  JepaV2ImageFallbackModel(JepaV2ImageWorldModelConfig cfg, int targetDim)
       : cfg_(std::move(cfg)),
         targetDim_(targetDim > 0 ? targetDim : 128),
         predictorWeights_(static_cast<size_t>(targetDim_ * targetDim_), 0.0f),
@@ -819,7 +824,7 @@ class JpeaV2ImageFallbackModel : public JpeaV2ImageWorldModel {
 
   std::vector<uint8_t> decode(const std::vector<float> &conceptVector,
                               const std::string &mimeType) override {
-#if !JPEA_HAVE_OPENCV
+#if !JEPA_HAVE_OPENCV
     (void)conceptVector;
     (void)mimeType;
     lastError_ = "OpenCV image decoding is unavailable in this build";
@@ -863,7 +868,7 @@ class JpeaV2ImageFallbackModel : public JpeaV2ImageWorldModel {
                           {"error", lastError_}};
   }
 
-  const JpeaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
 
  private:
   int countPatches() const {
@@ -873,7 +878,7 @@ class JpeaV2ImageFallbackModel : public JpeaV2ImageWorldModel {
 
   std::vector<float> preprocessImage(const std::vector<uint8_t> &imageBytes, int width, int height,
                                      const std::string &mimeType) {
-#if !JPEA_HAVE_OPENCV
+#if !JEPA_HAVE_OPENCV
     (void)imageBytes;
     (void)width;
     (void)height;
@@ -960,7 +965,7 @@ class JpeaV2ImageFallbackModel : public JpeaV2ImageWorldModel {
     return normalizeVector(projected);
   }
 
-  JpeaV2ImageWorldModelConfig cfg_;
+  JepaV2ImageWorldModelConfig cfg_;
   int targetDim_;
   size_t samples_ = 0;
   std::vector<float> predictorWeights_;
@@ -968,9 +973,9 @@ class JpeaV2ImageFallbackModel : public JpeaV2ImageWorldModel {
   std::string lastError_;
 };
 
-class JpeaV2ImageRemoteModel : public JpeaV2ImageWorldModel {
+class JepaV2ImageRemoteModel : public JepaV2ImageWorldModel {
  public:
-  JpeaV2ImageRemoteModel(JpeaV2ImageWorldModelConfig cfg, int targetDim,
+  JepaV2ImageRemoteModel(JepaV2ImageWorldModelConfig cfg, int targetDim,
                          const phoenix::deployment::RemoteEndpoint &endpoint)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128),
         endpoint_(endpoint) {}
@@ -1058,7 +1063,7 @@ class JpeaV2ImageRemoteModel : public JpeaV2ImageWorldModel {
                           {"error", lastError_}};
   }
 
-  const JpeaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
 
  private:
   static std::vector<float> parseFloatVectorFromJson(const nlohmann::json &j) {
@@ -1070,7 +1075,7 @@ class JpeaV2ImageRemoteModel : public JpeaV2ImageWorldModel {
     return out;
   }
 
-  JpeaV2ImageWorldModelConfig cfg_;
+  JepaV2ImageWorldModelConfig cfg_;
   int targetDim_;
   phoenix::deployment::RemoteEndpoint endpoint_;
   size_t samples_ = 0;
@@ -1081,19 +1086,32 @@ class JpeaV2ImageRemoteModel : public JpeaV2ImageWorldModel {
 static std::filesystem::path temporaryOnnxPath() {
   static std::atomic<uint64_t> sequence{0};
   std::error_code ec;
-  return std::filesystem::temp_directory_path(ec) /
-         ("phoenix-onnx-" + std::to_string(sequence.fetch_add(1)));
+  std::filesystem::path base;
+  const char *env = std::getenv("PHOENIX_ONNX_TMP");
+  if (env && *env) {
+    base = std::filesystem::path(env);
+  } else {
+    base = std::filesystem::path("build") / "tmp";
+  }
+  std::filesystem::create_directories(base, ec);
+  if (!std::filesystem::is_directory(base, ec)) {
+    base = std::filesystem::temp_directory_path(ec);
+  }
+  return base / ("phoenix-onnx-" + std::to_string(sequence.fetch_add(1)));
 }
 
 static std::string pythonExecutable() {
   std::error_code ec;
+  const char *env = std::getenv("PHOENIX_PYTHON");
+  if (env && *env) return std::string(env);
   const std::vector<std::string> candidates = {
-      "Python314/pythonw.exe", "Python314/python.exe", "pythonw", "python", "py"};
+      "Python314/python", "Python314/python.exe", "Python314/pythonw.exe",
+      "python3", "python", "py"};
   for (const auto &c : candidates) {
     if (std::filesystem::is_regular_file(c, ec))
       return std::filesystem::absolute(c, ec).string();
   }
-  return "python";
+  return "python3";
 }
 
 static std::string toShapeString(const std::vector<int> &shape) {
@@ -1126,15 +1144,32 @@ static nlohmann::json runLocalOnnx(
               static_cast<std::streamsize>(inputFloats.size() * sizeof(float)));
   }
 
+  const std::string py = pythonExecutable();
+  if (py.find_first_of(" \t") != std::string::npos) {
+    std::filesystem::remove(inPath, ec);
+    return {{"ok", false}, {"error", "python executable path contains spaces; set PHOENIX_PYTHON"}};
+  }
+  auto quoteIfNeeded = [](const std::string &s) -> std::string {
+    if (s.find_first_of(" \t\"&|<>^%;") == std::string::npos) return s;
+    std::string out;
+    out.push_back('\"');
+    for (char c : s) {
+      if (c == '\"') out.push_back('\"');
+      out.push_back(c);
+    }
+    out.push_back('\"');
+    return out;
+  };
+
   std::ostringstream cmd;
-  cmd << "\"" << pythonExecutable() << "\" "
+  cmd << py << " "
       << "tools/local_onnx_runner.py "
-      << "--model \"" << modelPath << "\" "
-      << "--input \"" << inPath.string() << "\" "
-      << "--input-name \"" << inputName << "\" "
+      << "--model " << quoteIfNeeded(modelPath) << " "
+      << "--input " << quoteIfNeeded(inPath.string()) << " "
+      << "--input-name " << quoteIfNeeded(inputName) << " "
       << "--input-shape " << toShapeString(inputShape) << " "
-      << "--output \"" << outPath.string() << "\" "
-      << "--output-name \"" << outputName << "\" "
+      << "--output " << quoteIfNeeded(outPath.string()) << " "
+      << "--output-name " << quoteIfNeeded(outputName) << " "
       << "--output-shape " << toShapeString(outputShape);
   if (gpu) cmd << " --gpu";
 
@@ -1144,13 +1179,16 @@ static nlohmann::json runLocalOnnx(
     std::filesystem::remove(inPath, ec);
     return {{"ok", false}, {"error", "failed to start local ONNX runner"}};
   }
-  char buffer[1024];
+  char buffer[4096];
   while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
     outputJson += buffer;
   }
   const int rc = _pclose(pipe);
   std::filesystem::remove(inPath, ec);
 
+  if (outputJson.empty()) {
+    return {{"ok", false}, {"error", "local ONNX runner produced no output"}};
+  }
   auto result = nlohmann::json::parse(outputJson, nullptr, false);
   if (result.is_discarded()) {
     return {{"ok", false}, {"error", "local ONNX runner returned invalid JSON"}, {"raw", outputJson}};
@@ -1175,9 +1213,9 @@ static nlohmann::json runLocalOnnx(
   return result;
 }
 
-class JpeaV2ImageServerClientModel : public JpeaV2ImageWorldModel {
+class JepaV2ImageServerClientModel : public JepaV2ImageWorldModel {
  public:
-  JpeaV2ImageServerClientModel(JpeaV2ImageWorldModelConfig cfg, int targetDim)
+  JepaV2ImageServerClientModel(JepaV2ImageWorldModelConfig cfg, int targetDim)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128) {}
 
   std::vector<float> encode(const std::vector<uint8_t> &, int, int,
@@ -1213,17 +1251,17 @@ class JpeaV2ImageServerClientModel : public JpeaV2ImageWorldModel {
                           {"targetDim", targetDim_}, {"ready", false},
                           {"error", "server-client: expects client concept vectors"}};
   }
-  const JpeaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
 
  private:
-  JpeaV2ImageWorldModelConfig cfg_;
+  JepaV2ImageWorldModelConfig cfg_;
   int targetDim_;
   std::string lastError_;
 };
 
-class JpeaV2ImageUnavailableModel : public JpeaV2ImageWorldModel {
+class JepaV2ImageUnavailableModel : public JepaV2ImageWorldModel {
  public:
-  JpeaV2ImageUnavailableModel(JpeaV2ImageWorldModelConfig cfg, int targetDim, std::string reason)
+  JepaV2ImageUnavailableModel(JepaV2ImageWorldModelConfig cfg, int targetDim, std::string reason)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128),
         reason_(std::move(reason)) {}
 
@@ -1254,21 +1292,21 @@ class JpeaV2ImageUnavailableModel : public JpeaV2ImageWorldModel {
     return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "unavailable"},
                           {"targetDim", targetDim_}, {"ready", false}, {"error", reason_}};
   }
-  const JpeaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
 
  private:
-  JpeaV2ImageWorldModelConfig cfg_;
+  JepaV2ImageWorldModelConfig cfg_;
   int targetDim_;
   std::string reason_;
 };
 
-class JpeaV2ImageLocalOnnxModel : public JpeaV2ImageWorldModel {
+class JepaV2ImageLocalOnnxModel : public JepaV2ImageWorldModel {
  public:
-  JpeaV2ImageLocalOnnxModel(JpeaV2ImageWorldModelConfig cfg, int targetDim, bool gpu)
+  JepaV2ImageLocalOnnxModel(JepaV2ImageWorldModelConfig cfg, int targetDim, bool gpu)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128),
         gpu_(gpu),
-        modelPath_(resolveOnnxModelPath("encoder")),
-        decoderPath_(resolveOnnxModelPath("decoder")),
+        modelPath_(resolveOnnxModelPath("encoder", jepaV2ImageLocalWeightsDir(cfg_))),
+        decoderPath_(resolveOnnxModelPath("decoder", jepaV2ImageLocalWeightsDir(cfg_))),
         mean_({0.485f, 0.456f, 0.406f}),
         std_({0.229f, 0.224f, 0.225f}) {
     loadManifest("encoder", encoderInputName_, encoderOutputName_, encoderInputShape_, encoderOutputShape_, conceptDim_);
@@ -1278,7 +1316,7 @@ class JpeaV2ImageLocalOnnxModel : public JpeaV2ImageWorldModel {
 
   std::vector<float> encode(const std::vector<uint8_t> &imageBytes, int width, int height,
                             const std::string &mimeType) override {
-#if !JPEA_HAVE_OPENCV
+#if !JEPA_HAVE_OPENCV
     lastError_ = "OpenCV image decoding is unavailable in this build";
     return {};
 #else
@@ -1343,7 +1381,7 @@ class JpeaV2ImageLocalOnnxModel : public JpeaV2ImageWorldModel {
 
   std::vector<uint8_t> decode(const std::vector<float> &conceptVector,
                               const std::string &mimeType) override {
-#if !JPEA_HAVE_OPENCV
+#if !JEPA_HAVE_OPENCV
     (void)conceptVector;
     (void)mimeType;
     lastError_ = "OpenCV image encoding is unavailable in this build";
@@ -1420,10 +1458,10 @@ class JpeaV2ImageLocalOnnxModel : public JpeaV2ImageWorldModel {
                           {"error", lastError_}};
   }
 
-  const JpeaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
 
  private:
-#if JPEA_HAVE_OPENCV
+#if JEPA_HAVE_OPENCV
   cv::Mat decodeImage(const std::vector<uint8_t> &imageBytes, int width, int height,
                       const std::string &mimeType) {
     cv::Mat image;
@@ -1490,7 +1528,7 @@ class JpeaV2ImageLocalOnnxModel : public JpeaV2ImageWorldModel {
                                           : std::vector<int>{1, 3, cfg_.resolution, cfg_.resolution};
   }
 
-  JpeaV2ImageWorldModelConfig cfg_;
+  JepaV2ImageWorldModelConfig cfg_;
   int targetDim_;
   bool gpu_;
   std::string modelPath_;
@@ -1510,16 +1548,26 @@ class JpeaV2ImageLocalOnnxModel : public JpeaV2ImageWorldModel {
   int conceptDim_ = 0;
 };
 
-static phoenix::deployment::LocalBackendType chooseLocalBackend(const phoenix::deployment::ModelDeploymentRecord &record) {
+static phoenix::deployment::LocalBackendType detectLocalBackend(const std::string &variantId) {
+  using phoenix::deployment::LocalBackendType;
+  std::error_code ec;
+  auto bpuDir = std::filesystem::path("runtime_store") / "models" / "ijepa" / variantId;
+  if (std::filesystem::is_regular_file(bpuDir / "model_encoder.bin", ec) ||
+      std::filesystem::is_regular_file(bpuDir / "model_decoder.bin", ec)) {
+    return LocalBackendType::Bpu;
+  }
+  auto additiveDir = std::filesystem::path("runtime_store") / "models" / "additive_jepa" / variantId;
+  if (std::filesystem::is_regular_file(additiveDir / "best.onnx", ec)) {
+    return LocalBackendType::Cpu;
+  }
+  return LocalBackendType::Auto;
+}
+
+static phoenix::deployment::LocalBackendType chooseLocalBackend(
+    const std::string &variantId, const phoenix::deployment::ModelDeploymentRecord &record) {
   auto backend = record.localBackend;
   if (backend == phoenix::deployment::LocalBackendType::Auto) {
-#if defined(__aarch64__)
-    backend = phoenix::deployment::LocalBackendType::Bpu;
-#elif defined(__x86_64__) || defined(__amd64__)
-    backend = phoenix::deployment::LocalBackendType::Cpu;
-#else
-    backend = phoenix::deployment::LocalBackendType::Cpu;
-#endif
+    backend = detectLocalBackend(variantId);
   }
   return backend;
 }
@@ -1539,55 +1587,60 @@ static phoenix::deployment::LocalBackendType chooseLocalBackend(const phoenix::d
  *   4. If no model files are present, return an unavailable model that reports
  *      the error through status() and returns empty vectors.
  */
-std::unique_ptr<JpeaV2ImageWorldModel> createJpeaV2ImageWorldModel(
+std::unique_ptr<JepaV2ImageWorldModel> createJepaV2ImageWorldModel(
     const std::string &variantId, int targetDim, const std::string & /*backend*/) {
-  const auto *v = findJpeaV2ImageVariant(variantId);
+  const auto *v = findJepaV2ImageVariant(variantId);
   if (!v) {
-    v = findJpeaV2ImageVariant("ijepa_vith14_1k");
+    JepaV2ImageWorldModelConfig unknownCfg;
+    unknownCfg.id = variantId;
+    unknownCfg.arch = "unknown";
+    return std::make_unique<JepaV2ImageUnavailableModel>(
+        unknownCfg, targetDim, "unknown image variant: " + variantId);
   }
-  if (!v) return nullptr;
 
   const auto &deployment = phoenix::deployment::ModelDeploymentConfig::instance().vision();
 
   if (deployment.placement == phoenix::deployment::ModelPlacement::ServerClient) {
-    return std::make_unique<JpeaV2ImageServerClientModel>(*v, targetDim);
+    return std::make_unique<JepaV2ImageServerClientModel>(*v, targetDim);
   }
 
-  const bool useRemote =
-      (deployment.placement == phoenix::deployment::ModelPlacement::Remote ||
-       deployment.placement == phoenix::deployment::ModelPlacement::Auto) &&
-      !deployment.remote.url.empty();
-  if (useRemote) {
-    return std::make_unique<JpeaV2ImageRemoteModel>(*v, targetDim, deployment.remote);
+  if (deployment.placement == phoenix::deployment::ModelPlacement::Remote) {
+    if (deployment.remote.url.empty()) {
+      return std::make_unique<JepaV2ImageUnavailableModel>(
+          *v, targetDim, "remote image placement configured but remote.url is empty");
+    }
+    return std::make_unique<JepaV2ImageRemoteModel>(*v, targetDim, deployment.remote);
   }
 
-  auto backend = chooseLocalBackend(deployment);
+  auto backend = chooseLocalBackend(variantId, deployment);
   if (backend == phoenix::deployment::LocalBackendType::Bpu) {
 #if PHOENIX_EDGE_IMAGE_ENABLED
-    auto hbdnn = std::make_unique<JpeaV2ImageHbdnnModel>(*v, targetDim);
+    auto hbdnn = std::make_unique<JepaV2ImageHbdnnModel>(*v, targetDim);
     if (hbdnn->status().value("ready", false)) return hbdnn;
-    return std::make_unique<JpeaV2ImageUnavailableModel>(
+    return std::make_unique<JepaV2ImageUnavailableModel>(
         *v, targetDim, "local BPU image model is not ready (missing .bin or BPU runtime)");
 #else
-    return std::make_unique<JpeaV2ImageUnavailableModel>(
+    return std::make_unique<JepaV2ImageUnavailableModel>(
         *v, targetDim, "local BPU image backend is disabled at compile time");
 #endif
   }
 
   if (backend == phoenix::deployment::LocalBackendType::Cpu ||
       backend == phoenix::deployment::LocalBackendType::Gpu) {
-    auto onnx = std::make_unique<JpeaV2ImageLocalOnnxModel>(
+    auto onnx = std::make_unique<JepaV2ImageLocalOnnxModel>(
         *v, targetDim, backend == phoenix::deployment::LocalBackendType::Gpu);
-    return onnx;
+    if (onnx->status().value("ready", false)) return onnx;
+    return std::make_unique<JepaV2ImageUnavailableModel>(
+        *v, targetDim, "local ONNX image model is not ready (missing .onnx)");
   }
 
   if (backend == phoenix::deployment::LocalBackendType::Js) {
-    return std::make_unique<JpeaV2ImageUnavailableModel>(
+    return std::make_unique<JepaV2ImageUnavailableModel>(
         *v, targetDim, "browser JS runner must execute on the client; no C++ implementation");
   }
 
-  return std::make_unique<JpeaV2ImageUnavailableModel>(
-      *v, targetDim, "no local image backend could be selected");
+  return std::make_unique<JepaV2ImageUnavailableModel>(
+      *v, targetDim, "auto-detection found no supported model for " + variantId);
 }
 
 }  // namespace io

@@ -4,7 +4,7 @@ cd /d "%~dp0"
 
 :: Default validation run with synthetic data for all 4 models.
 :: Change the arguments below for real data or longer training.
-
+:: I have change the kali VM to about 11068MB RAM, so the compiling might work
 python tools\run_all_additive_training.py ^
     --kali-host 192.168.0.100 ^
     --kali-user kali ^
@@ -14,10 +14,10 @@ python tools\run_all_additive_training.py ^
     --x5-pass sunrise ^
     --models speech_encoder,speech_decoder,vision_encoder,vision_decoder ^
     --max-rounds 3 ^
-    --lambda 2 ^
+    --lambda 10 ^
     --batch-size 1000 ^
-    --parallel 1 ^
-    --max-concurrent 2 ^
+    --parallel 10 ^
+    --max-concurrent 4 ^
     --synthetic ^
     --block-size small ^
     --wait ^

@@ -1,27 +1,14 @@
 {
   "llm": {
-    "placement": "remote",
-    "remote": {
-      "url": "http://192.168.0.107:11434",
-      "method": "websocket",
-      "modelName": "llama3.1:8b",
-      "authToken": "",
-      "timeoutMs": 120000,
-      "headers": {}
-    }
+    "placement": "local",
+    "localBackend": "cpu"
   },
   "vision": {
-    "placement": "local"
+    "placement": "local",
+    "localBackend": "cpu"
   },
   "speech": {
-    "placement": "remote",
-    "remote": {
-      "url": "http://192.168.0.107:8080/ws",
-      "method": "websocket",
-      "modelName": "",
-      "authToken": "",
-      "timeoutMs": 30000,
-      "headers": {}
-    }
+    "placement": "local",
+    "localBackend": "cpu"
   }
 }

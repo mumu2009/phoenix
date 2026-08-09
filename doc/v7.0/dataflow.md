@@ -50,8 +50,8 @@ flowchart TB
 
     subgraph MOD["世界模型 / 编码器"]
         TXT["TransformerTextEncoder<br/>Tokenizer / TransformerModel"]
-        IMG["JpeaV2ImageWorldModel<br/>+ Local-ONNX / BPU / Remote / ServerClient"]
-        SPK["JpeaV2SpeechWorldModel<br/>+ Local-ONNX / BPU / Remote / ServerClient"]
+        IMG["JepaV2ImageWorldModel<br/>+ Local-ONNX / BPU / Remote / ServerClient"]
+        SPK["JepaV2SpeechWorldModel<br/>+ Local-ONNX / BPU / Remote / ServerClient"]
     end
 
     subgraph INF["推理后端"]
@@ -204,7 +204,7 @@ sequenceDiagram
 1. `frontend_server.cpp` 仅做代理，不处理业务逻辑。
 2. 鉴权支持 JWT 与 `local-{user}-{ts}-{seq}` 本地 token。
 3. `/api/chat` 默认启用 MemeGraph selector，可通过 `disableGraphSelector` 关闭。
-4. 图像上下文通过 `injectImageContext` 注入，可能进入 `jpea_v2_image_world_model` 编码为语义单元。
+4. 图像上下文通过 `injectImageContext` 注入，可能进入 `jepa_v2_image_world_model` 编码为语义单元。
 5. 生成完成后会进行 `isLikelyGibberishReply` 与可选的 verify，并异步触发在线学习。
 
 ---
@@ -233,8 +233,8 @@ flowchart LR
 
     subgraph ENC_LAYER["模态编码器"]
         TE["TransformerTextEncoder"]
-        JW["JpeaV2ImageWorldModel<br/>Local-ONNX / BPU / Remote / ServerClient"]
-        SW["JpeaV2SpeechWorldModel<br/>Local-ONNX / BPU / Remote / ServerClient"]
+        JW["JepaV2ImageWorldModel<br/>Local-ONNX / BPU / Remote / ServerClient"]
+        SW["JepaV2SpeechWorldModel<br/>Local-ONNX / BPU / Remote / ServerClient"]
         MC["mediaConcept<br/>未知模态"]
     end
 
@@ -287,7 +287,7 @@ flowchart LR
 **说明**：
 
 - `MixedModalPacket` 是统一的外部输入/输出容器；`MixedModalConceptBridge` 负责将不同模态编码到同一语义空间。
-- 文本走 `TransformerTextEncoder`；图像/视频优先使用 `JpeaV2ImageWorldModel`（真实后端可切换为 RDK X5 BPU 或 PyTorch）；音频使用 `JpeaV2SpeechWorldModel`，并可通过 `pretrainSpeech` 与文本对齐。
+- 文本走 `TransformerTextEncoder`；图像/视频优先使用 `JepaV2ImageWorldModel`（真实后端可切换为 RDK X5 BPU 或 PyTorch）；音频使用 `JepaV2SpeechWorldModel`，并可通过 `pretrainSpeech` 与文本对齐。
 - 所有语义向量通过 `projectToDimension` 对齐到目标维度，实现不重新训练 LLM 的跨模态融合。
 - 解码时，非文本目标输出概念载荷并标记 `requiresModalityDecoder`，由外部解码器实体化。
 
@@ -500,7 +500,7 @@ flowchart LR
     GW2["GatewayServer"] -->|session| RED
     CAM2["CognitionAutonomyManager"] -->|speech concept| RS3
     TXT2["TransformerTextEncoder"] -->|params/state| RS4
-    IMG2["JpeaV2ImageWorldModel"] -->|safetensors| RS5
+    IMG2["JepaV2ImageWorldModel"] -->|safetensors| RS5
     EP3["edge_platform"] -->|cold weights| RS6
 
     GW2 -->|structured entities| RS1

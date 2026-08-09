@@ -1,4 +1,4 @@
-"""Train a scalable JPEA-v2 image autoencoder.
+"""Train a scalable JEPA-v2 image autoencoder.
 
 The encoder starts from a pretrained torchvision ResNet (18/34/50) and adds a
 learned Linear projection head to the concept dimension (default 128 to match
@@ -61,7 +61,7 @@ class ResBlock2d(nn.Module):
         return x + self.bn2(self.conv2(h))
 
 
-class JpeaV2ImageDecoder(nn.Module):
+class JepaV2ImageDecoder(nn.Module):
     """Image decoder: concept -> 3x224x224.
 
     The base architecture matches /home/kali/decoder_trained.pt:
@@ -145,7 +145,7 @@ class JpeaV2ImageDecoder(nn.Module):
         return x
 
 
-class JpeaV2ImageEncoder(nn.Module):
+class JepaV2ImageEncoder(nn.Module):
     def __init__(self, resnet_name='resnet18', concept=128, pretrained=True, unfreeze=False):
         super().__init__()
         self.concept = concept
@@ -167,13 +167,13 @@ class JpeaV2ImageEncoder(nn.Module):
         return self.head(feat)           # [N, concept]
 
 
-class JpeaV2ImageAutoencoder(nn.Module):
+class JepaV2ImageAutoencoder(nn.Module):
     def __init__(self, resnet_name='resnet18', concept=128, pretrained=True,
                  unfreeze=False, dec_width=1.0, dec_depth=0, dec_channels=None, load_sd=None):
         super().__init__()
         self.concept = concept
-        self.encoder = JpeaV2ImageEncoder(resnet_name, concept, pretrained, unfreeze)
-        self.decoder = JpeaV2ImageDecoder(concept, dec_width, dec_depth, dec_channels, load_sd)
+        self.encoder = JepaV2ImageEncoder(resnet_name, concept, pretrained, unfreeze)
+        self.decoder = JepaV2ImageDecoder(concept, dec_width, dec_depth, dec_channels, load_sd)
 
     def forward(self, x):
         z = self.encoder(x)
@@ -289,7 +289,7 @@ def export_onnx(model, out_dir, concept=128, resolution=224):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True, help='directory with images (class subdirs or flat)')
-    parser.add_argument('--out-dir', default='checkpoints/jpea_v2_vision', help='checkpoint directory')
+    parser.add_argument('--out-dir', default='checkpoints/jepa_v2_vision', help='checkpoint directory')
     parser.add_argument('--resnet', default='resnet18',
                         choices=['resnet18', 'resnet34', 'resnet50'],
                         help='pretrained ResNet base (resnet50 -> 2048-D features)')
@@ -341,7 +341,7 @@ def main():
 
     dec_channels = _parse_channel_list(args.decoder_channels)
 
-    model = JpeaV2ImageAutoencoder(
+    model = JepaV2ImageAutoencoder(
         resnet_name=args.resnet,
         concept=args.concept,
         pretrained=bool(args.pretrained),

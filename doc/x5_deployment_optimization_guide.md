@@ -9,7 +9,7 @@
 | `llama-server` + GGUF | 主机 | Llama 3.1 8B 权重加载、KV cache、文本推理、自然语言输出 |
 | `phoenix_main` | RDK X5 | HTTP 服务、会话、工具编排、世界模型、GNN/GA、Redis/SQLite、外设控制 |
 | USB 摄像头 | RDK X5 | 本地 V4L2 采集，固定规格输入 |
-| JPEA 图像编码器 | RDK X5 BPU | 真实视觉 embedding 推理 |
+| JEPA 图像编码器 | RDK X5 BPU | 真实视觉 embedding 推理 |
 | hbDNN / `libdnn.so` | RDK X5 | 加载和执行 Horizon `.bin` |
 | 模型转换工具链 | 独立 x86_64 转换环境 | ONNX 检查、PTQ/QAT、量化、`hb_mapper` 编译 `.bin` |
 
@@ -28,23 +28,23 @@
 - 服务打开 V4L2 后主动请求固定 MJPG、宽高与帧率；最多丢弃 11 个预热帧，再使用第一张稳定帧。
 - 服务锁定宽、高和 OpenCV 像素类型；偏离预期返回 HTTP `409`，而不是隐式转换或带着错误规格进入模型。
 
-### 2.2 真实 JPEA 与 fail-closed 策略
+### 2.2 真实 JEPA 与 fail-closed 策略
 
-图像 JPEA 只接受 Horizon hbDNN 推理：
+图像 JEPA 只接受 Horizon hbDNN 推理：
 
-- `JPEA_IMAGE_HORIZON_MODEL` 必须指向已编译的 `.bin`。
+- `JEPA_IMAGE_HORIZON_MODEL` 必须指向已编译的 `.bin`。
 - X5 必须存在 BPU 设备节点和 `libdnn.so`。
-- 摄像头帧直接作为连续 BGR 字节进入 JPEA 预处理，不再重新 JPEG 编码。
-- 模型输出必须是 `JPEA_IMAGE_CONCEPT_DIM` 个浮点 embedding；默认维度为 `128`。
+- 摄像头帧直接作为连续 BGR 字节进入 JEPA 预处理，不再重新 JPEG 编码。
+- 模型输出必须是 `JEPA_IMAGE_CONCEPT_DIM` 个浮点 embedding；默认维度为 `128`。
 - 模型不存在、BPU 不可用、输入不符合编译规格、模型输出维度不符或推理失败时，接口明确返回失败，**绝不生成哈希、统计或伪造 embedding**。
-- 语音 JPEA 在没有独立、真实的 X5 `.bin` 前保持 `unavailable`，不会回退到伪特征。
+- 语音 JEPA 在没有独立、真实的 X5 `.bin` 前保持 `unavailable`，不会回退到伪特征。
 
-这种 fail-closed 策略是核心工程约束：世界模型中标记为 JPEA 的向量，必须确实来自 JPEA BPU 模型。
+这种 fail-closed 策略是核心工程约束：世界模型中标记为 JEPA 的向量，必须确实来自 JEPA BPU 模型。
 
 ### 2.3 X5 构建与启动资产
 
 - `tools/build_rdk_x5.sh`：检查 hbDNN 头文件与动态库，链接 `rdk_x5_bpu.cpp`、Phoenix 业务源及系统依赖，生成 `phoenix_main`。
-- `tools/run_rdk_x5.sh`：检查可执行文件、JPEA `.bin` 与 BPU 设备节点；设置主机 LLM URL、JPEA 和摄像头环境变量后启动。
+- `tools/run_rdk_x5.sh`：检查可执行文件、JEPA `.bin` 与 BPU 设备节点；设置主机 LLM URL、JEPA 和摄像头环境变量后启动。
 - `runtime_store/rdk_x5_launcher.json`：保存 X5 专用参数模板。
 - `rdk_x5_bpu.cpp`：接入 Horizon `hbDNN` 执行路径。
 
@@ -64,9 +64,9 @@
 
 ### 3.2 当前缺失的唯一关键模型资产
 
-工程目录中存在 I-JEPA `.safetensors`，但不存在可直接运行的 Horizon JPEA `.bin`。这是启动真实 JPEA 的唯一硬阻塞。
+工程目录中存在 I-JEPA `.safetensors`，但不存在可直接运行的 Horizon JEPA `.bin`。这是启动真实 JEPA 的唯一硬阻塞。
 
-> 不得将 `.safetensors`、ONNX、普通 PyTorch checkpoint 或任意示例检测模型伪装为 JPEA 模型。
+> 不得将 `.safetensors`、ONNX、普通 PyTorch checkpoint 或任意示例检测模型伪装为 JEPA 模型。
 
 ## 4. 关键优化策略与工程经验
 
@@ -75,7 +75,7 @@
 推荐路径：
 
 ```text
-USB 摄像头 -> V4L2 MJPG -> OpenCV 解码 BGR -> JPEA 预处理 -> hbDNN/BPU -> embedding -> 世界模型/GNN -> LLM 上下文
+USB 摄像头 -> V4L2 MJPG -> OpenCV 解码 BGR -> JEPA 预处理 -> hbDNN/BPU -> embedding -> 世界模型/GNN -> LLM 上下文
 ```
 
 避免路径：
@@ -94,8 +94,8 @@ USB 摄像头 -> V4L2 MJPG -> OpenCV 解码 BGR -> JPEA 预处理 -> hbDNN/BPU -
 - 摄像头编码：`MJPG`
 - 源规格：`1920x1080@30`
 - 解码帧：连续 `CV_8UC3` BGR
-- JPEA 输入：按模型编译配置确定，例如 `224x224x3` BGR 或 RGB
-- 输出：`128` 维 F32 embedding，或与 `JPEA_IMAGE_CONCEPT_DIM` 一致
+- JEPA 输入：按模型编译配置确定，例如 `224x224x3` BGR 或 RGB
+- 输出：`128` 维 F32 embedding，或与 `JEPA_IMAGE_CONCEPT_DIM` 一致
 
 ### 4.3 BPU 使用原则
 
@@ -115,7 +115,7 @@ USB 摄像头 -> V4L2 MJPG -> OpenCV 解码 BGR -> JPEA 预处理 -> hbDNN/BPU -
 
 - 原始视频默认不持久化；仅保存经策略筛选的事件摘要、embedding、模型版本、时间戳与必要的引用。
 - Redis 用于短期会话和队列；SQLite/LMDB 用于可恢复的世界状态与索引。
-- embedding 写入前必须带 `encoder=transformer-text-encoder`、`encoder=world-model` 或 `encoder=jpea-horizon-hbdnn` 等来源标记；禁止混用不同空间的向量。
+- embedding 写入前必须带 `encoder=transformer-text-encoder`、`encoder=world-model` 或 `encoder=jepa-horizon-hbdnn` 等来源标记；禁止混用不同空间的向量。
 
 ## 5. 已提出的创新点与后续方法
 
@@ -125,7 +125,7 @@ USB 摄像头 -> V4L2 MJPG -> OpenCV 解码 BGR -> JPEA 预处理 -> hbDNN/BPU -
 
 ### 5.2 双层表征
 
-- **低层**：JPEA embedding，保留对视觉状态、变化和场景结构的压缩信息。
+- **低层**：JEPA embedding，保留对视觉状态、变化和场景结构的压缩信息。
 - **高层**：由 X5 世界模型/GNN 将 embedding 关联为对象、事件、时空关系和置信度。
 - **语言层**：仅将高层摘要、关键 embedding 检索结果和任务意图送至主机 LLM。
 
@@ -133,10 +133,10 @@ USB 摄像头 -> V4L2 MJPG -> OpenCV 解码 BGR -> JPEA 预处理 -> hbDNN/BPU -
 
 ### 5.3 主动采样而非固定高频推理
 
-连续采集不等于每帧跑 JPEA。建议后续实现：
+连续采集不等于每帧跑 JEPA。建议后续实现：
 
 1. 低成本帧差或运动检测在 CPU/NV12 路径进行。
-2. 仅当运动、外设事件、任务请求或置信度下降时触发 JPEA。
+2. 仅当运动、外设事件、任务请求或置信度下降时触发 JEPA。
 3. 静态场景采用指数退避采样间隔。
 4. 将关键帧 embedding 送入世界模型，非关键帧只更新心跳与时间信息。
 
@@ -179,7 +179,7 @@ ls -l /usr/lib/libdnn.so /usr/include/dnn/hb_dnn.h
 runtime_store/models/ijepa/ijepa_vith14_1k/model.bin
 ```
 
-模型必须匹配本项目当前适配：BGR/RGB 原始连续输入、目标 JPEA 分辨率和 `128` 维 F32 embedding 输出。若模型实际需要 NV12、量化输出或多个输入张量，必须先修改 `jpea_v2_image_world_model.cpp` 与模型 manifest，不能仅靠环境变量伪装兼容。
+模型必须匹配本项目当前适配：BGR/RGB 原始连续输入、目标 JEPA 分辨率和 `128` 维 F32 embedding 输出。若模型实际需要 NV12、量化输出或多个输入张量，必须先修改 `jepa_v2_image_world_model.cpp` 与模型 manifest，不能仅靠环境变量伪装兼容。
 
 ### 6.3 构建与启动
 
@@ -192,10 +192,10 @@ HOST_LLAMA_SERVER_URL=http://<HOST_LAN_IP>:8082 bash tools/run_rdk_x5.sh
 
 ```bash
 HOST_LLAMA_SERVER_URL=http://192.168.1.10:8082 \
-JPEA_CAMERA_DEVICE=/dev/video0 \
-JPEA_CAMERA_WIDTH=1920 \
-JPEA_CAMERA_HEIGHT=1080 \
-JPEA_CAMERA_FPS=30 \
+JEPA_CAMERA_DEVICE=/dev/video0 \
+JEPA_CAMERA_WIDTH=1920 \
+JEPA_CAMERA_HEIGHT=1080 \
+JEPA_CAMERA_FPS=30 \
 bash tools/run_rdk_x5.sh
 ```
 
@@ -370,7 +370,7 @@ OpenExplorer 专有镜像/离线包的首选方式：
 | X5 看不到摄像头 | `v4l2-ctl --list-devices` | 检查 USB 供电、线缆、`uvcvideo`、重新插拔 |
 | `/camera/analyze` 返回 503 | `.bin`、`/dev/bpu*`、`libdnn.so` | 按响应错误检查模型路径、BPU runtime 与模型 ABI |
 | `/camera/analyze` 返回 409 | 摄像头实际规格 | 恢复 MJPG `1920x1080@30` 或同步修改并重新编译模型契约 |
-| BPU 输出维度错误 | `.bin` manifest | 重新检查输出 tensor、F32/量化类型和 `JPEA_IMAGE_CONCEPT_DIM` |
+| BPU 输出维度错误 | `.bin` manifest | 重新检查输出 tensor、F32/量化类型和 `JEPA_IMAGE_CONCEPT_DIM` |
 | X5 不能调用 LLM | 主机 `/health`、路由、绑定地址、防火墙 | 主机监听 `0.0.0.0`，只对 X5 放行 `8082` |
 | 主机内存不足或慢 | `--ctx-size`、`--parallel`、线程 | 先降到 `4096/1`，再测量调优 |
 | 下载慢或失败 | 镜像地址、DNS、证书 | apt/PyPI 采用国内镜像；Horizon 包使用官方离线包和 SHA-256 |
@@ -382,8 +382,8 @@ OpenExplorer 专有镜像/离线包的首选方式：
 - [ ] X5 可访问主机 `/health`。
 - [ ] `/dev/video0` 可采集 MJPG `1920x1080@30`。
 - [ ] `hobot-dnn`、`libdnn.so`、BPU 节点存在。
-- [ ] JPEA `.bin` 有完整 manifest、哈希和与运行时匹配的 ABI。
-- [ ] `.bin` 输入/输出与 Phoenix JPEA 适配器一致。
+- [ ] JEPA `.bin` 有完整 manifest、哈希和与运行时匹配的 ABI。
+- [ ] `.bin` 输入/输出与 Phoenix JEPA 适配器一致。
 - [ ] `POST /camera/analyze` 返回真实 `horizon-hbdnn` embedding。
 - [ ] 世界模型记录 embedding 来源、模型版本和感知契约版本。
 - [ ] 主机未运行 Phoenix、摄像头服务、BPU 服务或额外 LLM 生命周期进程。
@@ -391,9 +391,9 @@ OpenExplorer 专有镜像/离线包的首选方式：
 
 ## 12. 下一阶段优先级
 
-1. 建立独立 x86_64 OpenExplorer 转换环境，产出第一版真实 JPEA `.bin`。
+1. 建立独立 x86_64 OpenExplorer 转换环境，产出第一版真实 JEPA `.bin`。
 2. 以 X5 摄像头帧建立校准集和 golden-frame 回归集。
 3. 部署 `.bin` 并完成 `/camera/analyze` 端到端验收。
 4. 引入单采集线程 + 环形缓冲区 + 主动采样，支持稳定连续感知。
 5. 增加模型 manifest 校验、BPU 延迟指标和 embedding 漂移监控。
-6. 有真实语音模型后，再以相同 fail-closed 原则接入语音 JPEA。
+6. 有真实语音模型后，再以相同 fail-closed 原则接入语音 JEPA。

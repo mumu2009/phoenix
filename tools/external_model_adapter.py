@@ -19,8 +19,8 @@ WORLD_CONTEXT_MARKERS = (
     "gnn_stage2|",
     "capture path:",
     "micro-mipi",
-    "v-jpea2",
-    "vjpea2",
+    "v-jepa2",
+    "vjepa2",
 )
 
 DEFAULT_CTX_SIZE = 10_000_000

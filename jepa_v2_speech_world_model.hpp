@@ -1,4 +1,4 @@
-/* jpea_v2_speech_world_model.hpp - Semantic interface for 1D speech world models
+/* jepa_v2_speech_world_model.hpp - Semantic interface for 1D speech world models
    Copyright (C) 2026 079 Project
 
    This file is part of 079 Project.
@@ -20,14 +20,14 @@ namespace phoenix {
 namespace io {
 
 /**
- * @brief Description of a 1D JPEA-v2 speech world-model variant.
+ * @brief Description of a 1D JEPA-v2 speech world-model variant.
  *
  * Variants differ by target sample rate and patch stride.  They correspond to
  * the standard wav2vec 2.0 / HuBERT style 25ms windows with 10ms stride.
  */
-struct JpeaV2SpeechWorldModelConfig {
-  std::string id;          /**< internal variant id, e.g. "jpea_v2_speech_16k" */
-  std::string arch;        /**< architecture string, e.g. "jpea_1d" */
+struct JepaV2SpeechWorldModelConfig {
+  std::string id;          /**< internal variant id, e.g. "jepa_v2_speech_16k" */
+  std::string arch;        /**< architecture string, e.g. "jepa_1d" */
   std::string repo;        /**< HuggingFace repo or checkpoint URL */
   int sampleRate = 16000;  /**< intended sample rate in Hz */
   int windowSamples = 400; /**< analysis window length in samples */
@@ -37,7 +37,7 @@ struct JpeaV2SpeechWorldModelConfig {
 };
 
 /**
- * @brief Semantic interface for a 1D JPEA speech world model.
+ * @brief Semantic interface for a 1D JEPA speech world model.
  *
  * A 1D JEPA splits an audio waveform into temporal patches (context/target
  * windows), encodes them into a joint embedding space, and predicts masked
@@ -45,9 +45,9 @@ struct JpeaV2SpeechWorldModelConfig {
  * contrastive pretraining step so the audio encoder can align with a paired
  * text concept vector.
  */
-class JpeaV2SpeechWorldModel {
+class JepaV2SpeechWorldModel {
  public:
-  virtual ~JpeaV2SpeechWorldModel() = default;
+  virtual ~JepaV2SpeechWorldModel() = default;
 
   /**
    * @brief Encode an audio waveform into a semantic concept vector.
@@ -132,41 +132,42 @@ class JpeaV2SpeechWorldModel {
   virtual nlohmann::json status() const = 0;
 
   /** @brief Configuration of this model instance. */
-  virtual const JpeaV2SpeechWorldModelConfig &config() const = 0;
+  virtual const JepaV2SpeechWorldModelConfig &config() const = 0;
 };
 
 /**
- * @brief List the 1D JPEA speech variants by sample rate.
+ * @brief List the 1D JEPA speech variants by sample rate.
  */
-inline std::vector<JpeaV2SpeechWorldModelConfig> jpeaV2SpeechOfficialVariants() {
+inline std::vector<JepaV2SpeechWorldModelConfig> jepaV2SpeechOfficialVariants() {
   return {
-      {"jpea_v2_speech_16k", "jpea_1d", "runtime_store/models/ijepa/speech_16k", 16000, 400, 160, 0, "LibriSpeech"},
-      {"jpea_v2_speech_22k", "jpea_1d", "facebook/jpea-v2-speech-22k", 22050, 512, 256, 0, "LibriLight"},
-      {"jpea_v2_speech_44k", "jpea_1d", "facebook/jpea-v2-speech-44k", 44100, 1024, 512, 0, "VoxPopuli"},
-      {"jpea_v2_speech_48k", "jpea_1d", "facebook/jpea-v2-speech-48k", 48000, 1024, 512, 0, "VoxPopuli"}};
+      {"speech_encoder",     "jepa_1d", "runtime_store/models/additive_jepa/speech_encoder", 16000, 400, 160, 0, "LibriSpeech"},
+      {"jepa_v2_speech_16k", "jepa_1d", "runtime_store/models/ijepa/speech_16k", 16000, 400, 160, 0, "LibriSpeech"},
+      {"jepa_v2_speech_22k", "jepa_1d", "facebook/jepa-v2-speech-22k", 22050, 512, 256, 0, "LibriLight"},
+      {"jepa_v2_speech_44k", "jepa_1d", "facebook/jepa-v2-speech-44k", 44100, 1024, 512, 0, "VoxPopuli"},
+      {"jepa_v2_speech_48k", "jepa_1d", "facebook/jepa-v2-speech-48k", 48000, 1024, 512, 0, "VoxPopuli"}};
 }
 
 /**
  * @brief Factory: create a 1D speech world model instance.
  *
- * @param variantId   one of the ids returned by jpeaV2SpeechOfficialVariants().
+ * @param variantId   one of the ids returned by jepaV2SpeechOfficialVariants().
  * @param targetDim   desired output concept dimension.
  * @param backend     retained for API compatibility.
  * @return a concrete implementation. Local execution uses the compiled RDK X5
- *         speech JPEA BPU model; fallback is used when BPU runtime is unavailable.
+ *         speech JEPA BPU model; fallback is used when BPU runtime is unavailable.
  */
-std::unique_ptr<JpeaV2SpeechWorldModel> createJpeaV2SpeechWorldModel(
-    const std::string &variantId = "jpea_v2_speech_16k",
+std::unique_ptr<JepaV2SpeechWorldModel> createJepaV2SpeechWorldModel(
+    const std::string &variantId = "jepa_v2_speech_16k",
     int targetDim = 0,
     const std::string &backend = "auto");
 
 /**
  * @brief Find an official variant config by id.
  */
-inline const JpeaV2SpeechWorldModelConfig *findJpeaV2SpeechVariant(
+inline const JepaV2SpeechWorldModelConfig *findJepaV2SpeechVariant(
     const std::string &id) {
-  static const std::vector<JpeaV2SpeechWorldModelConfig> kVariants =
-      jpeaV2SpeechOfficialVariants();
+  static const std::vector<JepaV2SpeechWorldModelConfig> kVariants =
+      jepaV2SpeechOfficialVariants();
   for (const auto &v : kVariants) {
     if (v.id == id) return &v;
   }

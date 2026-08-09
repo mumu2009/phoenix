@@ -66,6 +66,7 @@
 #include "../runtime_tuned_config.hpp"
 #include "../version.hpp"
 
+#include "../world_model.hpp"
 #include "../DATABASE_079.hpp"
 #include "../addon.hpp"
 #include "../autonomy_stack.hpp"
@@ -667,6 +668,12 @@ static std::string dotPathForEnv(const std::string &env) {
   if (env == "AI_BITNET_MODEL") return "main.inference.bitnetModel";
   if (env == "AI_BITNET_BASE_URL") return "main.inference.bitnetBaseUrl";
   if (env == "AI_BITNET_TIMEOUT_MS") return "main.inference.bitnetTimeoutMs";
+  if (env == "AI_TINYLLAMA_MODEL") return "main.inference.tinyllamaModel";
+  if (env == "AI_TINYLLAMA_BASE_URL") return "main.inference.tinyllamaBaseUrl";
+  if (env == "AI_TINYLLAMA_TIMEOUT_MS") return "main.inference.tinyllamaTimeoutMs";
+  if (env == "AI_TINYLLAMA_ENABLED") return "main.inference.tinyllamaEnabled";
+  if (env == "AI_CONCEPT_MATRIX_ENABLED") return "main.inference.conceptMatrixEnabled";
+  if (env == "AI_CONCEPT_MATRIX_CLEAR_PER_REQUEST") return "main.inference.conceptMatrixClearPerRequest";
   if (env == "AI_GGUF_MODELS_DIR") return "main.inference.ggufModelsDir";
   if (env == "AI_EXTERNAL_STYLE_SIM" || env == "AI_EXTERNAL_BACKEND_STYLE_SIM") return "main.inference.externalBackendStyleSim";
   if (env == "AI_TRANSFORMER_BOOTSTRAP") return "main.inference.transformerBootstrap";

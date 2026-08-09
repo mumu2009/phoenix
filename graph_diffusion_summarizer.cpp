@@ -57,13 +57,18 @@ DiffusionSummary GraphDiffusionSummarizer::summarize(
     std::fill(seedDist.begin(), seedDist.end(), 1.0 / static_cast<double>(n));
   }
 
-  // Pre-normalize adjacency weights per source node.
+  // Pre-normalize adjacency weights per source node. The direction-weighted
+  // magnitude is computed once per edge and reused for both the wsum
+  // accumulation and the final normalized weight (previously recomputed).
   std::vector<std::vector<std::pair<size_t, double>>> normalized(n);
   for (size_t i = 0; i < n; ++i) {
     if (i >= adjacency.size())
       continue;
+    std::vector<std::pair<size_t, double>> weighted;
+    weighted.reserve(adjacency[i].size());
     double wsum = 0.0;
     for (const auto &edge : adjacency[i]) {
+      size_t to = std::get<0>(edge);
       double w = std::get<1>(edge);
       int direction = std::get<2>(edge);
       if (direction == 1)
@@ -71,22 +76,17 @@ DiffusionSummary GraphDiffusionSummarizer::summarize(
       else if (direction == 2)
         w *= 1.15;  // outbound
       w = std::abs(w);
-      if (w > 0.0)
+      if (w > 0.0) {
         wsum += w;
+        weighted.emplace_back(to, w);
+      }
     }
     if (wsum <= 0.0)
       continue;
-    for (const auto &edge : adjacency[i]) {
-      size_t to = std::get<0>(edge);
-      double w = std::get<1>(edge);
-      int direction = std::get<2>(edge);
-      if (direction == 1)
-        w *= 0.85;
-      else if (direction == 2)
-        w *= 1.15;
-      w = std::abs(w) / wsum;
-      if (w > 0.0 && to < n)
-        normalized[i].push_back({to, w});
+    normalized[i].reserve(weighted.size());
+    for (const auto &wp : weighted) {
+      if (wp.first < n)
+        normalized[i].push_back({wp.first, wp.second / wsum});
     }
   }
 

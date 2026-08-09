@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile a JPEA-v2 speech or vision autoencoder ONNX pair to Horizon BPU .bin.
+# Compile a JEPA-v2 speech or vision autoencoder ONNX pair to Horizon BPU .bin.
 #
 # Designed to run inside the OpenExplorer Docker container with the project
 # mounted at /workspace, but can also be run from the Kali host if hb_mapper

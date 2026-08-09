@@ -66,22 +66,22 @@ X5 返回 HTTP 200 后，编辑 `runtime_store/start_079_launcher.json`：
 
 ## X5 全量部署边界
 
-- 主机只能运行 `llama-server`。不得在主机启动 Phoenix、视频解码、JPEA、hbDNN、GNN、Redis、SQLite 或边缘外设进程。
-- X5 运行 `phoenix_main`、HTTP 前端、视频接收/解码、JPEA、hbDNN/BPU、GNN-GA、世界模型、数据库及所有边缘外设逻辑。
+- 主机只能运行 `llama-server`。不得在主机启动 Phoenix、视频解码、JEPA、hbDNN、GNN、Redis、SQLite 或边缘外设进程。
+- X5 运行 `phoenix_main`、HTTP 前端、视频接收/解码、JEPA、hbDNN/BPU、GNN-GA、世界模型、数据库及所有边缘外设逻辑。
 - X5 仅以 HTTP 调用主机的 `llama-server`；`AI_LLAMACPP_BASE_URL` 必须设置为主机 LAN URL。
 - 使用 `runtime_store/rdk_x5_launcher.json` 作为 X5 配置模板，并以 `bash tools/build_rdk_x5.sh` 和 `HOST_LLAMA_SERVER_URL=http://<HOST_LAN_ADDRESS>:8082 bash tools/run_rdk_x5.sh` 构建、启动。
 
-## X5 摄像头到 JPEA
+## X5 摄像头到 JEPA
 
 - X5 已识别 UVC 摄像头：`/dev/video0` 是视频节点，`/dev/video1` 是 UVC 元数据节点。固定使用 `/dev/video0` 的 `MJPG 1920x1080@30`。
 - 调用 `POST /camera/analyze`（空 JSON 请求体）直接读取 X5 摄像头。`videoBase64` 与 `videoPath` 被明确拒绝，主机不再传输视频。
 - 服务打开 V4L2 设备后请求 MJPG、1920x1080、30 FPS，丢弃最多 11 个预热帧，再读取一帧。帧必须是连续 `CV_8UC3` BGR；宽、高或像素类型偏离锁定规格时返回 HTTP 409。
-- JPEA 直接接收摄像头 BGR 字节，不经 JPEG 或视频容器重编码；随后缩放为 JPEA 模型分辨率并按 `JPEA_IMAGE_INPUT_COLOR` 生成 BGR 或 RGB BPU 输入张量。
-- 生产运行仅接受 `JPEA_IMAGE_HORIZON_MODEL` 指向的已编译 Horizon `.bin`。没有该文件、没有 `/dev/bpu` 或 hbDNN、输入张量大小不匹配、输出不是目标维度的 F32 embedding 时，接口返回失败；不会产生伪 embedding。
-- 工程当前只有 I-JEPA `.safetensors`，没有可部署的 JPEA `.bin`。OpenExplorer 的 `hb_mapper` 是 **x86_64 开发机或其 Docker 容器** 使用的转换工具，不应安装在 aarch64 X5。必须在该开发环境完成 checkpoint -> ONNX -> 定点量化 -> `.bin` 编译，再将 `.bin` 复制到 X5。
+- JEPA 直接接收摄像头 BGR 字节，不经 JPEG 或视频容器重编码；随后缩放为 JEPA 模型分辨率并按 `JEPA_IMAGE_INPUT_COLOR` 生成 BGR 或 RGB BPU 输入张量。
+- 生产运行仅接受 `JEPA_IMAGE_HORIZON_MODEL` 指向的已编译 Horizon `.bin`。没有该文件、没有 `/dev/bpu` 或 hbDNN、输入张量大小不匹配、输出不是目标维度的 F32 embedding 时，接口返回失败；不会产生伪 embedding。
+- 工程当前只有 I-JEPA `.safetensors`，没有可部署的 JEPA `.bin`。OpenExplorer 的 `hb_mapper` 是 **x86_64 开发机或其 Docker 容器** 使用的转换工具，不应安装在 aarch64 X5。必须在该开发环境完成 checkpoint -> ONNX -> 定点量化 -> `.bin` 编译，再将 `.bin` 复制到 X5。
 
 ## 已移除的降级行为
 
-- 图像 JPEA 不再返回确定性统计特征；只调用 hbDNN。
-- 语音 JPEA 不再返回确定性统计特征；在没有独立的真实语音 `.bin` 前保持不可用。
-- 模型缺失或 BPU 不可用时，世界模型请求必须失败并暴露错误，不能将输出标为 JPEA 结果。
+- 图像 JEPA 不再返回确定性统计特征；只调用 hbDNN。
+- 语音 JEPA 不再返回确定性统计特征；在没有独立的真实语音 `.bin` 前保持不可用。
+- 模型缺失或 BPU 不可用时，世界模型请求必须失败并暴露错误，不能将输出标为 JEPA 结果。

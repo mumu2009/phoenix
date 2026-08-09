@@ -156,6 +156,7 @@ using ioctl_arg_t = unsigned long;
 #include "main_hub_parts/107_class_snapshotmanager.inc"
 #include "main_hub_parts/108_section_before_gatewaycontextservice.inc"
 #include "main_hub_parts/109_class_gatewaycontextservice.inc"
+#include "concept_matrix.hpp"
 #include "main_hub_parts/110_section_before_gatewayserver.inc"
 #include "main_hub_parts/111_class_gatewayserver.inc"
 #include "main_hub_parts/112_section_before_contexthint.inc"

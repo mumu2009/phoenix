@@ -63,7 +63,7 @@
 #include "physics_world_runtime.hpp"
 #include "world_model.hpp"
 #include "edge_platform.hpp"
-#include "jpea_v2_image_world_model.hpp"
+#include "jepa_v2_image_world_model.hpp"
 
 #ifdef HAVE_CURL
 #include <curl/curl.h>
@@ -4289,6 +4289,10 @@ void setupFrontendServer()
     const int port = resolveConfig<int>("frontend_server.port", 5081, "FRONTEND_PORT");
     const std::string robotsDir = resolveConfig<std::string>("frontend_server.robotsDir", std::string("./robots"), "ROBOTS_DIR");
 
+    // Long prompts (C-Eval/CMMLU/MMLU) can be several MB. Drogon's default
+    // 1MB body limit drops them before proxyApiCall sees them, so raise it.
+    drogon::app().setClientMaxBodySize(100 * 1024 * 1024);
+
     static auto boolEnv = [](const std::string &value, bool fallback)
     {
         if (value.empty())
@@ -4349,11 +4353,11 @@ void setupFrontendServer()
     if (!worldModelLegacyDir.empty())
         fs::create_directories(worldModelLegacyDir);
     static ContextService contextService(fs::path(robotsDir), useTorch);
-    static std::unique_ptr<phoenix::io::JpeaV2ImageWorldModel> imageWorldModel =
-        phoenix::io::createJpeaV2ImageWorldModel(
-            resolveConfig<std::string>("jpea.image.variant", std::string("ijepa_vith14_1k"), "JPEA_IMAGE_VARIANT"),
-            std::max(1, resolveConfig<int>("jpea.image.conceptDim", 128, "JPEA_IMAGE_CONCEPT_DIM")),
-            resolveConfig<std::string>("jpea.image.backend", std::string("auto"), "JPEA_IMAGE_BACKEND"));
+    static std::unique_ptr<phoenix::io::JepaV2ImageWorldModel> imageWorldModel =
+        phoenix::io::createJepaV2ImageWorldModel(
+            resolveConfig<std::string>("jepa.image.variant", std::string("ijepa_vith14_1k"), "JEPA_IMAGE_VARIANT"),
+            std::max(1, resolveConfig<int>("jepa.image.conceptDim", 128, "JEPA_IMAGE_CONCEPT_DIM")),
+            resolveConfig<std::string>("jepa.image.backend", std::string("auto"), "JEPA_IMAGE_BACKEND"));
     static SpeakIO speakIO;
     static V51RuntimeEngine v51Runtime;
     static std::shared_ptr<Database079> worldModelDb = [worldModelDbPath, worldModelLegacyDir, worldModelRedisUrl, worldModelRedisDb, worldModelRedisPrefix]()
@@ -4758,6 +4762,14 @@ void setupFrontendServer()
         if (!req->query().empty())
             path += "?" + req->query();
         outgoing->setPath(path);
+
+        // Forward caller credentials; for local/dev callers without an explicit
+        // Authorization header, inject the accepted local token so the gateway
+        // does not reject the proxied request with 401.
+        std::string auth = req->getHeader("authorization");
+        if (auth.empty())
+            auth = "Bearer local-dev";
+        outgoing->addHeader("Authorization", auth);
 
         std::string requestContentType = req->getHeader("content-type");
 
@@ -5911,21 +5923,21 @@ void setupFrontendServer()
                                                                                {"metadata", nlohmann::json{{"source", "context/ingest"},
                                                                                                            {"field", fieldName},
                                                                                                            {"mode", mode},
-                                                                                                           {"encoding", std::string("v-jpea2")}}}});
+                                                                                                           {"encoding", std::string("v-jepa2")}}}});
                 worldContexts.append(nlohmannToJsonCpp(contextIngest));
             };
             ingestOptionalContext("videoContext", "video");
             ingestOptionalContext("imageContext", "vision");
             ingestOptionalContext("speechContext", "speech");
 
-            if (json->isMember("videoContextVjpea2") && (*json)["videoContextVjpea2"].isObject())
+            if (json->isMember("videoContextVjepa2") && (*json)["videoContextVjepa2"].isObject())
             {
-                auto vjpea2 = jsonCppToNlohmann((*json)["videoContextVjpea2"]);
+                auto vjepa2 = jsonCppToNlohmann((*json)["videoContextVjepa2"]);
                 nlohmann::json metadata{{"source", "context/ingest"},
-                                        {"field", "videoContextVjpea2"},
+                                        {"field", "videoContextVjepa2"},
                                         {"mode", mode},
-                                        {"encoding", std::string("v-jpea2")},
-                                        {"vjpea2", vjpea2}};
+                                        {"encoding", std::string("v-jepa2")},
+                                        {"vjepa2", vjepa2}};
                 auto appendStringMetadata = [&](const char *fieldName)
                 {
                     if (json->isMember(fieldName) && (*json)[fieldName].isString())
@@ -5948,12 +5960,12 @@ void setupFrontendServer()
                     metadata["videoTimeline"] = jsonCppToNlohmann((*json)["videoTimeline"]);
                 }
                 std::string summary;
-                if (vjpea2.contains("focus") && vjpea2["focus"].is_string())
-                    summary = vjpea2["focus"].get<std::string>();
-                else if (vjpea2.contains("medium") && vjpea2["medium"].is_string())
-                    summary = vjpea2["medium"].get<std::string>();
-                else if (vjpea2.contains("coarse") && vjpea2["coarse"].is_string())
-                    summary = vjpea2["coarse"].get<std::string>();
+                if (vjepa2.contains("focus") && vjepa2["focus"].is_string())
+                    summary = vjepa2["focus"].get<std::string>();
+                else if (vjepa2.contains("medium") && vjepa2["medium"].is_string())
+                    summary = vjepa2["medium"].get<std::string>();
+                else if (vjepa2.contains("coarse") && vjepa2["coarse"].is_string())
+                    summary = vjepa2["coarse"].get<std::string>();
 
                 auto contextIngest = worldModel.ingestEvidence(nlohmann::json{{"sessionId", sessionId},
                                                                                {"modality", "video"},
@@ -6891,7 +6903,7 @@ void setupFrontendServer()
             }
             if (!imageWorldModel) {
                 resp->setStatusCode(drogon::k500InternalServerError);
-                resp->setBody("JPEA image world model is unavailable");
+                resp->setBody("JEPA image world model is unavailable");
                 cb(resp);
                 return;
             }
@@ -6921,7 +6933,7 @@ void setupFrontendServer()
             std::vector<uchar> encodedImage;
             if (!cv::imencode(".jpg", img, encodedImage)) {
                 resp->setStatusCode(drogon::k500InternalServerError);
-                resp->setBody("Failed to encode image for JPEA analysis");
+                resp->setBody("Failed to encode image for JEPA analysis");
                 cb(resp);
                 return;
             }
@@ -6946,7 +6958,7 @@ void setupFrontendServer()
             result["embeddingDim"] = static_cast<int>(embedding.size());
             result["graphContext"] = "vision-jepa|model:" + imageWorldModel->config().id + "|embeddingDim:" + std::to_string(embedding.size());
             if (embedding.empty()) {
-                result["error"] = "JPEA image world model returned an empty concept vector";
+                result["error"] = "JEPA image world model returned an empty concept vector";
             }
             std::string sessionId;
             if (json->isMember("sessionId")) {
@@ -6994,7 +7006,7 @@ void setupFrontendServer()
             }
             if (!imageWorldModel || !imageWorldModel->status().value("ready", false)) {
                 resp->setStatusCode(drogon::k503ServiceUnavailable);
-                resp->setBody("compiled RDK X5 JPEA model is unavailable");
+                resp->setBody("compiled RDK X5 JEPA model is unavailable");
                 cb(resp);
                 return;
             }
@@ -7006,10 +7018,10 @@ void setupFrontendServer()
                 return;
             }
 
-            const std::string cameraDevice = resolveConfig<std::string>("jpea.camera.device", std::string("/dev/video0"), "JPEA_CAMERA_DEVICE");
-            const int configuredWidth = std::max(1, resolveConfig<int>("jpea.camera.width", 1920, "JPEA_CAMERA_WIDTH"));
-            const int configuredHeight = std::max(1, resolveConfig<int>("jpea.camera.height", 1080, "JPEA_CAMERA_HEIGHT"));
-            const int configuredFps = std::max(1, resolveConfig<int>("jpea.camera.fps", 30, "JPEA_CAMERA_FPS"));
+            const std::string cameraDevice = resolveConfig<std::string>("jepa.camera.device", std::string("/dev/video0"), "JEPA_CAMERA_DEVICE");
+            const int configuredWidth = std::max(1, resolveConfig<int>("jepa.camera.width", 1920, "JEPA_CAMERA_WIDTH"));
+            const int configuredHeight = std::max(1, resolveConfig<int>("jepa.camera.height", 1080, "JEPA_CAMERA_HEIGHT"));
+            const int configuredFps = std::max(1, resolveConfig<int>("jepa.camera.fps", 30, "JEPA_CAMERA_FPS"));
             cv::VideoCapture capture(cameraDevice, cv::CAP_V4L2);
             if (capture.isOpened()) {
                 capture.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
@@ -7042,7 +7054,7 @@ void setupFrontendServer()
                 }
                 if (frame.cols != lockedWidth || frame.rows != lockedHeight || frame.type() != lockedType) {
                     resp->setStatusCode(drogon::k409Conflict);
-                    resp->setBody("video frame specification differs from the locked JPEA deployment specification");
+                    resp->setBody("video frame specification differs from the locked JEPA deployment specification");
                     cb(resp);
                     return;
                 }
@@ -7057,7 +7069,7 @@ void setupFrontendServer()
             const auto embedding = imageWorldModel->encode(std::vector<uint8_t>(frame.datastart, frame.dataend), frame.cols, frame.rows, "application/x-bgr");
             if (embedding.empty()) {
                 resp->setStatusCode(drogon::k503ServiceUnavailable);
-                resp->setBody(imageWorldModel->status().value("error", std::string("RDK X5 JPEA inference failed")));
+                resp->setBody(imageWorldModel->status().value("error", std::string("RDK X5 JEPA inference failed")));
                 cb(resp);
                 return;
             }
@@ -7073,8 +7085,8 @@ void setupFrontendServer()
             result["embeddingDim"] = static_cast<int>(embedding.size());
             const std::string sessionId = json->isMember("sessionId") ? (*json)["sessionId"].asString() : std::string();
             if (!sessionId.empty()) {
-                nlohmann::json metadata{{"source", "video/analyze"}, {"frameWidth", frame.cols}, {"frameHeight", frame.rows}, {"embedding", embedding}, {"jpeaBackend", "horizon-hbdnn"}};
-                result["worldModel"] = nlohmannToJsonCpp(worldModel.ingestEvidence(nlohmann::json{{"sessionId", sessionId}, {"modality", "video"}, {"graphSummary", "video-jpea|model:" + imageWorldModel->config().id + "|embeddingDim:" + std::to_string(embedding.size())}, {"rawLocation", cameraDevice}, {"metadata", metadata}}));
+                nlohmann::json metadata{{"source", "video/analyze"}, {"frameWidth", frame.cols}, {"frameHeight", frame.rows}, {"embedding", embedding}, {"jepaBackend", "horizon-hbdnn"}};
+                result["worldModel"] = nlohmannToJsonCpp(worldModel.ingestEvidence(nlohmann::json{{"sessionId", sessionId}, {"modality", "video"}, {"graphSummary", "video-jepa|model:" + imageWorldModel->config().id + "|embeddingDim:" + std::to_string(embedding.size())}, {"rawLocation", cameraDevice}, {"metadata", metadata}}));
             }
             resp->setStatusCode(drogon::k200OK);
             resp->setContentTypeString("application/json");

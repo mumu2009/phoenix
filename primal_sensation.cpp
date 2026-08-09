@@ -87,12 +87,9 @@ void PrimalSensationEngine::decay(float halfLifeSec, float dtSec) {
         s.decay(halfLifeSec, dtSec);
     }
     constexpr float kIntensityEpsilon = 1e-3f;
-    sensations_.erase(std::remove_if(sensations_.begin(), sensations_.end(),
-                                       [](const PrimalSensation &s) {
-                                           return s.intensity <= 0.0f;
-                                       }),
-                        sensations_.end());
-    /* Prune sensations that have decayed to a negligible intensity. */
+    /* Prune sensations that are non-positive or have decayed to a negligible
+       intensity. kIntensityEpsilon > 0, so this single pass also covers the
+       "intensity <= 0" case that used to be a separate erase-remove pass. */
     sensations_.erase(std::remove_if(sensations_.begin(), sensations_.end(),
                                        [kIntensityEpsilon](const PrimalSensation &s) {
                                            return s.intensity < kIntensityEpsilon;

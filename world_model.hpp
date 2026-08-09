@@ -1360,8 +1360,8 @@ inline bool isLlamacppWorldPromptLine(const std::string &line) {
            lowered.rfind("gnn_stage2|", 0) == 0 ||
            lowered.find("capture path:") != std::string::npos ||
            lowered.find("micro-mipi") != std::string::npos ||
-           lowered.find("v-jpea2") != std::string::npos ||
-           lowered.find("vjpea2") != std::string::npos;
+           lowered.find("v-jepa2") != std::string::npos ||
+           lowered.find("vjepa2") != std::string::npos;
 }
 
 inline int rankLlamacppWorldPromptLine(const std::string &line) {
@@ -3112,8 +3112,8 @@ inline std::string extractVideoCapturePath(const json &evidence) {
     if (capturePath.empty()) {
         capturePath = readString(metadata, "transport");
     }
-    if (capturePath.empty() && metadata.contains("vjpea2") && metadata["vjpea2"].is_object()) {
-        capturePath = readString(metadata["vjpea2"], "cameraInterface");
+    if (capturePath.empty() && metadata.contains("vjepa2") && metadata["vjepa2"].is_object()) {
+        capturePath = readString(metadata["vjepa2"], "cameraInterface");
     }
     return capturePath;
 }
@@ -3148,7 +3148,7 @@ inline std::size_t countKeywordOverlap(const std::string &lhs, const std::string
     return overlap;
 }
 
-inline double scoreVjpea2Candidate(const std::string &source,
+inline double scoreVjepa2Candidate(const std::string &source,
                                    const std::string &target,
                                    const std::string &languageAnchor,
                                    const std::string &capturePath) {
@@ -3199,7 +3199,7 @@ inline double scoreVjpea2Candidate(const std::string &source,
     return priority;
 }
 
-inline std::vector<std::pair<std::string, std::string>> buildVjpea2CompressionViews(const json &evidence,
+inline std::vector<std::pair<std::string, std::string>> buildVjepa2CompressionViews(const json &evidence,
                                                                                      std::size_t maxChars,
                                                                                      std::size_t maxLevels) {
     std::vector<std::pair<std::string, std::string>> out;
@@ -3242,8 +3242,8 @@ inline std::vector<std::pair<std::string, std::string>> buildVjpea2CompressionVi
             }
         };
 
-        if (metadata.contains("vjpea2")) {
-            appendFromObject(metadata["vjpea2"]);
+        if (metadata.contains("vjepa2")) {
+            appendFromObject(metadata["vjepa2"]);
         }
         if (metadata.contains("videoCompression")) {
             appendFromObject(metadata["videoCompression"]);
@@ -3276,7 +3276,7 @@ inline std::vector<std::pair<std::string, std::string>> buildVjpea2CompressionVi
     return out;
 }
 
-inline std::vector<std::pair<std::string, std::string>> buildVjpea2TemporalWindows(const json &evidence,
+inline std::vector<std::pair<std::string, std::string>> buildVjepa2TemporalWindows(const json &evidence,
                                                                                      std::size_t maxChars,
                                                                                      std::size_t maxWindows) {
     std::vector<std::pair<std::string, std::string>> out;
@@ -3315,10 +3315,10 @@ inline std::vector<std::pair<std::string, std::string>> buildVjpea2TemporalWindo
 
     if (evidence.contains("metadata") && evidence["metadata"].is_object()) {
         const auto &metadata = evidence["metadata"];
-        if (metadata.contains("vjpea2") && metadata["vjpea2"].is_object()) {
-            const auto &vjpea2 = metadata["vjpea2"];
-            if (vjpea2.contains("timeline")) {
-                appendFromTimelineObject(vjpea2["timeline"]);
+        if (metadata.contains("vjepa2") && metadata["vjepa2"].is_object()) {
+            const auto &vjepa2 = metadata["vjepa2"];
+            if (vjepa2.contains("timeline")) {
+                appendFromTimelineObject(vjepa2["timeline"]);
             }
         }
         if (metadata.contains("videoTimeline") && metadata["videoTimeline"].is_array()) {
@@ -3341,7 +3341,7 @@ inline std::vector<std::pair<std::string, std::string>> buildVjpea2TemporalWindo
     }
 
     if (out.empty()) {
-        const auto compressionViews = buildVjpea2CompressionViews(evidence, maxChars, std::max<std::size_t>(1, maxWindows));
+        const auto compressionViews = buildVjepa2CompressionViews(evidence, maxChars, std::max<std::size_t>(1, maxWindows));
         for (std::size_t index = 0; index < compressionViews.size() && out.size() < maxWindows; ++index) {
             const std::string name = index == 0 ? "early" : (index == 1 ? "mid" : "late");
             appendWindow(name, compressionViews[index].second);
@@ -3417,7 +3417,7 @@ inline std::vector<GroundedLearningSample> buildGroundedLearningSamples(const js
                                  const std::string &source,
                                  const std::string &target,
                                  const std::string &capturePath) {
-        const double priority = scoreVjpea2Candidate(source, target, recentTextSummary, capturePath);
+        const double priority = scoreVjepa2Candidate(source, target, recentTextSummary, capturePath);
         if (priority > selection.priority) {
             selection.priority = priority;
             selection.target = target;
@@ -3462,31 +3462,31 @@ inline std::vector<GroundedLearningSample> buildGroundedLearningSamples(const js
                 const std::string capturePath = extractVideoCapturePath(evidence);
                 const std::string captureHint = describeVideoCapturePath(capturePath);
                 if (options.includeVideoCompressionSamples) {
-                    const auto views = buildVjpea2CompressionViews(evidence,
+                    const auto views = buildVjepa2CompressionViews(evidence,
                                                                    std::min<std::size_t>(options.maxTargetChars, 160),
                                                                    std::max<std::size_t>(1, options.maxVideoCompressionLevels));
                     for (const auto &view : views) {
                         const std::string source = "video_" + view.first;
-                        queueCandidate(scoreVjpea2Candidate(source, view.second, recentTextSummary, capturePath),
-                                       "Ground the video stream" + captureHint + " at v-jpea2 " + view.first + " level into explicit knowledge.",
+                        queueCandidate(scoreVjepa2Candidate(source, view.second, recentTextSummary, capturePath),
+                                       "Ground the video stream" + captureHint + " at v-jepa2 " + view.first + " level into explicit knowledge.",
                                        view.second,
                                        source);
                         considerSelection(bestVideoSelection, source, view.second, capturePath);
                     }
                 } else {
-                    queueCandidate(scoreVjpea2Candidate("video", target, recentTextSummary, capturePath),
+                    queueCandidate(scoreVjepa2Candidate("video", target, recentTextSummary, capturePath),
                                    "Ground the current video stream" + captureHint + " into explicit knowledge.",
                                    target,
                                    "video");
                     considerSelection(bestVideoSelection, "video", target, capturePath);
                 }
                 if (options.includeVideoTemporalSamples) {
-                    const auto windows = buildVjpea2TemporalWindows(evidence,
+                    const auto windows = buildVjepa2TemporalWindows(evidence,
                                                                     std::min<std::size_t>(options.maxTargetChars, 160),
                                                                     std::max<std::size_t>(1, options.maxVideoTemporalWindows));
                     for (const auto &window : windows) {
                         const std::string source = "video_timeline_" + window.first;
-                        queueCandidate(scoreVjpea2Candidate(source, window.second, recentTextSummary, capturePath),
+                        queueCandidate(scoreVjepa2Candidate(source, window.second, recentTextSummary, capturePath),
                                        "Ground the video stream" + captureHint + " temporal window (" + window.first + ") into explicit knowledge.",
                                        window.second,
                                        source);
@@ -3524,8 +3524,8 @@ inline std::vector<GroundedLearningSample> buildGroundedLearningSamples(const js
             fusionParts.push_back("episode anchor: " + goalAnchor);
         }
         const std::string fusionTarget = truncateText(joinStrings(fusionParts, " | "), options.maxTargetChars);
-        queueCandidate(scoreVjpea2Candidate("fusion_video_text", fusionTarget, recentTextSummary, bestVideoSelection.capturePath),
-                       "Align the highest-salience v-jpea2 video abstraction" + describeVideoCapturePath(bestVideoSelection.capturePath) + " with the latest language context.",
+        queueCandidate(scoreVjepa2Candidate("fusion_video_text", fusionTarget, recentTextSummary, bestVideoSelection.capturePath),
+                       "Align the highest-salience v-jepa2 video abstraction" + describeVideoCapturePath(bestVideoSelection.capturePath) + " with the latest language context.",
                        fusionTarget,
                        "fusion_video_text");
 
@@ -3540,7 +3540,7 @@ inline std::vector<GroundedLearningSample> buildGroundedLearningSamples(const js
                 temporalParts.push_back("episode anchor: " + goalAnchor);
             }
             const std::string temporalTarget = truncateText(joinStrings(temporalParts, " | "), options.maxTargetChars);
-            queueCandidate(scoreVjpea2Candidate("fusion_video_timeline_text", temporalTarget, recentTextSummary, bestTemporalSelection.capturePath),
+            queueCandidate(scoreVjepa2Candidate("fusion_video_timeline_text", temporalTarget, recentTextSummary, bestTemporalSelection.capturePath),
                            "Align the highest-value video temporal focus" + describeVideoCapturePath(bestTemporalSelection.capturePath) + " with language guidance.",
                            temporalTarget,
                            "fusion_video_timeline_text");
@@ -3736,11 +3736,11 @@ inline json buildEcologyVideoAbstractions(const json &sessionState, const Virtua
 
     for (std::size_t index = 0; index < visualSummaries.size() && out.size() < options.maxEcologyClusters; ++index) {
         const std::string summary = visualSummaries[index];
-        const auto compressionViews = buildVjpea2CompressionViews(
+        const auto compressionViews = buildVjepa2CompressionViews(
             json{{"graphSummary", summary}, {"metadata", json::object()}},
             std::min<std::size_t>(options.maxEventChars, 120),
             3);
-        const auto temporalWindows = buildVjpea2TemporalWindows(
+        const auto temporalWindows = buildVjepa2TemporalWindows(
             json{{"graphSummary", summary}, {"metadata", json::object()}},
             std::min<std::size_t>(options.maxEventChars, 120),
             3);
@@ -3807,7 +3807,7 @@ inline json buildEcologyVideoAbstractions(const json &sessionState, const Virtua
         out.push_back(json{{"id", "ecosystem-cluster-" + std::to_string(index + 1)},
                            {"entityType", "non-intelligent-ecosystem"},
                            {"abstraction", "video-ecology-cluster"},
-                           {"encoding", "v-jpea2"},
+                           {"encoding", "v-jepa2"},
                            {"biomeLabel", biomeLabel},
                            {"sourceSummary", focusSummary},
                            {"compressedViews", json{{"coarse", coarseSummary},

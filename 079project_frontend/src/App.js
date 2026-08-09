@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import AuthGate from './components/AuthGate';
 import { api } from './api/client';
@@ -20,6 +20,103 @@ const saveJson = (key, value) => {
     localStorage.setItem(key, JSON.stringify(value));
   } catch (_e) {}
 };
+
+// Pure helpers that only depend on their arguments (no component state), so
+// they live at module scope instead of being redefined on every render.
+const convertToWavBase64 = async (blob) => {
+  const arrayBuffer = await blob.arrayBuffer();
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+  const wav = encodeWav(audioBuffer);
+  const base64 = btoa(String.fromCharCode(...new Uint8Array(wav)));
+  return `data:audio/wav;base64,${base64}`;
+};
+
+const encodeWav = (audioBuffer) => {
+  const numChannels = audioBuffer.numberOfChannels;
+  const sampleRate = audioBuffer.sampleRate;
+  const length = audioBuffer.length * numChannels;
+  const buffer = new ArrayBuffer(44 + length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (off, str) => {
+    for (let i = 0; i < str.length; i += 1) view.setUint8(off + i, str.charCodeAt(i));
+  };
+  let offset = 0;
+  writeStr(offset, 'RIFF'); offset += 4;
+  view.setUint32(offset, 36 + length * 2, true); offset += 4;
+  writeStr(offset, 'WAVE'); offset += 4;
+  writeStr(offset, 'fmt '); offset += 4;
+  view.setUint32(offset, 16, true); offset += 4;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint16(offset, numChannels, true); offset += 2;
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, sampleRate * numChannels * 2, true); offset += 4;
+  view.setUint16(offset, numChannels * 2, true); offset += 2;
+  view.setUint16(offset, 16, true); offset += 2;
+  writeStr(offset, 'data'); offset += 4;
+  view.setUint32(offset, length * 2, true); offset += 4;
+  const channelData = [];
+  for (let c = 0; c < numChannels; c += 1) channelData.push(audioBuffer.getChannelData(c));
+  for (let i = 0; i < audioBuffer.length; i += 1) {
+    for (let c = 0; c < numChannels; c += 1) {
+      const sample = Math.max(-1, Math.min(1, channelData[c][i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += 2;
+    }
+  }
+  return buffer;
+};
+
+// Memoized so re-renders of App (e.g. every keystroke in the composer) don't
+// force React to re-diff every row in a potentially long session list --
+// a row only re-renders when its own session data, active state, or the
+// (now useCallback-stabilized) handlers actually change.
+const SessionItem = memo(function SessionItem({ session, active, onSelect, onDelete }) {
+  return (
+    <div className={`session-item ${active ? 'active' : ''}`}>
+      <button className="session-main" onClick={() => onSelect(session.id)}>
+        <div className="session-title">{session.title || 'Chat'}</div>
+        <div className="session-sub">{new Date(session.createdAt).toLocaleString()}</div>
+      </button>
+      <button className="session-del" onClick={() => onDelete(session.id)} title="删除">
+        ×
+      </button>
+    </div>
+  );
+});
+
+// Same rationale as SessionItem: chat history can grow long, and messages
+// already sent never change, so they don't need to re-render on every
+// composer keystroke.
+const ChatMessage = memo(function ChatMessage({ message: m }) {
+  return (
+    <div className={`msg ${m.role}`}>
+      <div className="msg-role">{m.role}</div>
+      <div className="msg-bubble">
+        <div className="msg-text">{m.text}</div>
+        {m.meta?.image?.preview ? (
+          <div className="msg-image">
+            <img src={m.meta.image.preview} alt="attached" />
+            <div className="msg-image-caption">{m.meta.image.graphContext || '图像已附加'}</div>
+          </div>
+        ) : null}
+        {m.meta ? (
+          <div className="msg-meta">
+            {m.meta.latency != null ? <span>latency: {m.meta.latency}ms</span> : null}
+            {m.meta.provider ? <span> provider: {m.meta.provider}</span> : null}
+            {Array.isArray(m.meta.seeds) ? <span> seeds: {m.meta.seeds.length}</span> : null}
+            {Array.isArray(m.meta.memes) ? <span> memes: {m.meta.memes.length}</span> : null}
+            {m.meta.addon ? (
+              <span> addon: {m.meta.addon.name || m.meta.addon.addon || m.meta.addon.type || 'custom'}</span>
+            ) : null}
+            {m.meta.imageContext ? <span> imageCtx: {m.meta.imageContext.slice(0, 60)}</span> : null}
+            {m.meta.imageEmbeddingCount ? <span> imageEmb: {m.meta.imageEmbeddingCount}</span> : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+});
 
 function App() {
   const [account, setAccount] = useState(() => loadJson('phoenix.account', { id: 'local', name: 'Local User' }));
@@ -77,7 +174,7 @@ function App() {
     saveJson('phoenix.providerStats', providerStats);
   }, [providerStats]);
 
-  const trackProviderStat = (provider, latency) => {
+  const trackProviderStat = useCallback((provider, latency) => {
     const key = String(provider || 'core').toLowerCase() === 'openclaw' ? 'openclaw' : 'core';
     const n = Number(latency);
     setProviderStats((prev) => {
@@ -90,7 +187,7 @@ function App() {
         }
       };
     });
-  };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,16 +240,16 @@ function App() {
     setVoiceReady(true);
   }, []);
 
-  const ensureSession = () => {
+  const ensureSession = useCallback(() => {
     if (activeSession) return activeSession;
     const id = `s_${Date.now().toString(36)}_${Math.random().toString(16).slice(2)}`;
     const session = { id, title: 'New chat', createdAt: Date.now(), messages: [] };
     setSessions((prev) => [session, ...prev]);
     setActiveSessionId(id);
     return session;
-  };
+  }, [activeSession]);
 
-  const appendMessage = (sessionId, msg) => {
+  const appendMessage = useCallback((sessionId, msg) => {
     setSessions((prev) =>
       prev.map((s) =>
         s.id === sessionId
@@ -164,9 +261,9 @@ function App() {
           : s
       )
     );
-  };
+  }, []);
 
-  const onSend = async () => {
+  const onSend = useCallback(async () => {
     const text = message.trim();
     if (!text || busy) return;
     setError(null);
@@ -266,9 +363,9 @@ function App() {
       setBusy(false);
       setTimeout(() => inputRef.current?.focus(), 0);
     }
-  };
+  }, [message, busy, imageInfo, imagePreview, chatProvider, ttsEnabled, ensureSession, appendMessage, trackProviderStat]);
 
-  const onToggleVoice = () => {
+  const onToggleVoice = useCallback(() => {
     if (!voiceReady || !recognitionRef.current) return;
     if (listening) {
       recognitionRef.current.stop();
@@ -281,9 +378,9 @@ function App() {
         setListening(false);
       }
     }
-  };
+  }, [voiceReady, listening]);
 
-  const onRecordSpeech = async () => {
+  const onRecordSpeech = useCallback(async () => {
     if (recording) {
       mediaRecorderRef.current?.stop();
       setRecording(false);
@@ -324,57 +421,13 @@ function App() {
       setError(err.message || 'record failed');
       setSpeechBusy(false);
     }
-  };
+  }, [recording, activeSessionId, ensureSession]);
 
-  const convertToWavBase64 = async (blob) => {
-    const arrayBuffer = await blob.arrayBuffer();
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
-    const wav = encodeWav(audioBuffer);
-    const base64 = btoa(String.fromCharCode(...new Uint8Array(wav)));
-    return `data:audio/wav;base64,${base64}`;
-  };
-
-  const encodeWav = (audioBuffer) => {
-    const numChannels = audioBuffer.numberOfChannels;
-    const sampleRate = audioBuffer.sampleRate;
-    const length = audioBuffer.length * numChannels;
-    const buffer = new ArrayBuffer(44 + length * 2);
-    const view = new DataView(buffer);
-    const writeStr = (off, str) => {
-      for (let i = 0; i < str.length; i += 1) view.setUint8(off + i, str.charCodeAt(i));
-    };
-    let offset = 0;
-    writeStr(offset, 'RIFF'); offset += 4;
-    view.setUint32(offset, 36 + length * 2, true); offset += 4;
-    writeStr(offset, 'WAVE'); offset += 4;
-    writeStr(offset, 'fmt '); offset += 4;
-    view.setUint32(offset, 16, true); offset += 4;
-    view.setUint16(offset, 1, true); offset += 2;
-    view.setUint16(offset, numChannels, true); offset += 2;
-    view.setUint32(offset, sampleRate, true); offset += 4;
-    view.setUint32(offset, sampleRate * numChannels * 2, true); offset += 4;
-    view.setUint16(offset, numChannels * 2, true); offset += 2;
-    view.setUint16(offset, 16, true); offset += 2;
-    writeStr(offset, 'data'); offset += 4;
-    view.setUint32(offset, length * 2, true); offset += 4;
-    const channelData = [];
-    for (let c = 0; c < numChannels; c += 1) channelData.push(audioBuffer.getChannelData(c));
-    for (let i = 0; i < audioBuffer.length; i += 1) {
-      for (let c = 0; c < numChannels; c += 1) {
-        const sample = Math.max(-1, Math.min(1, channelData[c][i]));
-        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-        offset += 2;
-      }
-    }
-    return buffer;
-  };
-
-  const onPickImage = () => {
+  const onPickImage = useCallback(() => {
     fileRef.current?.click();
-  };
+  }, []);
 
-  const onImageSelected = async (e) => {
+  const onImageSelected = useCallback(async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setImageBusy(true);
@@ -397,27 +450,29 @@ function App() {
       setImageBusy(false);
       e.target.value = '';
     }
-  };
+  }, []);
 
-  const clearImage = () => {
+  const clearImage = useCallback(() => {
     setImageInfo(null);
     setImagePreview('');
-  };
+  }, []);
 
-  const newSession = () => {
+  const newSession = useCallback(() => {
     const id = `s_${Date.now().toString(36)}_${Math.random().toString(16).slice(2)}`;
     const session = { id, title: 'New chat', createdAt: Date.now(), messages: [] };
     setSessions((prev) => [session, ...prev]);
     setActiveSessionId(id);
     setTimeout(() => inputRef.current?.focus(), 0);
-  };
+  }, []);
 
-  const deleteSession = (id) => {
+  const deleteSession = useCallback((id) => {
     setSessions((prev) => prev.filter((s) => s.id !== id));
-    if (activeSessionId === id) {
-      setActiveSessionId(null);
-    }
-  };
+    setActiveSessionId((prev) => (prev === id ? null : prev));
+  }, []);
+
+  const onSelectSession = useCallback((id) => {
+    setActiveSessionId(id);
+  }, []);
 
   return (
     <AuthGate>
@@ -453,15 +508,13 @@ function App() {
               <div className="muted">暂无会话</div>
             ) : (
               sessions.map((s) => (
-                <div key={s.id} className={`session-item ${s.id === activeSessionId ? 'active' : ''}`}>
-                  <button className="session-main" onClick={() => setActiveSessionId(s.id)}>
-                    <div className="session-title">{s.title || 'Chat'}</div>
-                    <div className="session-sub">{new Date(s.createdAt).toLocaleString()}</div>
-                  </button>
-                  <button className="session-del" onClick={() => deleteSession(s.id)} title="删除">
-                    ×
-                  </button>
-                </div>
+                <SessionItem
+                  key={s.id}
+                  session={s}
+                  active={s.id === activeSessionId}
+                  onSelect={onSelectSession}
+                  onDelete={deleteSession}
+                />
               ))
             )}
           </div>
@@ -522,31 +575,7 @@ function App() {
             <section className="chat">
               <div className="chat-scroll">
                 {(activeSession?.messages || []).map((m) => (
-                  <div key={m.id} className={`msg ${m.role}`}>
-                    <div className="msg-role">{m.role}</div>
-                    <div className="msg-bubble">
-                      <div className="msg-text">{m.text}</div>
-                      {m.meta?.image?.preview ? (
-                        <div className="msg-image">
-                          <img src={m.meta.image.preview} alt="attached" />
-                          <div className="msg-image-caption">{m.meta.image.graphContext || '图像已附加'}</div>
-                        </div>
-                      ) : null}
-                      {m.meta ? (
-                        <div className="msg-meta">
-                          {m.meta.latency != null ? <span>latency: {m.meta.latency}ms</span> : null}
-                          {m.meta.provider ? <span> provider: {m.meta.provider}</span> : null}
-                          {Array.isArray(m.meta.seeds) ? <span> seeds: {m.meta.seeds.length}</span> : null}
-                          {Array.isArray(m.meta.memes) ? <span> memes: {m.meta.memes.length}</span> : null}
-                          {m.meta.addon ? (
-                            <span> addon: {m.meta.addon.name || m.meta.addon.addon || m.meta.addon.type || 'custom'}</span>
-                          ) : null}
-                          {m.meta.imageContext ? <span> imageCtx: {m.meta.imageContext.slice(0, 60)}</span> : null}
-                          {m.meta.imageEmbeddingCount ? <span> imageEmb: {m.meta.imageEmbeddingCount}</span> : null}
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
+                  <ChatMessage key={m.id} message={m} />
                 ))}
               </div>
 

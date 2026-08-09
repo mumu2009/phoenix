@@ -2,8 +2,8 @@
    Copyright (C) 2026 079 Project */
 
 #include "external_mixed_modal_io.hpp"
-#include "jpea_v2_image_world_model.hpp"
-#include "jpea_v2_speech_world_model.hpp"
+#include "jepa_v2_image_world_model.hpp"
+#include "jepa_v2_speech_world_model.hpp"
 #include "transformer.hpp"
 #include <algorithm>
 #include <chrono>
@@ -87,22 +87,29 @@ std::vector<float> normalizeConcept(std::vector<float> value) {
     return phoenix::multimodal::normalizeVector(value);
 }
 
-JpeaV2ImageWorldModel &imageWorldModel(const std::string &variant, int targetDim) {
+JepaV2ImageWorldModel &imageWorldModel(const std::string &variant, int targetDim) {
     static std::mutex mu;
-    static std::unordered_map<std::string, std::unique_ptr<JpeaV2ImageWorldModel>> cache;
-    std::lock_guard<std::mutex> lock(mu);
+    static std::unordered_map<std::string, std::unique_ptr<JepaV2ImageWorldModel>> cache;
     std::string key = variant + ":" + std::to_string(targetDim);
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        auto it = cache.find(key);
+        if (it != cache.end()) return *it->second;
+    }
+    // Build the (potentially slow, disk-loading) model outside the lock so a
+    // cold load for one variant doesn't block unrelated cache hits/misses.
+    auto model = createJepaV2ImageWorldModel(variant, targetDim);
+    std::lock_guard<std::mutex> lock(mu);
     auto it = cache.find(key);
-    if (it != cache.end()) return *it->second;
-    auto model = createJpeaV2ImageWorldModel(variant, targetDim);
+    if (it != cache.end()) return *it->second;  // another thread won the race
     auto &ref = *model;
     cache.emplace(key, std::move(model));
     return ref;
 }
 
 std::string imageVariantFromMetadata(const nlohmann::json &metadata) {
-    if (metadata.contains("jpeaVariant") && metadata["jpeaVariant"].is_string()) {
-        return metadata["jpeaVariant"].get<std::string>();
+    if (metadata.contains("jepaVariant") && metadata["jepaVariant"].is_string()) {
+        return metadata["jepaVariant"].get<std::string>();
     }
     if (metadata.contains("worldModel") && metadata["worldModel"].is_string()) {
         return metadata["worldModel"].get<std::string>();
@@ -110,27 +117,33 @@ std::string imageVariantFromMetadata(const nlohmann::json &metadata) {
     return "ijepa_vith14_1k";
 }
 
-JpeaV2SpeechWorldModel &speechWorldModel(const std::string &variant, int targetDim) {
+JepaV2SpeechWorldModel &speechWorldModel(const std::string &variant, int targetDim) {
     static std::mutex mu;
-    static std::unordered_map<std::string, std::unique_ptr<JpeaV2SpeechWorldModel>> cache;
-    std::lock_guard<std::mutex> lock(mu);
+    static std::unordered_map<std::string, std::unique_ptr<JepaV2SpeechWorldModel>> cache;
     std::string key = variant + ":" + std::to_string(targetDim);
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        auto it = cache.find(key);
+        if (it != cache.end()) return *it->second;
+    }
+    // Build outside the lock; see imageWorldModel() above for rationale.
+    auto model = createJepaV2SpeechWorldModel(variant, targetDim);
+    std::lock_guard<std::mutex> lock(mu);
     auto it = cache.find(key);
-    if (it != cache.end()) return *it->second;
-    auto model = createJpeaV2SpeechWorldModel(variant, targetDim);
+    if (it != cache.end()) return *it->second;  // another thread won the race
     auto &ref = *model;
     cache.emplace(key, std::move(model));
     return ref;
 }
 
 std::string speechVariantFromMetadata(const nlohmann::json &metadata) {
-    if (metadata.contains("jpeaSpeechVariant") && metadata["jpeaSpeechVariant"].is_string()) {
-        return metadata["jpeaSpeechVariant"].get<std::string>();
+    if (metadata.contains("jepaSpeechVariant") && metadata["jepaSpeechVariant"].is_string()) {
+        return metadata["jepaSpeechVariant"].get<std::string>();
     }
     if (metadata.contains("worldModel") && metadata["worldModel"].is_string()) {
         return metadata["worldModel"].get<std::string>();
     }
-    return "jpea_v2_speech_16k";
+    return "jepa_v2_speech_16k";
 }
 
 int sampleRateFromMetadata(const nlohmann::json &metadata) {
@@ -614,15 +627,15 @@ phoenix::multimodal::SemanticUnit MixedModalConceptBridge::encode(const MixedMod
         auto encoded = imageModel.encode(packet.payload, width, height, packet.mimeType);
         if (encoded.empty()) {
             auto status = imageModel.status();
-            unit.metadata["jpeaBackend"] = status.value("backend", "unavailable");
-            unit.metadata["jpeaError"] = status.value("error", "image world model not ready");
+            unit.metadata["jepaBackend"] = status.value("backend", "unavailable");
+            unit.metadata["jepaError"] = status.value("error", "image world model not ready");
             unit.confidence = 0.0f;
         } else {
-            unit.metadata["jpeaBackend"] = "jpea-v2-image-world-model";
+            unit.metadata["jepaBackend"] = "jepa-v2-image-world-model";
         }
         unit.semanticVector = std::move(encoded);
-        unit.metadata["conceptEncoder"] = "jpea-v2-image-world-model";
-        unit.metadata["jpeaVariant"] = variant;
+        unit.metadata["conceptEncoder"] = "jepa-v2-image-world-model";
+        unit.metadata["jepaVariant"] = variant;
     } else if (packet.modality == MixedModalModality::Audio) {
         auto variant = speechVariantFromMetadata(packet.metadata);
         const int sampleRate = sampleRateFromMetadata(packet.metadata);
@@ -630,11 +643,11 @@ phoenix::multimodal::SemanticUnit MixedModalConceptBridge::encode(const MixedMod
         auto encoded = speechModel.encode(packet.payload, sampleRate, packet.mimeType);
         if (encoded.empty()) {
             auto status = speechModel.status();
-            unit.metadata["jpeaSpeechBackend"] = status.value("backend", "unavailable");
-            unit.metadata["jpeaSpeechError"] = status.value("error", "speech world model not ready");
+            unit.metadata["jepaSpeechBackend"] = status.value("backend", "unavailable");
+            unit.metadata["jepaSpeechError"] = status.value("error", "speech world model not ready");
             unit.confidence = 0.0f;
         } else {
-            unit.metadata["jpeaSpeechBackend"] = "jpea-v2-speech-world-model";
+            unit.metadata["jepaSpeechBackend"] = "jepa-v2-speech-world-model";
         }
         {
             std::lock_guard<std::mutex> lock(gSpeechModelMutex);
@@ -646,8 +659,8 @@ phoenix::multimodal::SemanticUnit MixedModalConceptBridge::encode(const MixedMod
             }
         }
         unit.semanticVector = std::move(encoded);
-        unit.metadata["conceptEncoder"] = "jpea-v2-speech-world-model";
-        unit.metadata["jpeaSpeechVariant"] = variant;
+        unit.metadata["conceptEncoder"] = "jepa-v2-speech-world-model";
+        unit.metadata["jepaSpeechVariant"] = variant;
         unit.metadata["speechModelSamples"] = std::to_string(gSpeechModel.samples);
     } else {
         unit.semanticVector = mediaConcept(packet.payload, dim, 0x53545255U);
@@ -726,7 +739,7 @@ bool MixedModalConceptBridge::pretrainSpeech(const MixedModalPacket &audio,
     audioUnit.timestampMs = audio.timestampMs;
     audioUnit.metadata["source"] = audio.source;
     audioUnit.metadata["mimeType"] = audio.mimeType;
-    audioUnit.metadata["conceptEncoder"] = "jpea-v2-speech-world-model";
+    audioUnit.metadata["conceptEncoder"] = "jepa-v2-speech-world-model";
     audioUnit.metadata["transcript"] = transcript;
     audioUnit.associationIds.push_back(correlationId);
     gConceptMatrix.addOrUpdate(audioUnit, true);
@@ -790,8 +803,8 @@ bool MixedModalConceptBridge::pretrainImage(const MixedModalPacket &image,
     imageUnit.timestampMs = image.timestampMs;
     imageUnit.metadata["source"] = image.source;
     imageUnit.metadata["mimeType"] = image.mimeType;
-    imageUnit.metadata["conceptEncoder"] = "jpea-v2-image-world-model";
-    imageUnit.metadata["jpeaVariant"] = variant;
+    imageUnit.metadata["conceptEncoder"] = "jepa-v2-image-world-model";
+    imageUnit.metadata["jepaVariant"] = variant;
     if (!caption.empty()) {
         imageUnit.metadata["caption"] = caption;
         imageUnit.associationIds.push_back(correlationId);
@@ -860,7 +873,7 @@ MixedModalPacket MixedModalConceptBridge::decode(const phoenix::multimodal::Sema
         packet.metadata["conceptVector"] = unit.semanticVector;
     } else if (target == MixedModalModality::Audio) {
         packet.mimeType = "audio/pcm";
-        auto variant = "jpea_v2_speech_16k";
+        auto variant = "jepa_v2_speech_16k";
         size_t lengthHint = 0;
         auto it = unit.metadata.find("lengthHint");
         if (it != unit.metadata.end() && !it->second.empty()) {
@@ -909,9 +922,9 @@ nlohmann::json MixedModalConceptBridge::status() {
     }
     j["textEncoder"] = textEncoderStatus();
     try {
-        j["jpeaSpeechWorldModel"] = speechWorldModel("jpea_v2_speech_16k", 64).status();
+        j["jepaSpeechWorldModel"] = speechWorldModel("jepa_v2_speech_16k", 64).status();
     } catch (...) {
-        j["jpeaSpeechWorldModel"] = {{"error", "speech world model not available"}};
+        j["jepaSpeechWorldModel"] = {{"error", "speech world model not available"}};
     }
     j["conceptMatrix"] = gConceptMatrix.status();
     return j;

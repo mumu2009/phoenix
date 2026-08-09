@@ -6,14 +6,14 @@ PASS = 'kali'
 REMOTE_ROOT = '/home/kali/phoenix'
 
 FILES = [
-    'tools/train_jpea_v2_speech.py',
-    'tools/train_jpea_v2_vision.py',
-    'tools/export_jpea_v2_multimodal.py',
-    'tools/export_jpea_v2_speech.py',
+    'tools/train_jepa_v2_speech.py',
+    'tools/train_jepa_v2_vision.py',
+    'tools/export_jepa_v2_multimodal.py',
+    'tools/export_jepa_v2_speech.py',
     'tools/compile_bpu_jepa_v2.sh',
     'tools/run_hb_mapper.py',
     'tools/hb_mapper_patch.py',
-    'tools/train_jpea_v2_pilot.py',
+    'tools/train_jepa_v2_pilot.py',
     'doc/remote_training_package.md',
 ]
 

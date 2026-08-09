@@ -83,6 +83,12 @@ struct Config {
   std::string bitnetModel;
   std::string bitnetBaseUrl{"http://127.0.0.1:8090"};
   int bitnetRequestTimeoutMs{120000};
+  std::string tinyllamaModel;
+  std::string tinyllamaBaseUrl{"http://127.0.0.1:8085"};
+  int tinyllamaRequestTimeoutMs{120000};
+  bool tinyllamaEnabled{false};
+  bool conceptMatrixEnabled{false};
+  bool conceptMatrixClearPerRequest{true};
   fs::path ggufModelsDir;
   bool externalBackendStyleSim{false};
   bool transformerBootstrap{false};

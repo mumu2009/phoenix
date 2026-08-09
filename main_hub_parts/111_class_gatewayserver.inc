@@ -4,6 +4,16 @@
 
 class GatewayServer : public IGatewayServer {
 public:
+  // Stubs for features added in v7.4 (minimal implementations to keep build green)
+  void ingestWorldEvidence(const std::string &sessionId,
+                           const std::string &text,
+                           const std::string &graphSummary);
+  json chatWithTinyllama(const std::string &text,
+                         const std::string &graphContext,
+                         int maxTokens,
+                         const json &options = json::object());
+  void setWorldModelDatabase(std::shared_ptr<Database079> db);
+
   GatewayServer(std::shared_ptr<ControllerPoolBase> pool,
                 std::shared_ptr<ISnapshotManager> snapshots,
                 std::shared_ptr<IRedisSynchronizer> redisSync,
@@ -302,6 +312,8 @@ public:
   }
 
 private:
+  phoenix::conceptmatrix::ConceptMatrix conceptMatrix_;
+
   struct RouteMetric {
     uint64_t calls{0};
     uint64_t errors{0};

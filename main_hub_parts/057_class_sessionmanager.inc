@@ -168,11 +168,17 @@ private:
     items.reserve(active_.size());
     for (auto &kv : active_)
       items.push_back(kv.second);
-    std::sort(items.begin(), items.end(), [](const json &a, const json &b) {
-      return a.value("lastActivity", 0) > b.value("lastActivity", 0);
-    });
     if ((int)items.size() <= maxSessions_)
       return;
+    // Only the maxSessions_ most-recently-active sessions need to be
+    // identified (their relative order among themselves doesn't matter,
+    // since they only feed an unordered_set below), so partition in O(n)
+    // instead of fully sorting all sessions in O(n log n).
+    std::nth_element(items.begin(), items.begin() + maxSessions_, items.end(),
+                     [](const json &a, const json &b) {
+                       return a.value("lastActivity", 0) >
+                              b.value("lastActivity", 0);
+                     });
     std::unordered_set<std::string> keep;
     for (int i = 0; i < maxSessions_ && i < (int)items.size(); i++)
       keep.insert(items[i].value("id", ""));

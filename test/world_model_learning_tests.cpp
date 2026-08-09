@@ -89,14 +89,14 @@ void testGroundedLearningOptionsLimitAndTruncateSamples() {
                 "at least one grounded target should be truncated");
 }
 
-void testVideoVjpea2CompressionAndTextFusionSamples() {
+void testVideoVjepa2CompressionAndTextFusionSamples() {
     json state = {
         {"sessionId", "learn-4"},
         {"sceneState", {{"summary", "A rover tracks moving silhouettes while operator guidance arrives."}, {"objectSlots", json::array()}}},
         {"episode", {{"summary", "The rover should follow the strongest moving target and keep safe distance."}}},
         {"recentEvidence", json::array({json{{"modality", "video"},
                                               {"graphSummary", "rover sees moving silhouettes near a fence"},
-                                              {"metadata", json{{"vjpea2", json{{"coarse", "motion near fence"},
+                                              {"metadata", json{{"vjepa2", json{{"coarse", "motion near fence"},
                                                                                    {"medium", "two silhouettes moving left to right"},
                                                                                    {"focus", "primary silhouette accelerates toward gate"}}}}}},
                                      json{{"modality", "text"}, {"text", "prioritize the fastest target but avoid collision"}}})}
@@ -142,10 +142,10 @@ void testVideoVjpea2CompressionAndTextFusionSamples() {
         }
     }
 
-    requireTrue(sawVideoCoarse, "missing v-jpea2 coarse video sample");
-    requireTrue(sawVideoMedium, "missing v-jpea2 medium video sample");
-    requireTrue(sawVideoFocus, "missing v-jpea2 focus video sample");
-    requireTrue(sawVideoTimelineLate, "missing v-jpea2 timeline late sample");
+    requireTrue(sawVideoCoarse, "missing v-jepa2 coarse video sample");
+    requireTrue(sawVideoMedium, "missing v-jepa2 medium video sample");
+    requireTrue(sawVideoFocus, "missing v-jepa2 focus video sample");
+    requireTrue(sawVideoTimelineLate, "missing v-jepa2 timeline late sample");
     requireTrue(sawVideoTextFusion, "missing video-text fusion sample");
     requireTrue(sawVideoTimelineTextFusion, "missing video-timeline-text fusion sample");
 }
@@ -155,7 +155,7 @@ void testVideoPriorityKeepsActionableSamplesUnderTightBudget() {
     videoEvidence["modality"] = "video";
     videoEvidence["graphSummary"] = "sensor sees silhouettes shifting near the gate";
     videoEvidence["metadata"] = json{{"cameraInterface", "micro-mipi-csi"},
-                                      {"vjpea2", json{{"coarse", "motion near fence"},
+                                      {"vjepa2", json{{"coarse", "motion near fence"},
                                                        {"medium", "two silhouettes move toward the gate"},
                                                        {"focus", "primary silhouette accelerates toward gate"},
                                                        {"timeline", json{{"early", "target appears at fence edge"},
@@ -227,7 +227,7 @@ int main() {
         testBuildGroundedLearningSamplesIncludesVisionSpeechAndFusion();
         testBuildGroundedLearningSamplesSkipsNonSensoryOnlyState();
         testGroundedLearningOptionsLimitAndTruncateSamples();
-        testVideoVjpea2CompressionAndTextFusionSamples();
+        testVideoVjepa2CompressionAndTextFusionSamples();
         testVideoPriorityKeepsActionableSamplesUnderTightBudget();
         std::cout << "world_model_learning_tests: ok" << std::endl;
         return 0;

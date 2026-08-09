@@ -66,9 +66,8 @@ public:
         return false;
       out.assign((size_t)r, std::vector<float>((size_t)c, 0.0f));
       for (int i = 0; i < r; i++) {
-        for (int j = 0; j < c; j++) {
-          out[(size_t)i][(size_t)j] = data[(size_t)i * (size_t)c + (size_t)j];
-        }
+        auto rowBegin = data.begin() + (size_t)i * (size_t)c;
+        std::copy(rowBegin, rowBegin + c, out[(size_t)i].begin());
       }
       redis_->incr(prefix_ + ":hits:" + key);
       return true;
@@ -103,8 +102,8 @@ public:
       std::vector<float> flat;
       flat.reserve((size_t)rows * (size_t)cols);
       for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++)
-          flat.push_back(matrix[(size_t)i][(size_t)j]);
+        const auto &row = matrix[(size_t)i];
+        flat.insert(flat.end(), row.begin(), row.begin() + cols);
       }
       json payload{{"rows", rows}, {"cols", cols}, {"data", flat}};
       std::string k = prefix_ + ":data:" + key;

@@ -930,6 +930,22 @@ public:
       }
       return fallback;
     };
+    // options may come straight from a JSON request body where an absent
+    // field is serialized as an explicit `null` (see the "seeds"/"radius"/
+    // "file" construction in the /api/export/graph handlers). `json::value()`
+    // only substitutes the fallback when the key is *missing*; if the key is
+    // present but null it forwards to `get<std::string>()`, which throws
+    // type_error.302. Route every optional string field in this function
+    // through this helper instead so `null`/wrong-typed values behave like
+    // "not provided" rather than a 500.
+    auto optString = [](const json &o, const char *key,
+                        const std::string &fallback) -> std::string {
+      if (!o.contains(key) || o[key].is_null())
+        return fallback;
+      if (o[key].is_string())
+        return o[key].get<std::string>();
+      return fallback;
+    };
 
     int radius = 2;
     if (options.contains("radius")) {
@@ -953,7 +969,7 @@ public:
       if (std::isfinite(v))
         minActivation = v;
     }
-    std::string format = options.value("format", "json");
+    std::string format = optString(options, "format", "json");
     std::transform(format.begin(), format.end(), format.begin(),
                    [](unsigned char ch) { return (char)std::tolower(ch); });
     if (format != "json" && format != "jsonl" && format != "csv")
@@ -1062,7 +1078,7 @@ public:
       graphObj["Meta"] = meta;
     }
 
-    std::string fileArg = options.value("file", "");
+    std::string fileArg = optString(options, "file", "");
     fs::path outFile;
     if (!fileArg.empty()) {
       fs::path candidate = fs::path(fileArg);
