@@ -26,7 +26,13 @@ RE_ANSWER = re.compile(r"(?<![A-Za-z0-9])[A-D](?![A-Za-z0-9])")
 
 
 def log(msg: str) -> None:
-    print(msg, flush=True)
+    try:
+        print(msg, flush=True)
+    except OSError:
+        try:
+            print(msg.encode("utf-8", errors="replace").decode("gbk", errors="replace"), flush=True)
+        except OSError:
+            pass
     ui.log(msg)
 
 
@@ -80,7 +86,7 @@ def get_last_assistant_text(driver):
         return ""
 
 
-def send_chat(driver, prompt: str, timeout: float = 240.0) -> str:
+def send_chat(driver, prompt: str, timeout: float = 300.0) -> str:
     """Type a prompt into the web chat and return the assistant's reply text."""
     text_input = find_chat_input(driver)
 

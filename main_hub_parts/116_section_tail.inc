@@ -1812,7 +1812,8 @@
               else
                 graphContext = graphContext + "\n" + matrixContext;
             }
-            int maxTokens = graphResult.value("maxTokens", 24);
+            int maxTokens = graphResult.value(
+                "maxTokens", phoenix::cfgOr<int>("context.maxTokens", 8192));
             if (body.contains("maxTokens") &&
                 body["maxTokens"].is_number_integer())
               maxTokens = body["maxTokens"].get<int>();
@@ -1921,30 +1922,64 @@
 
             ingestWorldEvidence(sessionId, userText, graphContext);
 
-            // The emotion system is reachable through the frontend, but the
-            // gateway must not make re-entrant HTTP calls to the same process.
-            // Keep emotion fields empty here; runCognitionAutonomy may later
-            // fill cognitionEmotionTensor from the autonomy stack directly.
+            // v7.0 ahead-of-GNN branch: memory + emotion on raw user input.
             std::string emotionModulation;
             nlohmann::json emotionLogitBias;
             std::string emotionContextStr;
-
-            // v7.0: run the autonomy cognition stack to observe world state,
-            // iterate the primal/instinct/prompt layers and obtain affect-driven
-            // context + inference options.
+            nlohmann::json aheadInferenceOptions;
             nlohmann::json inferenceOptions;
             nlohmann::json cognitionEmotionTensor;
             nlohmann::json cognitionWorldEvidence;
             std::vector<nlohmann::json> cognitionMixedModalOutputs;
             std::string cognitionContext;
+            if (aheadModule_ && !sessionId.empty()) {
+              try {
+                phoenix::io::MixedModalPacket pkt;
+                pkt.modality = phoenix::io::MixedModalModality::Text;
+                pkt.payload.assign(userText.begin(), userText.end());
+                pkt.source = "gateway-chat";
+                auto ahead = aheadModule_->processBatch({pkt}, sessionId);
+                if (ahead.memoryReady) {
+                  if (!graphContext.empty())
+                    graphContext += "\n";
+                  graphContext += "[Ahead memory]\n" + ahead.memoryForBackend.content;
+                }
+                emotionModulation = ahead.emotionInfluence.promptModulation;
+                aheadInferenceOptions = ahead.emotionInfluence.inferenceOptions;
+                if (!ahead.emotionInfluence.logitBias.empty())
+                  emotionLogitBias = ahead.emotionInfluence.logitBias;
+                cognitionEmotionTensor = ahead.emotion.toJson();
+              } catch (...) {
+              }
+            }
+
+            // The emotion system is reachable through the frontend, but the
+            // gateway must not make re-entrant HTTP calls to the same process.
+            // Keep emotion fields empty here; runCognitionAutonomy may later
+            // fill cognitionEmotionTensor from the autonomy stack directly.
+
+            // v7.0: run the autonomy cognition stack to observe world state,
+            // iterate the primal/instinct/prompt layers and obtain affect-driven
+            // context + inference options.
             try {
               auto pack = runCognitionAutonomy(body, userText, graphContext);
               graphContext = pack.context;
-              inferenceOptions = pack.inferenceOptions;
-              cognitionEmotionTensor = pack.emotionTensor;
+              if (pack.inferenceOptions.is_object()) {
+                for (auto &el : pack.inferenceOptions.items())
+                  inferenceOptions[el.key()] = el.value();
+              }
+              if (pack.emotionTensor.is_object())
+                cognitionEmotionTensor = pack.emotionTensor;
               cognitionWorldEvidence = pack.worldEvidence;
               cognitionMixedModalOutputs = pack.mixedModalOutputs;
             } catch (...) {
+            }
+
+            if (inferenceOptions.is_object() && aheadInferenceOptions.is_object()) {
+              for (auto &el : aheadInferenceOptions.items())
+                inferenceOptions[el.key()] = el.value();
+            } else if (inferenceOptions.is_null() && aheadInferenceOptions.is_object()) {
+              inferenceOptions = aheadInferenceOptions;
             }
 
             std::string providerTag = std::string("provider:") + backendMode;
@@ -2149,6 +2184,14 @@
                 transformer_.addPreferenceFeedback(
                     text, graphContext, reply,
                     stripAddonToolDirective(transformerReplyRaw), 1.0f, source);
+              }
+            }
+            if (aheadModule_ && !sessionId.empty() && !reply.empty()) {
+              try {
+                auto routed = aheadModule_->routeSentence(reply, sessionId);
+                if (!routed.blockedByMemeBarrier)
+                  reply = routed.textForBackend;
+              } catch (...) {
               }
             }
             json result = graphResult;
@@ -2478,7 +2521,8 @@
             if (!simpleQuery && addonContractEnabled) {
               graphContext = attachAddonToolContract(graphContext);
             }
-            int maxTokens = body.value("maxTokens", 128);
+            int maxTokens = body.value(
+                "maxTokens", phoenix::cfgOr<int>("context.maxTokens", 8192));
             if (longQuerySafeMode)
               maxTokens = std::min(maxTokens, 32);
             if (maxTokens <= 0) maxTokens = 16;
@@ -2486,19 +2530,49 @@
 
             ingestWorldEvidence(sessionId, text, graphContext);
 
+            // v7.0 ahead-of-GNN branch: memory + emotion on raw user input.
             nlohmann::json inferenceOptions;
             nlohmann::json cognitionEmotionTensor;
+            nlohmann::json aheadInferenceOptions;
+            if (aheadModule_ && !sessionId.empty()) {
+              try {
+                phoenix::io::MixedModalPacket pkt;
+                pkt.modality = phoenix::io::MixedModalModality::Text;
+                pkt.payload.assign(text.begin(), text.end());
+                pkt.source = "gateway-chat";
+                auto ahead = aheadModule_->processBatch({pkt}, sessionId);
+                if (ahead.memoryReady) {
+                  if (!graphContext.empty())
+                    graphContext += "\n";
+                  graphContext += "[Ahead memory]\n" + ahead.memoryForBackend.content;
+                }
+                aheadInferenceOptions = ahead.emotionInfluence.inferenceOptions;
+                cognitionEmotionTensor = ahead.emotion.toJson();
+              } catch (...) {
+              }
+            }
+
             nlohmann::json cognitionWorldEvidence;
             std::vector<nlohmann::json> cognitionMixedModalOutputs;
             try {
               auto pack = runCognitionAutonomy(body, text, graphContext);
               graphContext = pack.context;
-              inferenceOptions = pack.inferenceOptions;
-              cognitionEmotionTensor = pack.emotionTensor;
+              if (pack.inferenceOptions.is_object()) {
+                for (auto &el : pack.inferenceOptions.items())
+                  inferenceOptions[el.key()] = el.value();
+              }
+              if (pack.emotionTensor.is_object())
+                cognitionEmotionTensor = pack.emotionTensor;
               cognitionWorldEvidence = pack.worldEvidence;
               cognitionMixedModalOutputs = pack.mixedModalOutputs;
             } catch (...) {
-              inferenceOptions = json::object();
+            }
+
+            if (inferenceOptions.is_object() && aheadInferenceOptions.is_object()) {
+              for (auto &el : aheadInferenceOptions.items())
+                inferenceOptions[el.key()] = el.value();
+            } else if (inferenceOptions.is_null() && aheadInferenceOptions.is_object()) {
+              inferenceOptions = aheadInferenceOptions;
             }
             std::string providerTag = std::string("provider:") + backendMode;
             std::string cacheKey = buildInferenceCacheKey(
@@ -2636,6 +2710,14 @@
                 transformer_.addPreferenceFeedback(
                     text, graphContext, finalReply,
                     stripAddonToolDirective(transformerReplyRaw), 1.0f, source);
+              }
+            }
+            if (aheadModule_ && !sessionId.empty() && !finalReply.empty()) {
+              try {
+                auto routed = aheadModule_->routeSentence(finalReply, sessionId);
+                if (!routed.blockedByMemeBarrier)
+                  finalReply = routed.textForBackend;
+              } catch (...) {
               }
             }
             if (!tReply.is_object()) {
@@ -3652,16 +3734,28 @@
           std::string graphContext = payload.value("graphContext", "");
           std::string reply = payload.value("reply", "");
           if (!payload.contains("reply") && reply.empty() && !text.empty()) {
-            std::lock_guard<std::mutex> lock(transformerMu_);
-            auto chatResult = transformer_.chat(
-                text, graphContext, payload.value("maxTokens", 120));
-            postInferenceMemoryTrim();
-            reply = chatResult.value("reply", "");
-            payload["reply"] = reply;
-            payload["generatedByTransformer"] = true;
+            int maxTokens = payload.value("maxTokens", 120);
+            json chatResult;
+            if (config_.transformerBackend == "native") {
+              std::lock_guard<std::mutex> lock(transformerMu_);
+              chatResult = transformer_.chat(text, graphContext, maxTokens);
+              postInferenceMemoryTrim();
+            } else if (config_.tinyllamaEnabled &&
+                       !config_.tinyllamaBaseUrl.empty()) {
+              chatResult = chatWithTinyllama(text, graphContext, maxTokens);
+            } else if (config_.inferenceEnabled &&
+                       !config_.llamaCppBaseUrl.empty()) {
+              chatResult = chatWithLlamaCpp(text, graphContext, maxTokens);
+            }
+            if (chatResult.is_object()) {
+              reply = chatResult.value("reply", "");
+              payload["reply"] = reply;
+              payload["generatedByTransformer"] =
+                  (config_.transformerBackend == "native");
+            }
           }
           json out = modelLifecycle_.explainOutput(payload);
-          if (!reply.empty()) {
+          if (!reply.empty() && config_.transformerBackend == "native") {
             json verify;
             {
               std::lock_guard<std::mutex> lock(transformerMu_);
@@ -4054,10 +4148,15 @@
           json payload = parseRequestBody(req, ok);
           if (!ok)
             return badRequest(cb, "invalid json");
-          json currentParams;
-          {
-            std::lock_guard<std::mutex> lock(transformerMu_);
-            currentParams = transformer_.params();
+          json currentParams =
+              payload.value("currentParams", json::object());
+          if (currentParams.empty()) {
+            currentParams["nLayers"] =
+                phoenix::cfgOr<int>("transformer.nLayers", 4);
+            currentParams["dModel"] =
+                phoenix::cfgOr<int>("transformer.dModel", 128);
+            currentParams["nHeads"] =
+                phoenix::cfgOr<int>("transformer.nHeads", 4);
           }
           json out =
               optimizerAutonomy_.modernizeTransformer(payload, currentParams);
@@ -4989,6 +5088,35 @@
           cfg["portGateway"] = config_.portGateway;
           cfg["portStudy"] = config_.portStudy;
           respondJson(cb, json{{"ok", true}, {"config", cfg}});
+        },
+        {drogon::Get});
+
+    drogon::app().registerHandler(
+        "/api/world/status",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          if (!worldModel_)
+            return respondJson(
+                cb, json{{"ok", false}, {"error", "world model unavailable"}});
+          respondJson(cb,
+                      json{{"ok", true}, {"status", worldModel_->status()}});
+        },
+        {drogon::Get});
+
+    drogon::app().registerHandler(
+        "/api/world/config",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          json out;
+          out["ok"] = true;
+          out["worldModelEnabled"] = (worldModel_ != nullptr);
+          out["cognitionAutonomyEnabled"] = cognitionAutonomyEnabled_;
+          out["ingestEnabled"] = (worldModel_ != nullptr);
+          respondJson(cb, out);
         },
         {drogon::Get});
 
@@ -6407,30 +6535,6 @@
                 drogon::k400BadRequest);
   }
 };
-
-
-void GatewayServer::ingestWorldEvidence(const std::string &sessionId,
-                                        const std::string &text,
-                                        const std::string &graphSummary) {
-  (void)sessionId;
-  (void)text;
-  (void)graphSummary;
-}
-
-json GatewayServer::chatWithTinyllama(const std::string &text,
-                                      const std::string &graphContext,
-                                      int maxTokens,
-                                      const json &options) {
-  (void)text;
-  (void)graphContext;
-  (void)maxTokens;
-  (void)options;
-  return json{{"ok", false}, {"reply", ""}};
-}
-
-void GatewayServer::setWorldModelDatabase(std::shared_ptr<Database079> db) {
-  (void)db;
-}
 
 thread_local GatewayServer::AuthError GatewayServer::lastAuthError_{};
 thread_local bool GatewayServer::hasAuthError_ = false;

@@ -4,15 +4,55 @@
 
 class GatewayServer : public IGatewayServer {
 public:
-  // Stubs for features added in v7.4 (minimal implementations to keep build green)
+  // v7.4 world model / tinyllama integration
+  void setWorldModelDatabase(std::shared_ptr<Database079> db) {
+    if (!db || worldModel_)
+      return;
+    auto kvm = db->createStore("kvm");
+    auto meme = db->createStore("meme_graph");
+    auto session = db->createStore("session");
+    if (logger_.enabled()) {
+      std::string msg = "[gateway-world] setWorldModelDatabase: kvm=" + std::to_string(kvm ? 1 : 0)
+                        + " meme=" + std::to_string(meme ? 1 : 0)
+                        + " session=" + std::to_string(session ? 1 : 0);
+      logger_.log(LoggerCXX::Type::MONITORING, msg);
+    }
+    if (kvm && meme && session) {
+      worldModel_ = std::make_shared<world_model::WorldModelStore>(kvm, meme, session);
+      if (logger_.enabled())
+        logger_.log(LoggerCXX::Type::MONITORING, "[gateway-world] world model store attached");
+    } else if (logger_.enabled()) {
+      logger_.log(LoggerCXX::Type::WARNING, "[gateway-world] failed to create one or more world model stores");
+    }
+  }
+
   void ingestWorldEvidence(const std::string &sessionId,
                            const std::string &text,
-                           const std::string &graphSummary);
+                           const std::string &graphSummary) {
+    if (!worldModel_)
+      return;
+    try {
+      nlohmann::json evidence;
+      evidence["sessionId"] = sessionId;
+      evidence["modality"] = "text";
+      evidence["text"] = text;
+      evidence["graphSummary"] = graphSummary;
+      evidence["metadata"] = nlohmann::json{{"source", "gateway-chat"}};
+      worldModel_->ingestEvidence(evidence);
+    } catch (...) {
+    }
+  }
+
   json chatWithTinyllama(const std::string &text,
                          const std::string &graphContext,
                          int maxTokens,
-                         const json &options = json::object());
-  void setWorldModelDatabase(std::shared_ptr<Database079> db);
+                         const json &options = json::object()) {
+    int summaryTimeoutMs =
+        phoenix::cfgOr<int>("tinyllama.summaryTimeoutMs", 5000);
+    return chatWithExternalAdapter(
+        "tinyllama", config_.tinyllamaBaseUrl, config_.tinyllamaModel,
+        summaryTimeoutMs, text, graphContext, maxTokens, options);
+  }
 
   GatewayServer(std::shared_ptr<ControllerPoolBase> pool,
                 std::shared_ptr<ISnapshotManager> snapshots,
@@ -85,6 +125,23 @@ public:
       logger_.log(LoggerCXX::Type::MONITORING,
                   "memebarrier disabled by config");
     }
+
+    try {
+      phoenix::v7::AsyncTaskSystem::global().start();
+    } catch (...) {}
+
+    try {
+      auto aheadCfgJson = phoenix::cfgOr<nlohmann::json>("v7.ahead", nlohmann::json::object());
+      auto aheadCfg = phoenix::v7::AheadConfig::fromJson(aheadCfgJson);
+      aheadModule_ = std::make_unique<phoenix::v7::AheadModule>(aheadCfg);
+      if (!aheadModule_->initialize())
+        aheadModule_.reset();
+      else if (logger_.enabled())
+        logger_.log(LoggerCXX::Type::MONITORING, "ahead module initialized");
+    } catch (...) {
+      aheadModule_.reset();
+    }
+
     setupRoutes();
   }
 
@@ -313,6 +370,7 @@ public:
 
 private:
   phoenix::conceptmatrix::ConceptMatrix conceptMatrix_;
+  std::shared_ptr<world_model::WorldModelStore> worldModel_;
 
   struct RouteMetric {
     uint64_t calls{0};
@@ -408,6 +466,8 @@ private:
   } dialogThresholds_;
   bool releaseSnapshotLogged_{false};
 
+  std::unique_ptr<phoenix::v7::AheadModule> aheadModule_;
+
   struct CognitionPack {
     std::string context;
     nlohmann::json inferenceOptions;
@@ -437,6 +497,20 @@ private:
         auto prev = cognitionMemory_.get("cognition:" + sessionId);
         if (prev)
           worldState["previousCognition"] = *prev;
+        if (worldModel_) {
+          try {
+            auto wmState = worldModel_->sessionState(sessionId, 8);
+            if (wmState.value("ok", false)) {
+              worldState["worldModelState"] = wmState;
+              world_model::PromptContextOptions wmOpts;
+              wmOpts.maxRecentEvidence = 3;
+              wmOpts.maxSummaryChars = 220;
+              pack.context = world_model::mergePromptContext(pack.context, wmState, wmOpts);
+              worldState["graphContext"] = pack.context;
+            }
+          } catch (...) {
+          }
+        }
       }
       auto obs = cognitionManager_.observe(observePayload, worldState);
       if (!obs.value("ok", false))
@@ -623,8 +697,15 @@ private:
       previousSpace = false;
     }
     auto trimmed = trimText(out);
-    if (trimmed.size() > dataCleanMaxChars_) {
-      trimmed.resize(dataCleanMaxChars_);
+    if (trimmed.size() > (size_t)dataCleanMaxChars_) {
+      size_t cut = (size_t)dataCleanMaxChars_;
+      while (cut > 0 &&
+             (static_cast<unsigned char>(trimmed[cut]) & 0xC0) == 0x80)
+        --cut;
+      if (cut == 0)
+        cut =
+            (size_t)dataCleanMaxChars_; // fall back to raw cut if no boundary found
+      trimmed.resize(cut);
       changed = true;
     }
     if (trimmed != raw)

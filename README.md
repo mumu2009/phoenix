@@ -23,10 +23,10 @@ A set of facilities based on LLM, which can efficiently boost the speed and accu
 
 ### Inference Backends
 - **Ollama** — standard and fine-tuning adapter modes (`ollama`, `ollama-fine-tuning`)
-- **llama.cpp / llama-server** — GGUF model server with LoRA adapter support (`llamacpp-lora-files`, `llamacpp-lora-init-without-apply`)
+- **llama.cpp / llama-server** — GGUF / OLLAMA raw blob model server with LoRA adapter support (`llamacpp-lora-files`, `llamacpp-lora-init-without-apply`); split-Backend mode (`llamaUseSplitBackend`) exposes `enc`/`infer`/`dec` as unit-query (hidden-state) endpoints
 - **BitNet** — 1-bit quantized GGUF inference adapter
 - **Native built-in Transformer** — self-contained transformer with checkpoint save/load, pre-training, joint GNN+Transformer training, and GA optimization
-- **Auto-selection** — if only one `.gguf` is in `GGUF_models/` the backend picks it automatically; multiple candidates require explicit `--llamacpp-model`
+- **Auto-selection** — if only one `.gguf` is in `GGUF_models/` the backend picks it automatically; OLLAMA raw blobs can be used by passing the blob path explicitly with `--llamacpp-model`
 
 ### Online Learning
 - **Reinforcement Learner (RL)** — learns from dialog outcomes; triggered every N dialogs (configurable `rlEvery`) or on-demand via `/api/learn/reinforce`
@@ -155,9 +155,10 @@ compile.bat
 ### Download a model
 
 ```powershell
-# Place .gguf models in GGUF_models/ (auto-detected if only one present)
+# Pull the 8B model with Ollama; it will be stored as a raw blob under GGUF_models/blobs/
 ollama pull llama3.1:8b
-# or download directly and place the .gguf file in GGUF_models/
+
+# Alternatively, place a .gguf file directly in GGUF_models/ (auto-detected if only one .gguf is present)
 ```
 
 ### Launch
@@ -167,8 +168,8 @@ ollama pull llama3.1:8b
 build_start_079_oneclick_exe.bat   # build launcher exe (once)
 start_079_oneclick.bat              # launch GUI
 
-# Or directly (llama.cpp backend)
-phoenix_main.exe --transformer-mode=llamacpp --llamacpp-model=GGUF_models/your_model.gguf
+# Or directly (llama.cpp backend, using the Ollama blob)
+phoenix_main.exe --transformer-mode=llamacpp --llamacpp-model=GGUF_models/blobs/sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29
 
 # Ollama backend
 phoenix_main.exe --transformer-mode=ollama --ollama-model=llama3.1:8b
@@ -230,7 +231,7 @@ GatewayServer (Drogon, :5080)
     │
     ├──► Transformer Backend (one of):
     │        ├── Ollama          → http://127.0.0.1:11434
-    │        ├── llama.cpp       → http://127.0.0.1:8080
+    │        ├── llama.cpp       → http://127.0.0.1:8082
     │        ├── BitNet          → http://127.0.0.1:8090
     │        └── Native built-in → in-process
     │

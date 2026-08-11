@@ -98,7 +98,7 @@ def wait_for_llama_server(port: int = 8084, timeout: float = 120.0) -> bool:
     return False
 
 
-def start_llm_backend(env: dict) -> tuple[subprocess.Popen, subprocess.Popen, subprocess.Popen]:
+def start_llm_backend(env: dict) -> tuple[subprocess.Popen, subprocess.Popen | None, subprocess.Popen, subprocess.Popen | None]:
     log("starting llama-server (llama-3.1-8b)")
     model = ROOT / "GGUF_models" / "blobs" / "sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29"
     llama = subprocess.Popen(
@@ -137,14 +137,33 @@ def start_llm_backend(env: dict) -> tuple[subprocess.Popen, subprocess.Popen, su
         stderr=open(ROOT / "build" / "tmp" / "ui_llama_proxy_err.log", "w", encoding="utf-8"),
         env=env,
     )
+
+    tinyllama_proxy = None
+    if tinyllama is not None:
+        log("starting llama_proxy (tinyllama)")
+        tinyllama_proxy = subprocess.Popen(
+            [str(ROOT / "Python314" / "python.exe"), str(ROOT / "tools" / "llama_proxy.py"),
+             "--proxy-port", "8086", "--backend-port", "8085"],
+            cwd=str(ROOT),
+            stdout=open(ROOT / "build" / "tmp" / "ui_tinyllama_proxy.log", "w", encoding="utf-8"),
+            stderr=open(ROOT / "build" / "tmp" / "ui_tinyllama_proxy_err.log", "w", encoding="utf-8"),
+            env=env,
+        )
+
     time.sleep(1)
-    return llama, tinyllama, proxy
+    return llama, tinyllama, proxy, tinyllama_proxy
 
 
 def start_phoenix() -> list[subprocess.Popen] | None:
     if phoenix_running():
         log("phoenix_main already running")
         return None
+    log("ensuring wikitext dataset is available")
+    subprocess.run(
+        [str(ROOT / "Python314" / "python.exe"), str(ROOT / "test-tools" / "ensure_wikitext.py")],
+        cwd=str(ROOT),
+        check=False,
+    )
     log("setting deployment by hardware before start")
     subprocess.run(
         [str(ROOT / "Python314" / "python.exe"), str(ROOT / "test-tools" / "set_deployment_by_hardware.py")],
@@ -157,12 +176,17 @@ def start_phoenix() -> list[subprocess.Popen] | None:
     env["JEPA_SPEECH_VARIANT"] = "speech_encoder"
     env["AI_LLAMACPP_BASE_URL"] = "http://127.0.0.1:8080"
     env["AI_LLAMACPP_MODEL"] = "GGUF_models\\blobs\\sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29"
-    env["AI_TINYLLAMA_BASE_URL"] = "http://127.0.0.1:8085"
+    env["AI_TINYLLAMA_BASE_URL"] = "http://127.0.0.1:8086"
     env["AI_TINYLLAMA_MODEL"] = "GGUF_models\\tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
     env["AI_TINYLLAMA_ENABLED"] = "true"
+    env["AI_HTTP_LOG"] = "false"
+    env["AI_DISABLE_LEARNING"] = "true"
+    env["AI_DISABLE_GNN_MODULE"] = "true"
+    env["AI_DISABLE_CONTEXT_MODULE"] = "true"
+    env["FRONTEND_SUMMARY_MODEL_ENABLED"] = "false"
     env["TMP"] = str(ROOT / "build" / "tmp")
     env["TEMP"] = env["TMP"]
-    llama, tinyllama, proxy = start_llm_backend(env)
+    llama, tinyllama, proxy, tinyllama_proxy = start_llm_backend(env)
     proc = subprocess.Popen(
         [str(ROOT / "phoenix_main.exe")],
         cwd=str(ROOT),
@@ -173,7 +197,12 @@ def start_phoenix() -> list[subprocess.Popen] | None:
     for _ in range(60):
         if phoenix_running():
             log("phoenix_main ready")
-            return [llama, proxy, proc]
+            procs = [llama, proxy, proc]
+            if tinyllama is not None:
+                procs.append(tinyllama)
+            if tinyllama_proxy is not None:
+                procs.append(tinyllama_proxy)
+            return procs
         time.sleep(1)
     raise RuntimeError("phoenix_main did not become ready")
 
