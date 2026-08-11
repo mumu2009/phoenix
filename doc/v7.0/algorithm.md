@@ -568,3 +568,262 @@ frontend_server.cpp 路由处理
                              v
                        输出到用户/执行器
 ```
+
+---
+
+## 13. aheadModule：多模态前置编码与并行摘要算法（v7.0 目标）
+
+> `aheadModule` 是 GNN 之前所有预处理逻辑的**概念名**（详见 `workflow.md` 文件头与 §0），本节给出其内部算法。当前代码中对应 `external_mixed_modal_io`、`jepa_v2_image_world_model`、`jepa_v2_speech_world_model`、`transformer::TransformerTextEncoder`、`TorchTextModels`、`PrimalSensationEngine`/`InstinctEngine` 的组合调用。
+
+### 13.1 输入编码调度
+
+```text
+aheadModule.process(rawInputs: {text?, image?, audio?, video?, sensor?}) -> AheadOutput:
+    units = []
+    if rawInputs.text present:
+        // 文本编码器可直接复用 llama3.1 8b 自带的 embedding/encoder 部分，
+        // 避免为文本单独训练一个语义空间；仅在需要跨模态对齐时才投影到统一维度。
+        textVec = llama3_1_embedding_lookup(tokenizer.encode(rawInputs.text))
+        units.append(SemanticUnit(modality=Text, vector=projectToDimension(textVec, D)))
+    if rawInputs.image or rawInputs.video present:
+        units.append(MixedModalConceptBridge.encode(image/video packet, D))   // JepaV2ImageWorldModel
+    if rawInputs.audio present:
+        units.append(MixedModalConceptBridge.encode(audio packet, D))        // JepaV2SpeechWorldModel
+    if rawInputs.sensor present:
+        units.append(mediaConcept(sensor payload, D, sensorSeed))
+
+    // 情感观测（与编码并行，不阻塞编码结果）
+    submit_async(EmotionQueue, task=observe(rawInputs, internalState))
+
+    memorySummary = MemoryModule.summarize(units, priorContext)   // 见 §13.2
+    return AheadOutput(units, memorySummary)
+```
+
+要点：
+
+- 文本路径优先复用 llama3.1 8b 自带 tokenizer/embedding，只有当需要与图像/音频等其它模态做 `fuseAttention`/`fuseAdd` 融合时，才调用 `projectToDimension` 对齐到统一的跨模态维度 `D`（沿用 §2.2 的投影矩阵机制），这样不需要为文本重新训练单独的编码器。
+- 图像/音频编码器（`JepaV2ImageWorldModel` / `JepaV2SpeechWorldModel`）保持现状：由 aheadModule 内部持有和调度，对上层（GNN、Backend）只暴露 `SemanticUnit`。
+- 情感观测被显式建模为**异步子任务**，提交到 §16 的 Emotion 队列，不在编码主路径上同步等待。
+
+### 13.2 记忆模块：RNN/LSTM/Transformer 摘要 + 并行双分支
+
+```text
+MemoryModule.summarize(units, priorContext) -> Summary:
+    // 三种摘要器按配置择一或级联：RNN/LSTM（TorchTextModels）用于长历史压缩，
+    // Transformer（TinyLlama/SummaryModel）用于短程语义摘要
+    hiddenState = RNNLSTM.encodeSequence(priorContext.tokens + units.textLike())
+    summaryText = TransformerSummary.generate(hiddenState, units, maxTokens)
+    summary = Summary(text=summaryText, vector=hiddenState.pooled(), ts=now())
+
+    // 关键：摘要只计算一次，随后 fan-out 到两个独立、只读的下游任务，
+    // 二者互不等待（对应 workflow.md §2.1 的 par...and...end）
+    submit_async(BackendQueue,  task=deliverToBackend(summary.readOnlyView()))
+    submit_async(GnnQueue,      task=deliverToGnnMemeBarrier(summary.readOnlyView()))
+
+    return summary
+```
+
+`deliverToBackend` 将摘要拼入 `MemoryPrompt.summary`（复用 `PromptComposer`）；`deliverToGnnMemeBarrier` 将摘要向量作为 `MemeGraph::query` 的检索 key。两个任务在提交时即产生各自的 `summary.readOnlyView()`（不可变引用/深拷贝），从算法层面保证互不阻塞、无共享可变状态。
+
+### 13.3 句子生成模块（TinyLlama 等）输出的双副本分发
+
+```text
+SentenceGenerator.onGenerated(text) -> void:
+    view = ImmutableTextView(text)   // 只读视图，两分支共享同一份底层缓冲，仅持有权不同
+    submit_async(BackendQueue, task=appendToNextPrompt(view))
+    submit_async(GnnQueue,     task=memeBarrierScanAndMaybeWriteback(view))
+    // 不在此处 join/wait；两个 task 各自独立完成，互不感知对方进度
+```
+
+这与 v6.0 现有的“TinyLlama 摘要 -> 拼入 prompt -> 调主 LLM”**串行**链路（见 `workflow.md` §2 步骤 8-9）是不同的目标状态：v7.0 要求生成文本对 Backend（下一轮 prompt）和对 MemeBarrier（安全检查/写回 GNN）是两条并行任务，而不是前者完成后才触发后者。
+
+---
+
+## 14. Backend：llama3.1 8b 的 enc / inference / dec 拆分算法
+
+对应 `workflow.md` §0.4、§15。
+
+### 14.1 编译期：tracked patch 应用
+
+```text
+build_backend():
+    fetch llama.cpp submodule/vendor source
+    apply_patch("patches/llama_server_phoenix_v7.patch")   // 版本化、可追踪，随仓库提交
+        // patch 内容示例（目标，非最终 API）：
+        //   - 暴露 forward 过程中的逐层 hidden state 回调（emotion 钩子的前置条件）
+        //   - 暴露采样前 logits 数组，供 logit-bias 注入
+        //   - 暴露可配置的 embedding 输入接口（供 enc 段直接注入语义向量而非仅 token id）
+    cmake --build . --target llama-server
+    // 产物：patched llama-server 二进制，供 inference 段以子进程/库形式调用
+```
+
+### 14.2 运行期三段调用
+
+```text
+Backend.run(request):
+    // enc
+    if request.hasPrecomputedEmbedding:
+        embedding = request.embedding                 // 来自 aheadModule 的跨模态对齐向量
+    else:
+        tokenIds = tokenizer.encode(request.text)
+        embedding = enc.lookup(tokenIds)                // token embedding 查表
+
+    // inference（patched llama-server 主体）
+    emotionPromptFragment = Emotion.renderPromptModulation()
+    hiddenState = inference.forward(embedding, prompt=systemPrompt+memoryPrompt+emotionPromptFragment+userPrompt)
+
+    // dec
+    if request.modality == Text:
+        logits = dec.lmHead(hiddenState)
+        logits = logits + Emotion.logitBias(request)    // 见 §15
+        token = sample(logits, temperature=Emotion.temperature(request), top_p=Emotion.topP(request))
+        return TextOutput(token)
+    else:  // audio / video
+        conceptVector = dec_av.projectFromHidden(hiddenState)    // 运行期代码，非 .gguf 权重
+        payload = dec_av.decode(conceptVector, targetMimeType)   // 见 jepa_v2_*_world_model::decode
+        return MediaOutput(payload)
+```
+
+要点：
+
+- `dec_av`（音视频 `dec`）不依赖 `.gguf`：其权重来自 `runtime_store/models/{ijepa,additive_jepa}/...`，由 `jepa_v2_image_world_model.cpp` / `jepa_v2_speech_world_model.cpp` 的 `decode()` 实现，属于 Phoenix 自己训练/维护的解码器，不与主 LLM 权重一起分发，因此文档与代码都不能假设它随 `.gguf` 一起提交。
+- `enc` 支持"预计算 embedding 直接注入"是为了让 aheadModule 产出的跨模态语义向量可以绕过 tokenizer，直接进入 llama 的隐藏空间，减少多模态到文本的重复转换。
+
+---
+
+## 15. 情感对 Backend 的影响算法：Prompt 调制 / Logit Bias / Temperature
+
+对应 `workflow.md` §0.5。三种机制均**不需要**修改或乘以 Backend 的权重矩阵，只作用于 prompt 文本、采样前 logits、采样超参数三个天然可控的接口。
+
+### 15.1 情感状态到三通道参数的映射
+
+```text
+EmotionState = {valence, arousal, dominance, trust, joy, fear, anger, surprise}   // 复用现有 driveVector 8 维定义
+
+Emotion.renderPromptModulation(state) -> string:
+    // 参考 CTRL 式控制码前缀，将情感状态压缩为简短自然语言标签，拼入 MemoryPrompt
+    label = classifyToneLabel(state)          // 例如 valence>0.3 & arousal>0.3 -> "engaged/positive"
+    return "[Tone:" + label + " driveVector=" + json(state) + "]"
+
+Emotion.logitBias(state, vocab) -> map<tokenId, float>:
+    // 参考 PPLM / DExperts 的解码期引导：为情感相关词簇加/减一个与强度成比例的偏置
+    bias = {}
+    for group, direction in EMOTION_TOKEN_GROUPS(state):     // 例如 fear 高 -> 谨慎用语词簇 +bias
+        strength = clamp(state[direction.dim] * direction.sign, -1, 1)
+        for tokenId in group.tokenIds:
+            bias[tokenId] = direction.scale * strength
+    return bias
+
+Emotion.temperature(state) -> float:
+    // arousal 越高，采样越发散；dominance 越高，越倾向确定性表达（略降 temperature）
+    base = config.sampler.baseTemperature   // 默认沿用现有采样默认值
+    return clamp(base + 0.5 * state.arousal - 0.2 * state.dominance, 0.1, 1.5)
+
+Emotion.topP(state) -> float:
+    return clamp(0.9 + 0.05 * state.arousal, 0.5, 1.0)
+```
+
+### 15.2 依据说明（避免"发明 API"，标注证据来源）
+
+| 通道 | 依据 | 说明 |
+|---|---|---|
+| Prompt 调制 | CTRL（Keskar et al., 2019, "CTRL: A Conditional Transformer Language Model for Controllable Generation"） | 用可读的控制标签/前缀条件化生成风格，是目前最常见、零侵入的可控生成方式；已被 `PromptComposer`/`MemoryPrompt` 部分实现（`benefitHarmBias`）。 |
+| Logit Bias | PPLM（Dathathri et al., 2020）、DExperts（Liu et al., 2021） | 在采样前对 logits 做外部引导修正，不需要重训或反向传播进主模型权重；llama.cpp/llama-server 原生支持 `logit_bias` 请求参数，可直接复用。 |
+| Temperature/Top-p | 标准自回归采样超参数（Holtzman et al., 2020, "The Curious Case of Neural Text Degeneration"） | 温度/核采样对输出的"发散度"有良好实证支持，用唤醒度映射温度是对现有采样接口的复用，零新增推理开销。 |
+
+### 15.3 端到端算法
+
+```text
+onGenerateRequest(request):
+    state = Emotion.observe(request.rawInput, InternalState.current())
+    state = Emotion.applySentimentModulation(state, aheadModule.sentimentFeatures(request))
+
+    promptFragment = Emotion.renderPromptModulation(state)
+    request.prompt = compose(systemPrompt, memoryPrompt, promptFragment, userPrompt)
+
+    logitsBiasMap = Emotion.logitBias(state, vocab)
+    samplerParams = { temperature: Emotion.temperature(state), top_p: Emotion.topP(state), logit_bias: logitsBiasMap }
+
+    return Backend.run(request, samplerParams)   // 见 §14.2
+```
+
+`Emotion.applySentimentModulation` 对应需求中 "sentiment/aheadModule 对情感进行调制"：aheadModule 抽取的语义/情绪线索（如文本情感极性、语调特征）作为额外调制项叠加到情感状态上，而不是替代 `PrimalSensationEngine`/`InstinctEngine` 的既有计算（见 §7）。
+
+---
+
+## 16. 异步任务系统：per-module 优先级队列 + work-stealing 线程池
+
+对应 `workflow.md` §0.6、§16。
+
+### 16.1 数据结构
+
+```text
+struct Task {
+    ModuleId module;         // AheadModule | Gnn | MemeBarrier | Backend | OutputDecoder | AsyncSidecar
+    int priority;            // 数值越小优先级越高；MemeBarrier 默认最高，AsyncSidecar 默认最低
+    uint64_t submitTimeMs;
+    function<void()> fn;
+}
+
+struct ModuleQueue {
+    ModuleId owner;
+    priority_queue<Task> local;     // 按 (priority, submitTimeMs) 排序的本地队列
+    mutex localMutex;               // 仅在跨线程 push/steal 时短暂持锁
+}
+
+struct WorkerThread {
+    int id;
+    ModuleQueue* affinity;          // 优先服务的队列（可为空 = 无固定归属，纯 stealer）
+}
+```
+
+### 16.2 调度循环
+
+```text
+worker_loop(worker):
+    while not shuttingDown:
+        task = try_pop(worker.affinity)              // 先服务自己归属的队列
+        if task is None:
+            task = steal_from_any_queue_tail(exclude=worker.affinity)   // 从其他队列"尾部"偷取，
+                                                                          // 避免和该队列自己的 pop（从"头部"）竞争同一端
+        if task is not None:
+            execute(task)
+        else:
+            exponential_backoff_park(maxMs=cfg.asyncPool.parkMaxMs)      // 短暂休眠，避免忙等
+```
+
+### 16.3 提交 API（供各模块调用）
+
+```text
+submit_async(queueId, fn, priority=default_priority_of(queueId)):
+    task = Task(module=queueId, priority=priority, submitTimeMs=now(), fn=fn)
+    ModuleQueue[queueId].push(task)     // O(log n) 入堆
+    wake_one_idle_worker()               // 避免所有 worker 都在 park 时任务无人处理
+```
+
+### 16.4 默认优先级建议（数值越小越先执行）
+
+| 模块队列 | 默认优先级 | 理由 |
+|---|---|---|
+| MemeBarrier | 0（最高） | 安全过滤属于关键路径，且执行时间通常很短，应尽快完成，避免不安全内容意外被下游消费。 |
+| Backend（enc/inference/dec） | 1 | 用户可感知的主路径延迟来源，需要稳定的调度优先级，但允许被 MemeBarrier 抢占。 |
+| GNN | 1 | 与 Backend 同级：图检索通常快于 LLM 推理，实际等待时间由任务本身耗时决定，不需要额外降级。 |
+| aheadModule（编码/摘要/情感） | 2 | 属于请求路径的前置步骤，但相对 Backend/GNN 结果的最终呈现不是瓶颈时可适度降级。 |
+| 输出/音视频解码 | 2 | 生成结果确定后才触发，允许与前置编码共享中等优先级资源。 |
+| 异步旁路（学习/工具/持久化） | 3（最低） | 允许被无限期推迟，只要不造成无界内存增长（见 16.5）。 |
+
+### 16.5 背压与公平性
+
+```text
+// 防止低优先级队列（AsyncSidecar）无限堆积
+if ModuleQueue[AsyncSidecar].size() > cfg.asyncPool.maxBacklog:
+    drop_oldest_or_coalesce(ModuleQueue[AsyncSidecar])   // 例如合并连续的"重新计算摘要"任务
+
+// 防止某个高优先级队列长期饿死其它队列的 steal 机会
+every N scheduling rounds:
+    force_round_robin_steal_attempt()   // 定期强制尝试从每个队列偷一次，避免饿死
+```
+
+### 16.6 与 GNN-GA / RL / ADV 等既有异步学习管线的关系
+
+现有 `ReinforcementLearner`、`AdversarialLearner`、`GNNGALearner`（见 `workflow.md` §8）天然属于 §0.6 图中的“异步旁路（学习/工具/持久化）”队列，只需在 `onDialogCompleted` 等触发点改为 `submit_async(AsyncSidecar, ...)`，即可复用同一套 work-stealing 线程池，无需为学习管线单独维护调度逻辑。

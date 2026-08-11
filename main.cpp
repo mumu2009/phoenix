@@ -46,6 +46,10 @@ typedef int sockopt_len_t;
 using ioctl_arg_t = unsigned long;
 #endif
 
+#include "ahead_module.hpp"
+#include "async_task_system.hpp"
+#include "module_overrides/llama_split_backend_client.hpp"
+
 #include "main_hub_parts/000_section_before_config.inc"
 #include "main_hub_parts/001_struct_config.inc"
 #include "main_hub_parts/002_section_before_sharedmemoryslice.inc"
@@ -157,6 +161,7 @@ using ioctl_arg_t = unsigned long;
 #include "main_hub_parts/108_section_before_gatewaycontextservice.inc"
 #include "main_hub_parts/109_class_gatewaycontextservice.inc"
 #include "concept_matrix.hpp"
+#include "world_model.hpp"
 #include "main_hub_parts/110_section_before_gatewayserver.inc"
 #include "main_hub_parts/111_class_gatewayserver.inc"
 #include "main_hub_parts/112_section_before_contexthint.inc"

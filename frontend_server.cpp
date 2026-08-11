@@ -906,7 +906,8 @@ namespace
         int dim{128};
         int minCount{2};
         int window{4};
-        size_t maxFiles{400};
+        size_t maxFiles{2};
+        size_t maxBytes{1048576};
         int maxVocab{3000};
         fs::path robotsDir;
         std::unordered_map<std::string, int> wordToId;
@@ -922,7 +923,7 @@ namespace
         // 调用方式：系统初始化时调用。
         // 实现思路：仅更新路径和上限参数，不立即训练。
         // 注意事项：目录应包含可读取 txt 文件。
-        void setCorpus(const fs::path &dir, size_t maxFilesIn = 400)
+        void setCorpus(const fs::path &dir, size_t maxFilesIn = 2)
         {
             robotsDir = dir;
             maxFiles = maxFilesIn;
@@ -1038,7 +1039,16 @@ namespace
                     if (!in)
                         continue;
                     std::ostringstream ss;
-                    ss << in.rdbuf();
+                    constexpr size_t bufSize = 8192;
+                    char buf[bufSize];
+                    size_t read = 0;
+                    while (in && read < maxBytes)
+                    {
+                        size_t toRead = std::min(bufSize, maxBytes - read);
+                        in.read(buf, static_cast<std::streamsize>(toRead));
+                        ss.write(buf, in.gcount());
+                        read += static_cast<size_t>(in.gcount());
+                    }
                     auto tokens = Tokenizer::tokenize(ss.str());
                     if (!tokens.empty())
                     {
@@ -2921,10 +2931,35 @@ namespace
         TorchGRU gru{nullptr};
         TorchLSTM lstm{nullptr};
 
-        void initFromCorpus(const fs::path &robotsDir, int maxFiles)
+        void initFromCorpus(const fs::path &robotsDir, const fs::path &wikitextPath,
+                            int maxFiles, int maxPretrainLines)
         {
             std::unordered_map<std::string, int> freq;
             std::vector<std::vector<std::string>> samples;
+
+            // 优先使用 wikitext-103-all.txt 对记忆网络 RNN/LSTM 做预训练，
+            // 限制行数以避免启动时 tokenize 超大文件导致首次聊天阻塞。
+            if (fs::exists(wikitextPath) && maxPretrainLines > 0)
+            {
+                std::ifstream in(wikitextPath, std::ios::binary);
+                if (in)
+                {
+                    std::string line;
+                    int lineCount = 0;
+                    while (std::getline(in, line) && lineCount < maxPretrainLines)
+                    {
+                        line.erase(0, line.find_first_not_of(" \t\r\n"));
+                        if (line.size() < 10) continue;
+                        auto tokens = Tokenizer::tokenize(line);
+                        if (!tokens.empty())
+                            samples.push_back(tokens);
+                        for (const auto &t : tokens)
+                            freq[t] += 1;
+                        ++lineCount;
+                    }
+                }
+            }
+
             if (fs::exists(robotsDir))
             {
                 int fileCount = 0;
@@ -2933,6 +2968,9 @@ namespace
                     if (!entry.is_regular_file())
                         continue;
                     if (entry.path().extension() != ".txt")
+                        continue;
+                    // wikitext 大文件已经单独处理过，避免重复读取。
+                    if (maxPretrainLines > 0 && fs::equivalent(entry.path(), wikitextPath))
                         continue;
                     std::ifstream in(entry.path(), std::ios::binary);
                     if (!in)
@@ -3094,7 +3132,8 @@ namespace
             embeddings_.window = std::max(1, resolveConfig<int>("context.embeddings.window", 4, "FRONTEND_EMB_WINDOW"));
             embeddings_.minCount = std::max(1, resolveConfig<int>("context.embeddings.minCount", 2, "FRONTEND_EMB_MIN_COUNT"));
             embeddings_.maxVocab = std::max(200, resolveConfig<int>("context.embeddings.maxVocab", 3000, "FRONTEND_EMB_MAX_VOCAB"));
-            embeddings_.setCorpus(robotsDir, (size_t)std::max(10, resolveConfig<int>("context.embeddings.maxFiles", 400, "FRONTEND_EMB_MAX_FILES")));
+            embeddings_.maxBytes = (size_t)std::max(0, resolveConfig<int>("context.embeddings.maxBytes", 1048576, "FRONTEND_EMB_MAX_BYTES"));
+            embeddings_.setCorpus(robotsDir, (size_t)std::max(0, resolveConfig<int>("context.embeddings.maxFiles", 2, "FRONTEND_EMB_MAX_FILES")));
 #ifdef HAVE_TORCH
             if (useTorchModels_)
             {
@@ -3104,6 +3143,7 @@ namespace
                 torchModels_.epochs = std::max(1, resolveConfig<int>("context.torch.epochs", 4, "FRONTEND_TORCH_EPOCHS"));
                 torchModels_.batch = std::max(4, resolveConfig<int>("context.torch.batch", 16, "FRONTEND_TORCH_BATCH"));
                 maxTorchFiles_ = std::max(10, resolveConfig<int>("context.torch.maxFiles", 240, "FRONTEND_TORCH_MAX_FILES"));
+                maxTorchPretrainLines_ = std::max(0, resolveConfig<int>("context.torch.pretrainLines", 2000, "FRONTEND_TORCH_PRETRAIN_LINES"));
             }
 #endif
 
@@ -4053,7 +4093,14 @@ namespace
             std::atomic<bool> failed{false};
             std::mutex mu;
             std::string checkpointPath;
-            int maxSummaryTokens{32};  // 环境变量 FRONTEND_SUMMARY_MAX_TOKENS 控制，初始值 32，后期实验确定
+            int maxSummaryTokens{32};
+
+            // v7.0: use TinyLlama as the summary sentence generator instead of
+            // training a local transformer from WikiText.  Local training is
+            // still available as a fallback when useTinyllama_ is false.
+            bool useTinyllama_{true};
+            std::string tinyllamaBaseUrl_{"http://127.0.0.1:8086"};
+            int tinyllamaTimeoutMs_{5000};
 
             SummaryModel()
             {
@@ -4077,10 +4124,27 @@ namespace
                     phoenix::cfgOr<std::string>("summary_model.tokenizerMode", std::string("bpe"));
                 maxSummaryTokens = std::max(8, resolveConfig<int>("summary_model.maxTokens", 32, "FRONTEND_SUMMARY_MAX_TOKENS"));
                 checkpointPath = resolveConfig<std::string>("summary_model.checkpointPath", std::string("runtime_store/summary_model.json"), "FRONTEND_SUMMARY_CHECKPOINT");
+
+                useTinyllama_ = resolveConfig<bool>("summary_model.useTinyllama", true, "FRONTEND_SUMMARY_USE_TINYLLAMA");
+                tinyllamaBaseUrl_ = resolveConfig<std::string>("tinyllama.baseUrl", std::string("http://127.0.0.1:8086"), "AI_TINYLLAMA_BASE_URL");
+                while (!tinyllamaBaseUrl_.empty() && tinyllamaBaseUrl_.back() == '/')
+                    tinyllamaBaseUrl_.pop_back();
+                tinyllamaTimeoutMs_ = std::max(1000, resolveConfig<int>("tinyllama.timeoutMs", 5000, "AI_TINYLLAMA_TIMEOUT_MS"));
             }
 
             bool tryLoadCheckpoint()
             {
+                if (useTinyllama_)
+                {
+                    if (tinyllamaBaseUrl_.empty())
+                    {
+                        failed = true;
+                        return false;
+                    }
+                    ready = true;
+                    std::cout << "[summary] using tinyllama backend at " << tinyllamaBaseUrl_ << std::endl;
+                    return true;
+                }
                 try
                 {
                     std::ifstream f(checkpointPath);
@@ -4118,9 +4182,11 @@ namespace
             }
 
             // 从 wikitext 文件预训练（自回归 LM），再用伪摘要样本微调 seq2seq 组句能力。
+            // v7.0: 默认走 tinyllama，本地训练只在 useTinyllama_=false 时生效。
             void trainAsync(const fs::path &wikitextPath, const std::vector<std::string> &dialogueSamples,
                             int pretrainLines, int epochs)
             {
+                if (useTinyllama_) return;
                 if (ready || failed) return;
                 std::cout << "[summary] starting async pretraining from " << wikitextPath << std::endl;
                 {
@@ -4205,6 +4271,8 @@ namespace
             std::string generateSummary(const std::string &keywords)
             {
                 if (!ready || failed || keywords.empty()) return "";
+                if (useTinyllama_)
+                    return generateSummaryFromTinyllama(keywords);
                 try
                 {
                     std::lock_guard<std::mutex> lk(mu);
@@ -4221,6 +4289,84 @@ namespace
                     return result;
                 }
                 catch (...) { return ""; }
+            }
+
+            // 调用 TinyLlama 为关键词生成一句自然语言摘要。
+            std::string generateSummaryFromTinyllama(const std::string &keywords)
+            {
+                if (tinyllamaBaseUrl_.empty())
+                    return "";
+                try
+                {
+                    auto client = drogon::HttpClient::newHttpClient(tinyllamaBaseUrl_);
+                    if (!client)
+                        return "";
+
+                    nlohmann::json payload = {
+                        {"model", "tinyllama"},
+                        {"stream", false},
+                        {"messages",
+                         nlohmann::json::array({{{"role", "user"},
+                                                 {"content",
+                                                  std::string("请用一句话总结以下关键词：\n") + keywords}}})},
+                        {"options",
+                         nlohmann::json{{"num_predict", maxSummaryTokens},
+                                        {"temperature", 0.3}}}};
+
+                    auto req = drogon::HttpRequest::newHttpRequest();
+                    req->setMethod(drogon::Post);
+                    req->setPath("/api/chat");
+                    req->setContentTypeCode(drogon::ContentType::CT_APPLICATION_JSON);
+                    req->setBody(payload.dump());
+
+                    std::promise<std::string> p;
+                    auto fut = p.get_future();
+                    client->sendRequest(req, [&p](drogon::ReqResult result, const drogon::HttpResponsePtr &resp) {
+                        if (result != drogon::ReqResult::Ok || !resp)
+                        {
+                            p.set_value("");
+                            return;
+                        }
+                        auto body = resp->getBody();
+                        std::string bodyStr(body.data(), body.data() + body.length());
+                        try
+                        {
+                            auto j = nlohmann::json::parse(bodyStr);
+                            if (j.contains("message") && j["message"].is_object() &&
+                                j["message"].contains("content") && j["message"]["content"].is_string())
+                            {
+                                std::string reply = j["message"]["content"].get<std::string>();
+                                // 截断到第一个句末标点，确保返回完整句子
+                                size_t dotPos = reply.find_first_of(".!?。！？");
+                                if (dotPos != std::string::npos)
+                                    reply = reply.substr(0, dotPos + 1);
+                                reply.erase(0, reply.find_first_not_of(" \t\r\n"));
+                                p.set_value(reply);
+                            }
+                            else
+                            {
+                                p.set_value("");
+                            }
+                        }
+                        catch (...)
+                        {
+                            p.set_value("");
+                        }
+                    });
+
+                    if (fut.wait_for(std::chrono::milliseconds(tinyllamaTimeoutMs_)) == std::future_status::ready)
+                        return fut.get();
+                    return "";
+                }
+                catch (const std::exception &ex)
+                {
+                    std::cerr << "[summary] tinyllama call failed: " << ex.what() << std::endl;
+                    return "";
+                }
+                catch (...)
+                {
+                    return "";
+                }
             }
         };
 
@@ -4243,6 +4389,7 @@ namespace
         bool useTorchModels_{false};
         fs::path robotsDir_;
         int maxTorchFiles_{240};
+        int maxTorchPretrainLines_{0};
         std::once_flag torchInitOnce_;
         // 异步流水线系统：各层独立处理不阻塞
         PipelineStage embeddingStage_;    // embedding计算阶段
@@ -4259,7 +4406,10 @@ namespace
             if (!useTorchModels_)
                 return;
             std::call_once(torchInitOnce_, [this]()
-                           { torchModels_.initFromCorpus(robotsDir_, maxTorchFiles_); });
+                           {
+                               fs::path wikitextPath = robotsDir_ / "wikitext-103-all.txt";
+                               torchModels_.initFromCorpus(robotsDir_, wikitextPath, maxTorchFiles_, maxTorchPretrainLines_);
+                           });
 #endif
         }
     };

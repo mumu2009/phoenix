@@ -1,8 +1,7 @@
 const API_BASE = process.env.REACT_APP_API_BASE || '';
 const OPENCLAW_CHAT_PATH = process.env.REACT_APP_OPENCLAW_CHAT_PATH || '/openclaw/chat';
 const DEFAULT_CHAT_PROVIDER = process.env.REACT_APP_CHAT_PROVIDER || 'core';
-const REQUEST_TIMEOUT_MS = Number(process.env.REACT_APP_REQUEST_TIMEOUT_MS || 120000);
-
+const REQUEST_TIMEOUT_MS = Number(process.env.REACT_APP_REQUEST_TIMEOUT_MS || 300000);
 const TOKEN_KEY = 'phoenix_auth_token';
 
 export function getAuthToken() {

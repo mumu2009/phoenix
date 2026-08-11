@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cmath>
 #include <functional>
+#include <sstream>
 
 namespace phoenix {
 namespace conceptmatrix {
