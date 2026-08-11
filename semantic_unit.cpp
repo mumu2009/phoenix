@@ -117,6 +117,7 @@ nlohmann::json SemanticUnit::toJson() const {
   j["id"] = id;
   j["modality"] = modalityToString(modality);
   j["semanticVector"] = semanticVector;
+  j["unitQuerySequence"] = unitQuerySequence;
   j["content"] = content;
   j["confidence"] = confidence;
   j["timestampMs"] = timestampMs;

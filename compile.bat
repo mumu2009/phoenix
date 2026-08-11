@@ -45,6 +45,43 @@ where conan >nul 2>&1 || (
 
 if not exist "build" mkdir "build"
 
+echo [STEP] Rebuild llama-server (enc/infer/dec split)
+REM Best-effort: keep outsides\llamacpp's llama-server / llama-cli in sync
+REM with the tracked patches under llama_server_mods\ before compiling
+REM phoenix_main.exe. outsides\ is gitignored, so llama_server_mods\*.patch
+REM is the source of truth for these changes (see llama_server_mods\README.md).
+REM Failures here are non-fatal to the overall Phoenix build unless the
+REM caller explicitly opts in via PHOENIX_REQUIRE_LLAMA_SERVER=1.
+set "PHOENIX_LLAMA_SERVER_OK=1"
+if exist "%CD%\llama_server_mods\apply_patches.bat" (
+  call "%CD%\llama_server_mods\apply_patches.bat"
+  if errorlevel 1 (
+    echo [WARN] llama_server_mods\apply_patches.bat failed. Continuing with whatever is currently in outsides\llamacpp.
+    set "PHOENIX_LLAMA_SERVER_OK=0"
+  )
+) else (
+  echo [INFO] llama_server_mods\apply_patches.bat not found. Skipping llama.cpp patch step.
+)
+
+if exist "%CD%\llama_server_mods\build_llama_server.bat" (
+  call "%CD%\llama_server_mods\build_llama_server.bat"
+  if errorlevel 1 (
+    echo [WARN] llama_server_mods\build_llama_server.bat failed. phoenix_main.exe compilation will continue; llama-server.exe/llama.dll may be stale or missing.
+    set "PHOENIX_LLAMA_SERVER_OK=0"
+  )
+) else (
+  echo [INFO] llama_server_mods\build_llama_server.bat not found. Skipping llama-server rebuild.
+)
+
+if "%PHOENIX_LLAMA_SERVER_OK%"=="0" (
+  if /I "%PHOENIX_REQUIRE_LLAMA_SERVER%"=="1" (
+    echo [ERROR] PHOENIX_REQUIRE_LLAMA_SERVER=1 and the llama-server patch/build step failed. Aborting.
+    exit /b 1
+  ) else (
+    echo [WARN] Continuing overall Phoenix build despite llama-server patch/build issues ^(set PHOENIX_REQUIRE_LLAMA_SERVER=1 to make this fatal^).
+  )
+)
+
 echo [STEP] Stop stale runtime processes
 taskkill /IM phoenix_main.exe /F >nul 2>&1
 taskkill /IM bug_shooter.exe /F >nul 2>&1
@@ -265,7 +302,7 @@ set "OVERRIDE_SOURCES="
 if exist "module_overrides\*.cpp" set "OVERRIDE_SOURCES=module_overrides\*.cpp"
 set "COMPILE_CMD_FILE=%CD%\runtime_store\compile_last_command.txt"
 set "COMPILE_SOURCES_FILE=%CD%\build\compile_sources.txt"
-set "COMMON_SOURCES=transformer_main.cpp transformer_ollama_fine_tuning.cpp addon.cpp addons\builtin_registry.cpp addons\math_addon.cpp addons\search_addon.cpp addons\computer_shell_addon.cpp loggerCXX.cpp DATABASE_079.cpp frontend_server.cpp speak_io.cpp model_lifecycle.cpp autonomy_stack.cpp v51_runtime.cpp external_runtime.cpp edge_platform.cpp gguf_tensor_parser.cpp physics_world_runtime.cpp emotion_system.cpp llamacpp_emotion_adjuster.cpp plugin_system.cpp modern_context_system.cpp semantic_unit.cpp concept_matrix.cpp primal_sensation.cpp instinct.cpp prompt_split.cpp external_mixed_modal_io.cpp jepa_v2_image_world_model.cpp jepa_v2_speech_world_model.cpp graph_diffusion_summarizer.cpp hierarchical_memory.cpp model_deployment.cpp rdk_x5_bpu.cpp %BULLET3_EMBEDDED_SOURCES%"
+set "COMMON_SOURCES=transformer_main.cpp transformer_ollama_fine_tuning.cpp addon.cpp addons\builtin_registry.cpp addons\math_addon.cpp addons\search_addon.cpp addons\computer_shell_addon.cpp loggerCXX.cpp DATABASE_079.cpp frontend_server.cpp speak_io.cpp model_lifecycle.cpp autonomy_stack.cpp v51_runtime.cpp external_runtime.cpp edge_platform.cpp gguf_tensor_parser.cpp physics_world_runtime.cpp emotion_system.cpp llamacpp_emotion_adjuster.cpp plugin_system.cpp modern_context_system.cpp semantic_unit.cpp concept_matrix.cpp primal_sensation.cpp instinct.cpp prompt_split.cpp external_mixed_modal_io.cpp multimodal_world_model.cpp jepa_v2_image_world_model.cpp graph_diffusion_summarizer.cpp hierarchical_memory.cpp model_deployment.cpp rdk_x5_bpu.cpp %BULLET3_EMBEDDED_SOURCES%"
 :: Build a response file of source files to avoid Windows command-line length limits.
 :: GCC response files treat '\' as an escape character, so paths must use '/'.
 if not exist "%CD%\build" mkdir "%CD%\build"
@@ -282,12 +319,12 @@ if not "%OVERRIDE_SOURCES%"=="" (
         echo !src! >> "%COMPILE_SOURCES_FILE%"
     )
 )
-echo [CMD] "%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% main.cpp @"%COMPILE_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
+echo [CMD] "%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% -I"%CD%" main.cpp @"%COMPILE_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
 (
-  echo "%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% main.cpp @"%COMPILE_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
+  echo "%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% -I"%CD%" main.cpp @"%COMPILE_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
 ) > "%COMPILE_CMD_FILE%"
 echo [INFO] compile command saved: %COMPILE_CMD_FILE%
-"%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% main.cpp @"%COMPILE_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
+"%GXX_EXE%" -o phoenix_main.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% %OUTSIDES_LINK_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% -I"%CD%" main.cpp @"%COMPILE_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 %OUTSIDES_LINK_LIBS% -O3
 set "PHOENIX_COMPILE_RESULT=%errorlevel%"
 set "PHOENIX_NEW_BUILD=0"
 if %PHOENIX_COMPILE_RESULT% neq 0 (
