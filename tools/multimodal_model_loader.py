@@ -19,13 +19,30 @@ from pathlib import Path
 from typing import List, Optional
 
 
+def _has_checkpoint(path: Path) -> bool:
+    """Return True if the directory contains a real model weight file."""
+    try:
+        return any(
+            f.is_file()
+            and (
+                f.suffix == ".safetensors"
+                or f.name == "pytorch_model.bin"
+                or f.name == "model.onnx"
+                or (f.name.endswith(".pb") and "saved_model" not in f.name)
+            )
+            for f in path.rglob("*")
+        )
+    except Exception:
+        return False
+
+
 def _is_existing_dir(path: str) -> bool:
     p = Path(path)
     if not p.is_dir():
         return False
     # Require at least one file/folder so an empty placeholder is not accepted.
     try:
-        return any(p.iterdir())
+        return any(p.iterdir()) and _has_checkpoint(p)
     except Exception:
         return False
 
@@ -92,7 +109,9 @@ def _try_hf_download(repo_id: str, hf_endpoint: Optional[str]) -> Optional[str]:
             local_files_only=False,
             endpoint=hf_endpoint or None,
         )
-        return local_path
+        if local_path and _has_checkpoint(Path(local_path)):
+            return local_path
+        raise RuntimeError(f"HF download did not produce a checkpoint for {repo_id}")
     except Exception as e:
         if _is_connection_error(e):
             print(f"[model_loader] HF endpoint {hf_endpoint or 'default'} unreachable for {repo_id}: {e}")
@@ -108,15 +127,18 @@ def _try_hf_download(repo_id: str, hf_endpoint: Optional[str]) -> Optional[str]:
 
 
 def _try_hf_local_cache(repo_id: str, hf_endpoint: Optional[str]) -> Optional[str]:
-    """Return a cached path without any network access."""
+    """Return a cached path without any network access, but only if weights exist."""
     try:
         from huggingface_hub import snapshot_download
     except Exception:
         return None
     try:
-        return snapshot_download(repo_id, local_files_only=True, endpoint=hf_endpoint or None)
+        local_path = snapshot_download(repo_id, local_files_only=True, endpoint=hf_endpoint or None)
+        if local_path and _has_checkpoint(Path(local_path)):
+            return local_path
     except Exception:
-        return None
+        pass
+    return None
 
 
 def _try_modelscope_download(
@@ -133,11 +155,14 @@ def _try_modelscope_download(
     candidates = [repo_id] + list(aliases or [])
     for mid in candidates:
         try:
-            return ms_snapshot_download(
+            local_path = ms_snapshot_download(
                 mid,
                 local_files_only=False,
                 endpoint=endpoint or None,
             )
+            if local_path and _has_checkpoint(Path(local_path)):
+                return local_path
+            continue
         except Exception as e:
             if _is_connection_error(e):
                 print(f"[model_loader] ModelScope endpoint {endpoint or 'default'} unreachable for {mid}: {e}")

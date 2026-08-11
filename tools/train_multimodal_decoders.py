@@ -379,7 +379,7 @@ def griffin_lim(mel, n_iter=32, sr=AUDIO_SAMPLE_RATE, n_fft=N_FFT, hop=HOP_LENGT
     return y
 
 
-def export_to_onnx(model, dummy_input, path, opset=14):
+def export_to_onnx(model, dummy_input, path, opset=18):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(
         model,
@@ -473,7 +473,8 @@ def main():
             loss = 0.0
 
             if args.modality == "image":
-                pred = decoder(unit_queries)
+                decoder_input = unit_queries if args.decoder == "painter" else unit_query
+                pred = decoder(decoder_input)
                 loss = image_loss(pred, media)
             else:
                 pred_mel = decoder(unit_query).squeeze(1)  # [B, n_mels, T]
