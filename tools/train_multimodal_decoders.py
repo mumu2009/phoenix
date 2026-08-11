@@ -307,11 +307,11 @@ class AudioFolderDataset(Dataset):
         if isinstance(caption, dict):
             caption = caption.get("text", "")
         wave, sr = librosa.load(path, sr=AUDIO_SAMPLE_RATE, mono=True)
-        # normalize and store as 16-bit wav
-        wave = np.clip(wave, -1.0, 1.0)
-        pcm = (wave * 32767).astype(np.int16).tobytes()
+        # Send the original file bytes to the server (server expects a WAV/FLAC container).
+        with open(path, "rb") as f:
+            file_bytes = f.read()
         try:
-            unit_queries, unit_query = load_unit_query_from_server(self.encoder_url, pcm, "audio", "audio/wav")
+            unit_queries, unit_query = load_unit_query_from_server(self.encoder_url, file_bytes, "audio", "audio/wav")
         except Exception as e:
             unit_queries = np.zeros((1, UNIT_DIM), dtype=np.float32)
             unit_query = np.zeros((UNIT_DIM,), dtype=np.float32)
@@ -354,6 +354,14 @@ def image_loss(pred, target):
 
 
 def audio_loss(pred_mel, target_mel):
+    target_mel = target_mel.squeeze(1)  # [B, n_mels, T]
+    if target_mel.size(-1) != pred_mel.size(-1):
+        target_mel = F.interpolate(
+            target_mel.unsqueeze(1),
+            size=pred_mel.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(1)
     return F.mse_loss(pred_mel, target_mel)
 
 
