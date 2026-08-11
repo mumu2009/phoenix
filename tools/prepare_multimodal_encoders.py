@@ -34,6 +34,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from multimodal_model_loader import resolve_model_path
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUT_DIR = PROJECT_ROOT / "runtime_store" / "models" / "multimodal_enc"
 
@@ -57,6 +59,13 @@ def resolve_dtype(dtype_str: str, device: str) -> torch.dtype:
         "bf16": torch.bfloat16,
     }
     return mapping.get(dtype_str, torch.float32)
+
+
+def _split_aliases(text: str) -> List[str]:
+    """Split a comma-separated list of model ids into a clean list."""
+    if not text:
+        return []
+    return [x.strip() for x in text.split(",") if x.strip()]
 
 
 def get_nested_attr(obj: Any, *names: str) -> Optional[Any]:
@@ -117,34 +126,49 @@ def export_image_encoder(args: argparse.Namespace) -> Optional[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = args.image_model_dir or args.image_model
-    local_files_only = bool(args.image_model_dir)
+    allow_download = not args.no_hf_download and args.allow_hf_download
     device = args.device
     dtype = resolve_dtype(args.dtype, device)
 
-    print(f"[image] loading {model_path} (local_only={local_files_only}) ...")
+    print(f"[image] resolving {model_path} (allow_download={allow_download}) ...")
+    try:
+        resolved_path = resolve_model_path(
+            model_path,
+            allow_download=allow_download,
+            hf_endpoint=args.hf_endpoint,
+            use_modelscope=args.use_modelscope,
+            modelscope_aliases=_split_aliases(args.image_modelscope_id),
+            modelscope_endpoint=args.modelscope_endpoint,
+        )
+        print(f"[image] model resolved to {resolved_path}")
+    except Exception as e:
+        print(f"[image] failed to resolve model: {e}")
+        traceback.print_exc()
+        return None
+
     try:
         from transformers import AutoProcessor, LlavaForConditionalGeneration
 
         try:
             model = LlavaForConditionalGeneration.from_pretrained(
-                model_path,
+                resolved_path,
                 torch_dtype=dtype,
                 device_map=device,
                 low_cpu_mem_usage=True,
-                local_files_only=local_files_only,
+                local_files_only=True,
             )
         except Exception as e:
             if "accelerate" in str(e).lower():
                 print(f"[image] accelerate not installed; loading without device_map")
                 model = LlavaForConditionalGeneration.from_pretrained(
-                    model_path,
+                    resolved_path,
                     torch_dtype=dtype,
-                    local_files_only=local_files_only,
+                    local_files_only=True,
                 )
                 model = model.to(device)
             else:
                 raise
-        processor = AutoProcessor.from_pretrained(model_path, local_files_only=local_files_only)
+        processor = AutoProcessor.from_pretrained(resolved_path, local_files_only=True)
     except Exception as e:
         print(f"[image] failed to load model: {e}")
         traceback.print_exc()
@@ -254,38 +278,53 @@ def export_audio_encoder(args: argparse.Namespace) -> Optional[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = args.audio_model_dir or args.audio_model
-    local_files_only = bool(args.audio_model_dir)
+    allow_download = not args.no_hf_download and args.allow_hf_download
     device = args.device
     dtype = resolve_dtype(args.dtype, device)
 
-    print(f"[audio] loading {model_path} (local_only={local_files_only}) ...")
+    print(f"[audio] resolving {model_path} (allow_download={allow_download}) ...")
+    try:
+        resolved_path = resolve_model_path(
+            model_path,
+            allow_download=allow_download,
+            hf_endpoint=args.hf_endpoint,
+            use_modelscope=args.use_modelscope,
+            modelscope_aliases=_split_aliases(args.audio_modelscope_id),
+            modelscope_endpoint=args.modelscope_endpoint,
+        )
+        print(f"[audio] model resolved to {resolved_path}")
+    except Exception as e:
+        print(f"[audio] failed to resolve model: {e}")
+        traceback.print_exc()
+        return None
+
     try:
         from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor
 
         try:
             model = Qwen2AudioForConditionalGeneration.from_pretrained(
-                model_path,
+                resolved_path,
                 torch_dtype=dtype,
                 device_map=device,
                 low_cpu_mem_usage=True,
-                local_files_only=local_files_only,
+                local_files_only=True,
                 trust_remote_code=True,
             )
         except Exception as e:
             if "accelerate" in str(e).lower():
                 print(f"[audio] accelerate not installed; loading without device_map")
                 model = Qwen2AudioForConditionalGeneration.from_pretrained(
-                    model_path,
+                    resolved_path,
                     torch_dtype=dtype,
-                    local_files_only=local_files_only,
+                    local_files_only=True,
                     trust_remote_code=True,
                 )
                 model = model.to(device)
             else:
                 raise
         processor = AutoProcessor.from_pretrained(
-            model_path,
-            local_files_only=local_files_only,
+            resolved_path,
+            local_files_only=True,
             trust_remote_code=True,
         )
     except Exception as e:
@@ -382,6 +421,51 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--image-model-dir", default="", help="Local Hugging Face image model dir")
     parser.add_argument("--audio-model-dir", default="", help="Local Hugging Face audio model dir")
+
+    # Network / mirror options for environments with limited HF access (e.g. mainland China).
+    parser.add_argument(
+        "--allow-hf-download",
+        action="store_true",
+        default=True,
+        help="Allow downloading from Hugging Face or a configured mirror (default: True)",
+    )
+    parser.add_argument(
+        "--no-hf-download",
+        action="store_true",
+        help="Never download; fail immediately if the model is not cached or provided via --*-model-dir",
+    )
+    parser.add_argument(
+        "--hf-endpoint",
+        default=os.environ.get("HF_ENDPOINT", ""),
+        help="Hugging Face mirror endpoint, e.g. https://hf-mirror.com (env: HF_ENDPOINT)",
+    )
+    parser.add_argument(
+        "--modelscope-endpoint",
+        default=os.environ.get("MODELSCOPE_ENDPOINT", ""),
+        help="ModelScope mirror endpoint (env: MODELSCOPE_ENDPOINT)",
+    )
+    parser.add_argument(
+        "--use-modelscope",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Try ModelScope as a fallback if Hugging Face is unavailable (default: True)",
+    )
+    parser.add_argument(
+        "--image-modelscope-id",
+        default="",
+        help="Optional comma-separated ModelScope ids for the image model",
+    )
+    parser.add_argument(
+        "--audio-modelscope-id",
+        default="",
+        help="Optional comma-separated ModelScope ids for the audio model",
+    )
+    parser.add_argument(
+        "--cn-mirror",
+        action="store_true",
+        help="Shortcut: set --hf-endpoint=https://hf-mirror.com and keep ModelScope fallback",
+    )
+
     parser.add_argument("--device", default="cpu", help="PyTorch device (cpu/cuda)")
     parser.add_argument(
         "--dtype",
@@ -397,6 +481,19 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+
+    if args.cn_mirror and not args.hf_endpoint:
+        args.hf_endpoint = "https://hf-mirror.com"
+        print(f"[prepare] using China mirror: {args.hf_endpoint}")
+
+    if args.no_hf_download:
+        args.allow_hf_download = False
+
+    if not args.image_model_dir and not args.audio_model_dir and not args.allow_hf_download:
+        print(
+            "[warn] No --*-model-dir provided and --no-hf-download is set. "
+            "The script will not be able to load any models."
+        )
 
     print(f"[prepare] output directory: {args.out_dir}")
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)

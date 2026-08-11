@@ -36,6 +36,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
+from multimodal_model_loader import resolve_model_path
+
 # ---------------------------------------------------------------------------
 # Paths and constants
 # ---------------------------------------------------------------------------
@@ -81,6 +83,13 @@ def b64_decode(text: str) -> bytes:
 def b64_encode(data: bytes) -> str:
     """Encode raw bytes as a base64 ASCII string."""
     return base64.b64encode(data).decode("ascii")
+
+
+def _split_aliases(text: str) -> List[str]:
+    """Split a comma-separated list of model ids into a clean list."""
+    if not text:
+        return []
+    return [x.strip() for x in text.split(",") if x.strip()]
 
 
 def safe_json(data: Any, ensure_ascii: bool = False) -> bytes:
@@ -378,9 +387,18 @@ class ServerState:
         model_path = self._image_model_path()
         dtype = self._resolve_dtype()
 
+        resolved_path = resolve_model_path(
+            model_path,
+            allow_download=self.args.allow_hf_download,
+            hf_endpoint=self.args.hf_endpoint,
+            use_modelscope=self.args.use_modelscope,
+            modelscope_aliases=_split_aliases(self.args.image_modelscope_id),
+            modelscope_endpoint=self.args.modelscope_endpoint,
+        )
+
         try:
             model = LlavaForConditionalGeneration.from_pretrained(
-                model_path,
+                resolved_path,
                 torch_dtype=dtype,
                 device_map=self.args.device,
                 low_cpu_mem_usage=True,
@@ -392,20 +410,20 @@ class ServerState:
                 log.warning("accelerate not installed; loading image encoder without device_map")
                 try:
                     model = LlavaForConditionalGeneration.from_pretrained(
-                        model_path,
+                        resolved_path,
                         torch_dtype=dtype,
                         local_files_only=True,
                     )
                     model = model.to(self.args.device)
                 except Exception as e2:
-                    raise RuntimeError(f"Could not load image encoder from {model_path}: {e2}")
+                    raise RuntimeError(f"Could not load image encoder from {resolved_path}: {e2}")
             else:
-                raise RuntimeError(f"Could not load image encoder from {model_path}: {e}")
+                raise RuntimeError(f"Could not load image encoder from {resolved_path}: {e}")
 
         try:
-            processor = AutoProcessor.from_pretrained(model_path, local_files_only=True)
+            processor = AutoProcessor.from_pretrained(resolved_path, local_files_only=True)
         except Exception as e:
-            raise RuntimeError(f"Could not load image processor from {model_path}: {e}")
+            raise RuntimeError(f"Could not load image processor from {resolved_path}: {e}")
 
         return {
             "type": "hf",
@@ -467,9 +485,26 @@ class ServerState:
         model_path = self._audio_model_path()
         dtype = self._resolve_dtype()
 
+        log.info(
+            "Resolving audio model %s (allow_download=%s, hf_endpoint=%s, use_modelscope=%s)",
+            model_path,
+            self.args.allow_hf_download,
+            self.args.hf_endpoint or "default",
+            self.args.use_modelscope,
+        )
+        resolved_path = resolve_model_path(
+            model_path,
+            allow_download=self.args.allow_hf_download,
+            hf_endpoint=self.args.hf_endpoint,
+            use_modelscope=self.args.use_modelscope,
+            modelscope_aliases=_split_aliases(self.args.audio_modelscope_id),
+            modelscope_endpoint=self.args.modelscope_endpoint,
+        )
+        log.info("Resolved audio model path: %s", resolved_path)
+
         try:
             model = Qwen2AudioForConditionalGeneration.from_pretrained(
-                model_path,
+                resolved_path,
                 torch_dtype=dtype,
                 device_map=self.args.device,
                 low_cpu_mem_usage=True,
@@ -482,23 +517,23 @@ class ServerState:
                 log.warning("accelerate not installed; loading audio encoder without device_map")
                 try:
                     model = Qwen2AudioForConditionalGeneration.from_pretrained(
-                        model_path,
+                        resolved_path,
                         torch_dtype=dtype,
                         local_files_only=True,
                         trust_remote_code=True,
                     )
                     model = model.to(self.args.device)
                 except Exception as e2:
-                    raise RuntimeError(f"Could not load audio encoder from {model_path}: {e2}")
+                    raise RuntimeError(f"Could not load audio encoder from {resolved_path}: {e2}")
             else:
-                raise RuntimeError(f"Could not load audio encoder from {model_path}: {e}")
+                raise RuntimeError(f"Could not load audio encoder from {resolved_path}: {e}")
 
         try:
             processor = AutoProcessor.from_pretrained(
-                model_path, local_files_only=True, trust_remote_code=True
+                resolved_path, local_files_only=True, trust_remote_code=True
             )
         except Exception as e:
-            raise RuntimeError(f"Could not load audio processor from {model_path}: {e}")
+            raise RuntimeError(f"Could not load audio processor from {resolved_path}: {e}")
 
         return {
             "type": "hf",
@@ -1218,6 +1253,45 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-model-dir", default="", help="Local Hugging Face image model dir")
     parser.add_argument("--audio-model-dir", default="", help="Local Hugging Face audio model dir")
 
+    # Network / mirror options for environments with limited HF access (e.g. mainland China).
+    parser.add_argument(
+        "--allow-hf-download",
+        action="store_true",
+        default=False,
+        help="Allow the server to download full HF models at startup if not cached (default: False)",
+    )
+    parser.add_argument(
+        "--hf-endpoint",
+        default=os.environ.get("HF_ENDPOINT", ""),
+        help="Hugging Face mirror endpoint, e.g. https://hf-mirror.com (env: HF_ENDPOINT)",
+    )
+    parser.add_argument(
+        "--modelscope-endpoint",
+        default=os.environ.get("MODELSCOPE_ENDPOINT", ""),
+        help="ModelScope mirror endpoint (env: MODELSCOPE_ENDPOINT)",
+    )
+    parser.add_argument(
+        "--use-modelscope",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Try ModelScope as a fallback if Hugging Face is unavailable (default: True)",
+    )
+    parser.add_argument(
+        "--image-modelscope-id",
+        default="",
+        help="Optional comma-separated ModelScope ids for the image model",
+    )
+    parser.add_argument(
+        "--audio-modelscope-id",
+        default="",
+        help="Optional comma-separated ModelScope ids for the audio model",
+    )
+    parser.add_argument(
+        "--cn-mirror",
+        action="store_true",
+        help="Shortcut: set --hf-endpoint=https://hf-mirror.com and keep ModelScope fallback",
+    )
+
     parser.add_argument(
         "--image-encoder-onnx",
         default=str(DEFAULT_IMAGE_ENCODER_ONNX),
@@ -1253,6 +1327,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+
+    if args.cn_mirror and not args.hf_endpoint:
+        args.hf_endpoint = "https://hf-mirror.com"
+        log.info("Using China HF mirror: %s", args.hf_endpoint)
 
     logging.basicConfig(
         level=logging.INFO,
