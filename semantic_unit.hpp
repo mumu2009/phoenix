@@ -62,7 +62,8 @@ std::string generateSemanticId(const std::string &content = "", uint64_t seed = 
 struct SemanticUnit {
   std::string id;                                     /**< Stable correlation id */
   Modality modality{Modality::Text};
-  std::vector<float> semanticVector;                  /**< Unified embedding vector */
+  std::vector<float> semanticVector;                  /**< Unified embedding vector (pooled unit query) */
+  std::vector<std::vector<float>> unitQuerySequence;  /**< Optional per-token unit queries for media enc/dec */
   std::string content;                              /**< Optional payload or summary */
   float confidence{0.0f};                             /**< Confidence in [0, 1] */
   uint64_t timestampMs{0};                            /**< UTC milliseconds */

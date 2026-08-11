@@ -12,6 +12,7 @@
       "function": 512
     },
     "maxTokens": 8192,
+    "maxContextChars": 8192,
     "reservedSystemTokens": 768,
     "importanceThreshold": 0.2,
     "similarityThreshold": 0.8,
@@ -25,7 +26,8 @@
       "window": 4,
       "minCount": 2,
       "maxVocab": 3000,
-      "maxFiles": 400
+      "maxFiles": 2,
+      "maxBytes": 1048576
     },
     "torch": {
       "maxLen": 64,
@@ -33,7 +35,8 @@
       "hidDim": 128,
       "epochs": 4,
       "batch": 16,
-      "maxFiles": 240
+      "maxFiles": 240,
+      "pretrainLines": 2000
     },
     "adaptive": {
       "concatThresh": 5,
@@ -102,9 +105,14 @@
     "lr": 0.001,
     "tokenizerMode": "bpe",
     "enabled": true,
-    "pretrainLines": 200000,
-    "trainEpochs": 4,
-    "checkpointPath": "runtime_store/summary_model.json"
+    "pretrainLines": 1000,
+    "trainEpochs": 1,
+    "checkpointPath": "runtime_store/summary_model.json",
+    "useTinyllama": true
+  },
+  "tinyllama": {
+    "baseUrl": "http://127.0.0.1:8086",
+    "timeoutMs": 5000
   },
   "model_defaults": {
     "decayFactor": 0.5,
@@ -384,7 +392,7 @@
     "bullet3Root": "./outsides/bullet3",
     "useTorch": false,
     "httpThreads": 4,
-    "httpLog": false,
+    "httpLog": true,
     "v51Default": true,
     "embeddingWorkers": 2,
     "rnnWorkers": 2,
@@ -506,7 +514,7 @@
     "groupCount": 3,
     "groupProc": false,
     "groupProcTimeoutMs": 12000,
-    "httpLog": false,
+    "httpLog": true,
     "inferMP": false,
     "inferWorkers": 0,
     "kvmCacheMaxEntries": 50000,
@@ -532,25 +540,34 @@
       "ollamaModel": "",
       "ollamaBaseUrl": "http://127.0.0.1:11434",
       "ollamaTimeoutMs": 120000,
-      "llamaCppModel": "",
-      "llamaCppBaseUrl": "http://127.0.0.1:8080",
+      "llamaCppModel": "blobs/sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29",
+      "llamaCppBaseUrl": "http://127.0.0.1:8082",
       "llamaCppTimeoutMs": 120000,
       "llamaCppLoraFiles": "",
       "llamaCppLoraInitWithoutApply": false,
       "llamaCppFineTuning": false,
+      "llamaUseSplitBackend": true,
       "bitnetModel": "",
       "bitnetBaseUrl": "http://127.0.0.1:8090",
       "bitnetTimeoutMs": 120000,
       "tinyllamaModel": "GGUF_models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
-      "tinyllamaBaseUrl": "http://127.0.0.1:8085",
+      "tinyllamaBaseUrl": "",
       "tinyllamaTimeoutMs": 120000,
-      "tinyllamaEnabled": true,
+      "tinyllamaEnabled": false,
       "conceptMatrixEnabled": false,
       "conceptMatrixClearPerRequest": true,
       "ggufModelsDir": "GGUF_models",
       "externalBackendStyleSim": false,
       "transformerBootstrap": false,
       "transformerBootstrapDocs": 256
+    },
+    "multimodal": {
+      "encDecBaseUrl": "http://127.0.0.1:8085",
+      "encDecTimeoutMs": 120000,
+      "imageEncoderModel": "llava-hf/llava-1.5-7b-hf",
+      "audioEncoderModel": "Qwen/Qwen2-Audio-7B-Instruct",
+      "imageDecoderPath": "runtime_store/models/multimodal_dec/image_decoder.onnx",
+      "audioDecoderPath": "runtime_store/models/multimodal_dec/audio_decoder.onnx"
     },
     "lmdb": {
       "root": "lmdb",
@@ -626,5 +643,44 @@
     "enabled": false,
     "numPasses": 5,
     "maskRate": 0.05
+  },
+  "v7": {
+    "ahead": {
+      "conceptDim": 128,
+      "memoryEnabled": true,
+      "emotionEnabled": true,
+      "audioVideoEncDecEnabled": true,
+      "schedulerName": "ahead_default"
+    },
+    "memory": {
+      "cellType": "LSTM",
+      "inputDim": 128,
+      "hiddenDim": 128,
+      "outputDim": 128,
+      "maxSummaryTokens": 256,
+      "useTinyLlamaFallback": true,
+      "tinyLlamaUrl": "http://127.0.0.1:8086",
+      "tinyLlamaTimeoutMs": 5000
+    },
+    "emotion_influence": {
+      "strength": 1.0,
+      "maxBias": 2.0,
+      "minBias": -2.0,
+      "baseTemperature": 0.7,
+      "baseTopP": 0.9,
+      "decay": 0.95
+    },
+    "async_pool": {
+      "workerCount": 0,
+      "maxQueueDepth": 256,
+      "waitTimeoutMs": 20,
+      "backgroundBackPressure": true
+    },
+    "llama_server_mods": {
+      "applyPatches": true,
+      "buildLlamaServer": false,
+      "runtimeDecBaseUrl": "http://127.0.0.1:8082",
+      "runtimeDecListenPort": 8099
+    }
   }
 }
