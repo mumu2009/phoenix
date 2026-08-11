@@ -1,0 +1,209 @@
+diff --git a/include/llama.h b/include/llama.h
+index b0726cbe..60c61db4 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -883,6 +883,13 @@ extern "C" {
+     // If set to true, the model will only attend to the past tokens
+     LLAMA_API void llama_set_causal_attn(struct llama_context * ctx, bool causal_attn);
+ 
++    // External style adapter (intrusive): drives attention mask bias with online gradient-style updates.
++    LLAMA_API void  llama_style_adapter_enable(struct llama_context * ctx, bool enabled);
++    LLAMA_API void  llama_style_adapter_set_target(struct llama_context * ctx, float target_align);
++    LLAMA_API void  llama_style_adapter_configure(struct llama_context * ctx, float lr, float clip_abs);
++    LLAMA_API float llama_style_adapter_train_step(struct llama_context * ctx, float observed_align, float loss_scale, float keyword_density, float sentiment, float punctuation_density, float graph_edge_weight, float graph_residual);
++    LLAMA_API float llama_style_adapter_get_bias(struct llama_context * ctx);
++
+     // Set abort callback
+     LLAMA_API void llama_set_abort_callback(struct llama_context * ctx, ggml_abort_callback abort_callback, void * abort_callback_data);
+ 
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 671d2a81..3af67d5f 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -3,11 +3,24 @@
+ #include "llama-impl.h"
+ #include "llama-mmap.h"
+ 
++#include <algorithm>
+ #include <cassert>
+ #include <cmath>
+ #include <cstring>
+ #include <stdexcept>
+ 
++static inline float llama_style_adapter_effective_bias(const struct llama_context & lctx) {
++    const auto & st = lctx.style_adapter;
++    const float lim = std::max(0.001f, st.clip_abs);
++    const float composed = st.bias
++        + st.feature_keyword_gain * st.feature_keyword_density
++        + st.feature_sentiment_gain * st.feature_sentiment
++        + st.feature_punctuation_gain * st.feature_punctuation_density
++        + st.graph_edge_gain * st.graph_edge_weight
++        + st.graph_residual_gain * st.graph_residual;
++    return std::clamp(composed, -lim, lim);
++}
++
+ void llama_set_k_shift(struct llama_context & lctx) {
+     const int64_t kv_size = lctx.kv_self.size;
+ 
+@@ -127,6 +140,7 @@ void llama_set_inputs(llama_context & lctx, const llama_ubatch & ubatch) {
+     );
+ 
+     if (lctx.inp_KQ_mask || lctx.inp_KQ_mask_swa) {
++        const float style_effective_bias = lctx.style_adapter.enabled ? llama_style_adapter_effective_bias(lctx) : 0.0f;
+         // NOTE: hparams.causal_attn indicates the model is capable of generation and uses the kv cache.
+         if (cparams.causal_attn && !lctx.is_encoding) {
+             const int64_t n_kv         = kv_self.n;
+@@ -168,6 +182,9 @@ void llama_set_inputs(llama_context & lctx, const llama_ubatch & ubatch) {
+                                 } else {
+                                     f = 0.0f;
+                                 }
++                                if (lctx.style_adapter.enabled) {
++                                    f += style_effective_bias;
++                                }
+                             }
+ 
+                             if (data) {
+@@ -231,6 +248,9 @@ void llama_set_inputs(llama_context & lctx, const llama_ubatch & ubatch) {
+                                         } else {
+                                             f = 0.0f;
+                                         }
++                                        if (lctx.style_adapter.enabled) {
++                                            f += style_effective_bias;
++                                        }
+                                         break;
+                                     }
+                                 }
+@@ -657,6 +677,103 @@ void llama_set_causal_attn(struct llama_context * ctx, bool causal_attn) {
+     ctx->cparams.causal_attn = causal_attn;
+ }
+ 
++void llama_style_adapter_enable(struct llama_context * ctx, bool enabled) {
++    if (!ctx) {
++        return;
++    }
++    ctx->style_adapter.enabled = enabled;
++}
++
++void llama_style_adapter_set_target(struct llama_context * ctx, float target_align) {
++    if (!ctx) {
++        return;
++    }
++    if (!std::isfinite(target_align)) {
++        return;
++    }
++    ctx->style_adapter.target_align = std::clamp(target_align, 0.0f, 1.0f);
++}
++
++void llama_style_adapter_configure(struct llama_context * ctx, float lr, float clip_abs) {
++    if (!ctx) {
++        return;
++    }
++    if (std::isfinite(lr) && lr > 0.0f) {
++        ctx->style_adapter.lr = lr;
++    }
++    if (std::isfinite(clip_abs) && clip_abs > 0.0f) {
++        ctx->style_adapter.clip_abs = clip_abs;
++    }
++}
++
++float llama_style_adapter_train_step(struct llama_context * ctx, float observed_align, float loss_scale, float keyword_density, float sentiment, float punctuation_density, float graph_edge_weight, float graph_residual) {
++    if (!ctx) {
++        return 0.0f;
++    }
++    if (!std::isfinite(observed_align)) {
++        observed_align = 0.0f;
++    }
++    if (!std::isfinite(loss_scale) || loss_scale <= 0.0f) {
++        loss_scale = 1.0f;
++    }
++    if (!std::isfinite(keyword_density)) {
++        keyword_density = 0.0f;
++    }
++    if (!std::isfinite(sentiment)) {
++        sentiment = 0.0f;
++    }
++    if (!std::isfinite(punctuation_density)) {
++        punctuation_density = 0.0f;
++    }
++    if (!std::isfinite(graph_edge_weight)) {
++        graph_edge_weight = 0.0f;
++    }
++    if (!std::isfinite(graph_residual)) {
++        graph_residual = 0.0f;
++    }
++
++    keyword_density = std::clamp(keyword_density, 0.0f, 1.0f);
++    sentiment = std::clamp(sentiment, -1.0f, 1.0f);
++    punctuation_density = std::clamp(punctuation_density, 0.0f, 1.0f);
++    graph_edge_weight = std::clamp(graph_edge_weight, 0.0f, 1.0f);
++    graph_residual = std::clamp(graph_residual, 0.0f, 1.0f);
++
++    ctx->style_adapter.feature_keyword_density = keyword_density;
++    ctx->style_adapter.feature_sentiment = sentiment;
++    ctx->style_adapter.feature_punctuation_density = punctuation_density;
++    ctx->style_adapter.graph_edge_weight = graph_edge_weight;
++    ctx->style_adapter.graph_residual = graph_residual;
++
++    const float clipped_observed = std::clamp(observed_align, 0.0f, 1.0f);
++    const float err = ctx->style_adapter.target_align - clipped_observed;
++    const float grad = err * loss_scale;
++    const float next_bias = ctx->style_adapter.bias + ctx->style_adapter.lr * grad;
++    const float lim = std::max(0.001f, ctx->style_adapter.clip_abs);
++    ctx->style_adapter.bias = std::clamp(next_bias, -lim, lim);
++
++    const float feature_lr = ctx->style_adapter.lr * 0.25f;
++    const float next_keyword_gain = ctx->style_adapter.feature_keyword_gain + feature_lr * grad * keyword_density;
++    const float next_sentiment_gain = ctx->style_adapter.feature_sentiment_gain + feature_lr * grad * sentiment;
++    const float next_punctuation_gain = ctx->style_adapter.feature_punctuation_gain + feature_lr * grad * punctuation_density;
++    const float next_graph_edge_gain = ctx->style_adapter.graph_edge_gain + feature_lr * grad * graph_edge_weight;
++    const float next_graph_residual_gain = ctx->style_adapter.graph_residual_gain - feature_lr * grad * graph_residual;
++    ctx->style_adapter.feature_keyword_gain = std::clamp(next_keyword_gain, -lim, lim);
++    ctx->style_adapter.feature_sentiment_gain = std::clamp(next_sentiment_gain, -lim, lim);
++    ctx->style_adapter.feature_punctuation_gain = std::clamp(next_punctuation_gain, -lim, lim);
++    ctx->style_adapter.graph_edge_gain = std::clamp(next_graph_edge_gain, -lim, lim);
++    ctx->style_adapter.graph_residual_gain = std::clamp(next_graph_residual_gain, -lim, lim);
++
++    ctx->style_adapter.steps += 1;
++    return llama_style_adapter_effective_bias(*ctx);
++}
++
++float llama_style_adapter_get_bias(struct llama_context * ctx) {
++    if (!ctx) {
++        return 0.0f;
++    }
++    return llama_style_adapter_effective_bias(*ctx);
++}
++
+ void llama_synchronize(struct llama_context * ctx) {
+     ggml_backend_sched_synchronize(ctx->sched.get());
+ 
+diff --git a/src/llama-context.h b/src/llama-context.h
+index a9268b29..c7eff71f 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -27,6 +27,25 @@ struct llama_context {
+     struct llama_kv_cache     kv_self;
+     struct llama_adapter_cvec cvec;
+ 
++    struct {
++        bool  enabled = false;
++        float bias = 0.0f;
++        float lr = 0.03f;
++        float target_align = 0.85f;
++        float clip_abs = 3.0f;
++        float feature_keyword_gain = 0.12f;
++        float feature_sentiment_gain = 0.08f;
++        float feature_punctuation_gain = 0.05f;
++        float graph_edge_gain = 0.10f;
++        float graph_residual_gain = -0.08f;
++        float feature_keyword_density = 0.0f;
++        float feature_sentiment = 0.0f;
++        float feature_punctuation_density = 0.0f;
++        float graph_edge_weight = 0.0f;
++        float graph_residual = 0.0f;
++        uint64_t steps = 0;
++    } style_adapter;
++
+     std::unordered_map<struct llama_adapter_lora *, float> lora;
+ 
+     std::vector<ggml_backend_ptr> backends;

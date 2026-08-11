@@ -2,6 +2,9 @@
 // Segment: section_before_ContextHint
 // Original lines: 13884-14002
 
+    if (config_.httpLog)
+      std::cout << "[chat] " << provider << " start baseUrl=" << baseUrl
+                << " model=" << model << " timeoutMs=" << timeoutMs << std::endl;
     out["provider"] = provider;
     try {
       std::string selectedModel = trimCopy(model);
@@ -29,9 +32,59 @@
         }
       }
 
-      if (contextHintText.empty() && !graphContext.empty())
+      size_t maxContextChars = static_cast<size_t>(
+          phoenix::cfgOr<int>("context.maxContextChars", 65536));
+      std::string cappedGraphContext = graphContext;
+      if (cappedGraphContext.size() > maxContextChars) {
+        size_t start = cappedGraphContext.size() - (maxContextChars - 25);
+        auto nl = cappedGraphContext.find('\n', start);
+        if (nl != std::string::npos)
+          start = nl + 1;
+        // Make sure we start at a valid UTF-8 code-point boundary, otherwise
+        // the resulting prompt can contain invalid multi-byte sequences and
+        // nlohmann::json::dump() will throw a type_error.316.
+        while (start < cappedGraphContext.size() &&
+               (static_cast<unsigned char>(cappedGraphContext[start]) & 0xC0) == 0x80) {
+          ++start;
+        }
+        cappedGraphContext =
+            std::string("... [context truncated]\n") + cappedGraphContext.substr(start);
+      }
+
+      if (contextHintText.empty() && !cappedGraphContext.empty())
         prompt =
-            std::string("Context:\n") + graphContext + "\n\nUser:\n" + text;
+            std::string("Context:\n") + cappedGraphContext + "\n\nUser:\n" + text;
+
+      // Ensure the prompt is valid UTF-8 so nlohmann::json can dump it without
+      // throwing a type_error.316 in the middle of the request.
+      auto sanitizeUtf8 = [](const std::string &s) -> std::string {
+        std::string out;
+        out.reserve(s.size());
+        size_t i = 0;
+        while (i < s.size()) {
+          unsigned char c = static_cast<unsigned char>(s[i]);
+          size_t len = 1;
+          if (c >= 0xC0 && c <= 0xDF) len = 2;
+          else if (c >= 0xE0 && c <= 0xEF) len = 3;
+          else if (c >= 0xF0 && c <= 0xF7) len = 4;
+          else if (c >= 0x80) { out.push_back('?'); ++i; continue; }
+          if (i + len > s.size()) { out.push_back('?'); ++i; continue; }
+          bool valid = true;
+          for (size_t j = 1; j < len; ++j) {
+            unsigned char cb = static_cast<unsigned char>(s[i + j]);
+            if ((cb & 0xC0) != 0x80) { valid = false; break; }
+          }
+          if (valid) {
+            out.append(s, i, len);
+            i += len;
+          } else {
+            out.push_back('?');
+            ++i;
+          }
+        }
+        return out;
+      };
+      prompt = sanitizeUtf8(prompt);
 
       json options = json{{"num_predict", std::max(1, maxTokens)}};
       if (inferenceOptions.is_object() && !inferenceOptions.empty()) {
@@ -47,7 +100,7 @@
            json::array({json{{"role", "user"}, {"content", prompt}}})},
           {"options", options}};
       if (!contextHintText.empty())
-        payload["contextHint"] = contextHintText;
+        payload["contextHint"] = sanitizeUtf8(contextHintText);
 
       auto endpoint = trimCopy(baseUrl);
       if (endpoint.empty())
@@ -119,7 +172,14 @@
         }
         if (!connected) {
           closesocket(sock);
-          out["ok"] = false; out["error"] = provider + " connect timeout"; out["reply"] = "";
+          out["ok"] = false;
+          int lastErr = WSAGetLastError();
+          out["error"] = provider + " connect failed to " + host + ":" + std::to_string(port) +
+                         " (err=" + std::to_string(lastErr) + ")";
+          out["reply"] = "";
+          if (config_.httpLog)
+            std::cout << "[chat] " << provider << " connect failed " << host << ":" << port
+                      << " err=" << lastErr << std::endl;
           return out;
         }
         // Restore blocking mode and set send/recv timeouts
@@ -193,6 +253,9 @@
         out["status"] = httpStatus;
         out["error"] = provider + " bad status " + std::to_string(httpStatus);
         out["reply"] = "";
+        if (config_.httpLog)
+          std::cout << "[chat] " << provider << " bad status=" << httpStatus
+                    << " body=" << httpBody.substr(0, 200) << std::endl;
         return out;
       }
 
@@ -214,18 +277,64 @@
 
       out["ok"] = !reply.empty();
       out["reply"] = reply;
+      if (config_.httpLog)
+        std::cout << "[chat] " << provider << " replyLen=" << reply.size() << " ok=" << out["ok"]
+                  << std::endl;
       return out;
     } catch (const std::exception &e) {
       out["ok"] = false;
-      out["error"] = e.what();
+      out["error"] = std::string("exception: ") + e.what();
       out["reply"] = "";
+      if (config_.httpLog)
+        std::cout << "[chat] " << provider << " exception=" << e.what() << std::endl;
       return out;
     } catch (...) {
       out["ok"] = false;
       out["error"] = provider + " unknown error";
       out["reply"] = "";
+      if (config_.httpLog)
+        std::cout << "[chat] " << provider << " unknown exception" << std::endl;
       return out;
     }
+  }
+
+  // Whether chatWithLlamaCpp() should drive the patched llama-server's
+  // split backend, now through the server-side /phx/generate endpoint
+  // (phoenix::v7::llamaSplitChat), instead of its native, unmodified
+  // /apply-template + /v1/chat/completions text endpoints
+  // (phoenix::v7::llamaTextOnlyChat). Controlled by
+  // main.inference.llamaUseSplitBackend in config/phoenix.json (defaults to
+  // false). The llama_server_mods/enc_dec_separation.patch has been updated
+  // to make the split endpoints stable for LLM_ARCH_LLAMA models; the
+  // llamaTextOnlyChat path remains the fallback when the split backend is
+  // disabled or fails.
+  bool useLlamaSplitBackend() const {
+    if (config_.llamaCppBaseUrl.empty()) return false;
+    bool enabled = false;
+    try {
+      enabled = phoenix::cfgOr<bool>("main.inference.llamaUseSplitBackend", false);
+    } catch (...) {}
+    return enabled;
+  }
+
+  json callLlamaCppBackend(const std::string &text,
+                           const std::string &graphContext, int maxTokens,
+                           const json &inferenceOptions) {
+    json r = useLlamaSplitBackend()
+                 ? phoenix::v7::llamaSplitChat(
+                       config_.llamaCppBaseUrl, config_.llamaCppRequestTimeoutMs,
+                       config_.llamaCppModel, text, graphContext, maxTokens,
+                       inferenceOptions)
+                 : phoenix::v7::llamaTextOnlyChat(
+                       config_.llamaCppBaseUrl, config_.llamaCppRequestTimeoutMs,
+                       config_.llamaCppModel, text, graphContext, maxTokens,
+                       inferenceOptions);
+    if (config_.httpLog)
+      std::cout << "[chat] llamacpp(" << (useLlamaSplitBackend() ? "split" : "text")
+                << ") ok=" << r.value("ok", false)
+                << " replyLen=" << r.value("reply", std::string()).size()
+                << std::endl;
+    return r;
   }
 
   json chatWithLlamaCpp(const std::string &text,
@@ -242,10 +351,7 @@
       try { maskRate = phoenix::cfgOr<double>("llama_voter.maskRate", 0.05); } catch (...) {}
     }
     if (!voterEnabled || numPasses <= 1 || maskRate <= 0.0) {
-      return chatWithExternalAdapter(
-          "llamacpp", config_.llamaCppBaseUrl, config_.llamaCppModel,
-          config_.llamaCppRequestTimeoutMs, text, graphContext, maxTokens,
-          inferenceOptions);
+      return callLlamaCppBackend(text, graphContext, maxTokens, inferenceOptions);
     }
 
     auto maskTokens = [&](const std::string &s,
@@ -277,10 +383,7 @@
     for (int i = 0; i < numPasses; ++i) {
       std::string mtext = (i == 0) ? text : maskTokens(text, rng);
       std::string mctx = (i == 0) ? graphContext : maskTokens(graphContext, rng);
-      json r = chatWithExternalAdapter(
-          "llamacpp", config_.llamaCppBaseUrl, config_.llamaCppModel,
-          config_.llamaCppRequestTimeoutMs, mtext, mctx, maxTokens,
-          inferenceOptions);
+      json r = callLlamaCppBackend(mtext, mctx, maxTokens, inferenceOptions);
       if (!r.is_object()) continue;
       std::string reply = r.value("reply", "");
       if (reply.empty()) continue;
@@ -296,10 +399,7 @@
     }
 
     if (!best.is_object()) {
-      return chatWithExternalAdapter(
-          "llamacpp", config_.llamaCppBaseUrl, config_.llamaCppModel,
-          config_.llamaCppRequestTimeoutMs, text, graphContext, maxTokens,
-          inferenceOptions);
+      return callLlamaCppBackend(text, graphContext, maxTokens, inferenceOptions);
     }
     best["rfVotes"] = static_cast<int>(candidates.size());
     best["rfBestScore"] = bestScore;
