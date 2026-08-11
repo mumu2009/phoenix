@@ -24,11 +24,18 @@ Usage:
 """
 
 import argparse
+import gc
+import json
 import os
 import sys
 import traceback
+
+# Avoid Windows cp65001/gbk encoding issues when torch.onnx prints emoji.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -86,6 +93,75 @@ def pick_attr_from_model(model: Any, *candidates: Tuple[str, ...]) -> Any:
     raise RuntimeError(f"Could not find any of {candidates} in model")
 
 
+def _find_index_file(model_path: Path) -> Optional[Path]:
+    """Find a sharded checkpoint index, preferring safetensors."""
+    for name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        p = model_path / name
+        if p.is_file():
+            return p
+    return None
+
+
+def _load_checkpoint_file(checkpoint_file: Path) -> Dict[str, torch.Tensor]:
+    """Load a safetensors or PyTorch checkpoint file and return its state dict."""
+    if checkpoint_file.suffix == ".safetensors":
+        try:
+            from safetensors.torch import load_file
+
+            return load_file(str(checkpoint_file), device="cpu")
+        except Exception as e:
+            print(f"[warn] safetensors load failed for {checkpoint_file}: {e}; trying torch.load")
+    return torch.load(checkpoint_file, map_location="cpu", weights_only=True)
+
+
+def _load_partial_state_dict(model_path: Path, prefixes: List[str]) -> Dict[str, Dict[str, torch.Tensor]]:
+    """Load only the weights for the given prefixes from a (sharded) checkpoint.
+
+    This is the key memory-saver: we don't need to load the whole 7B/7B+ model
+    just to extract the tiny vision/audio tower and projector.
+    """
+    # Strip trailing dots so callers can use plain names like "vision_tower".
+    result: Dict[str, Dict[str, torch.Tensor]] = {p.rstrip("."): {} for p in prefixes}
+    index_file = _find_index_file(model_path)
+    files_to_load: List[Path] = []
+
+    if index_file is not None:
+        with open(index_file, "r", encoding="utf-8") as f:
+            index = json.load(f)
+        weight_map = index.get("weight_map", {})
+        needed_files = set()
+        for key, filename in weight_map.items():
+            for prefix in prefixes:
+                if key.startswith(prefix):
+                    needed_files.add(model_path / filename)
+                    break
+        files_to_load = sorted(needed_files)
+        if not files_to_load:
+            raise FileNotFoundError(f"no weights matching {prefixes} found in {index_file}")
+    else:
+        candidates = sorted(model_path.glob("*.safetensors")) + sorted(
+            model_path.glob("pytorch_model.bin")
+        )
+        if not candidates:
+            raise FileNotFoundError(f"no checkpoint file found in {model_path}")
+        files_to_load = candidates[:1]
+
+    for checkpoint_file in files_to_load:
+        state = _load_checkpoint_file(checkpoint_file)
+        for key, tensor in state.items():
+            for prefix in prefixes:
+                if key.startswith(prefix):
+                    new_key = key[len(prefix):]
+                    if new_key.startswith("."):
+                        new_key = new_key[1:]
+                    result[prefix.rstrip(".")][new_key] = tensor
+                    break
+        del state
+        gc.collect()
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Image encoder export
 # ---------------------------------------------------------------------------
@@ -121,6 +197,28 @@ class LlavaImageEncoder(nn.Module):
         return self.multi_modal_projector(selected)
 
 
+def _load_llava_image_tower(resolved_path: Path, dtype: torch.dtype, device: str):
+    """Load only the CLIP vision tower + multimodal projector from the full LLaVA checkpoint."""
+    from transformers import AutoProcessor, CLIPVisionModel, LlavaConfig
+    from transformers.models.llava.modeling_llava import LlavaMultiModalProjector
+
+    config = LlavaConfig.from_pretrained(resolved_path, local_files_only=True)
+    state = _load_partial_state_dict(resolved_path, ["vision_tower.", "multi_modal_projector."])
+
+    print(f"[image] loading vision tower and projector from {resolved_path} ...")
+    vision_tower = CLIPVisionModel(config.vision_config)
+    vision_tower.load_state_dict(state["vision_tower"], strict=True)
+    projector = LlavaMultiModalProjector(config)
+    projector.load_state_dict(state["multi_modal_projector"], strict=True)
+
+    enc = LlavaImageEncoder(vision_tower, projector, config)
+    enc.eval().to(device=device, dtype=dtype)
+
+    # Save the image preprocessor so the ONNX-only server can preprocess.
+    processor = AutoProcessor.from_pretrained(resolved_path, local_files_only=True)
+    return enc, processor
+
+
 def export_image_encoder(args: argparse.Namespace) -> Optional[Path]:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -147,34 +245,12 @@ def export_image_encoder(args: argparse.Namespace) -> Optional[Path]:
         return None
 
     try:
-        from transformers import AutoProcessor, LlavaForConditionalGeneration
-
-        try:
-            model = LlavaForConditionalGeneration.from_pretrained(
-                resolved_path,
-                torch_dtype=dtype,
-                device_map=device,
-                low_cpu_mem_usage=True,
-                local_files_only=True,
-            )
-        except Exception as e:
-            if "accelerate" in str(e).lower():
-                print(f"[image] accelerate not installed; loading without device_map")
-                model = LlavaForConditionalGeneration.from_pretrained(
-                    resolved_path,
-                    torch_dtype=dtype,
-                    local_files_only=True,
-                )
-                model = model.to(device)
-            else:
-                raise
-        processor = AutoProcessor.from_pretrained(resolved_path, local_files_only=True)
+        enc, processor = _load_llava_image_tower(Path(resolved_path), dtype, device)
     except Exception as e:
-        print(f"[image] failed to load model: {e}")
+        print(f"[image] failed to load vision tower: {e}")
         traceback.print_exc()
         return None
 
-    # Save the image preprocessor so the ONNX-only server can preprocess.
     preprocessor = getattr(processor, "image_processor", None)
     if preprocessor is None:
         preprocessor = getattr(processor, "feature_extractor", None)
@@ -186,17 +262,6 @@ def export_image_encoder(args: argparse.Namespace) -> Optional[Path]:
             print(f"[image] saved preprocessor to {preproc_dir}")
         except Exception as e:
             print(f"[image] warning: could not save preprocessor: {e}")
-
-    # Wrap and export just the vision part.
-    vision_tower = pick_attr_from_model(
-        model, ("vision_tower",), ("model", "vision_tower")
-    )
-    projector = pick_attr_from_model(
-        model, ("multi_modal_projector",), ("model", "multi_modal_projector")
-    )
-
-    enc = LlavaImageEncoder(vision_tower, projector, model.config)
-    enc.eval().to(device=device, dtype=dtype)
 
     onnx_path = out_dir / "llava_vision_projector.onnx"
     dummy = torch.randn(1, 3, 336, 336, dtype=dtype, device=device)
@@ -210,10 +275,10 @@ def export_image_encoder(args: argparse.Namespace) -> Optional[Path]:
                 onnx_path,
                 input_names=["pixel_values"],
                 output_names=["image_features"],
-                opset_version=14,
+                opset_version=18,
                 do_constant_folding=True,
                 dynamic_axes={
-                    "pixel_values": {0: "batch", 2: "height", 3: "width"},
+                    "pixel_values": {0: "batch"},
                     "image_features": {0: "batch", 1: "num_queries"},
                 },
             )
@@ -223,15 +288,16 @@ def export_image_encoder(args: argparse.Namespace) -> Optional[Path]:
         print(f"[image] ONNX export failed: {e}")
         traceback.print_exc()
 
-    # Fallback: save the full HF checkpoint.
+    # Fallback: save the tiny extracted vision tower so the server can use it directly.
     fallback_dir = out_dir / "llava-1.5-7b-hf_full"
     fallback_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[image] falling back to full HF save -> {fallback_dir}")
+    print(f"[image] falling back to HF vision tower save -> {fallback_dir}")
     try:
-        model.save_pretrained(fallback_dir, max_shard_size="2GB", safe_serialization=False)
-        processor.save_pretrained(fallback_dir)
-        print(f"[image] saved full model and processor to {fallback_dir}")
-        print(f"[image] run the server with --image-model-dir {fallback_dir}")
+        enc.vision_tower.save_pretrained(fallback_dir / "vision_tower")
+        enc.multi_modal_projector.state_dict()  # no save_pretrained for projector
+        torch.save(enc.multi_modal_projector.state_dict(), fallback_dir / "multi_modal_projector.pt")
+        preprocessor.save_pretrained(fallback_dir)
+        print(f"[image] saved vision tower and projector to {fallback_dir}")
         return fallback_dir
     except Exception as e2:
         print(f"[image] fallback save failed: {e2}")
@@ -261,16 +327,44 @@ class QwenAudioEncoder(nn.Module):
         return self.multi_modal_projector(last_hidden_state)
 
 
-def qwen_expected_mel_length(model: Any) -> int:
+def qwen_expected_mel_length(config: Any) -> int:
     """Compute the exact mel-frame length Qwen2AudioEncoder expects.
 
     Qwen2AudioEncoder enforces:
         input_features.shape[-1] == max_source_positions * conv1.stride * conv2.stride
     """
-    audio_cfg = getattr(model.config, "audio_config", None) or model.config
+    audio_cfg = getattr(config, "audio_config", None) or config
     max_source_positions = getattr(audio_cfg, "max_source_positions", 1500)
     # conv1 stride is (1,), conv2 stride is (2,).
     return max_source_positions * 1 * 2
+
+
+def _load_qwen_audio_tower(resolved_path: Path, dtype: torch.dtype, device: str):
+    """Load only the Qwen2-Audio encoder + projector from the full checkpoint."""
+    from transformers import AutoProcessor, Qwen2AudioConfig
+    from transformers.models.qwen2_audio.modeling_qwen2_audio import (
+        Qwen2AudioEncoder,
+        Qwen2AudioMultiModalProjector,
+    )
+
+    config = Qwen2AudioConfig.from_pretrained(resolved_path, local_files_only=True, trust_remote_code=True)
+    state = _load_partial_state_dict(resolved_path, ["audio_tower.", "multi_modal_projector."])
+
+    print(f"[audio] loading audio tower and projector from {resolved_path} ...")
+    audio_tower = Qwen2AudioEncoder(config.audio_config)
+    audio_tower.load_state_dict(state["audio_tower"], strict=True)
+    projector = Qwen2AudioMultiModalProjector(config)
+    projector.load_state_dict(state["multi_modal_projector"], strict=True)
+
+    enc = QwenAudioEncoder(audio_tower, projector)
+    enc.eval().to(device=device, dtype=dtype)
+
+    processor = AutoProcessor.from_pretrained(
+        resolved_path,
+        local_files_only=True,
+        trust_remote_code=True,
+    )
+    return enc, processor, config
 
 
 def export_audio_encoder(args: argparse.Namespace) -> Optional[Path]:
@@ -299,36 +393,9 @@ def export_audio_encoder(args: argparse.Namespace) -> Optional[Path]:
         return None
 
     try:
-        from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor
-
-        try:
-            model = Qwen2AudioForConditionalGeneration.from_pretrained(
-                resolved_path,
-                torch_dtype=dtype,
-                device_map=device,
-                low_cpu_mem_usage=True,
-                local_files_only=True,
-                trust_remote_code=True,
-            )
-        except Exception as e:
-            if "accelerate" in str(e).lower():
-                print(f"[audio] accelerate not installed; loading without device_map")
-                model = Qwen2AudioForConditionalGeneration.from_pretrained(
-                    resolved_path,
-                    torch_dtype=dtype,
-                    local_files_only=True,
-                    trust_remote_code=True,
-                )
-                model = model.to(device)
-            else:
-                raise
-        processor = AutoProcessor.from_pretrained(
-            resolved_path,
-            local_files_only=True,
-            trust_remote_code=True,
-        )
+        enc, processor, config = _load_qwen_audio_tower(Path(resolved_path), dtype, device)
     except Exception as e:
-        print(f"[audio] failed to load model: {e}")
+        print(f"[audio] failed to load audio tower: {e}")
         traceback.print_exc()
         return None
 
@@ -343,20 +410,8 @@ def export_audio_encoder(args: argparse.Namespace) -> Optional[Path]:
         except Exception as e:
             print(f"[audio] warning: could not save feature extractor: {e}")
 
-    audio_tower = pick_attr_from_model(
-        model, ("audio_tower",), ("model", "audio_tower")
-    )
-    projector = pick_attr_from_model(
-        model, ("multi_modal_projector",), ("model", "multi_modal_projector")
-    )
-
-    enc = QwenAudioEncoder(audio_tower, projector)
-    enc.eval().to(device=device, dtype=dtype)
-
-    mel_length = qwen_expected_mel_length(model)
-    num_mel_bins = getattr(
-        getattr(model.config, "audio_config", model.config), "num_mel_bins", 128
-    )
+    mel_length = qwen_expected_mel_length(config)
+    num_mel_bins = getattr(config.audio_config, "num_mel_bins", 128)
     onnx_path = out_dir / "qwen2_audio_connector.onnx"
     dummy = torch.randn(1, num_mel_bins, mel_length, dtype=dtype, device=device)
 
@@ -369,7 +424,7 @@ def export_audio_encoder(args: argparse.Namespace) -> Optional[Path]:
                 onnx_path,
                 input_names=["input_features"],
                 output_names=["audio_features"],
-                opset_version=14,
+                opset_version=18,
                 do_constant_folding=True,
                 dynamic_axes={
                     "input_features": {0: "batch"},
@@ -382,15 +437,15 @@ def export_audio_encoder(args: argparse.Namespace) -> Optional[Path]:
         print(f"[audio] ONNX export failed: {e}")
         traceback.print_exc()
 
-    # Fallback: save the full HF checkpoint.
+    # Fallback: save the tiny extracted audio tower so the server can use it directly.
     fallback_dir = out_dir / "Qwen2-Audio-7B-Instruct_full"
     fallback_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[audio] falling back to full HF save -> {fallback_dir}")
+    print(f"[audio] falling back to HF audio tower save -> {fallback_dir}")
     try:
-        model.save_pretrained(fallback_dir, max_shard_size="2GB", safe_serialization=False)
+        enc.audio_tower.save_pretrained(fallback_dir / "audio_tower")
+        torch.save(enc.multi_modal_projector.state_dict(), fallback_dir / "multi_modal_projector.pt")
         processor.save_pretrained(fallback_dir)
-        print(f"[audio] saved full model and processor to {fallback_dir}")
-        print(f"[audio] run the server with --audio-model-dir {fallback_dir}")
+        print(f"[audio] saved audio tower and projector to {fallback_dir}")
         return fallback_dir
     except Exception as e2:
         print(f"[audio] fallback save failed: {e2}")

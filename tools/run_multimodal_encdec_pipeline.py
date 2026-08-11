@@ -33,6 +33,7 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import json
 import os
 import shutil
@@ -335,6 +336,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Create a tiny synthetic image/audio dataset for testing",
     )
+    parser.add_argument(
+        "--parallel-train",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Train image and audio decoders in parallel (default: True)",
+    )
 
     # Encoder model selection
     parser.add_argument(
@@ -435,15 +442,31 @@ def main() -> int:
 
         server_proc = start_encoder_server(args)
 
-        if args.train_image:
-            rc = train_image_decoder(args)
-            if rc != 0:
-                print("[pipeline] image decoder training failed", file=sys.stderr)
+        if args.parallel_train and args.train_image and args.train_audio:
+            print("[pipeline] training image and audio decoders in parallel ...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future_to_label = {
+                    executor.submit(train_image_decoder, args): "image",
+                    executor.submit(train_audio_decoder, args): "audio",
+                }
+                for future in concurrent.futures.as_completed(future_to_label):
+                    label = future_to_label[future]
+                    try:
+                        rc = future.result()
+                        if rc != 0:
+                            print(f"[pipeline] {label} decoder training failed", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[pipeline] {label} decoder training crashed: {e}", file=sys.stderr)
+        else:
+            if args.train_image:
+                rc = train_image_decoder(args)
+                if rc != 0:
+                    print("[pipeline] image decoder training failed", file=sys.stderr)
 
-        if args.train_audio:
-            rc = train_audio_decoder(args)
-            if rc != 0:
-                print("[pipeline] audio decoder training failed", file=sys.stderr)
+            if args.train_audio:
+                rc = train_audio_decoder(args)
+                if rc != 0:
+                    print("[pipeline] audio decoder training failed", file=sys.stderr)
 
     finally:
         stop_encoder_server(server_proc)

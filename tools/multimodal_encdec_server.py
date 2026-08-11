@@ -224,11 +224,14 @@ def decode_image(data: bytes, width: Optional[int], height: Optional[int]) -> An
 def preprocess_image_for_onnx(
     img: Any, target_size: Optional[Tuple[int, int]] = None
 ) -> np.ndarray:
-    """Preprocess a PIL image for the exported CLIP/LLaVA vision encoder."""
+    """Preprocess a PIL image for the exported CLIP/LLaVA vision encoder.
+
+    The exported ONNX expects a fixed 336x336 input (the CLIP vision model size).
+    """
     from PIL import Image
 
-    if target_size is None:
-        target_size = (336, 336)
+    # Always resize to the model's image size unless overridden by an explicit request.
+    target_size = (336, 336)
     img = img.resize(target_size, Image.BILINEAR)
     arr = np.array(img, dtype=np.float32) / 255.0
     arr = (arr - CLIP_MEAN) / CLIP_STD
@@ -715,18 +718,30 @@ def _image_forward_manual(model: Any, pixel_values: Any) -> Any:
 
 def _preprocess_image_with_processor(img: Any, preprocessor: Any, size: Tuple[int, int]) -> np.ndarray:
     """Use a saved AutoImageProcessor for preprocessing."""
-    from PIL import Image
-
-    img = img.resize(size, Image.BILINEAR)
-    inputs = preprocessor(
-        images=[img],
-        do_resize=False,
-        do_center_crop=False,
-        do_rescale=True,
-        do_normalize=True,
-        return_tensors="np",
-    )
-    return inputs["pixel_values"].astype(np.float32)
+    # The processor's config (e.g. size=336) controls resize/center-crop.
+    # The explicit `size` argument is kept for API compatibility but ignored
+    # because the exported ONNX was traced with the processor's target size.
+    try:
+        inputs = preprocessor(
+            images=[img],
+            do_resize=True,
+            do_center_crop=True,
+            do_rescale=True,
+            do_normalize=True,
+            return_tensors="np",
+        )
+        return inputs["pixel_values"].astype(np.float32)
+    except Exception:
+        # Fast (rust) processors often only return PyTorch tensors.
+        inputs = preprocessor(
+            images=[img],
+            do_resize=True,
+            do_center_crop=True,
+            do_rescale=True,
+            do_normalize=True,
+            return_tensors="pt",
+        )
+        return inputs["pixel_values"].detach().cpu().numpy().astype(np.float32)
 
 
 def _extract_audio_tower_and_projector(model: Any) -> Tuple[Any, Any]:
@@ -1340,6 +1355,15 @@ def main() -> int:
 
     state = ServerState(args)
     MultimodalEncDecHandler.state = state
+
+    # Pre-load encoders in the main thread so heavy/transformers imports don't
+    # race when multiple training clients hit the server concurrently.
+    for enc_name in ("image_encoder", "audio_encoder"):
+        model, err = getattr(state, enc_name).get()
+        if model is None and err:
+            log.warning("[%s] not available: %s", enc_name, err)
+        elif model is not None:
+            log.info("[%s] pre-loaded", enc_name)
 
     server = ThreadingHTTPServer((args.host, args.port), MultimodalEncDecHandler)
     log.info("Multimodal enc/dec server listening on http://%s:%s", args.host, args.port)
