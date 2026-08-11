@@ -1,0 +1,854 @@
+diff --git a/examples/server/server.cpp b/examples/server/server.cpp
+index 809bfe0..e919988 100644
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -18,12 +18,15 @@
+ #include "index.html.gz.hpp"
+ #include "loading.html.hpp"
+ 
++#include <algorithm>
+ #include <atomic>
+ #include <chrono>
++#include <cmath>
+ #include <condition_variable>
+ #include <cstddef>
+ #include <cinttypes>
+ #include <deque>
++#include <random>
+ #include <memory>
+ #include <mutex>
+ #include <signal.h>
+@@ -1801,6 +1804,16 @@ struct server_context {
+ 
+     server_metrics metrics;
+ 
++    // Guards direct (non-queued) use of `ctx` from the Phoenix enc/infer/dec
++    // split endpoints (see handle_phx_enc/handle_phx_infer/handle_phx_dec
++    // below). These endpoints bypass the normal slot/task-queue machinery
++    // for simplicity, so this mutex is the only thing preventing them from
++    // racing with the main update_slots() loop's own llama_decode() calls.
++    // Intended for offline pipeline/debugging use, not high-concurrency
++    // production traffic; run the server with a single concurrent client
++    // when exercising these endpoints alongside normal completions.
++    std::mutex phx_mutex;
++
+     // Necessary similarity of prompt for slot selection
+     float slot_prompt_similarity = 0.0f;
+ 
+@@ -4121,6 +4134,467 @@ int main(int argc, char ** argv) {
+         res_ok(res, data);
+     };
+ 
++    // ------------------------------------------------------------------
++    // Phoenix enc / infer / dec split endpoints.
++    //
++    // These expose the llama_phx_encode()/llama_phx_infer()/llama_phx_decode()
++    // C API (see include/llama.h) added for splitting llama3.1-8b into three
++    // conceptual pieces:
++    //   POST /phx/enc   tokens         -> hidden states
++    //   POST /phx/infer hidden states  -> hidden states (full transformer body)
++    //   POST /phx/dec   hidden states  -> logits
++    //
++    // Intentionally implemented as direct synchronous calls into ctx_server.ctx
++    // (protected by ctx_server.phx_mutex) rather than through the slot/task
++    // queue, since these are meant for offline pipeline experimentation
++    // (e.g. running enc/infer/dec on different machines or processes) rather
++    // than high-throughput concurrent serving. Do not mix heavy concurrent
++    // /completion traffic with these endpoints.
++    // ------------------------------------------------------------------
++
++    const auto handle_phx_enc = [&ctx_server, &res_error, &res_ok](const httplib::Request & req, httplib::Response & res) {
++        const json body = json::parse(req.body);
++
++        llama_tokens tokens;
++        if (body.contains("tokens")) {
++            tokens = body.at("tokens").get<llama_tokens>();
++        } else if (body.contains("content")) {
++            const bool add_special = json_value(body, "add_special", true);
++            tokens = tokenize_mixed(ctx_server.vocab, body.at("content"), add_special, true);
++        } else {
++            res_error(res, format_error_response("\"tokens\" or \"content\" must be provided", ERROR_TYPE_INVALID_REQUEST));
++            return;
++        }
++
++        if (tokens.empty()) {
++            res_error(res, format_error_response("no tokens to encode", ERROR_TYPE_INVALID_REQUEST));
++            return;
++        }
++
++        const int32_t n_embd = llama_model_n_embd(ctx_server.model);
++        std::vector<float> hidden((size_t) tokens.size() * n_embd);
++
++        int32_t ret;
++        {
++            std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
++            ret = llama_phx_encode(ctx_server.ctx, tokens.data(), (int32_t) tokens.size(), hidden.data());
++        }
++
++        if (ret != 0) {
++            res_error(res, format_error_response("llama_phx_encode failed", ERROR_TYPE_SERVER));
++            return;
++        }
++
++        json hidden_json = json::array();
++        for (size_t i = 0; i < tokens.size(); i++) {
++            hidden_json.push_back(std::vector<float>(hidden.begin() + i * n_embd, hidden.begin() + (i + 1) * n_embd));
++        }
++
++        res_ok(res, json{
++            {"n_tokens", tokens.size()},
++            {"n_embd",   n_embd},
++            {"tokens",   tokens},
++            {"hidden",   hidden_json},
++        });
++    };
++
++    const auto handle_phx_infer = [&ctx_server, &res_error, &res_ok](const httplib::Request & req, httplib::Response & res) {
++        const json body = json::parse(req.body);
++
++        if (!body.contains("hidden") || !body.at("hidden").is_array() || body.at("hidden").empty()) {
++            res_error(res, format_error_response("\"hidden\" (array of n_embd-length float rows) must be provided", ERROR_TYPE_INVALID_REQUEST));
++            return;
++        }
++
++        const int32_t n_embd   = llama_model_n_embd(ctx_server.model);
++        const json  & rows     = body.at("hidden");
++        const int32_t n_tokens = (int32_t) rows.size();
++
++        std::vector<float> hidden_in((size_t) n_tokens * n_embd);
++        for (int32_t i = 0; i < n_tokens; i++) {
++            const std::vector<float> row = rows[i].get<std::vector<float>>();
++            if ((int32_t) row.size() != n_embd) {
++                res_error(res, format_error_response("each \"hidden\" row must have n_embd floats", ERROR_TYPE_INVALID_REQUEST));
++                return;
++            }
++            std::copy(row.begin(), row.end(), hidden_in.begin() + (size_t) i * n_embd);
++        }
++
++        std::vector<llama_pos> positions;
++        const llama_pos * positions_ptr = nullptr;
++        if (body.contains("positions")) {
++            positions = body.at("positions").get<std::vector<llama_pos>>();
++            if ((int32_t) positions.size() != n_tokens) {
++                res_error(res, format_error_response("\"positions\" must have the same length as \"hidden\"", ERROR_TYPE_INVALID_REQUEST));
++                return;
++            }
++            positions_ptr = positions.data();
++        }
++
++        std::vector<float> hidden_out((size_t) n_tokens * n_embd);
++
++        int32_t ret;
++        {
++            std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
++            ret = llama_phx_infer(ctx_server.ctx, hidden_in.data(), n_tokens, positions_ptr, hidden_out.data());
++        }
++
++        if (ret != 0) {
++            res_error(res, format_error_response("llama_phx_infer failed", ERROR_TYPE_SERVER));
++            return;
++        }
++
++        json hidden_json = json::array();
++        for (int32_t i = 0; i < n_tokens; i++) {
++            hidden_json.push_back(std::vector<float>(hidden_out.begin() + i * n_embd, hidden_out.begin() + (i + 1) * n_embd));
++        }
++
++        res_ok(res, json{
++            {"n_tokens", n_tokens},
++            {"n_embd",   n_embd},
++            {"hidden",   hidden_json},
++        });
++    };
++
++    const auto handle_phx_dec = [&ctx_server, &res_error, &res_ok](const httplib::Request & req, httplib::Response & res) {
++        const json body = json::parse(req.body);
++
++        if (!body.contains("hidden") || !body.at("hidden").is_array() || body.at("hidden").empty()) {
++            res_error(res, format_error_response("\"hidden\" (array of n_embd-length float rows) must be provided", ERROR_TYPE_INVALID_REQUEST));
++            return;
++        }
++
++        const int32_t n_embd   = llama_model_n_embd(ctx_server.model);
++        const int32_t n_vocab  = llama_vocab_n_tokens(ctx_server.vocab);
++        const json  & rows     = body.at("hidden");
++        const int32_t n_tokens = (int32_t) rows.size();
++
++        std::vector<float> hidden_in((size_t) n_tokens * n_embd);
++        for (int32_t i = 0; i < n_tokens; i++) {
++            const std::vector<float> row = rows[i].get<std::vector<float>>();
++            if ((int32_t) row.size() != n_embd) {
++                res_error(res, format_error_response("each \"hidden\" row must have n_embd floats", ERROR_TYPE_INVALID_REQUEST));
++                return;
++            }
++            std::copy(row.begin(), row.end(), hidden_in.begin() + (size_t) i * n_embd);
++        }
++
++        const bool with_logits = json_value(body, "with_logits", false);
++
++        std::vector<float> logits((size_t) n_tokens * n_vocab);
++
++        int32_t ret;
++        {
++            std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
++            ret = llama_phx_decode(ctx_server.ctx, hidden_in.data(), n_tokens, logits.data());
++        }
++
++        if (ret != 0) {
++            res_error(res, format_error_response("llama_phx_decode failed", ERROR_TYPE_SERVER));
++            return;
++        }
++
++        json tokens_json = json::array();
++        for (int32_t i = 0; i < n_tokens; i++) {
++            const float * row = logits.data() + (size_t) i * n_vocab;
++            int32_t best = 0;
++            for (int32_t v = 1; v < n_vocab; v++) {
++                if (row[v] > row[best]) {
++                    best = v;
++                }
++            }
++            tokens_json.push_back({
++                {"token", best},
++                {"piece", common_token_to_piece(ctx_server.ctx, best)},
++            });
++        }
++
++        json data{
++            {"n_tokens", n_tokens},
++            {"n_vocab",  n_vocab},
++            {"tokens",   tokens_json},
++        };
++
++        if (with_logits) {
++            json logits_json = json::array();
++            for (int32_t i = 0; i < n_tokens; i++) {
++                logits_json.push_back(std::vector<float>(logits.begin() + i * n_vocab, logits.begin() + (i + 1) * n_vocab));
++            }
++            data["logits"] = logits_json;
++        }
++
++        res_ok(res, data);
++    };
++
++    // ------------------------------------------------------------------
++    // /phx/generate: server-side token-in-token-out generation.
++    //
++    // Encapsulates the autoregressive loop (dec -> sample -> enc -> infer)
++    // so that the client only sees:
++    //   enc(prompt) -> /phx/generate (inference) -> modality-specific dec
++    // The endpoint accepts prompt as content/tokens/hidden and returns the
++    // generated token ids and (optionally) the per-step unit queries and
++    // a detokenized text string.
++    // ------------------------------------------------------------------
++
++    const auto handle_phx_generate = [&ctx_server, &res_error, &res_ok](const httplib::Request & req, httplib::Response & res) {
++        const json body = json::parse(req.body);
++
++        const int32_t n_embd = llama_model_n_embd(ctx_server.model);
++        const int32_t n_vocab = llama_vocab_n_tokens(ctx_server.vocab);
++        const int32_t n_ctx  = llama_n_ctx(ctx_server.ctx);
++
++        const int32_t max_tokens = json_value(body, "max_tokens", 16);
++        if (max_tokens < 1) {
++            res_error(res, format_error_response("\"max_tokens\" must be >= 1", ERROR_TYPE_INVALID_REQUEST));
++            return;
++        }
++        if (max_tokens > n_ctx) {
++            res_error(res, format_error_response("\"max_tokens\" exceeds context size", ERROR_TYPE_INVALID_REQUEST));
++            return;
++        }
++
++        const float temperature = json_value(body, "temperature", 0.8f);
++        const float top_p       = json_value(body, "top_p", 0.95f);
++        const uint32_t seed     = json_value(body, "seed", (uint32_t) 0);
++        const bool return_hidden = json_value(body, "return_hidden", true);
++        const bool decode_text   = json_value(body, "decode_text", true);
++
++        std::vector<llama_token> stop_token_ids;
++        if (body.contains("stop_token_ids") && body.at("stop_token_ids").is_array()) {
++            stop_token_ids = body.at("stop_token_ids").get<std::vector<llama_token>>();
++        }
++        const llama_token eos = llama_vocab_eos(ctx_server.vocab);
++        if (eos >= 0) {
++            stop_token_ids.push_back(eos);
++        }
++
++        // --- encode prompt into hidden states ---
++        int32_t n_prompt_tokens = 0;
++        std::vector<float> prompt_hidden;
++
++        if (body.contains("hidden")) {
++            const json & rows = body.at("hidden");
++            n_prompt_tokens = (int32_t) rows.size();
++            if (n_prompt_tokens == 0) {
++                res_error(res, format_error_response("\"hidden\" must not be empty", ERROR_TYPE_INVALID_REQUEST));
++                return;
++            }
++            prompt_hidden.resize((size_t) n_prompt_tokens * n_embd);
++            for (int32_t i = 0; i < n_prompt_tokens; i++) {
++                const std::vector<float> row = rows[i].get<std::vector<float>>();
++                if ((int32_t) row.size() != n_embd) {
++                    res_error(res, format_error_response("each \"hidden\" row must have n_embd floats", ERROR_TYPE_INVALID_REQUEST));
++                    return;
++                }
++                std::copy(row.begin(), row.end(), prompt_hidden.begin() + (size_t) i * n_embd);
++            }
++        } else if (body.contains("tokens")) {
++            const llama_tokens tokens = body.at("tokens").get<llama_tokens>();
++            n_prompt_tokens = (int32_t) tokens.size();
++            if (n_prompt_tokens == 0) {
++                res_error(res, format_error_response("\"tokens\" must not be empty", ERROR_TYPE_INVALID_REQUEST));
++                return;
++            }
++            prompt_hidden.resize((size_t) n_prompt_tokens * n_embd);
++            int32_t ret;
++            {
++                std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
++                ret = llama_phx_encode(ctx_server.ctx, tokens.data(), n_prompt_tokens, prompt_hidden.data());
++            }
++            if (ret != 0) {
++                res_error(res, format_error_response("llama_phx_encode failed", ERROR_TYPE_SERVER));
++                return;
++            }
++        } else if (body.contains("content")) {
++            const bool add_special = json_value(body, "add_special", true);
++            const llama_tokens tokens = tokenize_mixed(ctx_server.vocab, body.at("content"), add_special, true);
++            n_prompt_tokens = (int32_t) tokens.size();
++            if (n_prompt_tokens == 0) {
++                res_error(res, format_error_response("no tokens to encode", ERROR_TYPE_INVALID_REQUEST));
++                return;
++            }
++            prompt_hidden.resize((size_t) n_prompt_tokens * n_embd);
++            int32_t ret;
++            {
++                std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
++                ret = llama_phx_encode(ctx_server.ctx, tokens.data(), n_prompt_tokens, prompt_hidden.data());
++            }
++            if (ret != 0) {
++                res_error(res, format_error_response("llama_phx_encode failed", ERROR_TYPE_SERVER));
++                return;
++            }
++        } else {
++            res_error(res, format_error_response("\"hidden\", \"tokens\" or \"content\" must be provided", ERROR_TYPE_INVALID_REQUEST));
++            return;
++        }
++
++        // --- prime KV cache with prompt ---
++        std::vector<llama_pos> prompt_positions(n_prompt_tokens);
++        for (int32_t i = 0; i < n_prompt_tokens; i++) {
++            prompt_positions[i] = i;
++        }
++
++        std::vector<float> prompt_out((size_t) n_prompt_tokens * n_embd);
++        int32_t ret;
++        {
++            std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
++            ret = llama_phx_infer(ctx_server.ctx, prompt_hidden.data(), n_prompt_tokens, prompt_positions.data(), prompt_out.data());
++        }
++        if (ret != 0) {
++            res_error(res, format_error_response("llama_phx_infer (prompt) failed", ERROR_TYPE_SERVER));
++            return;
++        }
++
++        // --- sampling setup ---
++        std::mt19937 rng(seed != 0 ? (unsigned) seed : std::random_device{}());
++
++        auto sample_logit = [&rng](const float * logits, int32_t n_vocab, float temp, float p_top) -> llama_token {
++            if (n_vocab <= 0) return -1;
++
++            // Greedy (temperature == 0) -> argmax over the raw logits.
++            if (temp <= 1e-6f) {
++                llama_token best = 0;
++                for (int32_t i = 1; i < n_vocab; ++i) {
++                    if (logits[i] > logits[best]) best = i;
++                }
++                return best;
++            }
++
++            // Apply temperature and softmax.
++            float max_logit = *std::max_element(logits, logits + n_vocab);
++            std::vector<std::pair<double, llama_token>> probs;
++            probs.reserve(n_vocab);
++            double sum = 0.0;
++            for (llama_token i = 0; i < n_vocab; ++i) {
++                double p = std::exp(((double) logits[i] - (double) max_logit) / (double) temp);
++                if (!std::isfinite(p)) p = 0.0;
++                sum += p;
++                probs.emplace_back(p, i);
++            }
++            if (sum <= 0.0 || !std::isfinite(sum)) {
++                llama_token best = 0;
++                for (int32_t i = 1; i < n_vocab; ++i) {
++                    if (logits[i] > logits[best]) best = i;
++                }
++                return best;
++            }
++            for (auto & pr : probs) pr.first /= sum;
++
++            // Top-p (nucleus) filtering.
++            float clamped_top_p = std::clamp(p_top, 0.0f, 1.0f);
++            if (clamped_top_p <= 0.0f) clamped_top_p = 1.0f;
++            std::sort(probs.begin(), probs.end(),
++                      [](const auto & a, const auto & b) { return a.first > b.first; });
++            double cum = 0.0;
++            size_t keep = probs.size();
++            for (size_t i = 0; i < probs.size(); ++i) {
++                cum += probs[i].first;
++                if (cum >= clamped_top_p) {
++                    keep = i + 1;
++                    break;
++                }
++            }
++            probs.resize(keep);
++
++            // Renormalize and sample.
++            double psum = 0.0;
++            for (const auto & pr : probs) psum += pr.first;
++            if (psum > 0.0) {
++                for (auto & pr : probs) pr.first /= psum;
++            }
++            std::uniform_real_distribution<double> dist(0.0, 1.0);
++            double r = dist(rng);
++            cum = 0.0;
++            for (const auto & pr : probs) {
++                cum += pr.first;
++                if (r <= cum) return pr.second;
++            }
++            return probs.back().second;
++        };
++
++        std::vector<llama_token> generated_tokens;
++        std::vector<std::vector<float>> generated_hidden;
++        generated_tokens.reserve(max_tokens);
++        if (return_hidden) {
++            generated_hidden.reserve(max_tokens);
++        }
++
++        std::vector<float> last_hidden(n_embd);
++        std::copy(prompt_out.begin() + (size_t)(n_prompt_tokens - 1) * n_embd,
++                  prompt_out.begin() + (size_t) n_prompt_tokens * n_embd,
++                  last_hidden.begin());
++
++        std::vector<float> logits((size_t) n_vocab);
++        std::vector<float> embd(n_embd);
++        std::vector<float> infer_out(n_embd);
++        std::vector<llama_pos> gen_pos(1);
++
++        {
++            std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
++            for (int32_t step = 0; step < max_tokens; ++step) {
++                // dec: unit query -> logits (logits buffer is in vocab order)
++                int32_t dec_ret = llama_phx_decode(ctx_server.ctx, last_hidden.data(), 1, logits.data());
++                if (dec_ret != 0) {
++                    res_error(res, format_error_response("llama_phx_decode failed", ERROR_TYPE_SERVER));
++                    return;
++                }
++
++                // sample next token from the logits buffer directly
++                const llama_token tok = sample_logit(logits.data(), n_vocab, temperature, top_p);
++
++                if (std::find(stop_token_ids.begin(), stop_token_ids.end(), tok) != stop_token_ids.end()) {
++                    break;
++                }
++
++                generated_tokens.push_back(tok);
++                if (return_hidden) {
++                    generated_hidden.push_back(last_hidden);
++                }
++
++                // enc: token -> embedding (unit query for next infer step)
++                int32_t enc_ret = llama_phx_encode(ctx_server.ctx, &tok, 1, embd.data());
++                if (enc_ret != 0) {
++                    res_error(res, format_error_response("llama_phx_encode failed", ERROR_TYPE_SERVER));
++                    return;
++                }
++
++                // infer: unit query -> unit query
++                gen_pos[0] = n_prompt_tokens + step;
++                int32_t infer_ret = llama_phx_infer(ctx_server.ctx, embd.data(), 1, gen_pos.data(), infer_out.data());
++                if (infer_ret != 0) {
++                    res_error(res, format_error_response("llama_phx_infer failed", ERROR_TYPE_SERVER));
++                    return;
++                }
++
++                std::copy(infer_out.begin(), infer_out.begin() + n_embd, last_hidden.begin());
++            }
++        }
++
++        json data = json{
++            {"n_tokens", (int) generated_tokens.size()},
++            {"tokens",   generated_tokens},
++        };
++
++        if (decode_text) {
++            std::string text;
++            for (llama_token tok : generated_tokens) {
++                text += common_token_to_piece(ctx_server.ctx, tok);
++            }
++            data["text"] = text;
++        }
++
++        if (return_hidden) {
++            json hidden_json = json::array();
++            for (const auto & h : generated_hidden) {
++                hidden_json.push_back(h);
++            }
++            data["hidden"] = hidden_json;
++        }
++
++        res_ok(res, data);
++    };
++
+     const auto handle_embeddings_impl = [&ctx_server, &res_error, &res_ok](const httplib::Request & req, httplib::Response & res, oaicompat_type oaicompat) {
+         const json body = json::parse(req.body);
+ 
+@@ -4394,6 +4868,10 @@ int main(int argc, char ** argv) {
+     svr->Post("/embeddings",          handle_embeddings);
+     svr->Post("/v1/embeddings",       handle_embeddings_oai);
+     svr->Post("/rerank",              handle_rerank);
++    svr->Post("/phx/enc",             handle_phx_enc);
++    svr->Post("/phx/infer",           handle_phx_infer);
++    svr->Post("/phx/dec",             handle_phx_dec);
++    svr->Post("/phx/generate",        handle_phx_generate);
+     svr->Post("/reranking",           handle_rerank);
+     svr->Post("/v1/rerank",           handle_rerank);
+     svr->Post("/v1/reranking",        handle_rerank);
+diff --git a/include/llama.h b/include/llama.h
+index 60c61db..ea09de0 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -864,6 +864,83 @@ extern "C" {
+             struct llama_context * ctx,
+               struct llama_batch   batch);
+ 
++    //
++    // Phoenix enc / infer / dec split
++    //
++    // Conceptually splits what llama_decode() normally does in one fused pass
++    // into three independently callable stages:
++    //   enc   : input tokens         -> hidden states (embedding lookup)
++    //   infer : hidden states        -> hidden states (full transformer body,
++    //           attention + FFN stack, still uses/updates the KV cache)
++    //   dec   : hidden states        -> logits        (final norm + lm_head)
++    //
++    // These are convenience wrappers around the existing llama_decode()
++    // machinery (they temporarily flip llama_context::cparams.embeddings /
++    // pooling_type and a per-context stage selector), so KV-cache semantics,
++    // batching, and threading behave exactly as they do for a normal
++    // llama_decode() call. "full" (fused) behavior is unaffected unless one
++    // of these is called.
++    //
++
++    enum llama_phx_stage {
++        LLAMA_PHX_STAGE_FULL  = 0, // normal fused llama_decode() behavior (default)
++        LLAMA_PHX_STAGE_ENC   = 1, // tokens -> hidden states
++        LLAMA_PHX_STAGE_INFER = 2, // hidden states -> hidden states
++        LLAMA_PHX_STAGE_DEC   = 3, // hidden states -> logits
++    };
++
++    // Select which conceptual stage the *next* llama_phx_encode/infer/decode
++    // (or raw llama_decode) call should execute against `ctx`.
++    // LLAMA_PHX_STAGE_FULL restores normal llama_decode() behavior.
++    // Prefer using llama_phx_encode() / llama_phx_infer() / llama_phx_decode()
++    // below, which manage this automatically; this is exposed for advanced
++    // callers that want to drive llama_decode() directly with a custom batch
++    // (e.g. batch.embd for the infer/dec stages).
++    LLAMA_API void llama_phx_set_stage(struct llama_context * ctx, enum llama_phx_stage stage);
++
++    // Returns the stage most recently selected with llama_phx_set_stage().
++    LLAMA_API enum llama_phx_stage llama_phx_get_stage(struct llama_context * ctx);
++
++    // enc: input tokens -> hidden states.
++    // Equivalent to an embedding-table lookup (plus any active LoRA
++    // embedding deltas); does not touch the KV cache.
++    // `out_hidden` must have room for n_tokens * llama_model_n_embd(model) floats.
++    // Returns 0 on success, matching llama_decode()'s return code convention.
++    LLAMA_API int32_t llama_phx_encode(
++            struct llama_context * ctx,
++              const llama_token *  tokens,
++                        int32_t    n_tokens,
++                          float *  out_hidden);
++
++    // infer: hidden states -> hidden states.
++    // Runs the full transformer body (all layers, attention + FFN, KV cache
++    // included) but stops short of the final norm + lm_head, i.e. this is
++    // llama_decode() with the output stage removed. `in_hidden` supplies
++    // n_tokens rows of n_embd floats (row-major, one row per token) in place
++    // of a token embedding lookup. If `positions` is NULL, positions are
++    // assigned automatically the same way llama_decode() would.
++    // `out_hidden` must have room for n_tokens * llama_model_n_embd(model) floats.
++    // Returns the same status codes as llama_decode() (0 success, >0 warning,
++    // <0 error).
++    LLAMA_API int32_t llama_phx_infer(
++            struct llama_context * ctx,
++                      const float * in_hidden,
++                          int32_t   n_tokens,
++                  const llama_pos * positions, // may be NULL
++                            float * out_hidden);
++
++    // dec: hidden states -> logits.
++    // Runs only the final norm + output projection (lm_head); does not touch
++    // the KV cache or run any attention/FFN layers. `in_hidden` supplies
++    // n_tokens rows of n_embd floats. `out_logits` must have room for
++    // n_tokens * llama_vocab_n_tokens(vocab) floats.
++    // Returns the same status codes as llama_decode().
++    LLAMA_API int32_t llama_phx_decode(
++            struct llama_context * ctx,
++                      const float * in_hidden,
++                          int32_t   n_tokens,
++                            float * out_logits);
++
+     // Set the number of threads used for decoding
+     // n_threads is the number of threads used for generation (single token)
+     // n_threads_batch is the number of threads used for prompt and batch processing (multiple tokens)
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 3af67d5..c376556 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -677,6 +677,130 @@ void llama_set_causal_attn(struct llama_context * ctx, bool causal_attn) {
+     ctx->cparams.causal_attn = causal_attn;
+ }
+ 
++void llama_phx_set_stage(struct llama_context * ctx, enum llama_phx_stage stage) {
++    if (!ctx) {
++        return;
++    }
++    ctx->phx_split.stage = stage;
++}
++
++enum llama_phx_stage llama_phx_get_stage(struct llama_context * ctx) {
++    if (!ctx) {
++        return LLAMA_PHX_STAGE_FULL;
++    }
++    return ctx->phx_split.stage;
++}
++
++// Shared helper: run one phx stage through the normal llama_decode() path,
++// temporarily overriding cparams.embeddings/pooling_type as needed so that
++// the existing output-extraction code in llama_decode_impl() (llama.cpp)
++// routes the stage's result into either lctx.embd (hidden-state stages) or
++// lctx.logits (the dec stage), then restores the previous settings.
++static int32_t llama_phx_run_stage(
++        struct llama_context * ctx,
++        enum llama_phx_stage    stage,
++        const llama_token     * tokens,     // used for ENC only
++        const float           * in_hidden,  // used for INFER / DEC
++        int32_t                 n_tokens,
++        const llama_pos       * positions,  // may be NULL, used for INFER only
++        float                 * out_buf) {
++    if (!ctx || n_tokens <= 0 || out_buf == nullptr) {
++        return -1;
++    }
++    if (stage == LLAMA_PHX_STAGE_ENC && tokens == nullptr) {
++        return -1;
++    }
++    if ((stage == LLAMA_PHX_STAGE_INFER || stage == LLAMA_PHX_STAGE_DEC) && in_hidden == nullptr) {
++        return -1;
++    }
++
++    const int32_t n_embd = llama_model_n_embd(&ctx->model);
++
++    const bool                saved_embeddings   = ctx->cparams.embeddings;
++    const enum llama_pooling_type saved_pooling  = ctx->cparams.pooling_type;
++    const enum llama_phx_stage saved_stage        = ctx->phx_split.stage;
++
++    const bool needs_hidden_output = (stage == LLAMA_PHX_STAGE_ENC || stage == LLAMA_PHX_STAGE_INFER);
++    if (needs_hidden_output) {
++        // route through the existing "token embeddings" (pooling==NONE)
++        // extraction path in llama_decode_impl(), which already copies
++        // per-token float vectors into lctx.embd.
++        ctx->cparams.embeddings   = true;
++        ctx->cparams.pooling_type = LLAMA_POOLING_TYPE_NONE;
++    } else {
++        // dec: reuse the normal logits path unchanged.
++        ctx->cparams.embeddings = false;
++    }
++
++    ctx->phx_split.stage = stage;
++
++    const int32_t n_embd_batch = (stage == LLAMA_PHX_STAGE_ENC) ? 0 : n_embd;
++    struct llama_batch batch = llama_batch_init(n_tokens, n_embd_batch, 1);
++    batch.n_tokens = n_tokens;
++
++    for (int32_t i = 0; i < n_tokens; ++i) {
++        if (stage == LLAMA_PHX_STAGE_ENC) {
++            batch.token[i] = tokens[i];
++        } else {
++            std::memcpy(batch.embd + (size_t) i * n_embd, in_hidden + (size_t) i * n_embd, n_embd * sizeof(float));
++        }
++        batch.pos[i]      = positions ? positions[i] : i;
++        batch.n_seq_id[i] = 1;
++        batch.seq_id[i][0] = 0;
++        batch.logits[i]   = 1; // we need output for every token, not just the last
++    }
++
++    const int32_t ret = llama_decode(ctx, batch);
++
++    if (ret == 0) {
++        if (needs_hidden_output) {
++            const float * embd = llama_get_embeddings(ctx);
++            if (embd != nullptr) {
++                std::memcpy(out_buf, embd, (size_t) n_tokens * n_embd * sizeof(float));
++            }
++        } else {
++            const float * logits = llama_get_logits(ctx);
++            if (logits != nullptr) {
++                const int32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(&ctx->model));
++                std::memcpy(out_buf, logits, (size_t) n_tokens * n_vocab * sizeof(float));
++            }
++        }
++    }
++
++    llama_batch_free(batch);
++
++    ctx->cparams.embeddings   = saved_embeddings;
++    ctx->cparams.pooling_type = saved_pooling;
++    ctx->phx_split.stage      = saved_stage;
++
++    return ret;
++}
++
++int32_t llama_phx_encode(
++        struct llama_context * ctx,
++          const llama_token *  tokens,
++                    int32_t    n_tokens,
++                      float *  out_hidden) {
++    return llama_phx_run_stage(ctx, LLAMA_PHX_STAGE_ENC, tokens, nullptr, n_tokens, nullptr, out_hidden);
++}
++
++int32_t llama_phx_infer(
++        struct llama_context * ctx,
++                  const float * in_hidden,
++                      int32_t   n_tokens,
++              const llama_pos * positions,
++                        float * out_hidden) {
++    return llama_phx_run_stage(ctx, LLAMA_PHX_STAGE_INFER, nullptr, in_hidden, n_tokens, positions, out_hidden);
++}
++
++int32_t llama_phx_decode(
++        struct llama_context * ctx,
++                  const float * in_hidden,
++                      int32_t   n_tokens,
++                        float * out_logits) {
++    return llama_phx_run_stage(ctx, LLAMA_PHX_STAGE_DEC, nullptr, in_hidden, n_tokens, nullptr, out_logits);
++}
++
+ void llama_style_adapter_enable(struct llama_context * ctx, bool enabled) {
+     if (!ctx) {
+         return;
+diff --git a/src/llama-context.h b/src/llama-context.h
+index c7eff71..627ca8f 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -27,6 +27,14 @@ struct llama_context {
+     struct llama_kv_cache     kv_self;
+     struct llama_adapter_cvec cvec;
+ 
++    // Phoenix enc/infer/dec stage split (see llama_phx_* in llama.h).
++    // `stage` is consulted by the per-arch graph builders (currently only
++    // build_llama(), which covers LLM_ARCH_LLAMA / Llama-3.1); all other
++    // architectures ignore it and behave exactly as before.
++    struct {
++        enum llama_phx_stage stage = LLAMA_PHX_STAGE_FULL;
++    } phx_split;
++
+     struct {
+         bool  enabled = false;
+         float bias = 0.0f;
+diff --git a/src/llama.cpp b/src/llama.cpp
+index 607f278..c9b8791 100644
+--- a/src/llama.cpp
++++ b/src/llama.cpp
+@@ -1366,7 +1366,7 @@ struct llm_build_context {
+         struct ggml_tensor * inp = nullptr;
+         for (int i = ggml_graph_n_nodes(gf) - 1; i >= 0; --i) {
+             inp = ggml_graph_node(gf, i);
+-            if (strcmp(inp->name, "result_norm") == 0 || strcmp(inp->name, "result_embd") == 0) {
++            if (strcmp(inp->name, "result_norm") == 0 || strcmp(inp->name, "result_embd") == 0 || strcmp(inp->name, "result_embd_pooled") == 0) {
+                 break;
+             } else {
+                 inp = nullptr;
+@@ -1486,8 +1486,51 @@ struct llm_build_context {
+         struct ggml_tensor * cur;
+         struct ggml_tensor * inpL;
+ 
++        // --- Phoenix enc/infer/dec stage split --------------------------------
++        // LLAMA_PHX_STAGE_DEC: hidden states -> logits only. Skips the whole
++        // attention/FFN stack; `inpL` here is the externally-supplied hidden
++        // state (llm_build_inp_embd() returns the raw `inp_embd` input tensor
++        // unchanged whenever the ubatch carries embeddings instead of token
++        // ids, which is how llama_phx_decode() feeds this stage).
++        if (lctx.phx_split.stage == LLAMA_PHX_STAGE_DEC) {
++            inpL = llm_build_inp_embd(ctx0, lctx, hparams, ubatch, model.tok_embd, cb);
++
++            cur = llm_build_norm(ctx0, inpL, hparams,
++                    model.output_norm, NULL,
++                    LLM_NORM_RMS, cb, -1);
++            cb(cur, "result_norm", -1);
++
++            // lm_head
++            cur = llm_build_lora_mm(lctx, ctx0, model.output, cur);
++
++            // For Granite architecture
++            if (hparams.f_logit_scale) {
++                cur = ggml_scale(ctx0, cur, 1.0f / hparams.f_logit_scale);
++            }
++
++            cb(cur, "result_output", -1);
++
++            ggml_build_forward_expand(gf, cur);
++
++            return gf;
++        }
++
+         inpL = llm_build_inp_embd(ctx0, lctx, hparams, ubatch, model.tok_embd, cb);
+ 
++        // LLAMA_PHX_STAGE_ENC: input tokens -> hidden states only. This is
++        // exactly the embedding-table lookup (+ any active LoRA embedding
++        // deltas) that `inpL` already holds at this point; we stop here
++        // instead of feeding it into the transformer stack. The tensor is
++        // named "result_embd_pooled" so llama_decode_impl()'s existing
++        // embeddings-extraction path (triggered by cparams.embeddings==true,
++        // see llama_phx_encode()) picks it up without any further changes.
++        if (lctx.phx_split.stage == LLAMA_PHX_STAGE_ENC) {
++            cb(inpL, "result_embd_pooled", -1);
++            ggml_build_forward_expand(gf, inpL);
++
++            return gf;
++        }
++
+         // inp_pos - contains the positions
+         struct ggml_tensor * inp_pos = build_inp_pos();
+ 
+@@ -1619,6 +1662,18 @@ struct llm_build_context {
+ 
+         cur = inpL;
+ 
++        // LLAMA_PHX_STAGE_INFER: hidden states -> hidden states. The full
++        // attention/FFN stack above has already run (including KV cache
++        // updates); stop here instead of applying the final norm + lm_head.
++        // Named "result_embd_pooled" for the same reason as the enc stage
++        // above (reuses llama_decode_impl()'s embeddings-extraction path).
++        if (lctx.phx_split.stage == LLAMA_PHX_STAGE_INFER) {
++            cb(cur, "result_embd_pooled", -1);
++            ggml_build_forward_expand(gf, cur);
++
++            return gf;
++        }
++
+         cur = llm_build_norm(ctx0, cur, hparams,
+                 model.output_norm, NULL,
+                 LLM_NORM_RMS, cb, -1);
+@@ -8645,7 +8700,10 @@ static int llama_decode_impl(
+ 
+         // the output is always the last tensor in the graph
+         struct ggml_tensor * res  = ggml_graph_node(gf, -1);
+-        struct ggml_tensor * embd = ggml_graph_node(gf, -2);
++        struct ggml_tensor * embd = nullptr;
++        if (ggml_graph_n_nodes(gf) >= 2) {
++            embd = ggml_graph_node(gf, -2);
++        }
+ 
+         if (lctx.n_outputs == 0) {
+             // no output
