@@ -149,7 +149,9 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
                             const std::string &mimeType) override {
     auto samples = preprocessAudio(audioBytes, sampleRate, mimeType);
     auto input = prepareInput(samples, {});
-    return runEncoderBpu(input);
+    auto out = runEncoderBpu(input);
+    if (!out.empty()) ++samples_;
+    return out;
   }
 
   std::vector<float> encodeContext(const std::vector<uint8_t> &audioBytes,
@@ -158,7 +160,9 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
                                    const std::vector<bool> &mask) override {
     auto samples = preprocessAudio(audioBytes, sampleRate, mimeType);
     auto input = prepareInput(samples, mask);
-    return runEncoderBpu(input);
+    auto out = runEncoderBpu(input);
+    if (!out.empty()) ++samples_;
+    return out;
   }
 
   std::vector<float> encodeTarget(const std::vector<uint8_t> &audioBytes,
@@ -175,7 +179,9 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
       }
     }
     auto input = prepareInput(samples, mask);
-    return runEncoderBpu(input);
+    auto out = runEncoderBpu(input);
+    if (!out.empty()) ++samples_;
+    return out;
   }
 
   std::vector<float> predictTarget(const std::vector<float> &contextRepr,
@@ -583,7 +589,10 @@ class JepaV2SpeechFallbackModel : public JepaV2SpeechWorldModel {
                             int sampleRate,
                             const std::string &mimeType) override {
     auto samples = preprocess(audioBytes, sampleRate, mimeType);
-    return windowStatsToConcept(samples, {});
+    auto out = windowStatsToConcept(samples, {});
+    if (!out.empty()) ++samples_;
+    lastError_.clear();
+    return out;
   }
 
   std::vector<float> encodeContext(const std::vector<uint8_t> &audioBytes,
@@ -591,7 +600,9 @@ class JepaV2SpeechFallbackModel : public JepaV2SpeechWorldModel {
                                    const std::string &mimeType,
                                    const std::vector<bool> &mask) override {
     auto samples = preprocess(audioBytes, sampleRate, mimeType);
-    return windowStatsToConcept(samples, mask);
+    auto out = windowStatsToConcept(samples, mask);
+    if (!out.empty()) ++samples_;
+    return out;
   }
 
   std::vector<float> encodeTarget(const std::vector<uint8_t> &audioBytes,
@@ -607,7 +618,9 @@ class JepaV2SpeechFallbackModel : public JepaV2SpeechWorldModel {
         if (idx >= 0 && idx < windows) mask[idx] = true;
       }
     }
-    return windowStatsToConcept(samples, mask);
+    auto out = windowStatsToConcept(samples, mask);
+    if (!out.empty()) ++samples_;
+    return out;
   }
 
   std::vector<float> predictTarget(const std::vector<float> &contextRepr,
@@ -1579,20 +1592,25 @@ std::unique_ptr<JepaV2SpeechWorldModel> createJepaV2SpeechWorldModel(
 
   if (backend == phoenix::deployment::LocalBackendType::Cpu ||
       backend == phoenix::deployment::LocalBackendType::Gpu) {
-    auto onnx = std::make_unique<JepaV2SpeechLocalOnnxModel>(
-        *v, targetDim, backend == phoenix::deployment::LocalBackendType::Gpu);
+    bool gpu = backend == phoenix::deployment::LocalBackendType::Gpu;
+    auto onnx = std::make_unique<JepaV2SpeechLocalOnnxModel>(*v, targetDim, gpu);
     if (onnx->status().value("ready", false)) return onnx;
-    return std::make_unique<JepaV2SpeechUnavailableModel>(
-        *v, targetDim, "local ONNX speech model is not ready (missing .onnx)");
+    return std::make_unique<JepaV2SpeechFallbackModel>(*v, targetDim);
   }
 
   if (backend == phoenix::deployment::LocalBackendType::Js) {
-    return std::make_unique<JepaV2SpeechUnavailableModel>(
-        *v, targetDim, "browser JS runner must execute on the client; no C++ implementation");
+    return std::make_unique<JepaV2SpeechFallbackModel>(*v, targetDim);
   }
 
-  return std::make_unique<JepaV2SpeechUnavailableModel>(
-      *v, targetDim, "auto-detection found no supported model for " + variantId);
+  if (backend == phoenix::deployment::LocalBackendType::Auto) {
+    auto bpu = std::make_unique<JepaV2SpeechHbdnnModel>(*v, targetDim);
+    if (bpu->status().value("ready", false)) return bpu;
+    auto onnx = std::make_unique<JepaV2SpeechLocalOnnxModel>(*v, targetDim, false);
+    if (onnx->status().value("ready", false)) return onnx;
+    return std::make_unique<JepaV2SpeechFallbackModel>(*v, targetDim);
+  }
+
+  return std::make_unique<JepaV2SpeechFallbackModel>(*v, targetDim);
 }
 
 }  // namespace io
