@@ -63,6 +63,7 @@ dump.rdb
 # ─── Edge device credentials / local config (do not commit) ─────────────────────
 config/edge_devices.json
 config/edge_devices.local.json
+config/deployment_matrix/
 .env
 *.env
 
@@ -112,6 +113,7 @@ catastrophe/
 robots/
 
 tests/
+!tests/gtest/unit/autonomy/test_deployment_matrix_load_all.cpp
 hacktests/
 # NOTE: robots/ corpus seeds must be provided by the user before first run.
 # the robots/ dir is recommended to contain a wikitext-103-all.txt file,which is from wikitext
