@@ -34,6 +34,11 @@ import traceback
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
+
+# Suppress noisy non-fatal warnings from torch.onnx / transformers / copyreg.
+warnings.filterwarnings("ignore", message=".*dynamic_axes.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*fast processor.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*isinstance\\(treespec, LeafSpec\\).*", category=FutureWarning)
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -281,6 +286,7 @@ def export_image_encoder(args: argparse.Namespace) -> Optional[Path]:
                     "pixel_values": {0: "batch"},
                     "image_features": {0: "batch", 1: "num_queries"},
                 },
+                verbose=False,
             )
         print(f"[image] exported ONNX -> {onnx_path}")
         return onnx_path
@@ -430,6 +436,7 @@ def export_audio_encoder(args: argparse.Namespace) -> Optional[Path]:
                     "input_features": {0: "batch"},
                     "audio_features": {0: "batch"},
                 },
+                verbose=False,
             )
         print(f"[audio] exported ONNX -> {onnx_path}")
         return onnx_path

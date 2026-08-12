@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# Suppress noisy non-fatal warnings from torch.onnx / transformers / copyreg.
+import warnings
+
+warnings.filterwarnings("ignore", message=".*dynamic_axes.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*fast processor.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*isinstance\\(treespec, LeafSpec\\).*", category=FutureWarning)
+
 """Train small audio/video decoders from frozen multimodal encoders.
 
 The encoders (LLaVA-1.5 vision, Qwen2-Audio audio tower) are frozen.  For each
@@ -379,7 +386,7 @@ def griffin_lim(mel, n_iter=32, sr=AUDIO_SAMPLE_RATE, n_fft=N_FFT, hop=HOP_LENGT
     return y
 
 
-def export_to_onnx(model, dummy_input, path, opset=18):
+def export_to_onnx(model, dummy_input, path, opset=18, modality: str = ""):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(
         model,
@@ -389,8 +396,10 @@ def export_to_onnx(model, dummy_input, path, opset=18):
         output_names=["output"],
         dynamic_axes={"unit_query": {0: "batch"}, "output": {0: "batch"}},
         opset_version=opset,
+        verbose=False,
     )
-    print(f"Exported ONNX -> {path}")
+    prefix = f"[{modality}] " if modality else ""
+    print(f"{prefix}Exported ONNX -> {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -494,21 +503,21 @@ def main():
             total_loss += loss.item()
             count += 1
             if count % 10 == 0:
-                print(f"epoch {epoch} step {count} loss={total_loss / count:.4f}")
+                print(f"[{args.modality}] epoch {epoch} step {count} loss={total_loss / count:.4f}")
 
-        print(f"epoch {epoch} avg loss={total_loss / max(1, count):.4f}")
+        print(f"[{args.modality}] epoch {epoch} avg loss={total_loss / max(1, count):.4f}")
 
     # Save
     decoder_path = out_dir / f"{args.modality}_decoder.pt"
     torch.save({"state_dict": decoder.state_dict(), "config": vars(args)}, decoder_path)
-    print(f"Saved checkpoint -> {decoder_path}")
+    print(f"[{args.modality}] Saved checkpoint -> {decoder_path}")
 
     # ONNX export
     decoder.eval()
     with torch.no_grad():
         if args.modality == "image" and args.decoder == "painter":
             dummy = dummy.unsqueeze(1).repeat(1, 4, 1)
-        export_to_onnx(decoder, dummy, out_dir / f"{args.modality}_decoder.onnx")
+        export_to_onnx(decoder, dummy, out_dir / f"{args.modality}_decoder.onnx", modality=args.modality)
 
     if caption_head:
         torch.save({"state_dict": caption_head.state_dict()}, out_dir / "caption_head.pt")
