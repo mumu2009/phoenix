@@ -29,6 +29,7 @@ import json
 import os
 import sys
 import traceback
+import warnings
 
 # Avoid Windows cp65001/gbk encoding issues when torch.onnx prints emoji.
 if hasattr(sys.stdout, "reconfigure"):
