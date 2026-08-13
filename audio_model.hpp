@@ -1,4 +1,4 @@
-/* jepa_v2_speech_world_model.hpp - Semantic interface for 1D speech world models
+/* audio_model.hpp - Semantic interface for 1D speech world models
    Copyright (C) 2026 079 Project
 
    This file is part of 079 Project.
@@ -20,13 +20,13 @@ namespace phoenix {
 namespace io {
 
 /**
- * @brief Description of a 1D JEPA-v2 speech world-model variant.
+ * @brief Description of a 1D audio world-model variant.
  *
  * Variants differ by target sample rate and patch stride.  They correspond to
  * the standard wav2vec 2.0 / HuBERT style 25ms windows with 10ms stride.
  */
-struct JepaV2SpeechWorldModelConfig {
-  std::string id;          /**< internal variant id, e.g. "jepa_v2_speech_16k" */
+struct AudioModelConfig {
+  std::string id;          /**< internal variant id, e.g. "audio-16k" */
   std::string arch;        /**< architecture string, e.g. "jepa_1d" */
   std::string repo;        /**< HuggingFace repo or checkpoint URL */
   int sampleRate = 16000;  /**< intended sample rate in Hz */
@@ -34,20 +34,22 @@ struct JepaV2SpeechWorldModelConfig {
   int strideSamples = 160; /**< window hop in samples */
   long long params = 0;    /**< approximate parameter count */
   std::string dataset;     /**< pretraining dataset, e.g. "LibriSpeech" */
+  std::string weightsFile = "model.safetensors"; /**< primary checkpoint filename inside localWeightsDir */
+  std::string localWeightsDir; /**< directory under runtime_store/models/ijepa/; empty means "<id>/" */
 };
 
 /**
- * @brief Semantic interface for a 1D JEPA speech world model.
+ * @brief Semantic interface for a 1D audio world model.
  *
  * A 1D JEPA splits an audio waveform into temporal patches (context/target
  * windows), encodes them into a joint embedding space, and predicts masked
- * targets from visible context.  The interface also exposes a speech-text
+ * targets from visible context.  The interface also exposes an audio-text
  * contrastive pretraining step so the audio encoder can align with a paired
  * text concept vector.
  */
-class JepaV2SpeechWorldModel {
+class AudioModel {
  public:
-  virtual ~JepaV2SpeechWorldModel() = default;
+  virtual ~AudioModel() = default;
 
   /**
    * @brief Encode an audio waveform into a semantic concept vector.
@@ -132,42 +134,58 @@ class JepaV2SpeechWorldModel {
   virtual nlohmann::json status() const = 0;
 
   /** @brief Configuration of this model instance. */
-  virtual const JepaV2SpeechWorldModelConfig &config() const = 0;
+  virtual const AudioModelConfig &config() const = 0;
+
+  /** @brief Optional per-instance role used for the "backend" status field. */
+  mutable std::string kind_;
 };
 
 /**
- * @brief List the 1D JEPA speech variants by sample rate.
+ * @brief List the 1D audio variants by sample rate.
  */
-inline std::vector<JepaV2SpeechWorldModelConfig> jepaV2SpeechOfficialVariants() {
+inline std::vector<AudioModelConfig> audioOfficialVariants() {
   return {
-      {"speech_encoder",     "jepa_1d", "runtime_store/models/additive_jepa/speech_encoder", 16000, 400, 160, 0, "LibriSpeech"},
-      {"jepa_v2_speech_16k", "jepa_1d", "runtime_store/models/ijepa/speech_16k", 16000, 400, 160, 0, "LibriSpeech"},
-      {"jepa_v2_speech_22k", "jepa_1d", "facebook/jepa-v2-speech-22k", 22050, 512, 256, 0, "LibriLight"},
-      {"jepa_v2_speech_44k", "jepa_1d", "facebook/jepa-v2-speech-44k", 44100, 1024, 512, 0, "VoxPopuli"},
-      {"jepa_v2_speech_48k", "jepa_1d", "facebook/jepa-v2-speech-48k", 48000, 1024, 512, 0, "VoxPopuli"}};
+      {"audio-encoder",      "jepa_1d", "runtime_store/models/additive_jepa/speech_encoder", 16000, 400, 160, 0, "LibriSpeech", "best.onnx", "speech_encoder"},
+      {"audio-16k",          "jepa_1d", "runtime_store/models/ijepa/speech_16k", 16000, 400, 160, 0, "LibriSpeech", "model.safetensors", "speech_16k"},
+      {"audio-22k",          "jepa_1d", "facebook/audio-22k", 22050, 512, 256, 0, "LibriLight", "model.safetensors", "speech_22k"},
+      {"audio-44k",          "jepa_1d", "facebook/audio-44k", 44100, 1024, 512, 0, "VoxPopuli", "model.safetensors", "speech_44k"},
+      {"audio-48k",          "jepa_1d", "facebook/audio-48k", 48000, 1024, 512, 0, "VoxPopuli", "model.safetensors", "speech_48k"}};
 }
 
 /**
- * @brief Factory: create a 1D speech world model instance.
+ * @brief Factory: create a 1D audio world model instance.
  *
- * @param variantId   one of the ids returned by jepaV2SpeechOfficialVariants().
+ * @param variantId   one of the ids returned by audioOfficialVariants().
  * @param targetDim   desired output concept dimension.
  * @param backend     retained for API compatibility.
  * @return a concrete implementation. Local execution uses the compiled RDK X5
  *         speech JEPA BPU model; fallback is used when BPU runtime is unavailable.
  */
-std::unique_ptr<JepaV2SpeechWorldModel> createJepaV2SpeechWorldModel(
-    const std::string &variantId = "jepa_v2_speech_16k",
+std::unique_ptr<AudioModel> createAudioModel(
+    const std::string &variantId = "audio-16k",
+    int targetDim = 0,
+    const std::string &backend = "auto");
+
+using AudioEncoder = AudioModel;
+using AudioDecoder = AudioModel;
+
+std::unique_ptr<AudioEncoder> createAudioEncoder(
+    const std::string &variantId = "audio-16k",
+    int targetDim = 0,
+    const std::string &backend = "auto");
+
+std::unique_ptr<AudioDecoder> createAudioDecoder(
+    const std::string &variantId = "audio-16k",
     int targetDim = 0,
     const std::string &backend = "auto");
 
 /**
  * @brief Find an official variant config by id.
  */
-inline const JepaV2SpeechWorldModelConfig *findJepaV2SpeechVariant(
+inline const AudioModelConfig *findAudioModelVariant(
     const std::string &id) {
-  static const std::vector<JepaV2SpeechWorldModelConfig> kVariants =
-      jepaV2SpeechOfficialVariants();
+  static const std::vector<AudioModelConfig> kVariants =
+      audioOfficialVariants();
   for (const auto &v : kVariants) {
     if (v.id == id) return &v;
   }

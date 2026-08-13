@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""(1+lambda) additive residual BPU evolution controller.
+"""(1+lambda) additive residual BPU evolution controller for video/audio models.
 
 Runs on the compile host (Kali / Linux with hb_mapper or Docker) and pushes
 compiled .bin models to the RDK X5 for BPU evaluation.  Each round:
@@ -8,7 +8,7 @@ compiled .bin models to the RDK X5 for BPU evaluation.  Each round:
   2. Sample a fresh batch from the local data pool.
   3. Generate ``--lambda`` candidate models (parent + one new residual block).
   4. Export each candidate to ONNX and calibrate.
-  5. Compile candidates in parallel with ``tools/compile_bpu_jepa_v2.sh``.
+  5. Compile candidates in parallel with ``tools/compile_bpu.sh``.
   6. Push the compiled .bin files and the batch to the X5 and run
      ``tools/x5_bpu_evaluate.py``.
   7. Select the lowest-MSE candidate as the new ``best.pt/best.onnx``.
@@ -255,21 +255,21 @@ def load_teacher(path: Path, concept: int) -> torch.nn.Module:
     if isinstance(ckpt, dict) and "model" in ckpt:
         state = ckpt["model"]
         if "enc_channels" in ckpt or "dec_channels" in ckpt:
-            from train_jepa_v2_speech import JepaV2SpeechAutoencoder
+            from train_audio import AudioAutoencoder
             enc_channels = ckpt.get("enc_channels", [32, 64, 128, 256])
             dec_channels = ckpt.get("dec_channels", [256, 128, 64, 32, 1])
             blocks = ckpt.get("blocks", 0)
-            model = JepaV2SpeechAutoencoder(
+            model = AudioAutoencoder(
                 enc_channels, dec_channels, concept=concept, blocks=blocks
             )
             model.load_state_dict(state)
             return model
         else:
-            from train_jepa_v2_vision import JepaV2ImageAutoencoder
+            from train_video import VideoAutoencoder
             resnet = ckpt.get("resnet", "resnet18")
             dec_channels = ckpt.get("dec_channels")
             dec_depth = ckpt.get("dec_depth", 0)
-            model = JepaV2ImageAutoencoder(
+            model = VideoAutoencoder(
                 resnet_name=resnet,
                 concept=concept,
                 pretrained=False,

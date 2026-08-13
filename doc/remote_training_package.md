@@ -1,6 +1,6 @@
-# Remote JEPA-v2 Training Package
+# Remote Video/Audio Training Package
 
-This package trains the Phoenix JEPA-v2 speech and vision autoencoders on the
+This package trains the Phoenix video and audio autoencoders on the
 remote Windows 10 Pro GPU box and produces ONNX / BPU-compatible `.bin` files
 for the RDK X5.
 
@@ -9,14 +9,14 @@ for the RDK X5.
 From `D:\_phoenix\_079\v6.0Alixander\phoenix`:
 
 ```
-tools/train_jepa_v2_speech.py
-tools/train_jepa_v2_vision.py
-tools/export_jepa_v2_multimodal.py
-tools/export_jepa_v2_speech.py
-tools/compile_bpu_jepa_v2.sh
+tools/train_audio.py
+tools/train_video.py
+tools/export_multimodal.py
+tools/export_speech.py
+tools/compile_bpu.sh
 tools/run_hb_mapper.py
 tools/hb_mapper_patch.py
-tools/train_jepa_v2_pilot.py
+tools/train_pilot.py
 doc/remote_training_package.md
 ```
 
@@ -52,21 +52,21 @@ pip install torch-tensorrt  # only if you plan to experiment with torch.compile
 ## Quick sanity check (tiny, CPU/GPU)
 
 ```powershell
-# speech ~1 M params, 3 epochs, quick smoke test
-python tools\train_jepa_v2_pilot.py `
+# audio ~1 M params, 3 epochs, quick smoke test
+python tools\train_pilot.py `
     --data-dir D:\datasets\musan_16k `
-    --out-dir D:\checkpoints\speech_pilot `
+    --out-dir D:\checkpoints\audio_pilot `
     --epochs 3 --batch-size 8 --device auto
 ```
 
-This creates `D:\checkpoints\speech_pilot\best.pt` and `model_*.onnx`.
+This creates `D:\checkpoints\audio_pilot\best.pt` and `model_*.onnx`.
 
-## Example: 5 M "small" speech run
+## Example: 5 M "small" audio run
 
 ```powershell
-python tools\train_jepa_v2_speech.py `
+python tools\train_audio.py `
     --data-dir D:\datasets\musan_16k `
-    --out-dir D:\checkpoints\jepa_v2_speech_small `
+    --out-dir D:\checkpoints\audio_small `
     --scale small `
     --epochs 50 `
     --batch-size 32 `
@@ -77,27 +77,27 @@ python tools\train_jepa_v2_speech.py `
 After training, export and compile on Kali (or copy back to Kali):
 
 ```powershell
-python tools\export_jepa_v2_multimodal.py `
+python tools\export_multimodal.py `
     --modality speech `
-    --checkpoint D:\checkpoints\jepa_v2_speech_small\best.pt `
-    --out-dir D:\checkpoints\jepa_v2_speech_small\onnx
+    --checkpoint D:\checkpoints\audio_small\best.pt `
+    --out-dir D:\checkpoints\audio_small\onnx
 ```
 
 Then on Kali, inside the OpenExplorer Docker:
 
 ```bash
-bash /workspace/tools/compile_bpu_jepa_v2.sh \
+bash /workspace/tools/compile_bpu.sh \
     --modality speech \
-    --onnx-dir /workspace/checkpoints/jepa_v2_speech_small/onnx \
-    --out-dir /workspace/checkpoints/jepa_v2_speech_small/bin
+    --onnx-dir /workspace/checkpoints/audio_small/onnx \
+    --out-dir /workspace/checkpoints/audio_small/bin
 ```
 
-## Example: 5 M "small" vision run
+## Example: 5 M "small" video run
 
 ```powershell
-python tools\train_jepa_v2_vision.py `
+python tools\train_video.py `
     --data-dir D:\datasets\images `
-    --out-dir D:\checkpoints\jepa_v2_vision_small `
+    --out-dir D:\checkpoints\video_small `
     --resnet resnet18 `
     --concept 128 `
     --decoder-pt none `
@@ -115,10 +115,10 @@ python tools\train_jepa_v2_vision.py `
 Export and compile:
 
 ```powershell
-python tools\export_jepa_v2_multimodal.py `
+python tools\export_multimodal.py `
     --modality image `
-    --checkpoint D:\checkpoints\jepa_v2_vision_small\best.pt `
-    --out-dir D:\checkpoints\jepa_v2_vision_small\onnx
+    --checkpoint D:\checkpoints\video_small\best.pt `
+    --out-dir D:\checkpoints\video_small\onnx
 ```
 
 This writes:
@@ -128,15 +128,15 @@ This writes:
   - `model_decoder.onnx` (concept -> 3x224x224)
 
 ```bash
-bash /workspace/tools/compile_bpu_jepa_v2.sh \
+bash /workspace/tools/compile_bpu.sh \
     --modality image \
-    --onnx-dir /workspace/checkpoints/jepa_v2_vision_small/onnx \
-    --out-dir /workspace/checkpoints/jepa_v2_vision_small/bin
+    --onnx-dir /workspace/checkpoints/video_small/onnx \
+    --out-dir /workspace/checkpoints/video_small/bin
 ```
 
 ## Larger scales
 
-| scale  | speech params | vision decoder params | notes |
+| scale  | audio params | video decoder params | notes |
 |--------|---------------|-----------------------|-------|
 | tiny   | ~1.1 M        | ~0.8 M (w=0.5)        | Kali CPU smoke test |
 | small  | ~5.0 M        | ~4.7 M (w=1.25)       | default, 6 GB OK |
@@ -144,7 +144,7 @@ bash /workspace/tools/compile_bpu_jepa_v2.sh \
 | large  | ~48 M         | ~32 M (w=4.0)         | use `--amp --grad-accum 2` |
 | xlarge | ~96 M         | ~55 M (w=5.0,d=3)     | may not compile on X5; for R&D |
 
-Vision decoder width examples:
+Video decoder width examples:
 
 ```powershell
 # medium
@@ -180,8 +180,8 @@ The remote GPU is a GTX 16-series with ~6 GB.  Use these rules of thumb:
 | `--concept` | concept dim (default 128, keep this for X5) |
 | `--resnet resnet18/34/50` | vision encoder base |
 | `--unfreeze-encoder` | train the ResNet base (needs more VRAM) |
-| `--decoder-width` | vision decoder channel multiplier (must be `1.0` to load `decoder_trained.pt`) |
-| `--decoder-depth` | extra 3x3 residual blocks after the vision decoder upsampling stack |
+| `--decoder-width` | video decoder channel multiplier (must be `1.0` to load `decoder_trained.pt`) |
+| `--decoder-depth` | extra 3x3 residual blocks after the video decoder upsampling stack |
 | `--pretrained 0` | use randomly initialized ResNet instead of downloading ImageNet weights |
 | `--amp` | use PyTorch automatic mixed precision (fp16) |
 | `--grad-accum N` | accumulate gradients over N mini-batches before stepping |
@@ -195,9 +195,9 @@ Because the remote is Windows, use `Start-Process` with a log file rather than
 ```powershell
 $log = "D:\checkpoints\speech_medium.log"
 Start-Process -FilePath python -ArgumentList @(
-    "tools\train_jepa_v2_speech.py",
+    "tools\train_audio.py",
     "--data-dir", "D:\datasets\musan_16k",
-    "--out-dir", "D:\checkpoints\jepa_v2_speech_medium",
+    "--out-dir", "D:\checkpoints\audio_medium",
     "--scale", "medium",
     "--epochs", "100",
     "--batch-size", "16",
@@ -209,7 +209,7 @@ Start-Process -FilePath python -ArgumentList @(
 On Kali/X5, continue to use `nohup`:
 
 ```bash
-nohup python tools/train_jepa_v2_pilot.py \
+nohup python tools/train_pilot.py \
     --data-dir /home/kali/phoenix/datasets/musan_16k \
     --out-dir /tmp/speech_pilot > /tmp/speech_pilot.log 2>&1 &
 echo $!
@@ -217,27 +217,27 @@ echo $!
 
 ## Calibration notes
 
-`export_jepa_v2_multimodal.py` writes synthetic random calibration bins by
+`export_multimodal.py` writes synthetic random calibration bins by
 default.  For the best BPU accuracy on real data, you can later replace those
 with real samples:
 
-- **speech encoder**: one `1x1x1x16000` float32 `.bin` per sample
-- **speech decoder**: one `1xCONCEPTx1x1` float32 `.bin` per sample
-- **image encoder**: one `1x3x224x224` float32 `.bin` per sample, NCHW,
+- **audio encoder**: one `1x1x1x16000` float32 `.bin` per sample
+- **audio decoder**: one `1xCONCEPTx1x1` float32 `.bin` per sample
+- **video encoder**: one `1x3x224x224` float32 `.bin` per sample, NCHW,
   ImageNet-normalized
-- **image decoder**: one `1xCONCEPTx1x1` float32 `.bin` per sample
+- **video decoder**: one `1xCONCEPTx1x1` float32 `.bin` per sample
 
 ## Output layout for the X5
 
 After compiling, copy the artifacts to the X5 model directory, e.g.:
 
 ```
-runtime_store/models/ijepa/speech_16k/
+runtime_store/models/ijepa/audio-16k/
   model_encoder.bin
   model_decoder.bin
   model.manifest.json
 
-runtime_store/models/ijepa/resnet18_224/
+runtime_store/models/ijepa/video-encoder/
   model_encoder.bin       # ResNet base -> 512-D embedding
   model_decoder.bin       # concept -> 3x224x224
   encoder_head.json       # 512 -> concept linear head (read by C++)

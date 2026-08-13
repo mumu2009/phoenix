@@ -67,10 +67,10 @@ struct Config {
   bool disableLearning{false};
   bool disableGnnModule{false};
   bool disableContextModule{false};
-  bool usingOllama{true};
-  bool ollamaFineTuning{true};
+  bool usingOllama{false};
+  bool ollamaFineTuning{false};
   bool inferenceEnabled{true};
-  std::string transformerBackend{"ollama"};
+  std::string transformerBackend{"llamacpp"};
   std::string ollamaModel;
   std::string ollamaBaseUrl{"http://127.0.0.1:11434"};
   int ollamaRequestTimeoutMs{120000};

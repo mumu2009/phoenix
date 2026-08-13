@@ -20,7 +20,7 @@ mapfile -t sources < <(python3 - "$root" <<'PY'
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
-names = '''transformer_main_x5_stub.cpp addon.cpp addons/builtin_registry.cpp addons/math_addon.cpp addons/search_addon.cpp addons/computer_shell_addon.cpp loggerCXX.cpp DATABASE_079.cpp frontend_server.cpp speak_io.cpp model_lifecycle.cpp autonomy_stack.cpp v51_runtime.cpp external_runtime.cpp edge_platform.cpp gguf_tensor_parser.cpp physics_world_runtime.cpp emotion_system.cpp llamacpp_emotion_adjuster.cpp plugin_system.cpp modern_context_system.cpp semantic_unit.cpp primal_sensation.cpp instinct.cpp prompt_split.cpp external_mixed_modal_io.cpp jepa_v2_image_world_model.cpp jepa_v2_speech_world_model.cpp model_deployment.cpp rdk_x5_bpu.cpp graph_diffusion_summarizer.cpp hierarchical_memory.cpp'''.split()
+names = '''transformer_main_x5_stub.cpp addon.cpp addons/builtin_registry.cpp addons/math_addon.cpp addons/search_addon.cpp addons/computer_shell_addon.cpp loggerCXX.cpp DATABASE_079.cpp frontend_server.cpp speak_io.cpp model_lifecycle.cpp autonomy_stack.cpp v51_runtime.cpp external_runtime.cpp edge_platform.cpp gguf_tensor_parser.cpp physics_world_runtime.cpp emotion_system.cpp llamacpp_emotion_adjuster.cpp plugin_system.cpp modern_context_system.cpp semantic_unit.cpp primal_sensation.cpp instinct.cpp prompt_split.cpp external_mixed_modal_io.cpp video_model.cpp audio_model.cpp model_deployment.cpp rdk_x5_bpu.cpp graph_diffusion_summarizer.cpp hierarchical_memory.cpp'''.split()
 for name in names:
     print(root / name)
 for source in sorted((root / 'module_overrides').glob('*.cpp')):

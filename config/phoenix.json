@@ -433,7 +433,7 @@
   },
   "jepa": {
     "image": {
-      "variant": "vision_encoder",
+      "variant": "video-encoder",
       "conceptDim": 128,
       "backend": "auto",
       "horizonModel": "runtime_store/models/ijepa/resnet18_224/model_encoder.bin",
@@ -446,7 +446,7 @@
       "fps": 30
     },
     "speech": {
-      "variant": "speech_encoder",
+      "variant": "audio-encoder",
       "conceptDim": 128,
       "backend": "auto",
       "horizonModel": "runtime_store/models/ijepa/speech_16k/model_encoder.bin",
@@ -534,7 +534,7 @@
     },
     "inference": {
       "usingOllama": false,
-      "ollamaFineTuning": true,
+      "ollamaFineTuning": false,
       "enabled": true,
       "transformerMode": "",
       "ollamaModel": "",

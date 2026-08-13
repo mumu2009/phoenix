@@ -311,7 +311,7 @@ static Config loadConfig(int argc, char **argv) {
   if (llmRemote) {
     std::string method = llmDeployment.remote.method;
     if (method != "ollama" && method != "llamacpp" && method != "bitnet")
-      method = "ollama";
+      method = "llamacpp";
     c.inferenceEnabled = true;
     c.transformerBackend = method;
     if (method == "ollama") {

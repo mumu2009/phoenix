@@ -1,4 +1,4 @@
-/* jepa_v2_image_world_model.hpp - Semantic interface for image world models
+/* video_model.hpp - Semantic interface for image world models
    Copyright (C) 2026 079 Project
 
    This file is part of 079 Project.
@@ -20,13 +20,13 @@ namespace phoenix {
 namespace io {
 
 /**
- * @brief Description of an official I-JEPA / JEPA-v2 image world-model variant.
+ * @brief Description of an official I-JEPA / video world-model variant.
  *
  * The four shipped variants below correspond to the official Meta I-JEPA
  * checkpoints (see https://github.com/facebookresearch/ijepa).  The default
  * is the lowest-compute variant: ViT-H/14 trained on ImageNet-1K at 224x224.
  */
-struct JepaV2ImageWorldModelConfig {
+struct VideoModelConfig {
   std::string id;            /**< internal variant id, e.g. "ijepa_vith14_1k" */
   std::string arch;          /**< architecture string, e.g. "vit_h14" */
   std::string repo;          /**< HuggingFace repo or checkpoint URL */
@@ -39,7 +39,7 @@ struct JepaV2ImageWorldModelConfig {
 };
 
 /**
- * @brief Semantic interface for an image JEPA-v2 world model.
+ * @brief Semantic interface for a video world model.
  *
  * The interface is organised around the JEPA joint-embedding predictive
  * architecture.  Implementations must be able to:
@@ -51,9 +51,9 @@ struct JepaV2ImageWorldModelConfig {
  * This is not just a format wrapper: it exposes the model's internal
  * representation contract so downstream modules can reason about concepts.
  */
-class JepaV2ImageWorldModel {
+class VideoModel {
  public:
-  virtual ~JepaV2ImageWorldModel() = default;
+  virtual ~VideoModel() = default;
 
   /**
    * @brief Encode an image into a semantic concept vector.
@@ -136,7 +136,10 @@ class JepaV2ImageWorldModel {
   virtual nlohmann::json status() const = 0;
 
   /** @brief Configuration of this model instance. */
-  virtual const JepaV2ImageWorldModelConfig &config() const = 0;
+  virtual const VideoModelConfig &config() const = 0;
+
+  /** @brief Optional per-instance role used for the "backend" status field. */
+  mutable std::string kind_;
 };
 
 /**
@@ -144,11 +147,11 @@ class JepaV2ImageWorldModel {
  *
  * Order is from lowest to highest compute / parameter count.
  */
-inline std::vector<JepaV2ImageWorldModelConfig> jepaV2ImageOfficialVariants() {
+inline std::vector<VideoModelConfig> videoOfficialVariants() {
   return {
       {"resnet18_224",     "resnet18",
        "timm/resnet18.a1_in1k",  16, 224, 11689512LL, "IN1K"},
-      {"vision_encoder",   "additive_resnet18",
+      {"video-encoder",    "additive_resnet18",
        "runtime_store/models/additive_jepa/vision_encoder",  16, 224, 0, "additive", "best.onnx", "vision_encoder"},
       {"ijepa_vith14_1k",  "vit_h14",
        "facebook/ijepa_vith14_1k",  14, 224, 632000000LL, "IN1K"},
@@ -163,13 +166,26 @@ inline std::vector<JepaV2ImageWorldModelConfig> jepaV2ImageOfficialVariants() {
 /**
  * @brief Factory: create an image world model instance.
  *
- * @param variantId   one of the ids returned by jepaV2ImageOfficialVariants().
+ * @param variantId   one of the ids returned by videoOfficialVariants().
  * @param targetDim   desired output concept dimension.
  * @param backend     retained for API compatibility; production always uses Horizon hbDNN.
  * @return a concrete implementation. Missing BPU runtime or a compiled model is reported
  *         through status() and encode() returns an empty vector.
  */
-std::unique_ptr<JepaV2ImageWorldModel> createJepaV2ImageWorldModel(
+std::unique_ptr<VideoModel> createVideoModel(
+    const std::string &variantId = "ijepa_vith14_1k",
+    int targetDim = 0,
+    const std::string &backend = "auto");
+
+using VideoEncoder = VideoModel;
+using VideoDecoder = VideoModel;
+
+std::unique_ptr<VideoEncoder> createVideoEncoder(
+    const std::string &variantId = "ijepa_vith14_1k",
+    int targetDim = 0,
+    const std::string &backend = "auto");
+
+std::unique_ptr<VideoDecoder> createVideoDecoder(
     const std::string &variantId = "ijepa_vith14_1k",
     int targetDim = 0,
     const std::string &backend = "auto");
@@ -177,10 +193,10 @@ std::unique_ptr<JepaV2ImageWorldModel> createJepaV2ImageWorldModel(
 /**
  * @brief Find an official variant config by id.
  */
-inline const JepaV2ImageWorldModelConfig *findJepaV2ImageVariant(
+inline const VideoModelConfig *findVideoModelVariant(
     const std::string &id) {
-  static const std::vector<JepaV2ImageWorldModelConfig> kVariants =
-      jepaV2ImageOfficialVariants();
+  static const std::vector<VideoModelConfig> kVariants =
+      videoOfficialVariants();
   for (const auto &v : kVariants) {
     if (v.id == id) return &v;
   }
@@ -193,7 +209,7 @@ inline const JepaV2ImageWorldModelConfig *findJepaV2ImageVariant(
  * This matches the layout created by tools/download_ijepa_models.py:
  * runtime_store/models/ijepa/<id>/.
  */
-inline std::string jepaV2ImageLocalWeightsDir(const JepaV2ImageWorldModelConfig &cfg) {
+inline std::string videoModelLocalWeightsDir(const VideoModelConfig &cfg) {
   return cfg.localWeightsDir.empty() ? cfg.id : cfg.localWeightsDir;
 }
 
@@ -202,9 +218,9 @@ inline std::string jepaV2ImageLocalWeightsDir(const JepaV2ImageWorldModelConfig 
  *
  * Example: "runtime_store/models/ijepa/ijepa_vith14_1k/model.safetensors".
  */
-inline std::string jepaV2ImageExpectedWeightsPath(const JepaV2ImageWorldModelConfig &cfg) {
+inline std::string videoModelExpectedWeightsPath(const VideoModelConfig &cfg) {
   return std::string("runtime_store/models/ijepa/") +
-         jepaV2ImageLocalWeightsDir(cfg) + "/" + cfg.weightsFile;
+         videoModelLocalWeightsDir(cfg) + "/" + cfg.weightsFile;
 }
 
 }  // namespace io

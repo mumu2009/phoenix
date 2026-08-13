@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a 1D JEPA-v2 speech autoencoder to BPU-friendly ONNX.
+"""Export a 1D audio autoencoder to BPU-friendly ONNX.
 
 The model treats a 1-second 16 kHz waveform as a 2D tensor with height=1,
 which allows the same Conv2d/ConvTranspose2d ops used by the image pipeline.

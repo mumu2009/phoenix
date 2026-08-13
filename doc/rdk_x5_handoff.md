@@ -179,7 +179,7 @@ ls -l /usr/lib/libdnn.so /usr/include/dnn/hb_dnn.h
 runtime_store/models/ijepa/ijepa_vith14_1k/model.bin
 ```
 
-模型必须匹配本项目当前适配：BGR/RGB 原始连续输入、目标 JEPA 分辨率和 `128` 维 F32 embedding 输出。若模型实际需要 NV12、量化输出或多个输入张量，必须先修改 `jepa_v2_image_world_model.cpp` 与模型 manifest，不能仅靠环境变量伪装兼容。
+模型必须匹配本项目当前适配：BGR/RGB 原始连续输入、目标 JEPA 分辨率和 `128` 维 F32 embedding 输出。若模型实际需要 NV12、量化输出或多个输入张量，必须先修改 `video_model.cpp` 与模型 manifest，不能仅靠环境变量伪装兼容。
 
 ### 6.3 构建与启动
 

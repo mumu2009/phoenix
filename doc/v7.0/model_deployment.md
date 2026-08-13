@@ -13,8 +13,8 @@ configuration file.
 flowchart TB
     subgraph HOST_A["部署单元 A：aheadModule"]
         TXTD["文本编码器<br/>(复用 llama3.1 8b embedding，与 Backend 同进程或共享权重文件)"]
-        IMGD["vision 记录<br/>JepaV2ImageWorldModel<br/>local(cpu/gpu/bpu) / remote / server-client"]
-        AUDD["speech 记录<br/>JepaV2SpeechWorldModel<br/>local(cpu/gpu/bpu) / remote / server-client"]
+        IMGD["vision 记录<br/>VideoModel<br/>local(cpu/gpu/bpu) / remote / server-client"]
+        AUDD["speech 记录<br/>AudioModel<br/>local(cpu/gpu/bpu) / remote / server-client"]
         MEMD["Memory 模块<br/>TorchTextModels(RNN/LSTM) + SummaryModel/TinyLlama"]
         EMOD["Emotion 模块<br/>PrimalSensationEngine + InstinctEngine"]
     end
@@ -443,8 +443,8 @@ compile.bat
 
 | Macro | Default | When set to `0` at compile time |
 |---|---|---|
-| `PHOENIX_EDGE_IMAGE_ENABLED` | `1` | `rdk_x5_bpu.cpp` does not include or link `dnn/hb_dnn.h`; `createJepaV2ImageWorldModel()` cannot select the BPU backend and falls through to the configured `localBackend`. |
-| `PHOENIX_EDGE_SPEECH_ENABLED` | `1` | `createJepaV2SpeechWorldModel()` cannot select the BPU backend and falls through to the configured `localBackend`. |
+| `PHOENIX_EDGE_IMAGE_ENABLED` | `1` | `rdk_x5_bpu.cpp` does not include or link `dnn/hb_dnn.h`; `createVideoModel()` cannot select the BPU backend and falls through to the configured `localBackend`. |
+| `PHOENIX_EDGE_SPEECH_ENABLED` | `1` | `createAudioModel()` cannot select the BPU backend and falls through to the configured `localBackend`. |
 
 The defaults keep the existing v7.0 behavior (BPU/local and remote endpoints are
 enabled and selected by runtime deployment configuration).
@@ -454,7 +454,7 @@ enabled and selected by runtime deployment configuration).
 - `model_deployment.{hpp,cpp}` defines the topology, parses configuration and
   provides `RemoteModelClient` for synchronous HTTP calls.  v7.0 adds
   `LocalBackendType` (`cpu`/`gpu`/`bpu`/`js`/`auto`) to `ModelDeploymentRecord`.
-- `jepa_v2_image_world_model.cpp` and `jepa_v2_speech_world_model.cpp` query
+- `video_model.cpp` and `audio_model.cpp` query
   `ModelDeploymentConfig::instance()` in their factories and create a remote,
   server-client, BPU, local ONNX, or unavailable model as appropriate.  No
   deterministic statistical fallback is returned.
@@ -465,8 +465,8 @@ enabled and selected by runtime deployment configuration).
   supported as a fallback path resolution.
 - When a model is not ready the factory returns a `*UnavailableModel` whose
   `status()` contains `"ready": false` and an `error` message; encode/decode
-  return empty vectors and the mixed-modal bridge sets `jepaError` /
-  `imageDecodeError` / `audioDecodeError` metadata.
+  return empty vectors and the mixed-modal bridge sets `videoEncoderError` /
+  `videoDecodeError` / `audioDecodeError` metadata.
 - `loadConfig` first applies the legacy `transformer-mode` and Ollama /
   llama.cpp / BitNet flags, then overwrites the corresponding `Config` fields
   (`ollamaBaseUrl`, `llamaCppBaseUrl`, `bitnetBaseUrl`, model names and
@@ -495,7 +495,7 @@ flowchart TB
     subgraph RUNHOST["运行主机 / 边缘设备"]
         GGUF["llama3.1-8b-instruct<br/>(.gguf 或 OLLAMA raw blob, 不入库，本地/宿主提供)"]
         SERVER["llama-server 进程<br/>(enc + inference + 文本 dec 均在此进程内)"]
-        AVDEC["音视频 dec 运行期代码<br/>jepa_v2_image_world_model.cpp<br/>jepa_v2_speech_world_model.cpp"]
+        AVDEC["音视频 dec 运行期代码<br/>video_model.cpp<br/>audio_model.cpp"]
         AVW["runtime_store/models/{ijepa,additive_jepa}/*/decoder<br/>(独立训练/维护的解码权重，不随 .gguf / raw blob 分发)"]
         ASYNC["AsyncLearning<br/>(异步学习 dec 输出与矩阵差距)"]
     end
@@ -564,7 +564,7 @@ TinyLlama 子进程部署方式沿用第 7 节现状（sidecar `llama-server`，
 
 音视频输出解码器对应 `workflow.md` 总览图中的 "音频/视频解码器（需要时）"：
 
-- 图像/视频：`jepa_v2_image_world_model.cpp` 的 `decode()`，依赖 `runtime_store/models/ijepa/<variant>/model.safetensors` 或 `additive_jepa` 的 `vision_decoder/best.{onnx,bin}`，可运行在 `local(cpu/gpu/bpu)`、`remote`、`server-client` 任一部署模式（复用第 2/3 节的通用参数）。
-- 音频：`jepa_v2_speech_world_model.cpp` 的 `decode()`，依赖 `speech_decoder/best.{onnx,bin}`，部署模式同上。
+- 图像/视频：`video_model.cpp` 的 `decode()`，依赖 `runtime_store/models/ijepa/<variant>/model.safetensors` 或 `additive_jepa` 的 `vision_decoder/best.{onnx,bin}`，可运行在 `local(cpu/gpu/bpu)`、`remote`、`server-client` 任一部署模式（复用第 2/3 节的通用参数）。
+- 音频：`audio_model.cpp` 的 `decode()`，依赖 `speech_decoder/best.{onnx,bin}`，部署模式同上。
 - 两者都遵循"fail-closed"原则：解码权重缺失时返回明确错误而不是确定性占位输出（沿用第 5 节 "Auto placement with edge fallback" 的既有约定）。
 - 当输出目标是纯文本时，输出队列直接跳过音视频解码器，对应 `workflow.md` §0.1 图中 `OQ0 -->|纯文本无需解码| USER0` 分支。

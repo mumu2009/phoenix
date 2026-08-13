@@ -1,9 +1,9 @@
-"""Unified ONNX export for trained JEPA-v2 speech or vision checkpoints.
+"""Unified ONNX export for trained audio or video checkpoints.
 
 Usage:
-    python tools/export_jepa_v2_multimodal.py \
+    python tools/export_multimodal.py \
         --modality speech|image \
-        --checkpoint checkpoints/jepa_v2_speech/best.pt \
+        --checkpoint checkpoints/audio/best.pt \
         --out-dir runtime_store/models/ijepa/my_variant
 
 The script reads the architecture metadata saved by the training scripts,
@@ -24,11 +24,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from train_jepa_v2_speech import (
-    JepaV2SpeechAutoencoder, CHUNK as SPEECH_CHUNK, TARGET as SPEECH_TARGET,
+from train_audio import (
+    AudioAutoencoder, CHUNK as SPEECH_CHUNK, TARGET as SPEECH_TARGET,
 )
-from train_jepa_v2_vision import (
-    JepaV2ImageAutoencoder, RESOLUTION as IMAGE_RES,
+from train_video import (
+    VideoAutoencoder, RESOLUTION as IMAGE_RES,
     IMAGENET_MEAN, IMAGENET_STD,
 )
 
@@ -53,7 +53,7 @@ def export_speech(ckpt, out_dir: Path):
     dec_channels = ckpt['dec_channels']
     blocks = ckpt.get('blocks', 0)
 
-    model = JepaV2SpeechAutoencoder(enc_channels, dec_channels, concept=concept, blocks=blocks)
+    model = AudioAutoencoder(enc_channels, dec_channels, concept=concept, blocks=blocks)
     model.load_state_dict(ckpt['model'])
     model.eval().cpu()
 
@@ -88,7 +88,7 @@ def export_speech(ckpt, out_dir: Path):
 
     with open(out_dir / 'model.manifest.json', 'w', encoding='utf-8') as f:
         json.dump({
-            'name': 'jepa_v2_speech_16k',
+            'name': 'audio-16k',
             'modality': 'speech',
             'concept_dim': concept,
             'chunk_size': SPEECH_CHUNK,
@@ -109,7 +109,7 @@ def export_image(ckpt, out_dir: Path, calib_images=None, calib_count=10):
     dec_depth = ckpt.get('dec_depth', 0)
     resolution = ckpt.get('resolution', IMAGE_RES)
 
-    model = JepaV2ImageAutoencoder(
+    model = VideoAutoencoder(
         resnet_name=resnet,
         concept=concept,
         pretrained=False,  # weights come from checkpoint
@@ -184,7 +184,7 @@ def export_image(ckpt, out_dir: Path, calib_images=None, calib_count=10):
 
     with open(out_dir / 'model.manifest.json', 'w', encoding='utf-8') as f:
         json.dump({
-            'name': 'jepa_v2_image_224',
+            'name': 'video-encoder',
             'modality': 'image',
             'concept_dim': concept,
             'feature_dim': feature_dim,

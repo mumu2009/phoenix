@@ -1,0 +1,57 @@
+{
+  "generatedAt": "2026-08-13T16:48:59.346001",
+  "baseUrl": "http://127.0.0.1:5081",
+  "summary": {
+    "total": 4,
+    "pass": 0,
+    "blocked": 1,
+    "fail": 3,
+    "allUsable": false
+  },
+  "results": [
+    {
+      "mode": "ollama",
+      "status": "FAIL",
+      "ready": true,
+      "chat_ok": false,
+      "provider_id": "",
+      "detail": "empty reply",
+      "runtime_status": "",
+      "model": "",
+      "elapsed_ms": 17374
+    },
+    {
+      "mode": "llamacpp",
+      "status": "BLOCKED",
+      "ready": false,
+      "chat_ok": false,
+      "provider_id": "",
+      "detail": "empty reply",
+      "runtime_status": "",
+      "model": "D:\\_phoenix\\_079\\v6.0Alixander\\phoenix\\GGUF_models\\blobs/sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29",
+      "elapsed_ms": 658372
+    },
+    {
+      "mode": "bitnet",
+      "status": "FAIL",
+      "ready": false,
+      "chat_ok": false,
+      "provider_id": "",
+      "detail": "HTTPConnectionPool(host='127.0.0.1', port=5081): Read timed out. (read timeout=9.6)",
+      "runtime_status": "",
+      "model": "",
+      "elapsed_ms": 20160
+    },
+    {
+      "mode": "native",
+      "status": "FAIL",
+      "ready": false,
+      "chat_ok": false,
+      "provider_id": "",
+      "detail": "HTTPConnectionPool(host='127.0.0.1', port=5081): Read timed out. (read timeout=9.6)",
+      "runtime_status": "",
+      "model": "",
+      "elapsed_ms": 20448
+    }
+  ]
+}

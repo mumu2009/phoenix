@@ -1,4 +1,4 @@
-/* jepa_v2_speech_world_model.cpp - Factory and HBDNN/fallback for 1D speech world model interface
+/* audio_model.cpp - Factory and HBDNN/fallback for 1D audio world model interface
    Copyright (C) 2026 079 Project
 
    This file is part of 079 Project.
@@ -8,7 +8,8 @@
    the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version. */
 
-#include "jepa_v2_speech_world_model.hpp"
+#include "audio_model.hpp"
+#include "local_onnx.hpp"
 #include "model_deployment.hpp"
 #include "phoenix_config.hpp"
 #include "rdk_x5_bpu.hpp"
@@ -41,7 +42,11 @@ constexpr int kEncoderOutputDim = 128;
 constexpr int kDecoderOutputSamples = 15872;
 
 std::string speechIjepaDir(const std::string &variantId) {
-  if (variantId == "jepa_v2_speech_16k" || variantId == "speech_16k") return "speech_16k";
+  if (variantId == "audio-encoder" || variantId == "speech_encoder") return "speech_encoder";
+  if (variantId == "audio-16k") return "speech_16k";
+  if (variantId == "audio-22k") return "speech_22k";
+  if (variantId == "audio-44k") return "speech_44k";
+  if (variantId == "audio-48k") return "speech_48k";
   return variantId;
 }
 
@@ -120,18 +125,18 @@ nlohmann::json readModelManifest(const std::filesystem::path &modelDir) {
 static std::filesystem::path temporaryInputPath() {
   static std::atomic<uint64_t> sequence{0};
   return std::filesystem::temp_directory_path() /
-         ("phoenix-jepa-speech-" + std::to_string(sequence.fetch_add(1)) + ".tensor");
+         ("phoenix-audio-" + std::to_string(sequence.fetch_add(1)) + ".tensor");
 }
 
 /**
- * @brief Local HBDNN-backed 1D speech world model.
+ * @brief Local HBDNN-backed 1D audio world model.
  *
- * Uses the RDK X5 hbDNN runtime for both the whole-clip speech encoder
+ * Uses the RDK X5 hbDNN runtime for both the whole-clip audio encoder
  * (1x1x1x16000 -> 1x128) and the waveform decoder (1x128x1x1 -> 1x1x1x15872).
  */
-class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
+class AudioHbdnnModel : public AudioModel {
  public:
-  JepaV2SpeechHbdnnModel(JepaV2SpeechWorldModelConfig cfg, int targetDim)
+  AudioHbdnnModel(AudioModelConfig cfg, int targetDim)
       : cfg_(std::move(cfg)),
         targetDim_(targetDim > 0 ? targetDim : 128),
         modelPath_(resolveBpuModelPath(phoenix::resolveConfig<std::string>("jepa.speech.horizonModel", "", "JEPA_SPEECH_HORIZON_MODEL"), "encoder", speechIjepaDir(cfg_.id))),
@@ -284,7 +289,7 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
     }
     auto speechConcept = encode(audioBytes, sampleRate, mimeType);
     if (speechConcept.empty()) {
-      lastError_ = "speech encoding failed";
+      lastError_ = "audio encoding failed";
       return -1.0f;
     }
 
@@ -317,7 +322,7 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
                               const std::string &mimeType,
                               size_t lengthHint) override {
     if (decoderPath_.empty()) {
-      lastError_ = "JEPA_SPEECH_HORIZON_DECODER_MODEL is required for decode";
+      lastError_ = "audio horizon decoder model is required for decode";
       return {};
     }
     if (!rdk_x5_bpu::available()) {
@@ -356,7 +361,7 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
     }
     const auto outputs = result.value("outputs", nlohmann::json::array());
     if (!outputs.is_array() || outputs.empty() || !outputs[0].contains("values") || !outputs[0]["values"].is_array()) {
-      lastError_ = "JEPA Horizon speech decoder must expose a float waveform output";
+      lastError_ = "audio horizon decoder must expose a float waveform output";
       return {};
     }
     const auto values = outputs[0]["values"].get<std::vector<float>>();
@@ -393,7 +398,9 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
     bool modelReady = !modelPath_.empty() && std::filesystem::is_regular_file(modelPath_, ec);
     bool decoderReady = !decoderPath_.empty() && std::filesystem::is_regular_file(decoderPath_, ec);
     bool bpuReady = rdk_x5_bpu::available();
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "horizon-hbdnn"},
+    std::string backend = kind_.empty() ? std::string("horizon-hbdnn") : kind_;
+    if (!bpuReady || !modelReady) backend += "-unavailable";
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", backend},
                           {"sampleRate", cfg_.sampleRate}, {"windowSamples", cfg_.windowSamples},
                           {"strideSamples", cfg_.strideSamples}, {"targetDim", targetDim_},
                           {"samples", samples_}, {"modelPath", modelPath_},
@@ -403,7 +410,7 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
                           {"error", lastError_}};
   }
 
-  const JepaV2SpeechWorldModelConfig &config() const override { return cfg_; }
+  const AudioModelConfig &config() const override { return cfg_; }
 
  private:
   std::vector<float> preprocessAudio(const std::vector<uint8_t> &payload,
@@ -468,7 +475,7 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
 
   std::vector<float> runEncoderBpu(const std::vector<float> &input) {
     if (modelPath_.empty()) {
-      lastError_ = "JEPA_SPEECH_HORIZON_MODEL is required";
+      lastError_ = "audio horizon encoder model is required";
       return {};
     }
     if (!rdk_x5_bpu::available()) {
@@ -476,7 +483,7 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
       return {};
     }
     if (static_cast<int>(input.size()) != kFixedInputSamples) {
-      lastError_ = "BPU speech input must contain 16000 samples";
+      lastError_ = "BPU audio input must contain 16000 samples";
       return {};
     }
 
@@ -486,7 +493,7 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
       output.write(reinterpret_cast<const char *>(input.data()),
                    static_cast<std::streamsize>(input.size() * sizeof(float)));
       if (!output) {
-        lastError_ = "unable to write BPU speech input tensor";
+        lastError_ = "unable to write BPU audio input tensor";
         return {};
       }
     }
@@ -503,13 +510,13 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
 
     const auto outputs = result.value("outputs", nlohmann::json::array());
     if (!outputs.is_array() || outputs.empty() || !outputs[0].contains("values") || !outputs[0]["values"].is_array()) {
-      lastError_ = "JEPA Horizon speech model must expose a float embedding output";
+      lastError_ = "audio horizon model must expose a float embedding output";
       return {};
     }
 
     auto values = outputs[0]["values"].get<std::vector<float>>();
     if (static_cast<int>(values.size()) != kEncoderOutputDim) {
-      lastError_ = "JEPA speech embedding output dimension is not 128";
+      lastError_ = "audio embedding output dimension is not 128";
       return {};
     }
 
@@ -556,7 +563,7 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
     return header;
   }
 
-  JepaV2SpeechWorldModelConfig cfg_;
+  AudioModelConfig cfg_;
   int targetDim_;
   std::string modelPath_;
   std::string decoderPath_;
@@ -569,12 +576,12 @@ class JepaV2SpeechHbdnnModel : public JepaV2SpeechWorldModel {
   std::string lastError_;
 };
 
-/* Deterministic fallback that implements the 1D JEPA-v2 speech interface.
+/* Deterministic fallback that implements the 1D audio world model interface.
    It is not the real model; it is here so the semantic contract can be
    exercised before a compiled backend is wired in. */
-class JepaV2SpeechFallbackModel : public JepaV2SpeechWorldModel {
+class AudioFallbackModel : public AudioModel {
  public:
-  JepaV2SpeechFallbackModel(JepaV2SpeechWorldModelConfig cfg, int targetDim)
+  AudioFallbackModel(AudioModelConfig cfg, int targetDim)
       : cfg_(std::move(cfg)),
         targetDim_(targetDim > 0 ? targetDim : 128),
         textAlignment_(static_cast<size_t>(targetDim_), 0.0f),
@@ -773,7 +780,7 @@ class JepaV2SpeechFallbackModel : public JepaV2SpeechWorldModel {
     nlohmann::json j;
     j["id"] = cfg_.id;
     j["arch"] = cfg_.arch;
-    j["backend"] = "fallback";
+    j["backend"] = kind_.empty() ? std::string("fallback") : kind_;
     j["sampleRate"] = cfg_.sampleRate;
     j["windowSamples"] = cfg_.windowSamples;
     j["strideSamples"] = cfg_.strideSamples;
@@ -786,10 +793,10 @@ class JepaV2SpeechFallbackModel : public JepaV2SpeechWorldModel {
     return j;
   }
 
-  const JepaV2SpeechWorldModelConfig &config() const override { return cfg_; }
+  const AudioModelConfig &config() const override { return cfg_; }
 
  private:
-  JepaV2SpeechWorldModelConfig cfg_;
+  AudioModelConfig cfg_;
   int targetDim_;
   size_t samples_ = 0;
   size_t contrastiveSamples_ = 0;
@@ -868,16 +875,16 @@ class JepaV2SpeechFallbackModel : public JepaV2SpeechWorldModel {
 
 
 /**
- * @brief Remote implementation of the 1-D speech world model.
+ * @brief Remote implementation of the 1-D audio world model.
  *
  * Forwards encode/decode requests to a remote HTTP/JSON endpoint.  The encode
  * call expects a float embedding of size @c targetDim_; the decode call expects
  * a base64-encoded payload in return.  Local adaptation and contrastive
  * learning are not supported by a remote inference-only model.
  */
-class JepaV2SpeechRemoteModel : public JepaV2SpeechWorldModel {
+class AudioRemoteModel : public AudioModel {
  public:
-  JepaV2SpeechRemoteModel(JepaV2SpeechWorldModelConfig cfg, int targetDim,
+  AudioRemoteModel(AudioModelConfig cfg, int targetDim,
                           const phoenix::deployment::RemoteEndpoint &endpoint)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128),
         endpoint_(endpoint) {}
@@ -894,12 +901,12 @@ class JepaV2SpeechRemoteModel : public JepaV2SpeechWorldModel {
 
     auto result = phoenix::deployment::RemoteModelClient::call(endpoint_, payload);
     if (!result.value("ok", false)) {
-      lastError_ = result.value("error", std::string("remote speech encode failed"));
+      lastError_ = result.value("error", std::string("remote audio encode failed"));
       return {};
     }
     auto embedding = parseFloatVectorFromJson(result.value("embedding", nlohmann::json::array()));
     if (static_cast<int>(embedding.size()) != targetDim_) {
-      lastError_ = "remote speech embedding dimension mismatch";
+      lastError_ = "remote audio embedding dimension mismatch";
       return {};
     }
     ++samples_;
@@ -980,31 +987,31 @@ class JepaV2SpeechRemoteModel : public JepaV2SpeechWorldModel {
 
     auto result = phoenix::deployment::RemoteModelClient::call(endpoint_, payload);
     if (!result.value("ok", false)) {
-      lastError_ = result.value("error", std::string("remote speech decode failed"));
+      lastError_ = result.value("error", std::string("remote audio decode failed"));
       return {};
     }
     auto encoded = result.value("payloadBase64", std::string());
     if (encoded.empty()) {
-      lastError_ = "remote speech decode returned empty payload";
+      lastError_ = "remote audio decode returned empty payload";
       return {};
     }
     auto decoded = phoenix::deployment::RemoteModelClient::base64Decode(encoded);
     if (decoded.empty() && !encoded.empty()) {
-      lastError_ = "remote speech decode returned invalid base64";
+      lastError_ = "remote audio decode returned invalid base64";
       return {};
     }
     return decoded;
   }
 
   nlohmann::json status() const override {
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "remote"},
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", kind_.empty() ? std::string("remote") : kind_},
                           {"url", endpoint_.url}, {"method", endpoint_.method},
                           {"targetDim", targetDim_}, {"samples", samples_},
                           {"ready", !endpoint_.url.empty()},
                           {"error", lastError_}};
   }
 
-  const JepaV2SpeechWorldModelConfig &config() const override { return cfg_; }
+  const AudioModelConfig &config() const override { return cfg_; }
 
  private:
   static std::vector<float> parseFloatVectorFromJson(const nlohmann::json &j) {
@@ -1016,7 +1023,7 @@ class JepaV2SpeechRemoteModel : public JepaV2SpeechWorldModel {
     return out;
   }
 
-  JepaV2SpeechWorldModelConfig cfg_;
+  AudioModelConfig cfg_;
   int targetDim_;
   phoenix::deployment::RemoteEndpoint endpoint_;
   size_t samples_ = 0;
@@ -1024,139 +1031,9 @@ class JepaV2SpeechRemoteModel : public JepaV2SpeechWorldModel {
 };
 
 
-static std::filesystem::path temporaryOnnxPath() {
-  static std::atomic<uint64_t> sequence{0};
-  std::error_code ec;
-  std::filesystem::path base;
-  const char *env = std::getenv("PHOENIX_ONNX_TMP");
-  if (env && *env) {
-    base = std::filesystem::path(env);
-  } else {
-    base = std::filesystem::path("build") / "tmp";
-  }
-  std::filesystem::create_directories(base, ec);
-  if (!std::filesystem::is_directory(base, ec)) {
-    base = std::filesystem::temp_directory_path(ec);
-  }
-  return base / ("phoenix-onnx-" + std::to_string(sequence.fetch_add(1)));
-}
-
-static std::string pythonExecutable() {
-  std::error_code ec;
-  const char *env = std::getenv("PHOENIX_PYTHON");
-  if (env && *env) return std::string(env);
-  const std::vector<std::string> candidates = {
-      "Python314/python", "Python314/python.exe", "Python314/pythonw.exe",
-      "python3", "python", "py"};
-  for (const auto &c : candidates) {
-    if (std::filesystem::is_regular_file(c, ec))
-      return std::filesystem::absolute(c, ec).string();
-  }
-  return "python3";
-}
-
-static std::string toShapeString(const std::vector<int> &shape) {
-  std::ostringstream oss;
-  for (size_t i = 0; i < shape.size(); ++i) {
-    if (i) oss << "x";
-    oss << shape[i];
-  }
-  return oss.str();
-}
-
-static nlohmann::json runLocalOnnx(
-    const std::string &modelPath,
-    const std::string &inputName,
-    const std::vector<int> &inputShape,
-    const std::vector<float> &inputFloats,
-    const std::string &outputName,
-    const std::vector<int> &outputShape,
-    bool gpu) {
-  std::error_code ec;
-  const auto inPath = temporaryOnnxPath().replace_extension(".in");
-  const auto outPath = temporaryOnnxPath().replace_extension(".out");
-
-  {
-    std::ofstream out(inPath, std::ios::binary | std::ios::trunc);
-    if (!out) {
-      return {{"ok", false}, {"error", "failed to write ONNX input binary"}};
-    }
-    out.write(reinterpret_cast<const char *>(inputFloats.data()),
-              static_cast<std::streamsize>(inputFloats.size() * sizeof(float)));
-  }
-
-  const std::string py = pythonExecutable();
-  if (py.find_first_of(" \t") != std::string::npos) {
-    std::filesystem::remove(inPath, ec);
-    return {{"ok", false}, {"error", "python executable path contains spaces; set PHOENIX_PYTHON"}};
-  }
-  auto quoteIfNeeded = [](const std::string &s) -> std::string {
-    if (s.find_first_of(" \t\"&|<>^%;") == std::string::npos) return s;
-    std::string out;
-    out.push_back('\"');
-    for (char c : s) {
-      if (c == '\"') out.push_back('\"');
-      out.push_back(c);
-    }
-    out.push_back('\"');
-    return out;
-  };
-
-  std::ostringstream cmd;
-  cmd << py << " "
-      << "tools/local_onnx_runner.py "
-      << "--model " << quoteIfNeeded(modelPath) << " "
-      << "--input " << quoteIfNeeded(inPath.string()) << " "
-      << "--input-name " << quoteIfNeeded(inputName) << " "
-      << "--input-shape " << toShapeString(inputShape) << " "
-      << "--output " << quoteIfNeeded(outPath.string()) << " "
-      << "--output-name " << quoteIfNeeded(outputName) << " "
-      << "--output-shape " << toShapeString(outputShape);
-  if (gpu) cmd << " --gpu";
-
-  std::string outputJson;
-  FILE *pipe = _popen(cmd.str().c_str(), "r");
-  if (!pipe) {
-    std::filesystem::remove(inPath, ec);
-    return {{"ok", false}, {"error", "failed to start local ONNX runner"}};
-  }
-  char buffer[4096];
-  while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-    outputJson += buffer;
-  }
-  const int rc = _pclose(pipe);
-  std::filesystem::remove(inPath, ec);
-
-  if (outputJson.empty()) {
-    return {{"ok", false}, {"error", "local ONNX runner produced no output"}};
-  }
-  auto result = nlohmann::json::parse(outputJson, nullptr, false);
-  if (result.is_discarded()) {
-    return {{"ok", false}, {"error", "local ONNX runner returned invalid JSON"}, {"raw", outputJson}};
-  }
-  if (!result.value("ok", false) || rc != 0) {
-    return result;
-  }
-
-  std::ifstream in(outPath, std::ios::binary);
-  if (!in) {
-    return {{"ok", false}, {"error", "local ONNX runner did not write output file"}};
-  }
-  const size_t expected = static_cast<size_t>(std::accumulate(outputShape.begin(), outputShape.end(), 1, std::multiplies<int>()));
-  std::vector<float> outputFloats(expected);
-  in.read(reinterpret_cast<char *>(outputFloats.data()),
-          static_cast<std::streamsize>(expected * sizeof(float)));
-  if (!in) {
-    return {{"ok", false}, {"error", "failed to read ONNX output binary"}};
-  }
-  std::filesystem::remove(outPath, ec);
-  result["floats"] = std::move(outputFloats);
-  return result;
-}
-
-class JepaV2SpeechServerClientModel : public JepaV2SpeechWorldModel {
+class AudioServerClientModel : public AudioModel {
  public:
-  JepaV2SpeechServerClientModel(JepaV2SpeechWorldModelConfig cfg, int targetDim)
+  AudioServerClientModel(AudioModelConfig cfg, int targetDim)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128) {}
 
   std::vector<float> encode(const std::vector<uint8_t> &, int, const std::string &) override {
@@ -1187,21 +1064,21 @@ class JepaV2SpeechServerClientModel : public JepaV2SpeechWorldModel {
     return {};
   }
   nlohmann::json status() const override {
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "server-client"},
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", kind_.empty() ? std::string("server-client") : kind_},
                           {"targetDim", targetDim_}, {"ready", false},
                           {"error", "server-client: expects client concept vectors"}};
   }
-  const JepaV2SpeechWorldModelConfig &config() const override { return cfg_; }
+  const AudioModelConfig &config() const override { return cfg_; }
 
  private:
-  JepaV2SpeechWorldModelConfig cfg_;
+  AudioModelConfig cfg_;
   int targetDim_;
   std::string lastError_;
 };
 
-class JepaV2SpeechUnavailableModel : public JepaV2SpeechWorldModel {
+class AudioUnavailableModel : public AudioModel {
  public:
-  JepaV2SpeechUnavailableModel(JepaV2SpeechWorldModelConfig cfg, int targetDim, std::string reason)
+  AudioUnavailableModel(AudioModelConfig cfg, int targetDim, std::string reason)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128),
         reason_(std::move(reason)) {}
 
@@ -1213,20 +1090,20 @@ class JepaV2SpeechUnavailableModel : public JepaV2SpeechWorldModel {
   float contrastiveAdapt(const std::vector<uint8_t> &, int, const std::string &, const std::vector<float> &, float) override { return -1.0f; }
   std::vector<uint8_t> decode(const std::vector<float> &, const std::string &, size_t) override { return {}; }
   nlohmann::json status() const override {
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "unavailable"},
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", kind_.empty() ? std::string("unavailable") : kind_},
                           {"targetDim", targetDim_}, {"ready", false}, {"error", reason_}};
   }
-  const JepaV2SpeechWorldModelConfig &config() const override { return cfg_; }
+  const AudioModelConfig &config() const override { return cfg_; }
 
  private:
-  JepaV2SpeechWorldModelConfig cfg_;
+  AudioModelConfig cfg_;
   int targetDim_;
   std::string reason_;
 };
 
-class JepaV2SpeechLocalOnnxModel : public JepaV2SpeechWorldModel {
+class AudioLocalOnnxModel : public AudioModel {
  public:
-  JepaV2SpeechLocalOnnxModel(JepaV2SpeechWorldModelConfig cfg, int targetDim, bool gpu)
+  AudioLocalOnnxModel(AudioModelConfig cfg, int targetDim, bool gpu)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : 128),
         gpu_(gpu),
         modelPath_(resolveOnnxModelPath("encoder", speechIjepaDir(cfg_.id))),
@@ -1239,7 +1116,7 @@ class JepaV2SpeechLocalOnnxModel : public JepaV2SpeechWorldModel {
   std::vector<float> encode(const std::vector<uint8_t> &audioBytes, int sampleRate,
                             const std::string &mimeType) override {
     if (modelPath_.empty()) {
-      lastError_ = "local ONNX speech encoder model (best.onnx) is not configured";
+      lastError_ = "local ONNX audio encoder model (best.onnx) is not configured";
       return {};
     }
     auto samples = preprocessAudio(audioBytes, sampleRate, mimeType);
@@ -1248,12 +1125,12 @@ class JepaV2SpeechLocalOnnxModel : public JepaV2SpeechWorldModel {
     auto result = runLocalOnnx(modelPath_, encoderInputName_, encoderInputShape_, input,
                                encoderOutputName_, encoderOutputShape_, gpu_);
     if (!result.value("ok", false)) {
-      lastError_ = result.value("error", std::string("local ONNX speech encode failed"));
+      lastError_ = result.value("error", std::string("local ONNX audio encode failed"));
       return {};
     }
     auto values = result.value("floats", std::vector<float>{});
     if (static_cast<int>(values.size()) != conceptDim_) {
-      lastError_ = "ONNX speech encoder output dimension mismatch";
+      lastError_ = "ONNX audio encoder output dimension mismatch";
       return {};
     }
     if (targetDim_ != conceptDim_) {
@@ -1267,7 +1144,7 @@ class JepaV2SpeechLocalOnnxModel : public JepaV2SpeechWorldModel {
   std::vector<float> encodeContext(const std::vector<uint8_t> &audioBytes, int sampleRate,
                                    const std::string &mimeType, const std::vector<bool> &mask) override {
     if (modelPath_.empty()) {
-      lastError_ = "local ONNX speech encoder model (best.onnx) is not configured";
+      lastError_ = "local ONNX audio encoder model (best.onnx) is not configured";
       return {};
     }
     auto samples = preprocessAudio(audioBytes, sampleRate, mimeType);
@@ -1275,7 +1152,7 @@ class JepaV2SpeechLocalOnnxModel : public JepaV2SpeechWorldModel {
     auto result = runLocalOnnx(modelPath_, encoderInputName_, encoderInputShape_, input,
                                encoderOutputName_, encoderOutputShape_, gpu_);
     if (!result.value("ok", false)) {
-      lastError_ = result.value("error", std::string("local ONNX speech encode failed"));
+      lastError_ = result.value("error", std::string("local ONNX audio encode failed"));
       return {};
     }
     auto values = result.value("floats", std::vector<float>{});
@@ -1308,12 +1185,12 @@ class JepaV2SpeechLocalOnnxModel : public JepaV2SpeechWorldModel {
   }
 
   float adapt(const std::vector<uint8_t> &, int, const std::string &, int, float) override {
-    lastError_ = "local ONNX speech model does not support adaptation";
+    lastError_ = "local ONNX audio model does not support adaptation";
     return -1.0f;
   }
 
   float contrastiveAdapt(const std::vector<uint8_t> &, int, const std::string &, const std::vector<float> &, float) override {
-    lastError_ = "local ONNX speech model does not support contrastive adaptation";
+    lastError_ = "local ONNX audio model does not support contrastive adaptation";
     return -1.0f;
   }
 
@@ -1321,7 +1198,7 @@ class JepaV2SpeechLocalOnnxModel : public JepaV2SpeechWorldModel {
                               const std::string &mimeType,
                               size_t lengthHint) override {
     if (decoderPath_.empty()) {
-      lastError_ = "local ONNX speech decoder model (best.onnx) is not configured";
+      lastError_ = "local ONNX audio decoder model (best.onnx) is not configured";
       return {};
     }
     std::vector<float> decoderConcept = conceptVector;
@@ -1332,7 +1209,7 @@ class JepaV2SpeechLocalOnnxModel : public JepaV2SpeechWorldModel {
     auto result = runLocalOnnx(decoderPath_, decoderInputName_, decoderInputShape_, decoderConcept,
                                decoderOutputName_, decoderOutputShape_, gpu_);
     if (!result.value("ok", false)) {
-      lastError_ = result.value("error", std::string("local ONNX speech decode failed"));
+      lastError_ = result.value("error", std::string("local ONNX audio decode failed"));
       return {};
     }
     auto values = result.value("floats", std::vector<float>{});
@@ -1368,7 +1245,8 @@ class JepaV2SpeechLocalOnnxModel : public JepaV2SpeechWorldModel {
     std::error_code ec;
     bool modelReady = !modelPath_.empty() && std::filesystem::is_regular_file(modelPath_, ec);
     bool decoderReady = !decoderPath_.empty() && std::filesystem::is_regular_file(decoderPath_, ec);
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", gpu_ ? "local-gpu" : "local-onnx"},
+    std::string backend = kind_.empty() ? (gpu_ ? std::string("local-gpu") : std::string("local-onnx")) : kind_;
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", backend},
                           {"sampleRate", cfg_.sampleRate}, {"targetDim", targetDim_},
                           {"conceptDim", conceptDim_}, {"samples", samples_},
                           {"modelPath", modelPath_}, {"decoderPath", decoderPath_},
@@ -1377,7 +1255,7 @@ class JepaV2SpeechLocalOnnxModel : public JepaV2SpeechWorldModel {
                           {"error", lastError_}};
   }
 
-  const JepaV2SpeechWorldModelConfig &config() const override { return cfg_; }
+  const AudioModelConfig &config() const override { return cfg_; }
 
  private:
   std::vector<float> preprocessAudio(const std::vector<uint8_t> &payload,
@@ -1498,7 +1376,7 @@ class JepaV2SpeechLocalOnnxModel : public JepaV2SpeechWorldModel {
                                           : std::vector<int>{1, 1, 1, kDecoderOutputSamples};
   }
 
-  JepaV2SpeechWorldModelConfig cfg_;
+  AudioModelConfig cfg_;
   int targetDim_;
   bool gpu_;
   std::string modelPath_;
@@ -1520,8 +1398,9 @@ static phoenix::deployment::LocalBackendType detectLocalBackend(const std::strin
   using phoenix::deployment::LocalBackendType;
   std::error_code ec;
   auto bpuDir = std::filesystem::path("runtime_store") / "models" / "ijepa" / variantId;
-  if (std::filesystem::is_regular_file(bpuDir / "model_encoder.bin", ec) ||
-      std::filesystem::is_regular_file(bpuDir / "model_decoder.bin", ec)) {
+  if (rdk_x5_bpu::available() &&
+      (std::filesystem::is_regular_file(bpuDir / "model_encoder.bin", ec) ||
+       std::filesystem::is_regular_file(bpuDir / "model_decoder.bin", ec))) {
     return LocalBackendType::Bpu;
   }
   auto additiveDir = std::filesystem::path("runtime_store") / "models" / "additive_jepa" / variantId;
@@ -1544,7 +1423,7 @@ static phoenix::deployment::LocalBackendType chooseLocalBackend(
 
 /**
  * @brief Factory that selects a local HBDNN, remote, server-client, or ONNX
- *        speech world model.
+ *        audio world model.
  *
  * Preference order:
  *   1. Server-client: the client runs the model and only sends concept vectors.
@@ -1552,65 +1431,79 @@ static phoenix::deployment::LocalBackendType chooseLocalBackend(
  *   3. Local backend from model_deployment.localBackend (cpu/gpu/bpu/js).
  *   4. Unavailable model if no model files are present.
  */
-std::unique_ptr<JepaV2SpeechWorldModel> createJepaV2SpeechWorldModel(
+std::unique_ptr<AudioModel> createAudioModel(
     const std::string &variantId, int targetDim, const std::string & /*backend*/) {
-  const auto *v = findJepaV2SpeechVariant(variantId);
+  const auto *v = findAudioModelVariant(variantId);
   if (!v) {
-    JepaV2SpeechWorldModelConfig unknownCfg;
+    AudioModelConfig unknownCfg;
     unknownCfg.id = variantId;
     unknownCfg.arch = "unknown";
-    return std::make_unique<JepaV2SpeechUnavailableModel>(
-        unknownCfg, targetDim, "unknown speech variant: " + variantId);
+    return std::make_unique<AudioUnavailableModel>(
+        unknownCfg, targetDim, "unknown audio variant: " + variantId);
   }
 
   const auto &deployment = phoenix::deployment::ModelDeploymentConfig::instance().speech();
 
   if (deployment.placement == phoenix::deployment::ModelPlacement::ServerClient) {
-    return std::make_unique<JepaV2SpeechServerClientModel>(*v, targetDim);
+    return std::make_unique<AudioServerClientModel>(*v, targetDim);
   }
 
   if (deployment.placement == phoenix::deployment::ModelPlacement::Remote) {
     if (deployment.remote.url.empty()) {
-      return std::make_unique<JepaV2SpeechUnavailableModel>(
-          *v, targetDim, "remote speech placement configured but remote.url is empty");
+      return std::make_unique<AudioUnavailableModel>(
+          *v, targetDim, "remote audio placement configured but remote.url is empty");
     }
-    return std::make_unique<JepaV2SpeechRemoteModel>(*v, targetDim, deployment.remote);
+    return std::make_unique<AudioRemoteModel>(*v, targetDim, deployment.remote);
   }
 
-  auto backend = chooseLocalBackend(variantId, deployment);
+  auto backend = chooseLocalBackend(speechIjepaDir(variantId), deployment);
   if (backend == phoenix::deployment::LocalBackendType::Bpu) {
 #if PHOENIX_EDGE_SPEECH_ENABLED
-    auto hbdnn = std::make_unique<JepaV2SpeechHbdnnModel>(*v, targetDim);
+    auto hbdnn = std::make_unique<AudioHbdnnModel>(*v, targetDim);
     if (hbdnn->status().value("ready", false)) return hbdnn;
-    return std::make_unique<JepaV2SpeechUnavailableModel>(
-        *v, targetDim, "local BPU speech model is not ready (missing .bin or BPU runtime)");
+    return std::make_unique<AudioUnavailableModel>(
+        *v, targetDim, "local BPU audio model is not ready (missing .bin or BPU runtime)");
 #else
-    return std::make_unique<JepaV2SpeechUnavailableModel>(
-        *v, targetDim, "local BPU speech backend is disabled at compile time");
+    return std::make_unique<AudioUnavailableModel>(
+        *v, targetDim, "local BPU audio backend is disabled at compile time");
 #endif
   }
 
   if (backend == phoenix::deployment::LocalBackendType::Cpu ||
       backend == phoenix::deployment::LocalBackendType::Gpu) {
     bool gpu = backend == phoenix::deployment::LocalBackendType::Gpu;
-    auto onnx = std::make_unique<JepaV2SpeechLocalOnnxModel>(*v, targetDim, gpu);
+    auto onnx = std::make_unique<AudioLocalOnnxModel>(*v, targetDim, gpu);
     if (onnx->status().value("ready", false)) return onnx;
-    return std::make_unique<JepaV2SpeechFallbackModel>(*v, targetDim);
+    return std::make_unique<AudioFallbackModel>(*v, targetDim);
   }
 
   if (backend == phoenix::deployment::LocalBackendType::Js) {
-    return std::make_unique<JepaV2SpeechFallbackModel>(*v, targetDim);
+    return std::make_unique<AudioFallbackModel>(*v, targetDim);
   }
 
   if (backend == phoenix::deployment::LocalBackendType::Auto) {
-    auto bpu = std::make_unique<JepaV2SpeechHbdnnModel>(*v, targetDim);
+    auto bpu = std::make_unique<AudioHbdnnModel>(*v, targetDim);
     if (bpu->status().value("ready", false)) return bpu;
-    auto onnx = std::make_unique<JepaV2SpeechLocalOnnxModel>(*v, targetDim, false);
+    auto onnx = std::make_unique<AudioLocalOnnxModel>(*v, targetDim, false);
     if (onnx->status().value("ready", false)) return onnx;
-    return std::make_unique<JepaV2SpeechFallbackModel>(*v, targetDim);
+    return std::make_unique<AudioFallbackModel>(*v, targetDim);
   }
 
-  return std::make_unique<JepaV2SpeechFallbackModel>(*v, targetDim);
+  return std::make_unique<AudioFallbackModel>(*v, targetDim);
+}
+
+std::unique_ptr<AudioEncoder> createAudioEncoder(
+    const std::string &variantId, int targetDim, const std::string &backend) {
+  auto model = createAudioModel(variantId, targetDim, backend);
+  if (model) model->kind_ = "audio-encoder";
+  return model;
+}
+
+std::unique_ptr<AudioDecoder> createAudioDecoder(
+    const std::string &variantId, int targetDim, const std::string &backend) {
+  auto model = createAudioModel(variantId, targetDim, backend);
+  if (model) model->kind_ = "audio-decoder";
+  return model;
 }
 
 }  // namespace io

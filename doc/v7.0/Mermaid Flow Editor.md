@@ -52,7 +52,7 @@ flowchart LR
     n21 --> n4
     n22 --> n4
 
-    n3 -->|"world model(jepa-v2)的encoder部分"| n9
+    n3 -->|"world model(video/audio)的encoder部分"| n9
     n2 -->|"一维 world model的encoder部分"| n9
     n4 -->|"通过transformer架构(这里将llama-server的架构统一看作transformer架构)的encoder部分"| n9
 
@@ -72,7 +72,7 @@ flowchart LR
     n24 --> n13
     n24 --> n28
 
-    n13 -->|"world model(jepa-v2)的decoder部分"| n16
+    n13 -->|"world model(video/audio)的decoder部分"| n16
     n13 -->|transformer的decoder部分| n18
     n13 -->|"一维 world model的decoder部分"| n19
 

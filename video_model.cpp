@@ -1,4 +1,4 @@
-/* jepa_v2_image_world_model.cpp - JEPA-v2 image world model factory and fallbacks
+/* video_model.cpp - video world model factory and fallbacks
    Copyright (C) 2026 079 Project
 
    This file is part of 079 Project.
@@ -8,11 +8,16 @@
    the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version. */
 
-#include "jepa_v2_image_world_model.hpp"
+#include "video_model.hpp"
+#include "local_onnx.hpp"
 #include "model_deployment.hpp"
 #include "phoenix_config.hpp"
 #include "rdk_x5_bpu.hpp"
 #include "semantic_unit.hpp"
+
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/dnn.hpp>
 
 #ifndef PHOENIX_EDGE_IMAGE_ENABLED
 #define PHOENIX_EDGE_IMAGE_ENABLED 1
@@ -40,7 +45,8 @@ constexpr int kDefaultResolution = 224;
 constexpr int kDefaultConceptDim = 128;
 
 std::string imageWeightsDir(const std::string &variantId) {
-  if (variantId == "vision_encoder") return "vision_encoder";
+  if (variantId == "video-encoder" || variantId == "video-decoder" ||
+      variantId == "vision_encoder") return "vision_encoder";
   if (variantId == "resnet18_224") return "resnet18_224";
   return variantId;
 }
@@ -248,9 +254,9 @@ static nlohmann::json runLocalOnnx(
   return result;
 }
 
-class JepaV2ImageFallbackModel : public JepaV2ImageWorldModel {
+class VideoFallbackModel : public VideoModel {
  public:
-  JepaV2ImageFallbackModel(JepaV2ImageWorldModelConfig cfg, int targetDim)
+  VideoFallbackModel(VideoModelConfig cfg, int targetDim)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : kDefaultConceptDim) {}
 
   std::vector<float> encode(const std::vector<uint8_t> &, int, int, const std::string &) override {
@@ -273,23 +279,23 @@ class JepaV2ImageFallbackModel : public JepaV2ImageWorldModel {
   }
 
   nlohmann::json status() const override {
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "fallback"},
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", kind_.empty() ? std::string("fallback") : kind_},
                           {"resolution", cfg_.resolution}, {"targetDim", targetDim_},
                           {"samples", samples_}, {"ready", false}, {"error", lastError_}};
   }
 
-  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const VideoModelConfig &config() const override { return cfg_; }
 
  private:
-  JepaV2ImageWorldModelConfig cfg_;
+  VideoModelConfig cfg_;
   int targetDim_;
   size_t samples_ = 0;
   mutable std::string lastError_;
 };
 
-class JepaV2ImageUnavailableModel : public JepaV2ImageWorldModel {
+class VideoUnavailableModel : public VideoModel {
  public:
-  JepaV2ImageUnavailableModel(JepaV2ImageWorldModelConfig cfg, int targetDim, std::string reason)
+  VideoUnavailableModel(VideoModelConfig cfg, int targetDim, std::string reason)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : kDefaultConceptDim), reason_(std::move(reason)) {}
 
   std::vector<float> encode(const std::vector<uint8_t> &, int, int, const std::string &) override { return {}; }
@@ -300,23 +306,23 @@ class JepaV2ImageUnavailableModel : public JepaV2ImageWorldModel {
   std::vector<uint8_t> decode(const std::vector<float> &, const std::string &) override { return {}; }
 
   nlohmann::json status() const override {
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "unavailable"},
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", kind_.empty() ? std::string("unavailable") : kind_},
                           {"resolution", cfg_.resolution}, {"targetDim", targetDim_},
                           {"samples", samples_}, {"ready", false}, {"error", reason_}};
   }
 
-  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const VideoModelConfig &config() const override { return cfg_; }
 
  private:
-  JepaV2ImageWorldModelConfig cfg_;
+  VideoModelConfig cfg_;
   int targetDim_;
   size_t samples_ = 0;
   std::string reason_;
 };
 
-class JepaV2ImageServerClientModel : public JepaV2ImageWorldModel {
+class VideoServerClientModel : public VideoModel {
  public:
-  JepaV2ImageServerClientModel(JepaV2ImageWorldModelConfig cfg, int targetDim)
+  VideoServerClientModel(VideoModelConfig cfg, int targetDim)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : kDefaultConceptDim) {}
 
   std::vector<float> encode(const std::vector<uint8_t> &, int, int, const std::string &) override {
@@ -335,23 +341,23 @@ class JepaV2ImageServerClientModel : public JepaV2ImageWorldModel {
     return {};
   }
   nlohmann::json status() const override {
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "server-client"},
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", kind_.empty() ? std::string("server-client") : kind_},
                           {"resolution", cfg_.resolution}, {"targetDim", targetDim_},
                           {"samples", samples_}, {"ready", false},
                           {"error", "server-client: expects client concept vectors"}};
   }
-  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const VideoModelConfig &config() const override { return cfg_; }
 
  private:
-  JepaV2ImageWorldModelConfig cfg_;
+  VideoModelConfig cfg_;
   int targetDim_;
   size_t samples_ = 0;
   mutable std::string lastError_;
 };
 
-class JepaV2ImageRemoteModel : public JepaV2ImageWorldModel {
+class VideoRemoteModel : public VideoModel {
  public:
-  JepaV2ImageRemoteModel(JepaV2ImageWorldModelConfig cfg, int targetDim,
+  VideoRemoteModel(VideoModelConfig cfg, int targetDim,
                          const phoenix::deployment::RemoteEndpoint &endpoint)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : kDefaultConceptDim), endpoint_(endpoint) {}
 
@@ -430,13 +436,13 @@ class JepaV2ImageRemoteModel : public JepaV2ImageWorldModel {
   }
 
   nlohmann::json status() const override {
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", "remote"},
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", kind_.empty() ? std::string("remote") : kind_},
                           {"url", endpoint_.url}, {"method", endpoint_.method},
                           {"resolution", cfg_.resolution}, {"targetDim", targetDim_},
                           {"samples", samples_}, {"ready", !endpoint_.url.empty()}, {"error", lastError_}};
   }
 
-  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const VideoModelConfig &config() const override { return cfg_; }
 
  private:
   static std::vector<float> parseFloatVectorFromJson(const nlohmann::json &j) {
@@ -448,16 +454,16 @@ class JepaV2ImageRemoteModel : public JepaV2ImageWorldModel {
     return out;
   }
 
-  JepaV2ImageWorldModelConfig cfg_;
+  VideoModelConfig cfg_;
   int targetDim_;
   phoenix::deployment::RemoteEndpoint endpoint_;
   size_t samples_ = 0;
   mutable std::string lastError_;
 };
 
-class JepaV2ImageLocalOnnxModel : public JepaV2ImageWorldModel {
+class VideoLocalOnnxModel : public VideoModel {
  public:
-  JepaV2ImageLocalOnnxModel(JepaV2ImageWorldModelConfig cfg, int targetDim, bool gpu)
+  VideoLocalOnnxModel(VideoModelConfig cfg, int targetDim, bool gpu)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : kDefaultConceptDim), gpu_(gpu),
         modelPath_(resolveOnnxModelPath("encoder", imageWeightsDir(cfg_.id))),
         decoderPath_(resolveOnnxModelPath("decoder", imageWeightsDir(cfg_.id))) {
@@ -472,16 +478,35 @@ class JepaV2ImageLocalOnnxModel : public JepaV2ImageWorldModel {
   std::vector<float> encode(const std::vector<uint8_t> &imageBytes,
                             int width,
                             int height,
-                            const std::string & /*mimeType*/) override {
+                            const std::string &mimeType) override {
     if (modelPath_.empty()) {
       lastError_ = "local ONNX image encoder model (best.onnx) is missing";
       return {};
     }
-    (void)width;
-    (void)height;
-    (void)imageBytes;
-    lastError_ = "local ONNX image encoder preprocessing is not implemented in this build";
-    return {};
+    auto input = prepareImageInput(imageBytes, width, height, mimeType);
+    if (input.empty()) {
+      if (lastError_.empty()) lastError_ = "local ONNX image encoder preprocessing failed";
+      return {};
+    }
+
+    auto result = phoenix::io::runLocalOnnx(
+        modelPath_, encoderInputName_, encoderInputShape_, input,
+        encoderOutputName_, encoderOutputShape_, gpu_);
+    if (!result.value("ok", false)) {
+      lastError_ = result.value("error", std::string("local ONNX image encode failed"));
+      return {};
+    }
+    auto values = result.value("floats", std::vector<float>{});
+    if (static_cast<int>(values.size()) != conceptDim_) {
+      lastError_ = "ONNX image encoder output dimension mismatch";
+      return {};
+    }
+    if (targetDim_ != conceptDim_) {
+      values = phoenix::multimodal::projectToDimension(values, static_cast<size_t>(targetDim_), 0x57494D47U);
+    }
+    ++samples_;
+    lastError_.clear();
+    return phoenix::multimodal::normalizeVector(values);
   }
 
   std::vector<float> encodeContext(const std::vector<uint8_t> &imageBytes,
@@ -509,28 +534,40 @@ class JepaV2ImageLocalOnnxModel : public JepaV2ImageWorldModel {
     return -1.0f;
   }
 
-  std::vector<uint8_t> decode(const std::vector<float> &conceptVector, const std::string & /*mimeType*/) override {
+  std::vector<uint8_t> decode(const std::vector<float> &conceptVector, const std::string &mimeType) override {
     if (decoderPath_.empty()) {
       lastError_ = "local ONNX image decoder model (best.onnx) is not configured";
       return {};
     }
-    (void)conceptVector;
-    lastError_ = "local ONNX image decoder rendering is not implemented in this build";
-    return {};
+    std::vector<float> decoderConcept = conceptVector;
+    if (static_cast<int>(decoderConcept.size()) != conceptDim_) {
+      decoderConcept = phoenix::multimodal::projectToDimension(decoderConcept, static_cast<size_t>(conceptDim_), 0x57494D47U);
+    }
+
+    auto result = phoenix::io::runLocalOnnx(
+        decoderPath_, decoderInputName_, decoderInputShape_, decoderConcept,
+        decoderOutputName_, decoderOutputShape_, gpu_);
+    if (!result.value("ok", false)) {
+      lastError_ = result.value("error", std::string("local ONNX image decode failed"));
+      return {};
+    }
+    auto values = result.value("floats", std::vector<float>{});
+    return renderImage(values, mimeType);
   }
 
   nlohmann::json status() const override {
     std::error_code ec;
     bool modelReady = !modelPath_.empty() && std::filesystem::is_regular_file(modelPath_, ec);
     bool decoderReady = !decoderPath_.empty() && std::filesystem::is_regular_file(decoderPath_, ec);
-    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", gpu_ ? "local-gpu" : "local-onnx"},
+    std::string backend = kind_.empty() ? (gpu_ ? std::string("local-gpu") : std::string("local-onnx")) : kind_;
+    return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", backend},
                           {"resolution", cfg_.resolution}, {"targetDim", targetDim_},
                           {"conceptDim", conceptDim_}, {"samples", samples_},
                           {"modelPath", modelPath_}, {"decoderPath", decoderPath_},
                           {"ready", modelReady}, {"decoderReady", decoderReady}, {"error", lastError_}};
   }
 
-  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const VideoModelConfig &config() const override { return cfg_; }
 
  private:
   void loadManifest(const std::string &kind, std::string &inputName, std::string &outputName,
@@ -557,7 +594,118 @@ class JepaV2ImageLocalOnnxModel : public JepaV2ImageWorldModel {
                                          : std::vector<int>{1, 3, kDefaultResolution, kDefaultResolution};
   }
 
-  JepaV2ImageWorldModelConfig cfg_;
+  std::vector<float> prepareImageInput(const std::vector<uint8_t> &imageBytes,
+                                       int width,
+                                       int height,
+                                       const std::string &mimeType) {
+    cv::Mat img;
+    if (!imageBytes.empty() && width > 0 && height > 0 &&
+        static_cast<int>(imageBytes.size()) == width * height * 3) {
+      img = cv::Mat(height, width, CV_8UC3, const_cast<uint8_t *>(imageBytes.data()));
+    } else if (!imageBytes.empty()) {
+      std::vector<int> params;
+      const std::vector<uint8_t> *source = &imageBytes;
+      std::vector<uint8_t> tmp;
+      if (!mimeType.empty() && mimeType.find("/raw") != std::string::npos &&
+          width > 0 && height > 0 && static_cast<int>(imageBytes.size()) >= width * height * 3) {
+        img = cv::Mat(height, width, CV_8UC3, const_cast<uint8_t *>(imageBytes.data()));
+      } else {
+        cv::Mat decoded = cv::imdecode(imageBytes, cv::IMREAD_COLOR);
+        if (!decoded.empty()) img = decoded;
+      }
+    }
+
+    if (img.empty()) {
+      int targetRes = cfg_.resolution > 0 ? cfg_.resolution : kDefaultResolution;
+      if (width > 0 && height > 0) {
+        img = cv::Mat::zeros(height, width, CV_8UC3);
+      } else {
+        img = cv::Mat::zeros(targetRes, targetRes, CV_8UC3);
+      }
+    }
+
+    const int res = cfg_.resolution > 0 ? cfg_.resolution : kDefaultResolution;
+    if (img.rows != res || img.cols != res) {
+      cv::resize(img, img, cv::Size(res, res), 0, 0, cv::INTER_LINEAR);
+    }
+
+    // BGR -> RGB
+    cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
+
+    cv::Mat floatImg;
+    img.convertTo(floatImg, CV_32FC3, 1.0 / 255.0);
+
+    // ImageNet normalization by default
+    constexpr float kMean[3] = {0.485f, 0.456f, 0.406f};
+    constexpr float kStd[3] = {0.229f, 0.224f, 0.225f};
+    for (int y = 0; y < floatImg.rows; ++y) {
+      auto *row = floatImg.ptr<cv::Vec3f>(y);
+      for (int x = 0; x < floatImg.cols; ++x) {
+        for (int c = 0; c < 3; ++c) {
+          row[x][c] = (row[x][c] - kMean[c]) / kStd[c];
+        }
+      }
+    }
+
+    std::vector<float> input(static_cast<size_t>(res * res * 3));
+    for (int c = 0; c < 3; ++c) {
+      for (int y = 0; y < res; ++y) {
+        const auto *row = floatImg.ptr<cv::Vec3f>(y);
+        for (int x = 0; x < res; ++x) {
+          input[static_cast<size_t>(c * res * res + y * res + x)] = row[x][c];
+        }
+      }
+    }
+    return input;
+  }
+
+  std::vector<uint8_t> renderImage(const std::vector<float> &output,
+                                   const std::string &mimeType) {
+    const int res = cfg_.resolution > 0 ? cfg_.resolution : kDefaultResolution;
+    const size_t expected = static_cast<size_t>(res * res * 3);
+    if (output.size() < expected) {
+      lastError_ = "ONNX image decoder output size mismatch";
+      return {};
+    }
+
+    cv::Mat img(res, res, CV_32FC3);
+    for (int c = 0; c < 3; ++c) {
+      for (int y = 0; y < res; ++y) {
+        auto *row = img.ptr<cv::Vec3f>(y);
+        for (int x = 0; x < res; ++x) {
+          row[x][c] = output[static_cast<size_t>(c * res * res + y * res + x)];
+        }
+      }
+    }
+
+    // Assume decoder outputs roughly [-1, 1] or [0, 1] normalized logits.
+    // Robust linear map: find min/max, stretch to [0, 255] while preserving shape.
+    double minVal = 0, maxVal = 0;
+    cv::minMaxLoc(img.reshape(1), &minVal, &maxVal);
+    double range = maxVal - minVal;
+    if (range < 1e-6) range = 1.0;
+    cv::Mat scaled;
+    cv::Mat((img - minVal) * (255.0 / range)).convertTo(scaled, CV_8UC3);
+
+    cv::Mat bgr;
+    cv::cvtColor(scaled, bgr, cv::COLOR_RGB2BGR);
+
+    std::vector<int> compressParams;
+    std::string ext = ".png";
+    if (mimeType == "image/jpeg" || mimeType == "image/jpg") {
+      ext = ".jpg";
+      compressParams = {cv::IMWRITE_JPEG_QUALITY, 90};
+    }
+    std::vector<uint8_t> out;
+    if (!cv::imencode(ext, bgr, out, compressParams)) {
+      lastError_ = "local ONNX image decoder: cv::imencode failed";
+      return {};
+    }
+    lastError_.clear();
+    return out;
+  }
+
+  VideoModelConfig cfg_;
   int targetDim_;
   bool gpu_;
   std::string modelPath_;
@@ -575,9 +723,9 @@ class JepaV2ImageLocalOnnxModel : public JepaV2ImageWorldModel {
   int conceptDim_ = 0;
 };
 
-class JepaV2ImageHbdnnModel : public JepaV2ImageWorldModel {
+class VideoHbdnnModel : public VideoModel {
  public:
-  JepaV2ImageHbdnnModel(JepaV2ImageWorldModelConfig cfg, int targetDim)
+  VideoHbdnnModel(VideoModelConfig cfg, int targetDim)
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : kDefaultConceptDim),
         modelPath_(resolveBpuModelPath(phoenix::resolveConfig<std::string>("jepa.image.horizonModel", "", "JEPA_IMAGE_HORIZON_MODEL"), "encoder", imageWeightsDir(cfg_.id))),
         decoderPath_(resolveBpuModelPath(phoenix::resolveConfig<std::string>("jepa.image.horizonDecoderModel", "", "JEPA_IMAGE_HORIZON_DECODER_MODEL"), "decoder", imageWeightsDir(cfg_.id))) {
@@ -642,7 +790,7 @@ class JepaV2ImageHbdnnModel : public JepaV2ImageWorldModel {
     bool modelReady = !modelPath_.empty() && std::filesystem::is_regular_file(modelPath_, ec);
     bool decoderReady = !decoderPath_.empty() && std::filesystem::is_regular_file(decoderPath_, ec);
     bool bpuReady = rdk_x5_bpu::available();
-    std::string backend = "horizon-hbdnn";
+    std::string backend = kind_.empty() ? std::string("horizon-hbdnn") : kind_;
     if (!bpuReady || !modelReady) backend += "-unavailable";
     return nlohmann::json{{"id", cfg_.id}, {"arch", cfg_.arch}, {"backend", backend},
                           {"resolution", cfg_.resolution}, {"targetDim", targetDim_},
@@ -652,10 +800,10 @@ class JepaV2ImageHbdnnModel : public JepaV2ImageWorldModel {
                           {"error", lastError_}};
   }
 
-  const JepaV2ImageWorldModelConfig &config() const override { return cfg_; }
+  const VideoModelConfig &config() const override { return cfg_; }
 
  private:
-  JepaV2ImageWorldModelConfig cfg_;
+  VideoModelConfig cfg_;
   int targetDim_;
   std::string modelPath_;
   std::string decoderPath_;
@@ -667,8 +815,9 @@ static phoenix::deployment::LocalBackendType detectLocalBackend(const std::strin
   using phoenix::deployment::LocalBackendType;
   std::error_code ec;
   auto bpuDir = std::filesystem::path("runtime_store") / "models" / "ijepa" / variantId;
-  if (std::filesystem::is_regular_file(bpuDir / "model_encoder.bin", ec) ||
-      std::filesystem::is_regular_file(bpuDir / "model_decoder.bin", ec)) {
+  if (rdk_x5_bpu::available() &&
+      (std::filesystem::is_regular_file(bpuDir / "model_encoder.bin", ec) ||
+       std::filesystem::is_regular_file(bpuDir / "model_decoder.bin", ec))) {
     return LocalBackendType::Bpu;
   }
   auto additiveDir = std::filesystem::path("runtime_store") / "models" / "additive_jepa" / variantId;
@@ -689,38 +838,38 @@ static phoenix::deployment::LocalBackendType chooseLocalBackend(
 
 }  // namespace
 
-std::unique_ptr<JepaV2ImageWorldModel> createJepaV2ImageWorldModel(
+std::unique_ptr<VideoModel> createVideoModel(
     const std::string &variantId, int targetDim, const std::string & /*backend*/) {
-  const auto *v = findJepaV2ImageVariant(variantId);
+  const auto *v = findVideoModelVariant(variantId);
   if (!v) {
-    JepaV2ImageWorldModelConfig unknownCfg;
+    VideoModelConfig unknownCfg;
     unknownCfg.id = variantId;
     unknownCfg.arch = "unknown";
-    return std::make_unique<JepaV2ImageUnavailableModel>(
+    return std::make_unique<VideoUnavailableModel>(
         unknownCfg, targetDim, "unknown image variant: " + variantId);
   }
 
   const auto &deployment = phoenix::deployment::ModelDeploymentConfig::instance().vision();
 
   if (deployment.placement == phoenix::deployment::ModelPlacement::ServerClient) {
-    return std::make_unique<JepaV2ImageServerClientModel>(*v, targetDim);
+    return std::make_unique<VideoServerClientModel>(*v, targetDim);
   }
 
   if (deployment.placement == phoenix::deployment::ModelPlacement::Remote) {
     if (deployment.remote.url.empty()) {
-      return std::make_unique<JepaV2ImageUnavailableModel>(
+      return std::make_unique<VideoUnavailableModel>(
           *v, targetDim, "remote image placement configured but remote.url is empty");
     }
-    return std::make_unique<JepaV2ImageRemoteModel>(*v, targetDim, deployment.remote);
+    return std::make_unique<VideoRemoteModel>(*v, targetDim, deployment.remote);
   }
 
   auto backend = chooseLocalBackend(imageWeightsDir(v->id), deployment);
   if (backend == phoenix::deployment::LocalBackendType::Bpu) {
 #if PHOENIX_EDGE_IMAGE_ENABLED
-    auto hbdnn = std::make_unique<JepaV2ImageHbdnnModel>(*v, targetDim);
+    auto hbdnn = std::make_unique<VideoHbdnnModel>(*v, targetDim);
     return hbdnn;
 #else
-    return std::make_unique<JepaV2ImageUnavailableModel>(
+    return std::make_unique<VideoUnavailableModel>(
         *v, targetDim, "local BPU image backend is disabled at compile time");
 #endif
   }
@@ -728,15 +877,29 @@ std::unique_ptr<JepaV2ImageWorldModel> createJepaV2ImageWorldModel(
   if (backend == phoenix::deployment::LocalBackendType::Cpu ||
       backend == phoenix::deployment::LocalBackendType::Gpu) {
     bool gpu = backend == phoenix::deployment::LocalBackendType::Gpu;
-    return std::make_unique<JepaV2ImageLocalOnnxModel>(*v, targetDim, gpu);
+    return std::make_unique<VideoLocalOnnxModel>(*v, targetDim, gpu);
   }
 
   if (backend == phoenix::deployment::LocalBackendType::Js) {
-    return std::make_unique<JepaV2ImageFallbackModel>(*v, targetDim);
+    return std::make_unique<VideoFallbackModel>(*v, targetDim);
   }
 
   // Auto-detected nothing: use fallback so the bridge still returns a clear error.
-  return std::make_unique<JepaV2ImageFallbackModel>(*v, targetDim);
+  return std::make_unique<VideoFallbackModel>(*v, targetDim);
+}
+
+std::unique_ptr<VideoEncoder> createVideoEncoder(
+    const std::string &variantId, int targetDim, const std::string &backend) {
+  auto model = createVideoModel(variantId, targetDim, backend);
+  if (model) model->kind_ = "video-encoder";
+  return model;
+}
+
+std::unique_ptr<VideoDecoder> createVideoDecoder(
+    const std::string &variantId, int targetDim, const std::string &backend) {
+  auto model = createVideoModel(variantId, targetDim, backend);
+  if (model) model->kind_ = "video-decoder";
+  return model;
 }
 
 }  // namespace io

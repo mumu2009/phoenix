@@ -26,7 +26,7 @@ semanticVector  : 统一语义向量（浮点）
 content         : 可选原始内容或摘要
 confidence      : [0, 1]
 timestampMs     : UTC 毫秒
-metadata        : 键值对（如 jepaVariant、jepaBackend、conceptEncoder 等）
+metadata        : 键值对（如 videoVariant、audioVariant、conceptEncoder 等）
 associationIds  : 关联单元 id
 modalWeights    : 各模态在融合中的权重
 ```
@@ -90,11 +90,11 @@ L_total = α * L_contrastive + β * L_reconstruction + γ * L_semantic_consisten
 
 ---
 
-## 3. I-JEPA / JEPA-v2 图像世界模型
+## 3. I-JEPA / 视频世界模型
 
 ### 3.1 官方变体
 
-定义在 `jepa_v2_image_world_model.hpp`：
+定义在 `video_model.hpp`：
 
 | id | arch | repo | patchSize | resolution | params | dataset |
 |---|---|---|---|---|---|---|
@@ -109,23 +109,23 @@ L_total = α * L_contrastive + β * L_reconstruction + γ * L_semantic_consisten
 runtime_store/models/ijepa/<id>/model.safetensors
 ```
 
-由 `jepaV2ImageExpectedWeightsPath(cfg)` 计算。
+由 `videoModelExpectedWeightsPath(cfg)` 计算。
 
 ### 3.2 接口语义
 
-`JepaV2ImageWorldModel` 接口：`encode`、`encodeContext`、`encodeTarget`、`predictTarget`、`adapt`、`decode`、`status`。
+`VideoModel` 接口：`encode`、`encodeContext`、`encodeTarget`、`predictTarget`、`adapt`、`decode`、`status`。
 
 工厂根据部署配置选择后端：
 
 ```text
-local(cpu|gpu)  -> JepaV2ImageLocalOnnxModel  运行 additive_jepa/.../best.onnx
-local(bpu)     -> JepaV2ImageHbdnnModel      加载 best.bin / model_encoder.bin
-remote         -> JepaV2ImageRemoteModel      POST JSON 到 remote url
-server-client  -> JepaV2ImageServerClientModel 仅接受客户端发来的 concept vector
-missing        -> JepaV2ImageUnavailableModel  status() 报错，encode/decode 返回空
+local(cpu|gpu)  -> VideoLocalOnnxModel  运行 additive_jepa/.../best.onnx
+local(bpu)     -> VideoHbdnnModel      加载 best.bin / model_encoder.bin
+remote         -> VideoRemoteModel      POST JSON 到 remote url
+server-client  -> VideoServerClientModel 仅接受客户端发来的 concept vector
+missing        -> VideoUnavailableModel  status() 报错，encode/decode 返回空
 ```
 
-`JepaV2ImageLocalOnnxModel` 在 x86_64 上通过 `tools/local_onnx_runner.py` 调用 ONNX Runtime；`JepaV2ImageHbdnnModel` 在 RDK X5 上调用 `rdk_x5_bpu::execute`。不再有确定性统计 fallback。
+`VideoLocalOnnxModel` 在 x86_64 上通过 `tools/local_onnx_runner.py` 调用 ONNX Runtime；`VideoHbdnnModel` 在 RDK X5 上调用 `rdk_x5_bpu::execute`。不再有确定性统计 fallback。
 
 ### 3.3 JEPA 预测流程
 
@@ -141,9 +141,9 @@ missing        -> JepaV2ImageUnavailableModel  status() 报错，encode/decode �
 
 ---
 
-## 4. 1D JEPA 语音世界模型
+## 4. 1D 音频世界模型
 
-实现：`jepa_v2_speech_world_model.{hpp,cpp}`
+实现：`audio_model.{hpp,cpp}`
 
 ### 4.1 编码
 
@@ -202,11 +202,11 @@ encode(packet, targetDim, contentHint):
         semanticVector = textEncoder.encode(packet.payload 解码为 UTF-8)
     else if image or video:
         variant = metadata["jepaVariant"] or "ijepa_vith14_1k"
-        semanticVector = imageWorldModel(variant, targetDim).encode(payload)
+        semanticVector = videoEncoder(variant, targetDim).encode(payload)
         if empty: semanticVector = mediaConcept(payload, targetDim, 0x494D4147U)
     else if audio:
-        variant = metadata["jepaSpeechVariant"] or "jepa_v2_speech_16k"
-        semanticVector = speechWorldModel(variant, targetDim).encode(payload)
+        variant = metadata["audioVariant"] or "audio-16k"
+        semanticVector = audioEncoder(variant, targetDim).encode(payload)
         if empty: semanticVector = mediaConcept(payload, targetDim, 0x41554449U)
         if SpeechConceptModel.meanAlignment 存在且同维度：
             semanticVector += meanAlignment
@@ -232,10 +232,10 @@ decode(unit, target, source):
     if target == Text:
         packet.payload = unit.content 的 UTF-8 字节
     else if target == Image or Video:
-        packet.payload = imageWorldModel.decode(unit.semanticVector, "image/png")
+        packet.payload = videoDecoder.decode(unit.semanticVector, "image/png")
         if empty: 使用 1x1 PNG 占位图并标记 imageDecodeFallback
     else if target == Audio:
-        packet.payload = speechWorldModel.decode(unit.semanticVector, "audio/pcm")
+        packet.payload = audioDecoder.decode(unit.semanticVector, "audio/pcm")
         if empty: packet.payload = JSON({semanticVector, sourceModality, lengthHint})
     else:
         packet.payload = JSON({semanticVector, sourceModality, content})
@@ -264,12 +264,12 @@ pretrainImage(image, caption, targetDim):
     if 不是 image/video 或 payload 空：返回 false
     dim = conceptDimension(targetDim)
     variant = image.metadata["jepaVariant"] or "ijepa_vith14_1k"
-    model = imageWorldModel(variant, dim)
+    model = videoEncoder(variant, dim)
     model.adapt(image.payload, width, height, mimeType, steps=1, lr=1e-3)
     visual = model.encode(image.payload, width, height, mimeType)
     if visual 空: visual = mediaConcept(image.payload, dim, 0x494D4147U)
     if visual.size != dim: 返回 false
-    imageUnit = SemanticUnit(..., visual, conceptEncoder="jepa-v2-image-world-model")
+    imageUnit = SemanticUnit(..., visual, conceptEncoder="video-encoder")
     PersistentConceptMatrix::addOrUpdate(imageUnit, true)
     if caption 非空:
         textConcept = transformerTextEncoderConcept(caption, dim)
@@ -292,9 +292,9 @@ reset():
 ### 6.7 `MixedModalConceptBridge::status`
 
 `status()` 返回一个 JSON，包括：
-- `speechWorldModel`：persistent、dimension、samples。
-- `imageWorldModel`：当前图像 world model 的 `status()`。
-- `jepaSpeechWorldModel`：当前语音 world model 的 `status()`。
+- `audioEncoder`：persistent、dimension、samples。
+- `videoEncoder`：当前图像 world model 的 `status()`。
+- `audioDecoder`：当前语音 world model 的 `status()`。
 - `textEncoder`：`TransformerTextEncoder` 的加载/错误状态。
 - `conceptMatrix`：`PersistentConceptMatrix::status()` 的结果。
 
@@ -539,8 +539,8 @@ frontend_server.cpp 路由处理
                     MixedModalConceptBridge::encode
                                |
                                +---> 文本  --> TransformerTextEncoder
-                               +---> 图像  --> JepaV2ImageWorldModel
-                               +---> 音频  --> JepaV2SpeechWorldModel
+                               +---> 图像  --> VideoModel
+                               +---> 音频  --> AudioModel
                                +---> 其他  --> mediaConcept
                                |
                                v
@@ -573,7 +573,7 @@ frontend_server.cpp 路由处理
 
 ## 13. aheadModule：多模态前置编码与并行摘要算法（v7.0 目标）
 
-> `aheadModule` 是 GNN 之前所有预处理逻辑的**概念名**（详见 `workflow.md` 文件头与 §0），本节给出其内部算法。当前代码中对应 `external_mixed_modal_io`、`jepa_v2_image_world_model`、`jepa_v2_speech_world_model`、`transformer::TransformerTextEncoder`、`TorchTextModels`、`PrimalSensationEngine`/`InstinctEngine` 的组合调用。
+> `aheadModule` 是 GNN 之前所有预处理逻辑的**概念名**（详见 `workflow.md` 文件头与 §0），本节给出其内部算法。当前代码中对应 `external_mixed_modal_io`、`video_model`、`audio_model`、`transformer::TransformerTextEncoder`、`TorchTextModels`、`PrimalSensationEngine`/`InstinctEngine` 的组合调用。
 
 ### 13.1 输入编码调度
 
@@ -586,9 +586,9 @@ aheadModule.process(rawInputs: {text?, image?, audio?, video?, sensor?}) -> Ahea
         textVec = llama3_1_embedding_lookup(tokenizer.encode(rawInputs.text))
         units.append(SemanticUnit(modality=Text, vector=projectToDimension(textVec, D)))
     if rawInputs.image or rawInputs.video present:
-        units.append(MixedModalConceptBridge.encode(image/video packet, D))   // JepaV2ImageWorldModel
+        units.append(MixedModalConceptBridge.encode(image/video packet, D))   // VideoModel
     if rawInputs.audio present:
-        units.append(MixedModalConceptBridge.encode(audio packet, D))        // JepaV2SpeechWorldModel
+        units.append(MixedModalConceptBridge.encode(audio packet, D))        // AudioModel
     if rawInputs.sensor present:
         units.append(mediaConcept(sensor payload, D, sensorSeed))
 
@@ -602,7 +602,7 @@ aheadModule.process(rawInputs: {text?, image?, audio?, video?, sensor?}) -> Ahea
 要点：
 
 - 文本路径优先复用 llama3.1 8b 自带 tokenizer/embedding，只有当需要与图像/音频等其它模态做 `fuseAttention`/`fuseAdd` 融合时，才调用 `projectToDimension` 对齐到统一的跨模态维度 `D`（沿用 §2.2 的投影矩阵机制），这样不需要为文本重新训练单独的编码器。
-- 图像/音频编码器（`JepaV2ImageWorldModel` / `JepaV2SpeechWorldModel`）保持现状：由 aheadModule 内部持有和调度，对上层（GNN、Backend）只暴露 `SemanticUnit`。
+- 图像/音频编码器（`VideoModel` / `AudioModel`）保持现状：由 aheadModule 内部持有和调度，对上层（GNN、Backend）只暴露 `SemanticUnit`。
 - 情感观测被显式建模为**异步子任务**，提交到 §16 的 Emotion 队列，不在编码主路径上同步等待。
 
 ### 13.2 记忆模块：RNN/LSTM/Transformer 摘要 + 并行双分支
@@ -680,13 +680,13 @@ Backend.run(request):
         return TextOutput(token)
     else:  // audio / video
         conceptVector = dec_av.projectFromHidden(hiddenState)    // 运行期代码，非 .gguf 权重
-        payload = dec_av.decode(conceptVector, targetMimeType)   // 见 jepa_v2_*_world_model::decode
+        payload = dec_av.decode(conceptVector, targetMimeType)   // 见 video/audio world_model::decode
         return MediaOutput(payload)
 ```
 
 要点：
 
-- `dec_av`（音视频 `dec`）不依赖 `.gguf`：其权重来自 `runtime_store/models/{ijepa,additive_jepa}/...`，由 `jepa_v2_image_world_model.cpp` / `jepa_v2_speech_world_model.cpp` 的 `decode()` 实现，属于 Phoenix 自己训练/维护的解码器，不与主 LLM 权重一起分发，因此文档与代码都不能假设它随 `.gguf` 一起提交。
+- `dec_av`（音视频 `dec`）不依赖 `.gguf`：其权重来自 `runtime_store/models/{ijepa,additive_jepa}/...`，由 `video_model.cpp` / `audio_model.cpp` 的 `decode()` 实现，属于 Phoenix 自己训练/维护的解码器，不与主 LLM 权重一起分发，因此文档与代码都不能假设它随 `.gguf` 一起提交。
 - `enc` 支持"预计算 embedding 直接注入"是为了让 aheadModule 产出的跨模态语义向量可以绕过 tokenizer，直接进入 llama 的隐藏空间，减少多模态到文本的重复转换。
 
 ---

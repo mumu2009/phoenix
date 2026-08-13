@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Legacy speech-only export wrapper.
 
-For new work use `export_jepa_v2_multimodal.py --modality speech`.
+For new work use `export_multimodal.py --modality speech`.
 This script exists to keep old commands working with the scalable speech
 autoencoder.
 """
@@ -18,7 +18,7 @@ def main():
     args = parser.parse_args()
 
     cmd = [
-        sys.executable, 'tools/export_jepa_v2_multimodal.py',
+        sys.executable, 'tools/export_multimodal.py',
         '--modality', 'speech',
         '--checkpoint', args.checkpoint,
         '--out-dir', args.out_dir,

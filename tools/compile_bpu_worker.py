@@ -79,7 +79,7 @@ def _init_hb_mapper():
 def _compile_one(job: dict) -> dict:
     """Compile a single ONNX model to BPU .bin.
 
-    Uses the compile_bpu_jepa_v2.sh script (which calls run_hb_mapper.py)
+    Uses the compile_bpu.sh script (which calls run_hb_mapper.py)
     so each compilation runs in its own subprocess with proper hb_mapper
     patching.  The parent process (this worker) stays alive between jobs.
     """
@@ -101,13 +101,13 @@ def _compile_one(job: dict) -> dict:
         os.makedirs(os.path.join(out_dir, "mapper_work"), exist_ok=True)
 
         # Use the same compile script that the old Docker flow uses.
-        # compile_bpu_jepa_v2.sh handles:
+        # compile_bpu.sh handles:
         #   - ONNX IR version fix
         #   - YAML config generation
         #   - hb_mapper invocation via run_hb_mapper.py
         #   - .bin output copying
         cmd = [
-            "bash", "/workspace/tools/compile_bpu_jepa_v2.sh",
+            "bash", "/workspace/tools/compile_bpu.sh",
             "--model-name", model_name,
             "--onnx", onnx_path,
             "--calib-dir", calib_dir,
@@ -150,7 +150,7 @@ def _compile_one(job: dict) -> dict:
 def _compile_batch(jobs: list, parallel: int = 2) -> list:
     """Compile a batch of jobs using thread-based parallelism.
 
-    Each job spawns a subprocess (bash compile_bpu_jepa_v2.sh) which handles
+    Each job spawns a subprocess (bash compile_bpu.sh) which handles
     its own hb_mapper import.  By running inside a persistent container we
     avoid the ~5s Docker cold-start for each candidate.  The thread pool
     enables multiple hb_mapper processes to run concurrently.

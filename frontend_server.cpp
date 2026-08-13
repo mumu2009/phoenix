@@ -63,7 +63,7 @@
 #include "physics_world_runtime.hpp"
 #include "world_model.hpp"
 #include "edge_platform.hpp"
-#include "jepa_v2_image_world_model.hpp"
+#include "video_model.hpp"
 
 #ifdef HAVE_CURL
 #include <curl/curl.h>
@@ -4503,8 +4503,8 @@ void setupFrontendServer()
     if (!worldModelLegacyDir.empty())
         fs::create_directories(worldModelLegacyDir);
     static ContextService contextService(fs::path(robotsDir), useTorch);
-    static std::unique_ptr<phoenix::io::JepaV2ImageWorldModel> imageWorldModel =
-        phoenix::io::createJepaV2ImageWorldModel(
+    static std::unique_ptr<phoenix::io::VideoModel> imageWorldModel =
+        phoenix::io::createVideoModel(
             resolveConfig<std::string>("jepa.image.variant", std::string("ijepa_vith14_1k"), "JEPA_IMAGE_VARIANT"),
             std::max(1, resolveConfig<int>("jepa.image.conceptDim", 128, "JEPA_IMAGE_CONCEPT_DIM")),
             resolveConfig<std::string>("jepa.image.backend", std::string("auto"), "JEPA_IMAGE_BACKEND"));
