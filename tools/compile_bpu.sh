@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Compile a JEPA-v2 speech or vision autoencoder ONNX pair to Horizon BPU .bin.
+# Compile an audio or video autoencoder ONNX pair to Horizon BPU .bin.
 #
 # Designed to run inside the OpenExplorer Docker container with the project
 # mounted at /workspace, but can also be run from the Kali host if hb_mapper
 # is in PATH and /workspace/tools/run_hb_mapper.py exists.
 #
 # Examples (inside Docker):
-#   bash /workspace/tools/compile_bpu_jepa_v2.sh \
+#   bash /workspace/tools/compile_bpu.sh \
 #        --modality speech --onnx-dir /workspace/speech_onnx \
 #        --out-dir /workspace/speech_bin
 #
-#   bash /workspace/tools/compile_bpu_jepa_v2.sh \
+#   bash /workspace/tools/compile_bpu.sh \
 #        --modality image --onnx-dir /workspace/image_onnx \
 #        --out-dir /workspace/image_bin \
 #        --concept 128 --resolution 224
 #
 # Generic single-model mode (new) for the additive residual BPU framework:
-#   bash /workspace/tools/compile_bpu_jepa_v2.sh \
+#   bash /workspace/tools/compile_bpu.sh \
 #        --model-name speech_encoder \
 #        --onnx /workspace/additive/speech_encoder/model.onnx \
 #        --calib-dir /workspace/additive/speech_encoder/calibration \

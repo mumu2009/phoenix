@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run compile_bpu_jepa_v2.sh inside the OpenExplorer Docker container.
+# Run compile_bpu.sh inside the OpenExplorer Docker container.
 #
 # This is the default compile driver for the additive residual BPU evolution
 # controller on Kali (where hb_mapper is only available inside Docker).
@@ -34,4 +34,4 @@ done
 args+=("--run-hb-mapper" "$CONTAINER_WORK/tools/run_hb_mapper.py")
 
 exec docker run --rm -v "$HOST_WORK:$CONTAINER_WORK" "$DOCKER_IMAGE" \
-    bash "$CONTAINER_WORK/tools/compile_bpu_jepa_v2.sh" "${args[@]}"
+    bash "$CONTAINER_WORK/tools/compile_bpu.sh" "${args[@]}"

@@ -1,4 +1,4 @@
-"""Additive residual BPU-evolvable JEPA-v2 models.
+"""Additive residual BPU-evolvable video/audio world models.
 
 A single model starts from a zero output and grows by adding one residual block
 per round.  Each new block receives the same input as the model and produces an
@@ -260,7 +260,7 @@ class ResNet18Base(nn.Module):
                 state = ckpt["base_state"]
             else:
                 state = ckpt.get("state_dict", ckpt.get("model", ckpt))
-            # If the checkpoint is a JepaV2ImageAutoencoder, strip encoder.
+            # If the checkpoint is a VideoAutoencoder, strip encoder.
             if any(k.startswith("encoder.") for k in state):
                 state = {
                     k.split("encoder.", 1)[1]: v

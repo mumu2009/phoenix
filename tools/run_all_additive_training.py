@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Windows batch runner for the four additive residual JEPA-v2 models.
+"""Windows batch runner for the four additive residual video/audio models.
 
 This script runs on the Windows host, connects to the Kali compile box and the
 RDK X5, and starts / monitors BPU evolutions for the four models.  It can also
@@ -58,7 +58,7 @@ KALI_FILES = [
     "tools/additive_jepa.py",
     "tools/bpu_evolve_additive.py",
     "tools/export_additive_jepa.py",
-    "tools/compile_bpu_jepa_v2.sh",
+    "tools/compile_bpu.sh",
     "tools/compile_bpu_docker.sh",
     "tools/compile_bpu_docker_persistent.sh",
     "tools/compile_bpu_worker.py",

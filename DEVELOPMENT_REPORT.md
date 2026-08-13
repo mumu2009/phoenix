@@ -16,7 +16,7 @@
 
 - exFAT mount configuration validates with `findmnt --verify --tab-file=/etc/fstab`.
 - The project runtime JSON files parse successfully.
-- `jepa_v2_image_world_model.cpp`, `rdk_x5_bpu.cpp`, and `module_overrides/gnn_ga_learner_advanced.cpp` pass local C++ syntax validation.
+- `video_model.cpp`, `rdk_x5_bpu.cpp`, and `module_overrides/gnn_ga_learner_advanced.cpp` pass local C++ syntax validation.
 - No `/vision/analyze` call site remains that invokes `visionPipeline.analyze`.
 - A temporary native X5 validation completed `/health` and `/completion` successfully. The 8B Q4_K model reached approximately 4.45 GiB RSS and used approximately 155 MiB swap without an OOM event; this validation was then removed in favor of host inference.
 

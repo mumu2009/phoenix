@@ -1,8 +1,8 @@
 /* external_mixed_modal_io.cpp - Implementation for external mixed-modal I/O */
 
 #include "external_mixed_modal_io.hpp"
-#include "jepa_v2_image_world_model.hpp"
-#include "jepa_v2_speech_world_model.hpp"
+#include "video_model.hpp"
+#include "audio_model.hpp"
 #include "phoenix_config.hpp"
 #include "transformer.hpp"
 #include <algorithm>
@@ -93,14 +93,27 @@ std::vector<float> normalizeConcept(std::vector<float> value) {
     return phoenix::multimodal::normalizeVector(value);
 }
 
-JepaV2ImageWorldModel &imageWorldModel(size_t targetDim = 0) {
+VideoModel &videoEncoder(size_t targetDim = 0) {
     static std::mutex mu;
-    static std::unordered_map<int, std::unique_ptr<JepaV2ImageWorldModel>> cache;
+    static std::unordered_map<int, std::unique_ptr<VideoModel>> cache;
     std::lock_guard<std::mutex> lock(mu);
     int key = static_cast<int>(targetDim);
     auto it = cache.find(key);
     if (it != cache.end()) return *it->second;
-    auto model = createJepaV2ImageWorldModel("ijepa_vith14_1k", static_cast<int>(targetDim));
+    auto model = createVideoEncoder("ijepa_vith14_1k", static_cast<int>(targetDim));
+    auto &ref = *model;
+    cache.emplace(key, std::move(model));
+    return ref;
+}
+
+VideoModel &videoDecoder(size_t targetDim = 0) {
+    static std::mutex mu;
+    static std::unordered_map<int, std::unique_ptr<VideoModel>> cache;
+    std::lock_guard<std::mutex> lock(mu);
+    int key = static_cast<int>(targetDim);
+    auto it = cache.find(key);
+    if (it != cache.end()) return *it->second;
+    auto model = createVideoDecoder("ijepa_vith14_1k", static_cast<int>(targetDim));
     auto &ref = *model;
     cache.emplace(key, std::move(model));
     return ref;
@@ -108,17 +121,30 @@ JepaV2ImageWorldModel &imageWorldModel(size_t targetDim = 0) {
 
 std::string imageVariantFromMetadata(const nlohmann::json &metadata) {
     (void)metadata;
-    return "jepa-v2-image-world-model";
+    return "video-encoder";
 }
 
-JepaV2SpeechWorldModel &speechWorldModel(size_t targetDim = 0) {
+AudioModel &audioEncoder(size_t targetDim = 0) {
     static std::mutex mu;
-    static std::unordered_map<int, std::unique_ptr<JepaV2SpeechWorldModel>> cache;
+    static std::unordered_map<int, std::unique_ptr<AudioModel>> cache;
     std::lock_guard<std::mutex> lock(mu);
     int key = static_cast<int>(targetDim);
     auto it = cache.find(key);
     if (it != cache.end()) return *it->second;
-    auto model = createJepaV2SpeechWorldModel("jepa_v2_speech_16k", static_cast<int>(targetDim));
+    auto model = createAudioEncoder("audio-16k", static_cast<int>(targetDim));
+    auto &ref = *model;
+    cache.emplace(key, std::move(model));
+    return ref;
+}
+
+AudioModel &audioDecoder(size_t targetDim = 0) {
+    static std::mutex mu;
+    static std::unordered_map<int, std::unique_ptr<AudioModel>> cache;
+    std::lock_guard<std::mutex> lock(mu);
+    int key = static_cast<int>(targetDim);
+    auto it = cache.find(key);
+    if (it != cache.end()) return *it->second;
+    auto model = createAudioDecoder("audio-16k", static_cast<int>(targetDim));
     auto &ref = *model;
     cache.emplace(key, std::move(model));
     return ref;
@@ -126,7 +152,7 @@ JepaV2SpeechWorldModel &speechWorldModel(size_t targetDim = 0) {
 
 std::string speechVariantFromMetadata(const nlohmann::json &metadata) {
     (void)metadata;
-    return "jepa-v2-speech-world-model";
+    return "audio-encoder";
 }
 
 int sampleRateFromMetadata(const nlohmann::json &metadata) {
@@ -560,27 +586,27 @@ phoenix::multimodal::SemanticUnit MixedModalConceptBridge::encode(const MixedMod
         if (packet.metadata.contains("height") && packet.metadata["height"].is_number()) {
             height = packet.metadata["height"].get<int>();
         }
-        auto &imageModel = imageWorldModel(dim);
+        auto &imageModel = videoEncoder(dim);
         unit.semanticVector = imageModel.encode(packet.payload, width, height, packet.mimeType);
         if (width > 0) unit.metadata["width"] = std::to_string(width);
         if (height > 0) unit.metadata["height"] = std::to_string(height);
         unit.metadata["conceptEncoder"] = imageVariantFromMetadata(packet.metadata);
-        unit.metadata["multimodalBackend"] = imageModel.status().value("backend", std::string("jepa-v2"));
+        unit.metadata["multimodalBackend"] = imageModel.status().value("backend", std::string("video-encoder"));
         if (unit.semanticVector.empty()) {
             unit.confidence = 0.0f;
             std::string err = imageModel.status().value("error", std::string());
-            unit.metadata["jepaError"] = err.empty() ? "image encoder returned empty concept vector" : err;
+            unit.metadata["videoEncoderError"] = err.empty() ? "video encoder returned empty concept vector" : err;
         }
     } else if (packet.modality == MixedModalModality::Audio) {
         const int sampleRate = sampleRateFromMetadata(packet.metadata);
-        auto &speechModel = speechWorldModel(dim);
+        auto &speechModel = audioEncoder(dim);
         unit.semanticVector = speechModel.encode(packet.payload, sampleRate, packet.mimeType);
         unit.metadata["conceptEncoder"] = speechVariantFromMetadata(packet.metadata);
-        unit.metadata["multimodalBackend"] = speechModel.status().value("backend", std::string("jepa-v2"));
+        unit.metadata["multimodalBackend"] = speechModel.status().value("backend", std::string("audio-encoder"));
         if (unit.semanticVector.empty()) {
             unit.confidence = 0.0f;
             std::string err = speechModel.status().value("error", std::string());
-            unit.metadata["multimodalEncodeError"] = err.empty() ? "speech encoder returned empty concept vector" : err;
+            unit.metadata["multimodalEncodeError"] = err.empty() ? "audio encoder returned empty concept vector" : err;
         }
     } else {
         unit.semanticVector = mediaConcept(packet.payload, dim, 0x53545255U);
@@ -612,7 +638,7 @@ bool MixedModalConceptBridge::pretrainSpeech(const MixedModalPacket &audio,
     if (audio.modality != MixedModalModality::Audio || audio.payload.empty() || transcript.empty()) return false;
     const size_t dim = conceptDimension(targetDim);
     const int sampleRate = sampleRateFromMetadata(audio.metadata);
-    auto &model = speechWorldModel(dim);
+    auto &model = audioEncoder(dim);
     auto encoded = model.encode(audio.payload, sampleRate, audio.mimeType);
     if (encoded.empty()) return false;
 
@@ -626,7 +652,7 @@ bool MixedModalConceptBridge::pretrainSpeech(const MixedModalPacket &audio,
     audioUnit.metadata["source"] = audio.source;
     audioUnit.metadata["mimeType"] = audio.mimeType;
     audioUnit.metadata["conceptEncoder"] = speechVariantFromMetadata(audio.metadata);
-    audioUnit.metadata["multimodalBackend"] = model.status().value("backend", std::string("jepa-v2"));
+    audioUnit.metadata["multimodalBackend"] = model.status().value("backend", std::string("audio-encoder"));
     audioUnit.metadata["transcript"] = transcript;
     audioUnit.associationIds.push_back(correlationId);
     gConceptMatrix.addOrUpdate(audioUnit, true);
@@ -671,7 +697,7 @@ bool MixedModalConceptBridge::pretrainImage(const MixedModalPacket &image,
     if (image.metadata.contains("height") && image.metadata["height"].is_number()) {
         height = image.metadata["height"].get<int>();
     }
-    auto &model = imageWorldModel(dim);
+    auto &model = videoEncoder(dim);
     auto encoded = model.encode(image.payload, width, height, image.mimeType);
     if (encoded.empty()) return false;
 
@@ -689,7 +715,7 @@ bool MixedModalConceptBridge::pretrainImage(const MixedModalPacket &image,
     if (width > 0) imageUnit.metadata["width"] = std::to_string(width);
     if (height > 0) imageUnit.metadata["height"] = std::to_string(height);
     imageUnit.metadata["conceptEncoder"] = imageVariantFromMetadata(image.metadata);
-    imageUnit.metadata["multimodalBackend"] = model.status().value("backend", std::string("jepa-v2"));
+    imageUnit.metadata["multimodalBackend"] = model.status().value("backend", std::string("video-encoder"));
     if (!caption.empty()) {
         imageUnit.metadata["caption"] = caption;
         imageUnit.associationIds.push_back(correlationId);
@@ -758,12 +784,13 @@ MixedModalPacket MixedModalConceptBridge::decode(const phoenix::multimodal::Sema
                 height = 224;
             }
         }
-        auto &model = imageWorldModel(unit.semanticVector.size());
+        auto &model = videoDecoder(unit.semanticVector.size());
         packet.payload = model.decode(unit.semanticVector, "image/png");
         packet.mimeType = "image/png";
+        packet.metadata["multimodalBackend"] = model.status().value("backend", std::string("video-decoder"));
         if (packet.payload.empty()) {
             std::string err = model.status().value("error", std::string());
-            packet.metadata["imageDecodeError"] = err.empty() ? "image decoder returned empty payload" : err;
+            packet.metadata["videoDecodeError"] = err.empty() ? "video decoder returned empty payload" : err;
         }
         packet.metadata["sourceModality"] = phoenix::multimodal::modalityToString(unit.modality);
         packet.metadata["conceptVector"] = unit.semanticVector;
@@ -777,12 +804,13 @@ MixedModalPacket MixedModalConceptBridge::decode(const phoenix::multimodal::Sema
                 lengthHint = 0;
             }
         }
-        auto &model = speechWorldModel(unit.semanticVector.size());
+        auto &model = audioDecoder(unit.semanticVector.size());
         packet.payload = model.decode(unit.semanticVector, "audio/pcm", lengthHint);
         packet.mimeType = "audio/pcm";
+        packet.metadata["multimodalBackend"] = model.status().value("backend", std::string("audio-decoder"));
         if (packet.payload.empty()) {
             std::string err = model.status().value("error", std::string());
-            packet.metadata["audioDecodeError"] = err.empty() ? "speech decoder returned empty payload" : err;
+            packet.metadata["audioDecodeError"] = err.empty() ? "audio decoder returned empty payload" : err;
         }
         packet.metadata["sourceModality"] = phoenix::multimodal::modalityToString(unit.modality);
         packet.metadata["conceptVector"] = unit.semanticVector;
@@ -799,28 +827,28 @@ MixedModalPacket MixedModalConceptBridge::decode(const phoenix::multimodal::Sema
 }
 
 /**
- * @brief Report the state of the multimodal image/audio world models,
+ * @brief Report the state of the multimodal video/audio world models,
  *        the text encoder, and the shared concept matrix.
  */
 nlohmann::json MixedModalConceptBridge::status() {
     nlohmann::json j;
     try {
-        auto imgStatus = imageWorldModel(gLastRequestedTargetDim).status();
+        auto imgStatus = videoEncoder(gLastRequestedTargetDim).status();
         if (!imgStatus.contains("dimension") && imgStatus.contains("targetDim")) {
             imgStatus["dimension"] = imgStatus["targetDim"];
         }
-        j["imageWorldModel"] = std::move(imgStatus);
+        j["videoWorldModel"] = std::move(imgStatus);
     } catch (...) {
-        j["imageWorldModel"] = {{"error", "image world model not available"}};
+        j["videoWorldModel"] = {{"error", "video world model not available"}};
     }
     try {
-        auto spkStatus = speechWorldModel(gLastRequestedTargetDim).status();
+        auto spkStatus = audioEncoder(gLastRequestedTargetDim).status();
         if (!spkStatus.contains("dimension") && spkStatus.contains("targetDim")) {
             spkStatus["dimension"] = spkStatus["targetDim"];
         }
-        j["speechWorldModel"] = std::move(spkStatus);
+        j["audioWorldModel"] = std::move(spkStatus);
     } catch (...) {
-        j["speechWorldModel"] = {{"error", "speech world model not available"}};
+        j["audioWorldModel"] = {{"error", "audio world model not available"}};
     }
     j["textEncoder"] = textEncoderStatus();
     j["conceptMatrix"] = gConceptMatrix.status();

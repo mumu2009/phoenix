@@ -10,7 +10,7 @@
 
 本节描述 v7.0 的目标数据流主干，覆盖以下关键设计点（详见 `algorithm.md` 与 `model_deployment.md` 的对应章节）：
 
-1. 输入模态：文本、图像、音频、视频、传感器，统一由 **aheadModule** 接收并编码；文本可复用 **llama3.1 8b 自带的 embedding/encoder 部分**（见 §0.4），音频/视频编码器由 aheadModule 内部实现（对应现有 `JepaV2SpeechWorldModel` / `JepaV2ImageWorldModel`）。
+1. 输入模态：文本、图像、音频、视频、传感器，统一由 **aheadModule** 接收并编码；文本可复用 **llama3.1 8b 自带的 embedding/encoder 部分**（见 §0.4），音频/视频编码器由 aheadModule 内部实现（对应现有 `AudioModel` / `VideoModel`）。
 2. **记忆模块（Memory）**：RNN/LSTM/Transformer 摘要器，输出**并行双分支**——一路直达 Backend（作为 prompt 的记忆片段），一路进入 GNN/MemeBarrier（作为图检索的查询上下文）。两路是同一份摘要的两个只读副本，互不阻塞、互不等待。
 3. **情感 / 心境（Emotion / Sentiment）**：情感层观测“输入 + 内部状态”，sentiment/aheadModule 对情感做调制；情感层**不直接对 Backend 权重矩阵做乘法**，而是通过 prompt 调制、logit bias、temperature 三种有据可查的机制影响 Backend 的生成（见 §0.5、`algorithm.md` §12）。
 4. **GNN / MemeBarrier**：GNN 存取语义单元（meme）并提供图上下文；MemeBarrier 是一层安全/语义过滤器，出现在两个位置——GNN 与用户之间、以及 Backend 输出与用户之间。
@@ -32,8 +32,8 @@ flowchart TB
         direction TB
         subgraph ENCS["模态编码器"]
             TXTENC["文本编码器<br/>(可复用 llama3.1 8b 的 embedding/encoder)"]
-            IMGENC["图像/视频编码器<br/>JepaV2ImageWorldModel"]
-            AUDENC["音频编码器<br/>JepaV2SpeechWorldModel"]
+            IMGENC["图像/视频编码器<br/>VideoModel"]
+            AUDENC["音频编码器<br/>AudioModel"]
             SENSENC["传感器编码器<br/>mediaConcept"]
         end
         MEMORY["记忆模块 Memory<br/>RNN / LSTM / Transformer 摘要"]
@@ -116,7 +116,7 @@ flowchart TB
 
 | 目标架构角色 | 现有/规划实现 | 说明 |
 |---|---|---|
-| `aheadModule`（概念层） | `external_mixed_modal_io`、`jepa_v2_image_world_model`、`jepa_v2_speech_world_model`、`transformer::TransformerTextEncoder`、`autonomy_stack`（部分） | 不是单一文件，是这些模块的统称 |
+| `aheadModule`（概念层） | `external_mixed_modal_io`、`video_model`、`audio_model`、`transformer::TransformerTextEncoder`、`autonomy_stack`（部分） | 不是单一文件，是这些模块的统称 |
 | 记忆模块 Memory | `TorchTextModels`（RNN/LSTM）+ `SummaryModel`/TinyLlama（Transformer 摘要）+ `ModernContextManager` | 双分支输出见 §2 |
 | 情感/心境 Emotion | `PrimalSensationEngine` + `InstinctEngine` + `BenefitHarmResult.driveVector` | 影响机制升级为 prompt/logit-bias/temperature，见 §0.5 |
 | GNN | `MemeGraph` + `KVMStore/LMDB` | 已实现 |
@@ -196,7 +196,7 @@ flowchart LR
 - `enc`、`inference`、`dec` 是**同一个 llama3.1 8b 模型**在运行时按职责切出的三个逻辑段，不是三个独立训练的模型。贯穿三段的数据单元是 **unit query**（语义/概念向量），而 `text / audio / video` 只在 `enc` 之前（输入侧）和 `dec` 之后（输出侧）出现：
   - `enc` = 任意模态 -> unit query。对文本是 token embedding 查表；在 aheadModule 完成跨模态对齐后，音视频的语义向量也通过输入投影映射进 llama 的 embedding 空间。
   - `inference` = unit query -> unit query。运行 `llama-server` 的 attention/FFN 主体，输出仍是隐藏状态/语义向量；**不直接输出 text/audio/video**。它在编译期打了 tracked patch，以支持情感 logit-bias 钩子、分段抽取隐藏状态等 v7.0 所需接口。补丁以 git 版本化的 diff/patch 文件形式提交仓库，编译脚本在构建 `llama-server` 之前应用它。
-  - `dec` = unit query -> 输出模态。对纯文本，`dec` 使用 LM head 产生 token 后再 detokenize 为文本；对**音频/视频**，`.gguf` / raw blob 中并不包含解码到波形/像素的权重，因此这部分 `dec` 由 Phoenix 自己的运行期 C++ 代码实现（对应 `jepa_v2_speech_world_model.cpp` / `jepa_v2_image_world_model.cpp` 的 `decode()`），从概念向量还原为音视频载荷。
+  - `dec` = unit query -> 输出模态。对纯文本，`dec` 使用 LM head 产生 token 后再 detokenize 为文本；对**音频/视频**，`.gguf` / raw blob 中并不包含解码到波形/像素的权重，因此这部分 `dec` 由 Phoenix 自己的运行期 C++ 代码实现（对应 `audio_model.cpp` / `video_model.cpp` 的 `decode()`），从概念向量还原为音视频载荷。
 - `dec` 的输出**不回传给 `inference`**。最终模态输出首先返回给用户/下游，同时进入 `AsyncLearning`（异步学习模块）学习其中与当前知识/情感矩阵差距较大的部分，并异步修正或增补矩阵。
 - 针对**文本型 8B 模型**的自回归实现说明：当前 `llama3.1:8b` 是 token-based 模型，必须逐 token 采样才能继续生成。`llama-server` 的 `POST /phx/generate` 端点把这段 enc/infer/dec 采样循环封装在服务端完成，客户端在 `apply-template` 后直接调用 `/phx/generate` 即可获得最终文本。这是**文本模型在当前阶段的实现折中**，不是概念流：概念上 `inference` 仍然是 unit query -> unit query，`dec` 仍是最终输出边界；`enc` 的临时使用相当于把 `inference` 产出的 unit query 先交给 `dec` 预览出一个 token，再把该 token 作为下一轮输入重新编码。
 - 未来优化方向：如果模型的 `inference` 能直接生成下一时刻的 unit query（而非先通过 `dec` 采样 token 再 `enc` 回 unit query），就可以在自回归过程中完全削去 `enc` 与 `dec`，只保留 `inference` 一路生成 unit query 序列，最后根据用户需求统一交给对应的 `dec`（文本用 LM head，音视频用 JEPA decoder）一次性解码。当前 8B token-based 模型无法做到这一点，因为 `infer` 必须知道下一个 token 的 embedding 才能计算下一层 hidden state；`enc` 与 `dec` 在数学上也不是可逆运算。
@@ -328,8 +328,8 @@ flowchart TB
 
     subgraph MOD["世界模型 / 编码器"]
         TXT["TransformerTextEncoder<br/>Tokenizer / TransformerModel"]
-        IMG["JepaV2ImageWorldModel<br/>+ Local-ONNX / BPU / Remote / ServerClient"]
-        SPK["JepaV2SpeechWorldModel<br/>+ Local-ONNX / BPU / Remote / ServerClient"]
+        IMG["VideoModel<br/>+ Local-ONNX / BPU / Remote / ServerClient"]
+        SPK["AudioModel<br/>+ Local-ONNX / BPU / Remote / ServerClient"]
     end
 
     subgraph INF["推理后端"]
@@ -495,7 +495,7 @@ sequenceDiagram
 1. `frontend_server.cpp` 仅做代理，不处理业务逻辑。
 2. 鉴权支持 JWT 与 `local-{user}-{ts}-{seq}` 本地 token。
 3. `/api/chat` 默认启用 MemeGraph selector，可通过 `disableGraphSelector` 关闭。
-4. 图像上下文通过 `injectImageContext` 注入，可能进入 `jepa_v2_image_world_model` 编码为语义单元。
+4. 图像上下文通过 `injectImageContext` 注入，可能进入 `video_model` 编码为语义单元。
 5. **v7.0 更新**：当 `tinyllamaEnabled=true` 且输入文本达到一定长度时，网关会先调用 TinyLlama 生成 `summary`，并把摘要拼入最终 prompt，再调用主 LLM；同时 `chatWithExternalAdapter` 对 `graphContext` 和 `prompt` 做上限限制，避免 `std::bad_alloc`，并受 `llamaCppRequestTimeoutMs` / `tinyllamaRequestTimeoutMs` 等超时保护。
 6. 生成完成后会进行 `isLikelyGibberishReply` 与可选的 verify，并异步触发在线学习。
 
@@ -565,8 +565,8 @@ flowchart LR
 
     subgraph ENC_LAYER["模态编码器"]
         TE["TransformerTextEncoder"]
-        JW["JepaV2ImageWorldModel<br/>Local-ONNX / BPU / Remote / ServerClient"]
-        SW["JepaV2SpeechWorldModel<br/>Local-ONNX / BPU / Remote / ServerClient"]
+        JW["VideoModel<br/>Local-ONNX / BPU / Remote / ServerClient"]
+        SW["AudioModel<br/>Local-ONNX / BPU / Remote / ServerClient"]
         MC["mediaConcept<br/>未知模态"]
     end
 
@@ -619,7 +619,7 @@ flowchart LR
 **说明**：
 
 - `MixedModalPacket` 是统一的外部输入/输出容器；`MixedModalConceptBridge` 负责将不同模态编码到同一语义空间。
-- 文本走 `TransformerTextEncoder`；图像/视频优先使用 `JepaV2ImageWorldModel`（真实后端可切换为 RDK X5 BPU 或 PyTorch）；音频使用 `JepaV2SpeechWorldModel`，并可通过 `pretrainSpeech` 与文本对齐。
+- 文本走 `TransformerTextEncoder`；图像/视频优先使用 `VideoModel`（真实后端可切换为 RDK X5 BPU 或 PyTorch）；音频使用 `AudioModel`，并可通过 `pretrainSpeech` 与文本对齐。
 - 所有语义向量通过 `projectToDimension` 对齐到目标维度，实现不重新训练 LLM 的跨模态融合。
 - 解码时，非文本目标输出概念载荷并标记 `requiresModalityDecoder`，由外部解码器实体化。
 
@@ -725,8 +725,8 @@ flowchart TD
 
     subgraph MM["多模态 I/O 与世界模型"]
         EMMIO[external_mixed_modal_io<br/>MixedModalConceptBridge]
-        IMG[jepa_v2_image_world_model<br/>JepaV2ImageWorldModel]
-        SPK[jepa_v2_speech_world_model<br/>JepaV2SpeechWorldModel]
+        IMG[video_model<br/>VideoModel]
+        SPK[audio_model<br/>AudioModel]
         TXT[transformer<br/>TransformerTextEncoder/Service]
     end
 
@@ -819,10 +819,10 @@ flowchart TD
     end
 
     subgraph WM["世界模型"]
-        IMGIF["phoenix::io::JepaV2ImageWorldModel"]
-        IMGO["phoenix::io::JepaV2ImageLocalOnnxModel / Hbdnn / Remote / ServerClient"]
-        SPKIF["phoenix::io::JepaV2SpeechWorldModel"]
-        SPKO["phoenix::io::JepaV2SpeechLocalOnnxModel / Hbdnn / Remote / ServerClient"]
+        IMGIF["phoenix::io::VideoModel"]
+        IMGO["phoenix::io::VideoLocalOnnxModel / Hbdnn / Remote / ServerClient"]
+        SPKIF["phoenix::io::AudioModel"]
+        SPKO["phoenix::io::AudioLocalOnnxModel / Hbdnn / Remote / ServerClient"]
     end
 
     subgraph TXT["文本/Transformer"]
@@ -865,8 +865,8 @@ flowchart TD
     CAM -->|decode| BRIDGE
     CAM -->|pretrainSpeech| BRIDGE
     BRIDGE -->|textEncoder| TTE
-    BRIDGE -->|imageWorldModel| IMGIF
-    BRIDGE -->|speechWorldModel| SPKIF
+    BRIDGE -->|videoEncoder| IMGIF
+    BRIDGE -->|audioEncoder| SPKIF
     IMGIF -->|factory| IMGO
     SPKIF -->|factory| SPKO
     BRIDGE <-->|SemanticUnit| SU
@@ -952,13 +952,13 @@ flowchart TD
     end
 
     subgraph WM_F["世界模型函数"]
-        CREATE_IMG["createJepaV2ImageWorldModel(variant, targetDim)"]
-        IMG_encode["JepaV2ImageLocalOnnxModel/Hbdnn/Remote::encode(...)"]
-        IMG_decode["JepaV2ImageLocalOnnxModel/Hbdnn/Remote::decode(...)"]
-        IMG_status["JepaV2ImageWorldModel::status()"]
-        CREATE_SPK["createJepaV2SpeechWorldModel(variant, targetDim)"]
-        SPK_encode["JepaV2SpeechLocalOnnxModel/Hbdnn/Remote::encode(...)"]
-        SPK_adapt["JepaV2SpeechLocalOnnxModel/Hbdnn/Remote::adapt(...)"]
+        CREATE_IMG["createVideoModel(variant, targetDim)"]
+        IMG_encode["VideoLocalOnnxModel/Hbdnn/Remote::encode(...)"]
+        IMG_decode["VideoLocalOnnxModel/Hbdnn/Remote::decode(...)"]
+        IMG_status["VideoModel::status()"]
+        CREATE_SPK["createAudioModel(variant, targetDim)"]
+        SPK_encode["AudioLocalOnnxModel/Hbdnn/Remote::encode(...)"]
+        SPK_adapt["AudioLocalOnnxModel/Hbdnn/Remote::adapt(...)"]
     end
 
     subgraph TXT_F["文本编码/生成函数"]
@@ -1199,7 +1199,7 @@ flowchart LR
     GW2["GatewayServer"] -->|session| RED
     CAM2["CognitionAutonomyManager"] -->|speech concept| RS3
     TXT2["TransformerTextEncoder"] -->|params/state| RS4
-    IMG2["JepaV2ImageWorldModel"] -->|safetensors| RS5
+    IMG2["VideoModel"] -->|safetensors| RS5
     EP3["edge_platform"] -->|cold weights| RS6
 
     GW2 -->|结构化 entities| RS1

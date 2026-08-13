@@ -60,7 +60,7 @@ if not defined AI_OLLAMA_BASE_URL if defined OLLAMA_HOST set "AI_OLLAMA_BASE_URL
 if not defined AI_OLLAMA_KEEP_ALIVE if defined OLLAMA_KEEP_ALIVE set "AI_OLLAMA_KEEP_ALIVE=%OLLAMA_KEEP_ALIVE%"
 if not defined AI_OLLAMA_TIMEOUT_MS set "AI_OLLAMA_TIMEOUT_MS=180000"
 
-set "PHOENIX_ARGS=--port=%GATEWAY_PORT% --study-port=%STUDY_PORT% --frontend-enabled=true --http-log=false --frontend-http-log=false --using-ollama=true"
+set "PHOENIX_ARGS=--port=%GATEWAY_PORT% --study-port=%STUDY_PORT% --frontend-enabled=true --http-log=false --frontend-http-log=false --using-ollama=false"
 if not defined PHOENIX_LIGHT_MODE set "PHOENIX_LIGHT_MODE=true"
 if /I "%PHOENIX_LIGHT_MODE%"=="true" set "PHOENIX_ARGS=%PHOENIX_ARGS% --disable-context-module=true --disable-gnn-module=true"
 if defined AI_OLLAMA_MODEL set "PHOENIX_ARGS=%PHOENIX_ARGS% --ollama-model=%AI_OLLAMA_MODEL%"
@@ -73,11 +73,34 @@ if not exist "%PHOENIX_EXE%" (
     exit /b 6
 )
 
+set "LLAMA_SERVER_EXE=%REPO_ROOT%outsides\llamacpp\build-gcc\bin\llama-server.exe"
+set "LLAMA_MODEL=%REPO_ROOT%GGUF_models\blobs\sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29"
+set "TINYLLAMA_MODEL=%REPO_ROOT%GGUF_models\tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+
 echo [INFO] Cleaning stale phoenix_main.exe processes
 taskkill /IM phoenix_main.exe /F >nul 2>&1
 taskkill /IM llama-server.exe /F >nul 2>&1
 taskkill /IM bitnet-server.exe /F >nul 2>&1
 timeout /t 2 /nobreak >nul
+
+if not exist "%LLAMA_SERVER_EXE%" (
+    echo [WARN] llama-server.exe not found: "%LLAMA_SERVER_EXE%". Backend matrix will run without llama.cpp backend.
+) else (
+    echo [INFO] Starting llama-server.exe on 8082 with main model
+    start "llama-server" /B "%LLAMA_SERVER_EXE%" -m "%LLAMA_MODEL%" --port 8082 --host 127.0.0.1 --ctx-size 4096 --parallel 1 -n 512 > "%LOG_DIR%\backend_matrix_llama_server.log" 2>&1
+
+    echo [INFO] Starting tinyllama llama-server.exe on 8086
+    start "tinyllama-server" /B "%LLAMA_SERVER_EXE%" -m "%TINYLLAMA_MODEL%" --port 8086 --host 127.0.0.1 --ctx-size 2048 --no-warmup > "%LOG_DIR%\backend_matrix_tinyllama_server.log" 2>&1
+
+    echo [INFO] Waiting for llama-server health on 8082
+    for /L %%I in (1,1,60) do (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='http://127.0.0.1:8082/health'; try { $r=Invoke-WebRequest -UseBasicParsing -Uri $u -TimeoutSec 2; if ($r.StatusCode -lt 500) { exit 0 } } catch { } exit 1" >nul 2>&1
+        if !ERRORLEVEL! EQU 0 goto :llama_ready
+        timeout /t 1 /nobreak >nul
+    )
+    :llama_ready
+    echo [INFO] llama-server health check complete
+)
 
 echo [INFO] Starting phoenix_main.exe with documented args
 echo [INFO] Command: phoenix_main.exe %PHOENIX_ARGS%
@@ -119,6 +142,10 @@ set "EXITCODE=%ERRORLEVEL%"
 
 echo [INFO] Logs: "%LOG_DIR%\backend_matrix.log"
 echo [INFO] Report: "%LOG_DIR%\backend_matrix_report.json"
+
+echo [INFO] Stopping backend matrix helper processes
+taskkill /IM llama-server.exe /F >nul 2>&1
+taskkill /IM phoenix_main.exe /F >nul 2>&1
 
 popd
 exit /b %EXITCODE%

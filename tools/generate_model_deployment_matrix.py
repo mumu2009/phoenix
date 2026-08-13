@@ -47,12 +47,13 @@ SPEECH_PLACEMENTS = ["local", "remote"]
 
 def default_port(conn: str, is_llm: bool) -> int:
     if is_llm:
+        # Default to llama-server (llama.cpp) ports, not Ollama.
         if conn == "http-json":
-            return 11434
+            return 8080
         if conn == "grpc":
-            return 11434
+            return 8081
         if conn == "websocket":
-            return 11434
+            return 8082
     if conn == "http-json":
         return 5000
     if conn == "grpc":
@@ -68,16 +69,18 @@ def default_path(conn: str, is_llm: bool) -> str:
     if conn == "http-json":
         return "/infer"
     if conn == "grpc":
-        return "/Infer"
+        return "/infer"
     if conn == "websocket":
-        return "/ws"
+        return "/infer"
     return "/infer"
 
 
 def default_method(conn: str, is_llm: bool) -> str:
-    if is_llm and conn == "http-json":
-        return "ollama"
-    return conn
+    # LLM default is llama-server (llama.cpp); Ollama is only used when explicitly requested.
+    # Vision/speech remote endpoints are always HTTP/JSON model servers for now.
+    if is_llm:
+        return "llamacpp"
+    return "http-json"
 
 
 def base_ip(role: str) -> str:

@@ -59,14 +59,14 @@ ops are used.
 The evolved additive residual models are consumed at runtime by the Phoenix
 mixed-modal bridge:
 
-* **x86_64 / cpu / gpu** — `jepa_v2_image_world_model.cpp` and
-  `jepa_v2_speech_world_model.cpp` resolve
+* **x86_64 / cpu / gpu** — `video_model.cpp` and
+  `audio_model.cpp` resolve
   `runtime_store/models/additive_jepa/{speech,vision}_{encoder,decoder}/best.onnx`,
   then call `tools/local_onnx_runner.py` through a `popen` pipe.  The Python
   runner loads the ONNX with `onnxruntime`, reads the float32 input binary, and
   writes the float32 output binary.
 * **RDK X5 / bpu** — the same `runtime_store/models/additive_jepa/.../best.bin`
-  compiled with `tools/compile_bpu_jepa_v2.sh` is executed through
+  compiled with `tools/compile_bpu.sh` is executed through
   `rdk_x5_bpu::execute`.
 * **Server-client / js** — the backend does not run the model.  Use
   `static/js/client_onnx_runner.js` as a stub for client-side inference.
@@ -82,7 +82,7 @@ uses them to configure the local runner or BPU call.
 | `tools/additive_jepa.py` | `AdditiveResidualModel`, block builders, export helpers |
 | `tools/export_additive_jepa.py` | CLI to export one `.pt` checkpoint to ONNX + calibration + manifest |
 | `tools/bpu_evolve_additive.py` | `(1+lambda)` evolution controller |
-| `tools/compile_bpu_jepa_v2.sh` | Updated to compile a **single** generic ONNX or a speech/image pair |
+| `tools/compile_bpu.sh` | Updated to compile a **single** generic ONNX or a speech/image pair |
 | `tools/x5_bpu_evaluate.py` | Updated to evaluate a single `.bin` or a directory of `.bin` files against `.npy` or `.bin` input/target batches |
 | `doc/additive_bpu_evolution.md` | This document |
 
@@ -102,7 +102,7 @@ ResNet18 base with `--base-path`.
    * generates `--lambda` candidates, each = parent + one new residual block
    * exports each candidate ONNX and writes calibration bins
    * compiles candidates in parallel using
-     `tools/compile_bpu_jepa_v2.sh --model-name ... --onnx ...`
+     `tools/compile_bpu.sh --model-name ... --onnx ...`
    * copies the compiled `.bin` files and the batch to the X5
    * runs `tools/x5_bpu_evaluate.py` on the X5
    * selects the lowest-MSE candidate and promotes it to `best.pt/best.onnx`
@@ -143,7 +143,7 @@ python tools/export_additive_jepa.py \
 ### 3. Compile one ONNX with the generic compile script
 
 ```bash
-bash tools/compile_bpu_jepa_v2.sh \
+bash tools/compile_bpu.sh \
     --model-name speech_encoder \
     --onnx /tmp/additive_speech_encoder_onnx/model.onnx \
     --calib-dir /tmp/additive_speech_encoder_onnx/calibration \

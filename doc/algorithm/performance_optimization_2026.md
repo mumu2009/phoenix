@@ -21,7 +21,7 @@
 |------|------|------|
 | `hierarchical_memory.cpp` (`HierarchicalMemory::query`) | 排序比较函数中原来对每个候选在 `working_/shortTerm_/longTerm_` 三个 map 中重复 `find`（每次比较最多 6 次 map 查找）。改为收集阶段直接算出 `score` 并随 key/value 一起保存，排序只比较预先算好的 `score`。 | 纯性能优化，排序结果（分值公式、topK 截断）与原实现完全一致。 |
 | `primal_sensation.cpp` (`PrimalSensationEngine::decay`) | 原来对 `sensations_` 做两次 `erase(remove_if(...))`：先删 `intensity <= 0`，再删 `intensity < kIntensityEpsilon`。由于 `kIntensityEpsilon(1e-3) > 0`，第二个条件已完全覆盖第一个，合并为一次遍历。 | 少一次 O(n) 遍历，行为不变。 |
-| `external_mixed_modal_io.cpp` (`imageWorldModel` / `speechWorldModel`) | 原来在持锁状态下调用 `createJepaV2ImageWorldModel/SpeechWorldModel`（可能涉及磁盘加载 ONNX/BPU 模型），锁粒度过粗会阻塞所有并发请求。改为双重检查锁定：先无锁查找，未命中时在锁外构建模型，再加锁二次检查后插入（若并发命中同一新 key，保留先插入的一份）。 | 减少长时间持锁；缓存语义不变，返回值不变。 |
+| `external_mixed_modal_io.cpp` (`videoEncoder` / `audioEncoder`) | 原来在持锁状态下调用 `createVideoModel/createAudioModel`（可能涉及磁盘加载 ONNX/BPU 模型），锁粒度过粗会阻塞所有并发请求。改为双重检查锁定：先无锁查找，未命中时在锁外构建模型，再加锁二次检查后插入（若并发命中同一新 key，保留先插入的一份）。 | 减少长时间持锁；缓存语义不变，返回值不变。 |
 | `semantic_unit.cpp` (`getProjectionMatrix`) | 同上模式：投影矩阵的构建是给定 `(sourceDim,targetDim,seed)` 的确定性计算，原来在锁内构建。改为锁外构建、锁内二次检查再插入。 | 并发场景下减少持锁时间；矩阵内容与原实现完全一致（相同 RNG 序列）。 |
 | `graph_diffusion_summarizer.cpp`（邻接权重归一化） | 原来对每条边的方向加权值（`w *= 0.85/1.15` 等）计算了两次：一次累加 `wsum`，一次做归一化。改为只计算一次并缓存到临时数组，第二遍直接使用。 | 减少一半的浮点乘法/取绝对值调用，结果数值完全一致。 |
 | `main_hub_parts/007_class_hotmatrixcache.inc`（`HotMatrixCache::getMatrix` / `recordAndMaybeSet`） | 原来用双重 `for` 循环逐元素拷贝 `vector<float>` <-> `vector<vector<float>>`。改为按行使用 `std::copy` / `vector::insert`。 | 减少循环开销，语义不变。 |
@@ -184,4 +184,4 @@ nlohmann::json 在键存在但值为 `null` 时会对 `get<std::string>()` 抛 `
 **已知限制 / 后续步骤**：
 
 - 当前 `/api/chat` 在调用图选择/Transformer 时仍会失败（无本地 LLM 模型/Ollama 配置），因此本次只验证了 World Model 的“写入->读取”链路；完整的 `cognitionManager` 推理+回复生成需要配置真实推理后端才能端到端跑通。
-- 物理世界模拟（Bullet3）、JEPA-v2 视觉/语音世界模型与主聊天的更深耦合（作为工具调用、作为虚拟数据输入）是下一步，需要先在 `WorldModelStore` 之上扩展 `tool`/`observe`/`predict` 网关 API。
+- 物理世界模拟（Bullet3）、视频/音频世界模型与主聊天的更深耦合（作为工具调用、作为虚拟数据输入）是下一步，需要先在 `WorldModelStore` 之上扩展 `tool`/`observe`/`predict` 网关 API。
