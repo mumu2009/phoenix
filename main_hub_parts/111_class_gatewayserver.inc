@@ -85,6 +85,37 @@ public:
         "AUTH_JWT_SECRET");
     cognitionAutonomyEnabled_ =
         phoenix::resolveConfig<bool>("main.cognitionAutonomyEnabled", true, "AI_ENABLE_COGNITION_AUTONOMY");
+    /* v7.0 active inference / MPC: load agi.* config and configure the
+       optional controller at startup (disabled by default). */
+    {
+      json agiCfg;
+      agiCfg["enabled"] = phoenix::cfgOr<bool>("agi.enabled", false);
+      agiCfg["dim"] = phoenix::cfgOr<int>("agi.dim", 128);
+      agiCfg["horizon"] = phoenix::cfgOr<int>("agi.horizon", 3);
+      agiCfg["pragmaticWeight"] = phoenix::cfgOr<double>("agi.pragmaticWeight", 1.0);
+      agiCfg["intrinsicWeight"] = phoenix::cfgOr<double>("agi.intrinsicWeight", 1.0);
+      agiCfg["epistemicWeight"] = phoenix::cfgOr<double>("agi.epistemicWeight", 0.25);
+      agiCfg["learningRate"] = phoenix::cfgOr<double>("agi.learningRate", 0.05);
+      agiCfg["discount"] = phoenix::cfgOr<double>("agi.discount", 0.9);
+      agiCfg["consolidateEvery"] = phoenix::cfgOr<int>("agi.consolidateEvery", 16);
+      agiCfg["adaptiveExploration"] = phoenix::cfgOr<bool>("agi.adaptiveExploration", true);
+      cognitionManager_.configureAgi(agiCfg);
+    }
+    /* v7.0 subconscious profile: load subconscious.* config (disabled by
+       default; every parameter defaults to the current behaviour). */
+    {
+      json subCfg;
+      subCfg["enabled"] = phoenix::cfgOr<bool>("subconscious.enabled", false);
+      subCfg["baselineValence"] = phoenix::cfgOr<double>("subconscious.baselineValence", 0.0);
+      subCfg["baselineArousal"] = phoenix::cfgOr<double>("subconscious.baselineArousal", 0.0);
+      subCfg["baselineDominance"] = phoenix::cfgOr<double>("subconscious.baselineDominance", 0.0);
+      subCfg["temperamentStrength"] = phoenix::cfgOr<double>("subconscious.temperamentStrength", 0.0);
+      subCfg["riskAversion"] = phoenix::cfgOr<double>("subconscious.riskAversion", 1.0);
+      subCfg["anticipatoryGain"] = phoenix::cfgOr<double>("subconscious.anticipatoryGain", 1.0);
+      subCfg["sensationTuning"] = phoenix::cfgOr<nlohmann::json>("subconscious.sensationTuning", nlohmann::json::object());
+      subCfg["instincts"] = phoenix::cfgOr<nlohmann::json>("subconscious.instincts", nlohmann::json::array());
+      cognitionManager_.configureSubconscious(subCfg);
+    }
     rlDisabled_ = config_.disableLearning || config_.disableRL;
     advDisabled_ = config_.disableLearning || config_.disableADV;
     gnnGaDisabled_ = config_.disableLearning;

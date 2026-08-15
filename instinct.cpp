@@ -270,6 +270,14 @@ BenefitHarmResult InstinctEngine::evaluateAction(
     return base;
 }
 
+void InstinctEngine::replaceAll(const std::vector<Instinct> &instincts) {
+    instincts_ = instincts;
+    currentActivations_.clear();
+    for (const auto &i : instincts_) {
+        currentActivations_.push_back(i.activation);
+    }
+}
+
 nlohmann::json InstinctEngine::toJson() const {
     nlohmann::json arr = nlohmann::json::array();
     for (const auto &i : instincts_) arr.push_back(i.toJson());

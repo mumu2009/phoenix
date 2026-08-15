@@ -302,7 +302,7 @@ set "OVERRIDE_SOURCES="
 if exist "module_overrides\*.cpp" set "OVERRIDE_SOURCES=module_overrides\*.cpp"
 set "COMPILE_CMD_FILE=%CD%\runtime_store\compile_last_command.txt"
 set "COMPILE_SOURCES_FILE=%CD%\build\compile_sources.txt"
-set "COMMON_SOURCES=transformer_main.cpp transformer_ollama_fine_tuning.cpp addon.cpp addons\builtin_registry.cpp addons\math_addon.cpp addons\search_addon.cpp addons\computer_shell_addon.cpp loggerCXX.cpp DATABASE_079.cpp frontend_server.cpp speak_io.cpp model_lifecycle.cpp autonomy_stack.cpp v51_runtime.cpp external_runtime.cpp edge_platform.cpp gguf_tensor_parser.cpp physics_world_runtime.cpp emotion_system.cpp llamacpp_emotion_adjuster.cpp plugin_system.cpp modern_context_system.cpp semantic_unit.cpp concept_matrix.cpp primal_sensation.cpp instinct.cpp prompt_split.cpp external_mixed_modal_io.cpp multimodal_world_model.cpp local_onnx.cpp video_model.cpp audio_model.cpp graph_diffusion_summarizer.cpp hierarchical_memory.cpp model_deployment.cpp rdk_x5_bpu.cpp %BULLET3_EMBEDDED_SOURCES%"
+set "COMMON_SOURCES=transformer_main.cpp transformer_ollama_fine_tuning.cpp addon.cpp addons\builtin_registry.cpp addons\math_addon.cpp addons\search_addon.cpp addons\computer_shell_addon.cpp loggerCXX.cpp DATABASE_079.cpp frontend_server.cpp speak_io.cpp model_lifecycle.cpp autonomy_stack.cpp v51_runtime.cpp external_runtime.cpp edge_platform.cpp gguf_tensor_parser.cpp physics_world_runtime.cpp emotion_system.cpp llamacpp_emotion_adjuster.cpp plugin_system.cpp modern_context_system.cpp semantic_unit.cpp concept_matrix.cpp primal_sensation.cpp instinct.cpp prompt_split.cpp external_mixed_modal_io.cpp multimodal_world_model.cpp local_onnx.cpp video_model.cpp audio_model.cpp graph_diffusion_summarizer.cpp hierarchical_memory.cpp model_deployment.cpp rdk_x5_bpu.cpp active_inference.cpp subconscious_profile.cpp sparse_block_matmul.cpp %BULLET3_EMBEDDED_SOURCES%"
 :: Build a response file of source files to avoid Windows command-line length limits.
 :: GCC response files treat '\' as an escape character, so paths must use '/'.
 if not exist "%CD%\build" mkdir "%CD%\build"
@@ -417,12 +417,12 @@ if exist "%SCRIPT_DIR%phoenix_sql_cli.exe" (
 echo [DEBUG] Checking phoenix_main.exe existence: %SCRIPT_DIR%phoenix_main.exe
 if exist "%SCRIPT_DIR%phoenix_main.exe" (
   echo [DEBUG] phoenix_main.exe exists. PHOENIX_NEW_BUILD=%PHOENIX_NEW_BUILD%
-  if %PHOENIX_NEW_BUILD% equ 1 (
+  if "%PHOENIX_NEW_BUILD%"=="1" (
     echo [INFO] Build completed successfully with new phoenix_main.exe.
   ) else (
     echo [INFO] Build completed using existing phoenix_main.exe from previous build.
   )
-  echo [INFO] phoenix_main.exe exists; build completed (exit 0).
+  echo [INFO] phoenix_main.exe exists; build completed ^(exit 0^).
   endlocal & exit /b 0
 ) else (
   echo [DEBUG] phoenix_main.exe does not exist.
@@ -453,7 +453,7 @@ if exist "%CD%\build_success_flag.txt" (
 echo [INFO] End of script reached. BUILD_STATUS=%BUILD_STATUS% FORCE_SUCCESS=%FORCE_SUCCESS%
 echo [INFO] Final check: Does phoenix_main.exe exist?
 if exist "%SCRIPT_DIR%phoenix_main.exe" (
-  echo [INFO] phoenix_main.exe exists. Build successful (exit 0).
+  echo [INFO] phoenix_main.exe exists. Build successful ^(exit 0^).
   endlocal
   exit /b 0
 )
@@ -474,11 +474,11 @@ if /I "%BUILD_STATUS%"=="SUCCESS" (
 
 REM ULTIMATE FALLBACK - check one more time at the very end
 if exist "%SCRIPT_DIR%phoenix_main.exe" (
-  echo [INFO] phoenix_main.exe exists; build successful (exit 0).
+  echo [INFO] phoenix_main.exe exists; build successful ^(exit 0^).
   exit /b 0
 )
 if exist phoenix_main.exe (
-  echo [INFO] phoenix_main.exe exists in current dir; build successful (exit 0).
+  echo [INFO] phoenix_main.exe exists in current dir; build successful ^(exit 0^).
   exit /b 0
 )
 echo [INFO] FINAL: phoenix_main.exe not found, exit 1

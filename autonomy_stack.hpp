@@ -22,6 +22,8 @@
 #include "instinct.hpp"
 #include "primal_sensation.hpp"
 #include "prompt_split.hpp"
+#include "active_inference.hpp"
+#include "subconscious_profile.hpp"
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <mutex>
@@ -131,6 +133,14 @@ public:
     json ingestSensation(const json &payload); /* Ingest a primal sensation */
     json evaluateInstincts(); /* Run benefit-harm evaluation */
 
+    /* v7.0 active inference / MPC (optional, config agi.*) */
+    json configureAgi(const json &payload);        /* Configure the AGI controller. */
+    json agiPlan();                                /* MPC action selection. */
+    json ingestAgiTransition(const json &payload); /* Feed a real (z,a,z') transition. */
+
+    /* v7.0 subconscious profile (optional, config subconscious.*) */
+    json configureSubconscious(const json &payload); /* Configure temperament/tuning. */
+
     /* v7.0 prompt split */
     json composePrompt(const json &payload); /* Compose system+memory+user prompt */
 
@@ -156,6 +166,20 @@ private:
     phoenix::primal::PrimalSensationEngine sensationEngine_;
     phoenix::instinct::InstinctEngine instinctEngine_;
     std::string lastBenefitHarmBias_;
+
+    /* v7.0 active inference / MPC (optional) */
+    bool agiEnabled_{false};
+    double agiPragW_{1.0}, agiIntrinW_{1.0}, agiEpistW_{0.25};
+    double agiAlpha_{0.05}, agiGamma_{0.9};
+    size_t agiConsolidateEvery_{16};
+    bool agiAdaptiveExploration_{true};
+    phoenix::agi::ActiveInferenceController agiController_;
+    std::vector<float> agiLatentState_;  /*!< last observed latent state (z). */
+    std::string lastAgiAction_;          /*!< last chosen action (for the next transition). */
+
+    /* v7.0 subconscious profile (optional) */
+    bool subconsciousEnabled_{false};
+    phoenix::subconscious::SubconsciousProfile subProfile_;
 
     /* v7.0 prompt split */
     phoenix::prompt::PromptComposer promptComposer_;

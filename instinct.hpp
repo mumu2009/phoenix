@@ -133,6 +133,9 @@ public:
     BenefitHarmResult evaluateAction(const std::string &action,
                                      const std::vector<primal::PrimalSensation> &sensations) const;
 
+    /** Replace the whole instinct table (subconscious profile override). */
+    void replaceAll(const std::vector<Instinct> &instincts);
+
     nlohmann::json toJson() const;
     static InstinctEngine fromJson(const nlohmann::json &j);
 

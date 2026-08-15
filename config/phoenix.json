@@ -406,6 +406,30 @@
     "maxInFlight": 1,
     "aiApiBase": "http://127.0.0.1:5080"
   },
+  "agi": {
+    "enabled": false,
+    "horizon": 3,
+    "dim": 128,
+    "pragmaticWeight": 1.0,
+    "intrinsicWeight": 1.0,
+    "epistemicWeight": 0.25,
+    "maxEpisodes": 4096,
+    "learningRate": 0.05,
+    "discount": 0.9,
+    "consolidateEvery": 16,
+    "adaptiveExploration": true
+  },
+  "subconscious": {
+    "enabled": false,
+    "baselineValence": 0.0,
+    "baselineArousal": 0.0,
+    "baselineDominance": 0.0,
+    "temperamentStrength": 0.0,
+    "riskAversion": 1.0,
+    "anticipatoryGain": 1.0,
+    "sensationTuning": {},
+    "instincts": []
+  },
   "api": {
     "upstreamTimeoutMs": 45000,
     "gatewayHost": "127.0.0.1",

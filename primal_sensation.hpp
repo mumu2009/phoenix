@@ -15,6 +15,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace phoenix {
@@ -67,6 +68,22 @@ struct PrimalSensation {
 };
 
 /**
+ * @brief Per-sensation homeostatic tuning (subconscious profile parameters).
+ *
+ * Grounded in allostasis (Sterling 1988) and precision weighting (Friston):
+ *  - gain       precision/sensitivity multiplier for the sensation intensity;
+ *  - halfLifeSec per-type decay half-life (opponent-process time constant,
+ *               Solomon & Corbit 1974); 0 = use the engine's default;
+ *  - setpoint   homeostatic setpoint: the desired intensity level; deviation
+ *               in either direction is the homeostatic cost.
+ */
+struct SensationTuning {
+    float gain = 1.0f;
+    float halfLifeSec = 0.0f;
+    float setpoint = 0.0f;
+};
+
+/**
  * @brief Aggregation layer for primal sensations.
  *
  * Tracks active sensations, decays them over time and exposes net valence
@@ -93,11 +110,19 @@ public:
     /** Dominant sensation by intensity. */
     std::optional<PrimalSensation> dominant() const;
 
+    /** Install per-sensation tuning (subconscious profile). Empty = untuned. */
+    void setTuning(const std::unordered_map<SensationType, SensationTuning> &t) { tuning_ = t; }
+    bool hasTuning() const { return !tuning_.empty(); }
+
+    /** Homeostatic cost: Σ gain · |intensity − setpoint| (allostatic drive). */
+    float homeostaticCost() const;
+
     nlohmann::json toJson() const;
     static PrimalSensationEngine fromJson(const nlohmann::json &j);
 
 private:
     std::vector<PrimalSensation> sensations_;
+    std::unordered_map<SensationType, SensationTuning> tuning_;
 };
 
 }  // namespace primal

@@ -79,12 +79,22 @@ PrimalSensation PrimalSensation::fromJson(const nlohmann::json &j) {
 }
 
 void PrimalSensationEngine::add(const PrimalSensation &s) {
-    sensations_.push_back(s);
+    PrimalSensation tuned = s;
+    auto it = tuning_.find(s.type);
+    if (it != tuning_.end()) {
+        // Precision weighting: scale the incoming signal by its gain.
+        tuned.intensity = std::clamp(s.intensity * it->second.gain, 0.0f, 1.0f);
+    }
+    sensations_.push_back(tuned);
 }
 
 void PrimalSensationEngine::decay(float halfLifeSec, float dtSec) {
     for (auto &s : sensations_) {
-        s.decay(halfLifeSec, dtSec);
+        const auto it = tuning_.find(s.type);
+        const float hl = (it != tuning_.end() && it->second.halfLifeSec > 0.0f)
+                             ? it->second.halfLifeSec
+                             : halfLifeSec;
+        s.decay(hl, dtSec);
     }
     constexpr float kIntensityEpsilon = 1e-3f;
     /* Prune sensations that are non-positive or have decayed to a negligible
@@ -115,6 +125,17 @@ float PrimalSensationEngine::netArousal() const {
         arousal = std::max(arousal, s.intensity);
     }
     return std::clamp(arousal, 0.0f, 1.0f);
+}
+
+float PrimalSensationEngine::homeostaticCost() const {
+    float cost = 0.0f;
+    for (const auto &s : sensations_) {
+        const auto it = tuning_.find(s.type);
+        const float gain = (it != tuning_.end()) ? it->second.gain : 1.0f;
+        const float setpoint = (it != tuning_.end()) ? it->second.setpoint : 0.0f;
+        cost += gain * std::abs(s.intensity - setpoint);
+    }
+    return cost;
 }
 
 std::optional<PrimalSensation> PrimalSensationEngine::dominant() const {

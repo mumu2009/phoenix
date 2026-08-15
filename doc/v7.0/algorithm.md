@@ -953,3 +953,19 @@ every N scheduling rounds:
    **复杂度变化**：两次的最坏时间复杂度不变，但 wall-clock 在多核下随块数近似线性加速，I/O 密集的 `ConceptMatrix::propagate` 尤为明显。
 
 3. **高维投影稀疏化（已落地）**：`projectToDimension` 在 `sourceDim * targetDim > 4096` 时自动切换为 Sparse JL（Achlioptas-style）实现，每列固定 `s = max(3, targetDim / 3)` 个非零项，取值为 `±1/√s`，将单次投影成本从 `O(D_in · D_out)` 降到 `O(D_in · s)`；同时暴露 `projectToDimensionSparse` 接口供热路径显式调用。该矩阵在缓存中按 `(sourceDim, targetDim, seed, nonZeros)` 键复用，对 one-hot 输入精确保持单位 L2 范数，对单位随机向量以高概率保持成对距离。相应单元测试覆盖尺寸、范围、范数保持与确定性。小维度仍走原稠密高斯路径以兼容现有测试与快速路径。
+
+## 18. 主动推理 / 模型预测控制（可选闭环，agi.*）
+
+新增可选子系统（默认关闭，config `agi.enabled=false`），把趋利避害扩展为完整的最优决策闭环（`active_inference.hpp` 声明 + `active_inference.cpp` 实现，已入构建）：
+
+- `active_inference.hpp`：期望自由能（EFE）三项（pragmatic/intrinsic/epistemic）+ 前向 latent 模型 `LatentTransitionModel` + 滚动时域规划器 `ActiveInferenceController`（含情景记忆）。
+- 已接线：`AutonomyStack` 通过 `configureAgi/agiPlan/ingestAgiTransition` 接入 `ActiveInferenceController`（`iterate()` 在模型有真实转移后覆盖本能 argmax）。`active_inference.cpp` 已加入 `compile.bat` 的 `COMMON_SOURCES`。
+- 自我进化闭环（§18.1）：`observeRewarded`（TD(0)，奖励 = bh.netUtility）、`bootstrapPreferences`（一次播种）、`consolidate`（每 K 回合重放）、`explorationMultiplier`（VDBE 自适应探索）。测试方法见 `doc/v7.0/testing_methodology.md`。
+
+完整推导（EFE 分解、MPC↔主动推理等价性证明、前向模型 surprise、复杂度）见 `doc/v7.0/active_inference.md`。
+
+## 19. 潜意识可定制层与 llama.cpp 优化（可选，默认关闭）
+
+- `subconscious_profile.{hpp,cpp}`：全稳态剖面（气质/敏感度/稳态设定点/风险态度/自定义野性表），接 `configureSubconscious`；理论见 `doc/v7.0/subconscious.md`。
+- `tools/llama_prune_analyzer.py`：GGUF 幅度剪枝（逐层自适应阈值 + 原始备份 manifest + keep-mask），只看矩阵不看输出。
+- `sparse_block_matmul.{hpp,cpp}`：块稀疏矩阵乘法（τ=0 精确、τ>0 带 Frobenius 界）；ggml 集成规格与上游更新核查见 `doc/v7.0/llamacpp_optimization.md`。

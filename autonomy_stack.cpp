@@ -670,6 +670,7 @@ json CognitionAutonomyManager::status() const {
                                  {"sensations", sensationEngine_.toJson()},
                                  {"instincts", instinctEngine_.toJson()},
                                  {"lastBenefitHarmBias", lastBenefitHarmBias_},
+                                 {"agi", agiEnabled_ ? agiController_.status() : json{{"enabled", false}}},
                                  {"mixedModalInputSize", inputBuffer_.size()},
                                  {"mixedModalOutputSize", outputQueue_.size()},
                                  {"channels", channelRegistry_.toJson()},
@@ -1219,8 +1220,83 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
     phoenix::prompt::MemoryPrompt memory;
     memory.driveVector = bh.driveVector;
     memory.emotionTensor = phoenix::instinct::InstinctEngine::driveToEmotion(bh);
+    if (subconsciousEnabled_) {
+        /* Temperament: shift the appraisal toward the baseline PAD disposition. */
+        memory.emotionTensor = subProfile_.applyTemperament(memory.emotionTensor);
+    }
     memory.inferenceOptions = memory.emotionTensor.inferenceOptions();
     memory.benefitHarmBias = bh.recommendedAction;  // human-readable action label
+    /* v7.0 active inference / MPC.  Three parts per iteration:
+       1. observe the previous real transition (zPrev, aPrev, zNow) so the
+          forward model learns online (metacognition / episodic memory);
+       2. re-plan over the receding horizon; once the model has at least one
+          real transition it overrides the instinct argmax (cold-start guard);
+       3. record the chosen action for the next transition. */
+    nlohmann::json agiPlanJson = nlohmann::json::object();
+    if (agiEnabled_) {
+        const size_t dim = agiController_.model().dim();
+        const std::vector<float> zNow =
+            phoenix::multimodal::projectToDimension(bh.driveVector, dim, 0x41474955U);
+        const bool havePrev = !agiLatentState_.empty() && !lastAgiAction_.empty();
+        if (havePrev) {
+            std::vector<float> aPrev;
+            for (const auto &act : agiController_.actions()) {
+                if (act.name == lastAgiAction_) { aPrev = act.embedding; break; }
+            }
+            /* Self-evolution: the realised benefit-harm netUtility is the
+               reward; observeRewarded refines the forward model AND runs the
+               TD(0) value-learning step on the preference head. */
+            const double agiSurprise = agiController_.observeRewarded(
+                agiLatentState_, aPrev, zNow, static_cast<double>(bh.netUtility),
+                0.01f, agiAlpha_, agiGamma_);
+            /* Metacognitive loop: the forward-model prediction error becomes a
+               Novelty primal sensation, so Curiosity/Exploration receive a real
+               epistemic signal instead of a hard-coded match. */
+            const float feedGain = subconsciousEnabled_ ? subProfile_.anticipatoryGain : 1.0f;
+            if (agiSurprise > 1e-4 && feedGain > 0.0f) {
+                phoenix::primal::PrimalSensation nov;
+                nov.type = phoenix::primal::SensationType::Novelty;
+                nov.intensity = std::clamp(static_cast<float>(std::min(1.0, agiSurprise * feedGain)), 0.0f, 1.0f);
+                nov.valence = 0.2f;  // novelty is mildly attractive (exploration drive)
+                nov.source = "agi-forward-model-surprise";
+                nov.timestampMs = static_cast<uint64_t>(nowMs());
+                sensationEngine_.add(nov);
+            }
+        }
+        agiLatentState_ = zNow;
+        /* Only SEED the preference head once; TD learning owns it afterwards. */
+        agiController_.bootstrapPreferences(zNow);
+        /* Allostasis: with a subconscious profile the intrinsic cost is the
+           homeostatic deviation (Σ gain·|intensity−setpoint|); otherwise the
+           legacy arousal proxy. */
+        const double driveCost = subconsciousEnabled_
+            ? static_cast<double>(sensationEngine_.homeostaticCost())
+            : static_cast<double>(sensationEngine_.netArousal());
+        /* Adaptive exploration (VDBE-style): amplify the epistemic term when
+           the environment is getting predictable, damp it when chaotic. */
+        const double epistW = agiEpistW_ * (agiAdaptiveExploration_
+            ? agiController_.explorationMultiplier() : 1.0);
+        const auto plan = agiController_.plan(agiLatentState_, driveCost, agiPragW_, agiIntrinW_, epistW);
+        /* Periodic consolidation: replay episodic memory to refine the forward
+           model and the value function (sleep-like). */
+        if (agiConsolidateEvery_ > 0 && agiController_.episodeCount() > 0 &&
+            agiController_.episodeCount() % agiConsolidateEvery_ == 0) {
+            agiController_.consolidate(64, agiAlpha_ * 0.4, agiGamma_);
+        }
+        if (plan.bestAction >= 0 && plan.bestAction < static_cast<int>(agiController_.actions().size())) {
+            lastAgiAction_ = agiController_.actions()[static_cast<size_t>(plan.bestAction)].name;
+            if (agiController_.episodeCount() >= 1) {
+                memory.benefitHarmBias = lastAgiAction_;
+            }
+        }
+        agiPlanJson = json{{"bestAction", lastAgiAction_},
+                           {"bestActionIndex", plan.bestAction},
+                           {"efe", plan.efe.toJson()},
+                           {"driveCost", driveCost},
+                           {"episodes", agiController_.episodeCount()},
+                           {"surpriseEma", agiController_.surpriseEma()},
+                           {"explorationMultiplier", agiController_.explorationMultiplier()}};
+    }
     if (memory.benefitHarmBias.empty())
         memory.benefitHarmBias = memory.emotionTensor.modulationHint();
     memory.summary = "Benefit=" + std::to_string(bh.benefitScore) +
@@ -1253,7 +1329,8 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
                                  {"inferenceOptions", memory.inferenceOptions},
                                  {"cognitionModulation", cognitionModulation},
                                  {"mixedModalOutputs", mixedModalOutputs},
-                                 {"composedPrompt", composedPrompt}}}};
+                                 {"composedPrompt", composedPrompt},
+                                 {"agiPlan", agiPlanJson}}}};
 }
 
 json CognitionAutonomyManager::session(const std::string &sessionId) const {
@@ -1325,6 +1402,104 @@ json CognitionAutonomyManager::evaluateInstincts() {
     auto bh = instinctEngine_.evaluate(sensationEngine_.active());
     return json{{"ok", true}, {"result", bh.toJson()}};
 }
+
+json CognitionAutonomyManager::configureAgi(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto asInt = [](const json &j, int dflt) -> int {
+        return j.is_number() ? static_cast<int>(j.get<double>()) : dflt;
+    };
+    auto asDbl = [](const json &j, double dflt) -> double {
+        return j.is_number() ? j.get<double>() : dflt;
+    };
+    agiEnabled_ = payload.value("enabled", agiEnabled_);
+    const int dim = clampInt(asInt(payload.value("dim", json(128)), 128), 8, 4096);
+    const int horizon = clampInt(asInt(payload.value("horizon", json(3)), 3), 1, 16);
+    agiPragW_ = clampDouble(asDbl(payload.value("pragmaticWeight", json(1.0)), 1.0), 0.0, 10.0);
+    agiIntrinW_ = clampDouble(asDbl(payload.value("intrinsicWeight", json(1.0)), 1.0), 0.0, 10.0);
+    agiEpistW_ = clampDouble(asDbl(payload.value("epistemicWeight", json(0.25)), 0.25), 0.0, 10.0);
+    agiAlpha_ = clampDouble(asDbl(payload.value("learningRate", json(0.05)), 0.05), 0.0, 1.0);
+    agiGamma_ = clampDouble(asDbl(payload.value("discount", json(0.9)), 0.9), 0.0, 0.999);
+    agiConsolidateEvery_ = static_cast<size_t>(clampInt(asInt(payload.value("consolidateEvery", json(16)), 16), 0, 4096));
+    agiAdaptiveExploration_ = payload.value("adaptiveExploration", agiAdaptiveExploration_);
+
+    // Rebuild the controller: latent dim + scalar control (actionDim=1) + horizon.
+    agiController_.configure(static_cast<size_t>(dim), 1, static_cast<size_t>(horizon));
+
+    // Seed the action space from the instinct action biases.
+    std::vector<phoenix::agi::Action> actions;
+    for (const auto &i : instinctEngine_.instincts()) {
+        if (i.actionBias.empty()) continue;
+        phoenix::agi::Action a;
+        a.name = i.actionBias;
+        a.embedding = {i.benefitWeight - i.harmWeight};  // scalar control direction
+        actions.push_back(std::move(a));
+    }
+    agiController_.setActions(std::move(actions));
+
+    // Preferences track the current benefit-harm drive direction.
+    auto bh = instinctEngine_.evaluate(sensationEngine_.active());
+    agiController_.bootstrapPreferences(
+        phoenix::multimodal::projectToDimension(bh.driveVector, static_cast<size_t>(dim), 0x41474955U));
+    return json{{"ok", true}, {"result", agiController_.status()}};
+}
+
+json CognitionAutonomyManager::agiPlan() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!agiEnabled_) return json{{"ok", false}, {"error", "agi disabled"}};
+    auto bh = instinctEngine_.evaluate(sensationEngine_.active());
+    const size_t dim = agiController_.model().dim();
+    std::vector<float> z = agiLatentState_;
+    if (z.empty()) {
+        z = phoenix::multimodal::projectToDimension(bh.driveVector, dim, 0x41474955U);
+        agiLatentState_ = z;
+    }
+    agiController_.bootstrapPreferences(
+        phoenix::multimodal::projectToDimension(bh.driveVector, dim, 0x41474955U));
+    const double driveCost = static_cast<double>(sensationEngine_.netArousal());
+    const auto plan = agiController_.plan(z, driveCost, agiPragW_, agiIntrinW_, agiEpistW_);
+    json out;
+    out["ok"] = true;
+    out["result"]["bestActionIndex"] = plan.bestAction;
+    out["result"]["bestAction"] =
+        (plan.bestAction >= 0 && plan.bestAction < static_cast<int>(agiController_.actions().size()))
+            ? agiController_.actions()[static_cast<size_t>(plan.bestAction)].name
+            : std::string();
+    out["result"]["efe"] = plan.efe.toJson();
+    out["result"]["driveCost"] = driveCost;
+    out["result"]["model"] = agiController_.model().status();
+    return out;
+}
+
+json CognitionAutonomyManager::ingestAgiTransition(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!agiEnabled_) return json{{"ok", false}, {"error", "agi disabled"}};
+    auto toVec = [](const json &j) {
+        std::vector<float> v;
+        if (j.is_array()) for (const auto &e : j) if (e.is_number()) v.push_back(e.get<float>());
+        return v;
+    };
+    std::vector<float> z = toVec(payload.value("z", json::array()));
+    std::vector<float> a = toVec(payload.value("a", json::array()));
+    std::vector<float> zNext = toVec(payload.value("zNext", json::array()));
+    if (z.empty() || zNext.empty()) return json{{"ok", false}, {"error", "z and zNext required"}};
+    const double surprise = agiController_.observe(z, a, zNext);
+    agiLatentState_ = zNext;
+    return json{{"ok", true},
+                {"result", json{{"surprise", surprise},
+                                {"episodes", agiController_.episodeCount()}}}};
+}
+
+json CognitionAutonomyManager::configureSubconscious(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    subconsciousEnabled_ = payload.value("enabled", subconsciousEnabled_);
+    subProfile_ = phoenix::subconscious::SubconsciousProfile::fromJson(payload);
+    /* Install the innate parameters into the three subconscious layers. */
+    subProfile_.applyTo(sensationEngine_);
+    subProfile_.applyTo(instinctEngine_);
+    subProfile_.applyTo(agiController_);
+    return json{{"ok", true}, {"result", subProfile_.toJson()}};
+}
+
 
 json CognitionAutonomyManager::composePrompt(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
