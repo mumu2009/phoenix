@@ -286,131 +286,134 @@ std::vector<std::string> SQLiteEmotionStorage::listSessions() {
     return sessions;
 }
 
-// Simple rule-based emotion analyzer
+// VAD-lexicon based emotion analyzer.
+//
+// A compact affective lexicon maps lowercased words to PAD coordinates
+// (valence, arousal, dominance) in [-1, 1], following the affective-norms
+// tradition (Russell, 1980, "A circumplex model of affect"; Warriner et al.,
+// 2013, "Norms of valence, arousal, and dominance for 13,915 English lemmas").
+// The analyzer mean-pools the matched coordinates over ALL tokens (unmatched
+// words contribute zero), which (a) bounds the signal by match density instead
+// of the saturated keyword counting used previously, and (b) removes the
+// double-counting caused by overlapping keyword categories.  The pooled
+// (V, A, D) triple is converted to the 8-d tensor through padToTensor().
+namespace {
+struct VAD { float v; float a; float d; };
+
+const std::unordered_map<std::string, VAD>& vadLexicon() {
+    static const std::unordered_map<std::string, VAD> lex = {
+        // joy / positive
+        {"happy",     {0.90f,  0.70f,  0.50f}},
+        {"glad",      {0.80f,  0.50f,  0.40f}},
+        {"great",     {0.80f,  0.60f,  0.40f}},
+        {"wonderful", {0.90f,  0.60f,  0.50f}},
+        {"excellent", {0.90f,  0.60f,  0.60f}},
+        {"love",      {0.90f,  0.80f,  0.30f}},
+        {"joy",       {0.90f,  0.80f,  0.50f}},
+        {"amazing",   {0.90f,  0.80f,  0.40f}},
+        // sadness / negative
+        {"sad",       {-0.80f, -0.40f, -0.50f}},
+        {"bad",       {-0.70f,  0.20f, -0.30f}},
+        {"terrible",  {-0.90f,  0.40f, -0.40f}},
+        {"awful",     {-0.90f,  0.30f, -0.50f}},
+        {"hate",      {-0.90f,  0.60f,  0.20f}},
+        // fear
+        {"afraid",    {-0.80f,  0.70f, -0.70f}},
+        {"scared",    {-0.80f,  0.70f, -0.70f}},
+        {"fear",      {-0.80f,  0.60f, -0.60f}},
+        {"worried",   {-0.60f,  0.50f, -0.50f}},
+        {"anxious",   {-0.60f,  0.60f, -0.50f}},
+        // anger
+        {"angry",     {-0.80f,  0.80f,  0.70f}},
+        {"furious",   {-0.90f,  0.90f,  0.80f}},
+        {"mad",       {-0.70f,  0.70f,  0.60f}},
+        // surprise
+        {"surprise",  { 0.20f,  0.80f,  0.00f}},
+        {"shock",     {-0.40f,  0.90f, -0.60f}},
+        {"unexpected",{ 0.00f,  0.70f, -0.20f}},
+        // trust
+        {"trust",     { 0.60f,  0.10f,  0.40f}},
+        {"believe",   { 0.50f,  0.10f,  0.30f}},
+        {"confident", { 0.70f,  0.40f,  0.80f}},
+        {"reliable",  { 0.60f,  0.10f,  0.50f}},
+    };
+    return lex;
+}
+}  // namespace
+
 class RuleBasedEmotionAnalyzer : public EmotionAnalyzer {
 public:
     EmotionTensor analyzeText(const std::string& text) override {
-        EmotionTensor emotion;
-        
-        // Simple keyword-based emotion detection
-        std::string lowerText = text;
-        std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), ::tolower);
-        
-        // Positive/joy keywords
-        if (lowerText.find("happy") != std::string::npos ||
-            lowerText.find("great") != std::string::npos ||
-            lowerText.find("love") != std::string::npos ||
-            lowerText.find("wonderful") != std::string::npos) {
-            emotion.joy += 0.5f;
-            emotion.valence += 0.4f;
+        const auto toks = tokenizeText(text);
+        if (toks.empty()) return EmotionTensor();
+        const auto& lex = vadLexicon();
+        float V = 0.0f, A = 0.0f, D = 0.0f;
+        size_t matched = 0;
+        for (const auto& t : toks) {
+            auto it = lex.find(t);
+            if (it == lex.end()) continue;
+            V += it->second.v;
+            A += it->second.a;
+            D += it->second.d;
+            ++matched;
         }
-        
-        // Negative/sad keywords
-        if (lowerText.find("sad") != std::string::npos ||
-            lowerText.find("bad") != std::string::npos ||
-            lowerText.find("hate") != std::string::npos ||
-            lowerText.find("terrible") != std::string::npos) {
-            emotion.joy -= 0.5f;
-            emotion.valence -= 0.4f;
-        }
-        
-        // Fear keywords
-        if (lowerText.find("afraid") != std::string::npos ||
-            lowerText.find("scared") != std::string::npos ||
-            lowerText.find("fear") != std::string::npos ||
-            lowerText.find("worried") != std::string::npos) {
-            emotion.fear += 0.6f;
-            emotion.arousal += 0.3f;
-        }
-        
-        // Anger keywords
-        if (lowerText.find("angry") != std::string::npos ||
-            lowerText.find("furious") != std::string::npos ||
-            lowerText.find("mad") != std::string::npos ||
-            lowerText.find("hate") != std::string::npos) {
-            emotion.anger += 0.7f;
-            emotion.arousal += 0.5f;
-        }
-        
-        // Surprise keywords
-        if (lowerText.find("surprise") != std::string::npos ||
-            lowerText.find("shock") != std::string::npos ||
-            lowerText.find("amazing") != std::string::npos ||
-            lowerText.find("unexpected") != std::string::npos) {
-            emotion.surprise += 0.6f;
-            emotion.arousal += 0.4f;
-        }
-        
-        // Trust keywords
-        if (lowerText.find("trust") != std::string::npos ||
-            lowerText.find("believe") != std::string::npos ||
-            lowerText.find("confident") != std::string::npos) {
-            emotion.trust += 0.5f;
-            emotion.valence += 0.2f;
-        }
-        
-        // Clamp values to [-1, 1]
-        auto clamp = [](float& v) { v = std::max(-1.0f, std::min(1.0f, v)); };
-        clamp(emotion.valence);
-        clamp(emotion.arousal);
-        clamp(emotion.dominance);
-        clamp(emotion.trust);
-        clamp(emotion.joy);
-        clamp(emotion.fear);
-        clamp(emotion.anger);
-        clamp(emotion.surprise);
-        
-        return emotion;
+        if (matched == 0) return EmotionTensor();
+        // Mean-pool over ALL tokens (unmatched -> 0) so intensity scales with
+        // match density rather than being saturated by a single keyword.
+        const float invN = 1.0f / static_cast<float>(toks.size());
+        return padToTensor(V * invN, A * invN, D * invN);
     }
-    
+
     EmotionTensor analyzeAudio(const std::vector<float>& audioFeatures) override {
-        // Audio-feature based emotion analysis
-        // Maps the first eight audio features directly to emotion dimensions.
-        EmotionTensor emotion;
-        if (audioFeatures.size() >= 8) {
-            emotion.valence = audioFeatures[0];
-            emotion.arousal = audioFeatures[1];
-            emotion.dominance = audioFeatures[2];
-            emotion.trust = audioFeatures[3];
-            emotion.joy = audioFeatures[4];
-            emotion.fear = audioFeatures[5];
-            emotion.anger = audioFeatures[6];
-            emotion.surprise = audioFeatures[7];
+        // Audio-feature based emotion analysis.
+        // If the upstream audio tower provides >= 3 features, interpret the
+        // first three as a (valence, arousal, dominance) triplet; a single
+        // feature is treated as an arousal-only (energy/loudness) signal.  The
+        // previous implementation mapped eight raw acoustic features directly
+        // onto the 8-d affect space, conflating acoustic energy with the
+        // appraisal dimensions.
+        if (audioFeatures.size() >= 3) {
+            return padToTensor(audioFeatures[0], audioFeatures[1], audioFeatures[2]);
         }
-        return emotion;
+        if (audioFeatures.size() == 1) {
+            return padToTensor(0.0f, audioFeatures[0], 0.0f);
+        }
+        return EmotionTensor();
     }
-    
+
     EmotionTensor combineEmotions(const std::vector<EmotionTensor>& emotions,
                                   const std::vector<float>& weights) override {
         if (emotions.empty()) return EmotionTensor();
-        
+        // Confidence-weighted mean.  Non-positive weights are treated as zero
+        // so a low-confidence source decays gracefully rather than being
+        // averaged in with unit weight.
+        const size_t n = std::min(emotions.size(), weights.size());
         EmotionTensor combined;
         float totalWeight = 0.0f;
-        
-        for (size_t i = 0; i < emotions.size() && i < weights.size(); ++i) {
-            float w = weights[i];
-            combined.valence += emotions[i].valence * w;
-            combined.arousal += emotions[i].arousal * w;
-            combined.dominance += emotions[i].dominance * w;
-            combined.trust += emotions[i].trust * w;
-            combined.joy += emotions[i].joy * w;
-            combined.fear += emotions[i].fear * w;
-            combined.anger += emotions[i].anger * w;
-            combined.surprise += emotions[i].surprise * w;
+        for (size_t i = 0; i < n; ++i) {
+            const float w = weights[i] > 0.0f ? weights[i] : 0.0f;
+            if (w == 0.0f) continue;
+            const auto& e = emotions[i];
+            combined.valence += e.valence * w;
+            combined.arousal += e.arousal * w;
+            combined.dominance += e.dominance * w;
+            combined.trust += e.trust * w;
+            combined.joy += e.joy * w;
+            combined.fear += e.fear * w;
+            combined.anger += e.anger * w;
+            combined.surprise += e.surprise * w;
             totalWeight += w;
         }
-        
-        if (totalWeight > 0.0f) {
-            combined.valence /= totalWeight;
-            combined.arousal /= totalWeight;
-            combined.dominance /= totalWeight;
-            combined.trust /= totalWeight;
-            combined.joy /= totalWeight;
-            combined.fear /= totalWeight;
-            combined.anger /= totalWeight;
-            combined.surprise /= totalWeight;
-        }
-        
+        if (totalWeight <= 0.0f) return EmotionTensor();
+        const float inv = 1.0f / totalWeight;
+        combined.valence *= inv;
+        combined.arousal *= inv;
+        combined.dominance *= inv;
+        combined.trust *= inv;
+        combined.joy *= inv;
+        combined.fear *= inv;
+        combined.anger *= inv;
+        combined.surprise *= inv;
         return combined;
     }
 };
@@ -502,9 +505,14 @@ EmotionState EmotionSystem::processMessage(const std::string& sessionId,
         }
     }
     
-    // Apply emotion decay
+    // Apply emotion dynamics: a first-order homeostatic update.
+    //   E = lerp(E, newEmotion, 1 - decayRate)      // stimulus coupling (EMA)
+    //   E = lerp(E, baseline,    homeostasisRate)   // opponent-process pull
+    // The second term is the opponent-process homeostatic pull toward the
+    // session baseline (Solomon & Corbit, 1974, "An opponent-process theory of
+    // motivation").  See doc/v7.0/algorithm.md section 15 for the derivation.
     newEmotion = EmotionTensor::lerp(state.current, newEmotion, 1.0f - impl_->config.emotionDecayRate);
-    
+    newEmotion = EmotionTensor::lerp(newEmotion, state.baseline, impl_->config.homeostasisRate);
     state.current = newEmotion;
 
     // Update vocabulary-level emotion weight table across stages.

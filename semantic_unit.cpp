@@ -19,26 +19,34 @@
 #include "semantic_unit.hpp"
 
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <iomanip>
 #include <mutex>
+#include <numeric>
 #include <random>
 #include <sstream>
+#include <thread>
+
+#include "async_task_system.hpp"
 
 namespace phoenix {
 namespace multimodal {
 
 namespace {
 
-/* Deterministic projection matrix cache keyed by (sourceDim, targetDim, seed). */
+/* Deterministic projection matrix cache keyed by (sourceDim, targetDim, seed, nonZeros). */
 struct ProjectionKey {
   size_t sourceDim;
   size_t targetDim;
   unsigned int seed;
+  size_t nonZeros;
   bool operator==(const ProjectionKey &o) const noexcept {
-    return sourceDim == o.sourceDim && targetDim == o.targetDim && seed == o.seed;
+    return sourceDim == o.sourceDim && targetDim == o.targetDim &&
+           seed == o.seed && nonZeros == o.nonZeros;
   }
 };
 
@@ -46,17 +54,19 @@ struct ProjectionKeyHash {
   std::size_t operator()(const ProjectionKey &k) const noexcept {
     return std::hash<std::size_t>{}(k.sourceDim) ^
            (std::hash<std::size_t>{}(k.targetDim) << 1) ^
-           (std::hash<unsigned int>{}(k.seed) << 2);
+           (std::hash<unsigned int>{}(k.seed) << 2) ^
+           (std::hash<std::size_t>{}(k.nonZeros) << 3);
   }
 };
 
 std::mutex gProjectionCacheMu;
 std::unordered_map<ProjectionKey, Eigen::MatrixXf, ProjectionKeyHash> gProjectionCache;
+std::unordered_map<ProjectionKey, Eigen::SparseMatrix<float>, ProjectionKeyHash> gSparseProjectionCache;
 
 const Eigen::MatrixXf &getProjectionMatrix(size_t sourceDim,
                                            size_t targetDim,
                                            unsigned int seed) {
-  ProjectionKey key{sourceDim, targetDim, seed};
+  ProjectionKey key{sourceDim, targetDim, seed, 0};
   {
     std::lock_guard<std::mutex> lock(gProjectionCacheMu);
     auto it = gProjectionCache.find(key);
@@ -86,6 +96,55 @@ const Eigen::MatrixXf &getProjectionMatrix(size_t sourceDim,
     return it->second;  // another thread already inserted the same matrix
   }
   auto &ref = gProjectionCache[key];
+  ref = std::move(mat);
+  return ref;
+}
+
+const Eigen::SparseMatrix<float> &getSparseProjectionMatrix(size_t sourceDim,
+                                                            size_t targetDim,
+                                                            size_t nonZeros,
+                                                            unsigned int seed) {
+  ProjectionKey key{sourceDim, targetDim, seed, nonZeros};
+  {
+    std::lock_guard<std::mutex> lock(gProjectionCacheMu);
+    auto it = gSparseProjectionCache.find(key);
+    if (it != gSparseProjectionCache.end()) {
+      return it->second;
+    }
+  }
+
+  // Sparse Johnson-Lindenstrauss projection (Achlioptas-style): each source
+  // dimension is projected to `nonZeros` distinct target rows, each row value
+  // is +/- 1/sqrt(nonZeros).  This preserves the L2 norm of a one-hot vector
+  // exactly and preserves pairwise distances with high probability for larger
+  // unit vectors, while reducing the per-projection cost from O(source*target)
+  // to O(source*nonZeros).
+  const float scale = 1.0f / std::sqrt(static_cast<float>(nonZeros));
+  std::mt19937 rng(static_cast<unsigned int>(sourceDim + targetDim * 1315423911u +
+                                            seed + nonZeros * 2654435761u));
+  std::vector<int> rows(targetDim);
+  std::iota(rows.begin(), rows.end(), 0);
+  std::vector<Eigen::Triplet<float>> triplets;
+  triplets.reserve(sourceDim * nonZeros);
+  for (size_t c = 0; c < sourceDim; ++c) {
+    std::shuffle(rows.begin(), rows.end(), rng);
+    for (size_t i = 0; i < nonZeros; ++i) {
+      const int r = rows[i];
+      const float value = (rng() & 1u) ? scale : -scale;
+      triplets.emplace_back(r, static_cast<int>(c), value);
+    }
+  }
+
+  Eigen::SparseMatrix<float> mat(static_cast<Eigen::Index>(targetDim),
+                                 static_cast<Eigen::Index>(sourceDim));
+  mat.setFromTriplets(triplets.begin(), triplets.end());
+
+  std::lock_guard<std::mutex> lock(gProjectionCacheMu);
+  auto it = gSparseProjectionCache.find(key);
+  if (it != gSparseProjectionCache.end()) {
+    return it->second;
+  }
+  auto &ref = gSparseProjectionCache[key];
   ref = std::move(mat);
   return ref;
 }
@@ -223,11 +282,54 @@ float cosineSimilarity(const std::vector<float> &a, const std::vector<float> &b)
   return static_cast<float>(dot / denom);
 }
 
+std::vector<float> projectToDimensionSparse(const std::vector<float> &v,
+                                            size_t targetDim,
+                                            size_t nonZerosPerColumn,
+                                            unsigned int seed) {
+  if (targetDim == 0 || targetDim == v.size() || v.empty()) {
+    return v;
+  }
+  if (nonZerosPerColumn == 0) {
+    nonZerosPerColumn = std::max<size_t>(3, targetDim / 3);
+  }
+  nonZerosPerColumn = std::min(nonZerosPerColumn, targetDim);
+  if (nonZerosPerColumn == 0) {
+    return v;
+  }
+
+  const Eigen::Index sourceDim = static_cast<Eigen::Index>(v.size());
+  const Eigen::Index outDim = static_cast<Eigen::Index>(targetDim);
+  const Eigen::SparseMatrix<float> &mat =
+      getSparseProjectionMatrix(v.size(), targetDim, nonZerosPerColumn, seed);
+
+  Eigen::VectorXf in(sourceDim);
+  for (Eigen::Index i = 0; i < sourceDim; ++i) {
+    in(i) = v[static_cast<size_t>(i)];
+  }
+
+  Eigen::VectorXf out = mat * in;
+  std::vector<float> result;
+  result.reserve(targetDim);
+  for (Eigen::Index i = 0; i < outDim; ++i) {
+    result.push_back(out(i));
+  }
+  return result;
+}
+
 std::vector<float> projectToDimension(const std::vector<float> &v,
                                       size_t targetDim,
                                       unsigned int seed) {
   if (targetDim == 0 || targetDim == v.size() || v.empty()) {
     return v;
+  }
+
+  // For large source*target projections use the sparse JL transform to reduce
+  // the per-call cost from O(source*target) to O(source*nonZeros), while
+  // keeping the dense path for small dimensions where it is faster and where
+  // existing unit tests depend on the exact dense distribution.
+  constexpr size_t kSparseJlThreshold = 4096;
+  if (v.size() * targetDim > kSparseJlThreshold) {
+    return projectToDimensionSparse(v, targetDim, 0, seed);
   }
 
   const Eigen::Index sourceDim = static_cast<Eigen::Index>(v.size());
@@ -314,34 +416,83 @@ SemanticUnit fuseMultiply(const SemanticUnit &a,
   return fuseImpl(a, b, targetDim, true);
 }
 
-SemanticUnit fuseAttention(const SemanticUnit &query,
-                           const std::vector<SemanticUnit> &units,
-                           size_t targetDim) {
+static SemanticUnit fuseAttention(const SemanticUnit &query,
+                                  const std::vector<SemanticUnit> &units,
+                                  size_t dim,
+                                  unsigned int seed) {
   if (units.empty()) {
     return query;
   }
 
-  const size_t dim = targetDim != 0
-                         ? targetDim
-                         : std::max(query.semanticVector.size(),
-                                    std::max_element(
-                                        units.begin(), units.end(),
-                                        [](const SemanticUnit &x, const SemanticUnit &y) {
-                                          return x.semanticVector.size() < y.semanticVector.size();
-                                        })->semanticVector.size());
+  const size_t targetDim = dim != 0
+                               ? dim
+                               : std::max(query.semanticVector.size(),
+                                          std::max_element(
+                                              units.begin(), units.end(),
+                                              [](const SemanticUnit &x, const SemanticUnit &y) {
+                                                return x.semanticVector.size() < y.semanticVector.size();
+                                              })->semanticVector.size());
 
-  std::vector<float> q = projectToDimension(query.semanticVector, dim);
+  std::vector<float> q = projectToDimension(query.semanticVector, targetDim, seed);
   q = normalizeVector(q);
 
-  std::vector<float> weights;
-  weights.reserve(units.size());
+  // Memoize each unit's projected-and-normalised vector so the aggregation
+  // loop below reuses it instead of re-projecting.  This halves the dominant
+  // O(K * D_in * D_out) projection cost on the hot path (a "JIT-like" single
+  // materialisation per unit).
+  std::vector<float> weights(units.size());
+  std::vector<std::vector<float>> projected(units.size());
+
+  // Per-unit projection and scoring is embarrassingly parallel.
+  auto projectAndScore = [&](size_t start, size_t end) {
+    for (size_t i = start; i < end; ++i) {
+      std::vector<float> uv =
+          normalizeVector(projectToDimension(units[i].semanticVector, targetDim, seed));
+      weights[i] = cosineSimilarity(q, uv);
+      projected[i] = std::move(uv);
+    }
+  };
+
+  const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
+  const size_t chunkCount = std::min(units.size(), workerCount);
+
+  if (units.size() > 8 && chunkCount > 1) {
+    auto &ats = phoenix::v7::AsyncTaskSystem::global();
+    ats.start();
+
+    std::vector<std::future<void>> futures;
+    futures.reserve(chunkCount);
+
+    for (size_t c = 0; c < chunkCount; ++c) {
+      const size_t start = c * units.size() / chunkCount;
+      const size_t end = (c + 1) * units.size() / chunkCount;
+      std::future<void> f = ats.submitWithFuture(
+          phoenix::v7::TaskModule::Encoder,
+          phoenix::v7::TaskPriority::High,
+          [&, start, end]() { projectAndScore(start, end); },
+          "fuseAttention_chunk");
+      futures.push_back(std::move(f));
+    }
+
+    bool parallelOk = true;
+    for (auto &f : futures) {
+      try {
+        f.get();
+      } catch (...) {
+        parallelOk = false;
+      }
+    }
+
+    if (!parallelOk) {
+      projectAndScore(0, units.size());
+    }
+  } else {
+    projectAndScore(0, units.size());
+  }
+
   float maxScore = -std::numeric_limits<float>::infinity();
-  for (const auto &u : units) {
-    std::vector<float> uv = projectToDimension(u.semanticVector, dim);
-    uv = normalizeVector(uv);
-    float score = cosineSimilarity(q, uv);
-    weights.push_back(score);
-    maxScore = std::max(maxScore, score);
+  for (float w : weights) {
+    maxScore = std::max(maxScore, w);
   }
 
   /* Numerically stable softmax. */
@@ -354,7 +505,7 @@ SemanticUnit fuseAttention(const SemanticUnit &query,
   }
 
   SemanticUnit out;
-  out.semanticVector.resize(dim, 0.0f);
+  out.semanticVector.resize(targetDim, 0.0f);
   size_t bestIdx = 0;
   float bestWeight = weights[0];
   for (size_t i = 0; i < units.size(); ++i) {
@@ -362,8 +513,8 @@ SemanticUnit fuseAttention(const SemanticUnit &query,
       bestWeight = weights[i];
       bestIdx = i;
     }
-    std::vector<float> uv = projectToDimension(units[i].semanticVector, dim);
-    for (size_t d = 0; d < dim; ++d) {
+    const auto &uv = projected[i];
+    for (size_t d = 0; d < targetDim; ++d) {
       out.semanticVector[d] += uv[d] * weights[i];
     }
   }
@@ -380,6 +531,12 @@ SemanticUnit fuseAttention(const SemanticUnit &query,
   }
   out.metadata["fusion"] = "attention";
   return out;
+}
+
+SemanticUnit fuseAttention(const SemanticUnit &query,
+                           const std::vector<SemanticUnit> &units,
+                           size_t targetDim) {
+  return fuseAttention(query, units, targetDim, 0x61727468U);
 }
 
 SemanticMemory::SemanticMemory(size_t reserveCount) {
@@ -429,11 +586,13 @@ std::vector<std::pair<SemanticUnit, float>> SemanticMemory::retrieve(
     float sim = cosineSimilarity(query.semanticVector, u.semanticVector);
     scored.emplace_back(u, sim);
   }
-  std::sort(scored.begin(), scored.end(),
-            [](const auto &a, const auto &b) { return a.second > b.second; });
-  if (scored.size() > topK) {
-    scored.resize(topK);
-  }
+  // Partial sort returns the top-K (descending) in O(N log K) instead of the
+  // previous full O(N log N) sort — an asymptotic win whenever topK << N.
+  const size_t k = std::min(topK, scored.size());
+  std::partial_sort(scored.begin(), scored.begin() + static_cast<std::ptrdiff_t>(k),
+                    scored.end(),
+                    [](const auto &a, const auto &b) { return a.second > b.second; });
+  scored.resize(k);
   return scored;
 }
 

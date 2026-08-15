@@ -811,15 +811,26 @@ class VideoHbdnnModel : public VideoModel {
   mutable std::string lastError_;
 };
 
+static bool bpuModelAvailable(const std::string &variantId) {
+  using phoenix::deployment::LocalBackendType;
+  std::error_code ec;
+  if (!rdk_x5_bpu::available()) return false;
+  // Compiled BPU models are stored in the legacy ijepa tree; newer end-to-end
+  // .bin exports may land in additive_jepa.  Accept either.
+  auto ijepaDir = std::filesystem::path("runtime_store") / "models" / "ijepa" / variantId;
+  auto additiveBpuDir = std::filesystem::path("runtime_store") / "models" / "additive_jepa" / variantId;
+  return std::filesystem::is_regular_file(ijepaDir / "best.bin", ec) ||
+         std::filesystem::is_regular_file(ijepaDir / "model_encoder.bin", ec) ||
+         std::filesystem::is_regular_file(ijepaDir / "model_decoder.bin", ec) ||
+         std::filesystem::is_regular_file(additiveBpuDir / "best.bin", ec) ||
+         std::filesystem::is_regular_file(additiveBpuDir / "model_encoder.bin", ec) ||
+         std::filesystem::is_regular_file(additiveBpuDir / "model_decoder.bin", ec);
+}
+
 static phoenix::deployment::LocalBackendType detectLocalBackend(const std::string &variantId) {
   using phoenix::deployment::LocalBackendType;
   std::error_code ec;
-  auto bpuDir = std::filesystem::path("runtime_store") / "models" / "ijepa" / variantId;
-  if (rdk_x5_bpu::available() &&
-      (std::filesystem::is_regular_file(bpuDir / "model_encoder.bin", ec) ||
-       std::filesystem::is_regular_file(bpuDir / "model_decoder.bin", ec))) {
-    return LocalBackendType::Bpu;
-  }
+  if (bpuModelAvailable(variantId)) return LocalBackendType::Bpu;
   auto additiveDir = std::filesystem::path("runtime_store") / "models" / "additive_jepa" / variantId;
   if (std::filesystem::is_regular_file(additiveDir / "best.onnx", ec)) {
     return LocalBackendType::Cpu;
@@ -867,11 +878,17 @@ std::unique_ptr<VideoModel> createVideoModel(
   if (backend == phoenix::deployment::LocalBackendType::Bpu) {
 #if PHOENIX_EDGE_IMAGE_ENABLED
     auto hbdnn = std::make_unique<VideoHbdnnModel>(*v, targetDim);
-    return hbdnn;
-#else
-    return std::make_unique<VideoUnavailableModel>(
-        *v, targetDim, "local BPU image backend is disabled at compile time");
+    if (hbdnn->status().value("ready", false)) return hbdnn;
 #endif
+    // Graceful fallback: if the BPU runtime or compiled .bin is unavailable,
+    // use the local ONNX model so the deployment is still feasible.
+    std::error_code ec;
+    auto additiveDir = std::filesystem::path("runtime_store") / "models" / "additive_jepa" / imageWeightsDir(v->id);
+    if (std::filesystem::is_regular_file(additiveDir / "best.onnx", ec)) {
+      return std::make_unique<VideoLocalOnnxModel>(*v, targetDim, false);
+    }
+    return std::make_unique<VideoUnavailableModel>(
+        *v, targetDim, "local BPU image backend is unavailable and no ONNX fallback found");
   }
 
   if (backend == phoenix::deployment::LocalBackendType::Cpu ||

@@ -112,6 +112,28 @@ std::vector<float> projectToDimension(const std::vector<float> &v,
                                       unsigned int seed = 0x61727468U);
 
 /**
+ * @brief Project a vector to a target dimension using a sparse Johnson-
+ *        Lindenstrauss (Achlioptas-style) random projection.
+ *
+ * This is the implementation of the algorithm.md 17.6.3 recommendation:
+ * for large source*target it reduces the cost from O(source*target) to
+ * O(source*nonZeros) while preserving distances with high probability.
+ * Each source dimension is mapped to nonZerosPerColumn distinct target rows
+ * with +/- 1/sqrt(nonZerosPerColumn) values.
+ *
+ * @param v Input vector.
+ * @param targetDim Desired output dimension.  If 0, the input dimension is kept.
+ * @param nonZerosPerColumn Number of non-zero entries per column.  If 0, a
+ *        default of max(3, targetDim/3) is used.
+ * @param seed Additional seed for reproducibility.
+ * @return Projected vector.
+ */
+std::vector<float> projectToDimensionSparse(const std::vector<float> &v,
+                                            size_t targetDim,
+                                            size_t nonZerosPerColumn = 0,
+                                            unsigned int seed = 0x61727468U);
+
+/**
  * @brief Element-wise addition of two semantic units after projection.
  */
 SemanticUnit fuseAdd(const SemanticUnit &a,

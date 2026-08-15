@@ -1394,15 +1394,24 @@ class AudioLocalOnnxModel : public AudioModel {
   int conceptDim_ = 0;
 };
 
+static bool bpuModelAvailable(const std::string &variantId) {
+  using phoenix::deployment::LocalBackendType;
+  std::error_code ec;
+  if (!rdk_x5_bpu::available()) return false;
+  auto ijepaDir = std::filesystem::path("runtime_store") / "models" / "ijepa" / variantId;
+  auto additiveBpuDir = std::filesystem::path("runtime_store") / "models" / "additive_jepa" / variantId;
+  return std::filesystem::is_regular_file(ijepaDir / "best.bin", ec) ||
+         std::filesystem::is_regular_file(ijepaDir / "model_encoder.bin", ec) ||
+         std::filesystem::is_regular_file(ijepaDir / "model_decoder.bin", ec) ||
+         std::filesystem::is_regular_file(additiveBpuDir / "best.bin", ec) ||
+         std::filesystem::is_regular_file(additiveBpuDir / "model_encoder.bin", ec) ||
+         std::filesystem::is_regular_file(additiveBpuDir / "model_decoder.bin", ec);
+}
+
 static phoenix::deployment::LocalBackendType detectLocalBackend(const std::string &variantId) {
   using phoenix::deployment::LocalBackendType;
   std::error_code ec;
-  auto bpuDir = std::filesystem::path("runtime_store") / "models" / "ijepa" / variantId;
-  if (rdk_x5_bpu::available() &&
-      (std::filesystem::is_regular_file(bpuDir / "model_encoder.bin", ec) ||
-       std::filesystem::is_regular_file(bpuDir / "model_decoder.bin", ec))) {
-    return LocalBackendType::Bpu;
-  }
+  if (bpuModelAvailable(variantId)) return LocalBackendType::Bpu;
   auto additiveDir = std::filesystem::path("runtime_store") / "models" / "additive_jepa" / variantId;
   if (std::filesystem::is_regular_file(additiveDir / "best.onnx", ec)) {
     return LocalBackendType::Cpu;
@@ -1461,12 +1470,16 @@ std::unique_ptr<AudioModel> createAudioModel(
 #if PHOENIX_EDGE_SPEECH_ENABLED
     auto hbdnn = std::make_unique<AudioHbdnnModel>(*v, targetDim);
     if (hbdnn->status().value("ready", false)) return hbdnn;
-    return std::make_unique<AudioUnavailableModel>(
-        *v, targetDim, "local BPU audio model is not ready (missing .bin or BPU runtime)");
-#else
-    return std::make_unique<AudioUnavailableModel>(
-        *v, targetDim, "local BPU audio backend is disabled at compile time");
 #endif
+    // Graceful fallback: if the BPU runtime or compiled .bin is unavailable,
+    // use the local ONNX model so the deployment is still feasible.
+    std::error_code ec;
+    auto additiveDir = std::filesystem::path("runtime_store") / "models" / "additive_jepa" / speechIjepaDir(variantId);
+    if (std::filesystem::is_regular_file(additiveDir / "best.onnx", ec)) {
+      return std::make_unique<AudioLocalOnnxModel>(*v, targetDim, false);
+    }
+    return std::make_unique<AudioUnavailableModel>(
+        *v, targetDim, "local BPU audio backend is unavailable and no ONNX fallback found");
   }
 
   if (backend == phoenix::deployment::LocalBackendType::Cpu ||

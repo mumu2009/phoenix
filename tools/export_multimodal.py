@@ -4,13 +4,16 @@ Usage:
     python tools/export_multimodal.py \
         --modality speech|image \
         --checkpoint checkpoints/audio/best.pt \
-        --out-dir runtime_store/models/ijepa/my_variant
+        --out-dir runtime_store/models/additive_jepa/my_variant
 
 The script reads the architecture metadata saved by the training scripts,
 reconstructs the encoder/decoder, and writes:
-  - model_encoder.onnx
+  - best.onnx            (fused encoder/decoder for C++ local ONNX)
+  - model_encoder.onnx   (encoder base for BPU compilation)
   - model_decoder.onnx
-  - calibration_encoder/   (bin float32 files)
+  - model_encoder_head.onnx (image projection head, where applicable)
+  - encoder_head.json    (image head weights for BPU runtime)
+  - calibration_encoder/ (bin float32 files)
   - calibration_decoder/
   - model.manifest.json
 """
@@ -19,7 +22,13 @@ import argparse
 import json
 import os
 import struct
+import sys
 from pathlib import Path
+
+# Ensure tools/ is importable when run as a script from the project root.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import export_runtime_models
 
 import numpy as np
 import torch
@@ -98,6 +107,12 @@ def export_speech(ckpt, out_dir: Path):
             'blocks': blocks,
             'checkpoint': str(args.checkpoint),
         }, f, indent=2)
+
+    export_runtime_models.deploy_audio_onnx(
+        model, out_dir,
+        deploy_root=export_runtime_models.DEFAULT_DEPLOY_ROOT,
+        concept=concept, chunk_size=SPEECH_CHUNK, decoder_output_samples=SPEECH_TARGET,
+    )
     print(f'[export] speech ONNX -> {out_dir}')
 
 
@@ -194,6 +209,12 @@ def export_image(ckpt, out_dir: Path, calib_images=None, calib_count=10):
             'dec_depth': dec_depth,
             'checkpoint': str(args.checkpoint),
         }, f, indent=2)
+
+    export_runtime_models.deploy_video_onnx(
+        model, out_dir,
+        deploy_root=export_runtime_models.DEFAULT_DEPLOY_ROOT,
+        concept=concept, resolution=resolution, feature_dim=feature_dim,
+    )
     print(f'[export] image ONNX -> {out_dir}')
 
 

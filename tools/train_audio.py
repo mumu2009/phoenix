@@ -18,8 +18,14 @@ import json
 import math
 import os
 import random
+import sys
 import time
 from pathlib import Path
+
+# Ensure tools/ is importable when run as a script from the project root.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import export_runtime_models
 
 os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
 
@@ -221,6 +227,14 @@ def export_onnx(model, out_dir, concept=128):
             dynamo=False,
             dynamic_axes={'concept': {0: 'batch'}, 'reconstruction': {0: 'batch'}},
         )
+
+    # Also deploy fused encoder/decoder as best.onnx for C++ local ONNX.
+    export_runtime_models.deploy_audio_onnx(
+        model, out_dir,
+        deploy_root=export_runtime_models.DEFAULT_DEPLOY_ROOT,
+        concept=concept, chunk_size=CHUNK, decoder_output_samples=TARGET,
+    )
+
     print(f'[export] ONNX -> {out_dir}')
 
 

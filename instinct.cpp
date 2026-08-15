@@ -3,12 +3,64 @@
 
 #include "instinct.hpp"
 #include <algorithm>
-#include <array>
 #include <cmath>
-#include <numeric>
 
 namespace phoenix {
 namespace instinct {
+
+namespace {
+
+/**
+ * @brief Soft affinity between a sensation type and an instinct type.
+ *
+ * Primary binding (per the v7.0 design's primal-sensation/instinct table)
+ * maps to 1.0; biologically related secondary bindings map to intermediate
+ * values; unrelated pairs keep a small floor so no instinct is ever perfectly
+ * blind to any signal.  This replaces the previous hard 0/1 type match, which
+ * made e.g. the Survival instinct insensitive to Pain and Fatigue.
+ */
+float typeAffinity(primal::SensationType s, InstinctType i) {
+    switch (i) {
+        case InstinctType::Survival:
+            switch (s) {
+                case primal::SensationType::Threat:      return 1.0f;
+                case primal::SensationType::Fatigue:     return 0.6f;
+                case primal::SensationType::Pain:        return 0.5f;
+                case primal::SensationType::Temperature: return 0.4f;
+                case primal::SensationType::Hunger:      return 0.3f;
+                default: return 0.1f;
+            }
+        case InstinctType::Exploration:
+            switch (s) {
+                case primal::SensationType::Novelty:   return 1.0f;
+                case primal::SensationType::Pleasure:  return 0.4f;
+                default: return 0.15f;
+            }
+        case InstinctType::Avoidance:
+            switch (s) {
+                case primal::SensationType::Pain:        return 1.0f;
+                case primal::SensationType::Threat:      return 0.8f;
+                case primal::SensationType::Temperature: return 0.3f;
+                default: return 0.1f;
+            }
+        case InstinctType::Affiliation:
+            switch (s) {
+                case primal::SensationType::SocialIsolation: return 1.0f;
+                case primal::SensationType::Pleasure:        return 0.5f;
+                default: return 0.1f;
+            }
+        case InstinctType::Curiosity:
+            switch (s) {
+                case primal::SensationType::Novelty:   return 1.0f;
+                case primal::SensationType::Pleasure:  return 0.3f;
+                default: return 0.15f;
+            }
+        default:
+            return 0.0f;
+    }
+}
+
+}  // namespace
 
 std::string Instinct::typeToString(InstinctType t) {
     switch (t) {
@@ -92,11 +144,18 @@ void InstinctEngine::registerInstinct(const Instinct &i) {
     currentActivations_.push_back(i.activation);
 }
 
-float InstinctEngine::sensationInstinctScore(const primal::PrimalSensation &s,
-                                              const Instinct &instinct) const {
-    float typeMatch = (s.type == instinct.targetSensation) ? 1.0f : 0.0f;
-    float valenceMatch = 1.0f - std::abs(s.valence - (instinct.benefitWeight - instinct.harmWeight));
-    return typeMatch * s.intensity * (valenceMatch * 0.5f + 0.5f);
+InstinctEngine::Appraisal InstinctEngine::appraise(
+    const primal::PrimalSensation &s, const Instinct &instinct) const {
+    // Goal-conduciveness appraisal (Smith & Lazarus, 1990): a sensation is
+    // beneficial in proportion to its positive valence and harmful in
+    // proportion to its negative valence, weighted by intensity, by how
+    // attuned the instinct is to that sensation type, and by the instinct's
+    // pursue/avoid sensitivity.
+    const float drive = s.intensity * typeAffinity(s.type, instinct.type);
+    Appraisal a;
+    a.benefit = drive * std::max(0.0f, s.valence) * instinct.benefitWeight;
+    a.harm = drive * std::max(0.0f, -s.valence) * instinct.harmWeight;
+    return a;
 }
 
 std::vector<float> InstinctEngine::currentActivations() const {
@@ -112,12 +171,13 @@ void InstinctEngine::update(const std::vector<primal::PrimalSensation> &sensatio
 
     for (size_t i = 0; i < instincts_.size(); ++i) {
         const auto &instinct = instincts_[i];
-        float sensationScore = 0.0f;
+        float sensationDrive = 0.0f;
         for (const auto &s : sensations) {
-            sensationScore += sensationInstinctScore(s, instinct);
+            const Appraisal a = appraise(s, instinct);
+            sensationDrive += a.benefit + a.harm;
         }
-        /* v7.0 dynamic regulation: current = base * (1 + sensationScore) * decay */
-        float current = instinct.activation * (1.0f + sensationScore) * decay;
+        /* v7.0 dynamic regulation: current = base * (1 + drive) * decay */
+        float current = instinct.activation * (1.0f + sensationDrive) * decay;
         currentActivations_[i] = std::clamp(current, 0.0f, 1.0f);
     }
 }
@@ -125,104 +185,74 @@ void InstinctEngine::update(const std::vector<primal::PrimalSensation> &sensatio
 BenefitHarmResult InstinctEngine::evaluate(
     const std::vector<primal::PrimalSensation> &sensations,
     float temperature) const {
+    (void)temperature;  // Reserved: Boltzmann inverse-temperature (see below).
     BenefitHarmResult result;
     float benefit = 0.0f;
     float harm = 0.0f;
-    float totalActivation = 0.0f;
-    std::unordered_map<std::string, float> actionScores;
+    std::unordered_map<std::string, float> actionUtility;
 
     for (size_t i = 0; i < instincts_.size(); ++i) {
         const auto &instinct = instincts_[i];
-        float score = 0.0f;
+        float bi = 0.0f;
+        float hi = 0.0f;
         for (const auto &s : sensations) {
-            score += sensationInstinctScore(s, instinct);
+            const Appraisal a = appraise(s, instinct);
+            bi += a.benefit;
+            hi += a.harm;
         }
-        score *= currentActivations_[i];
-        if (temperature > 0.0f) {
-            score = std::pow(score + 1e-6f, 1.0f / temperature);
-        }
-        benefit += score * instinct.benefitWeight;
-        harm += score * instinct.harmWeight;
-        totalActivation += score;
+        const float act = currentActivations_[i];
+        benefit += bi * act;
+        harm += hi * act;
 
+        // Each instinct votes for its action bias with its own net utility.
         if (!instinct.actionBias.empty()) {
-            actionScores[instinct.actionBias] += score;
+            actionUtility[instinct.actionBias] += (bi - hi) * act;
         }
     }
 
-    float denom = totalActivation + 1e-6f;
+    // Normalized, bounded benefit/harm/utility.  Both benefit and harm live in
+    // [0, 1]; netUtility is the signed normalised difference in [-1, 1].
+    const float denom = benefit + harm + 1e-6f;
     result.benefitScore = std::clamp(benefit / denom, 0.0f, 1.0f);
     result.harmScore = std::clamp(harm / denom, 0.0f, 1.0f);
     result.netUtility = std::clamp((benefit - harm) / denom, -1.0f, 1.0f);
 
-    if (!actionScores.empty()) {
-        auto best = std::max_element(
-            actionScores.begin(), actionScores.end(),
-            [](const auto &a, const auto &b) { return a.second < b.second; });
-        result.recommendedAction = best->first;
+    // Action selection.  The deterministic recommendation is the argmax of the
+    // per-action net utility.  temperature is a Boltzmann inverse-temperature
+    // reserved for stochastic (sampling) action selection: as T -> 0 the policy
+    // concentrates on argmax, as T -> inf it approaches a uniform distribution.
+    // The argmax itself is temperature-invariant because softmax is monotonic.
+    if (!actionUtility.empty()) {
+        result.recommendedAction = std::max_element(
+            actionUtility.begin(), actionUtility.end(),
+            [](const auto &a, const auto &b) { return a.second < b.second; })->first;
     } else {
-        result.recommendedAction.clear();  // Do not synthesize explicit action words.
+        result.recommendedAction.clear();
     }
 
-    /* Compute the 8-dim emotion operation weight vector via a fixed linear
-       matrix applied to [benefit, harm, netUtility, abs(netUtility), activation].
-       This vector is not an explicit emotion state; it is a set of weights that
-       downstream modules (e.g. EmotionVocabWeightTable / logit-bias matrices)
-       apply as a latent signal, avoiding hard-coded emotional labels. */
-    static constexpr std::array<std::array<float, 5>, 8> kEmotionOperationMatrix = {{
-        {{ 0.00f,  0.00f,  1.00f,  0.00f,  0.00f }},
-        {{ 0.30f,  0.30f,  0.00f,  0.00f,  0.40f }},
-        {{ 0.00f,  0.00f,  0.00f,  1.00f,  0.00f }},
-        {{ 0.70f, -0.20f,  0.30f,  0.00f,  0.00f }},
-        {{ 0.60f, -0.30f,  0.40f,  0.00f,  0.10f }},
-        {{-0.20f,  0.80f,  0.00f,  0.00f,  0.20f }},
-        {{ 0.00f,  0.60f, -0.60f,  0.00f,  0.10f }},
-        {{ 0.10f,  0.10f,  0.00f,  0.30f,  0.50f }}
-    }};
-    const float absNet = std::abs(result.netUtility);
-    const float activationNorm = std::clamp(totalActivation, 0.0f, 1.0f);
-    const std::array<float, 5> input = {{
-        result.benefitScore, result.harmScore, result.netUtility, absNet, activationNorm
-    }};
-    result.driveVector.assign(8, 0.0f);
-    for (size_t i = 0; i < 8; ++i) {
-        float v = 0.0f;
-        for (size_t j = 0; j < 5; ++j) {
-            v += kEmotionOperationMatrix[i][j] * input[j];
-        }
-        result.driveVector[i] = std::clamp(v, -1.0f, 1.0f);
-    }
+    // Canonical appraisal -> 8-d drive vector (shared with the emotion module).
+    // Replaces the previous ad-hoc 8x5 fixed matrix.  See emotion::fromAppraisal
+    // and doc/v7.0/algorithm.md sections 7 and 15.
+    const emotion::EmotionTensor t =
+        emotion::fromAppraisal(result.benefitScore, result.harmScore);
+    result.driveVector = {t.valence, t.arousal, t.dominance, t.trust,
+                          t.joy, t.fear, t.anger, t.surprise};
 
     return result;
 }
 
 emotion::EmotionTensor InstinctEngine::driveToEmotion(const BenefitHarmResult &result) {
-    /* The driveVector holds the 8 operation weights produced by the fixed
-       linear matrix in evaluate().  Convert them into an EmotionTensor so
-       downstream modules can apply them as a latent signal to matrices such
-       as token/logit weight tables, without turning them into explicit words. */
-    emotion::EmotionTensor t;
+    // Reconstruct the 8-D emotion tensor from the drive vector when it is
+    // available.  This preserves any explicit drive-vector values (e.g. in
+    // unit tests) while still being lossless for vectors produced by
+    // emotion::fromAppraisal() in evaluate().
     if (result.driveVector.size() >= 8) {
-        t.valence = result.driveVector[0];
-        t.arousal = result.driveVector[1];
-        t.dominance = result.driveVector[2];
-        t.trust = result.driveVector[3];
-        t.joy = result.driveVector[4];
-        t.fear = result.driveVector[5];
-        t.anger = result.driveVector[6];
-        t.surprise = result.driveVector[7];
-    } else {
-        // Fallback: derive a neutral-ish tensor directly from scores.
-        t.valence = result.netUtility;
-        t.arousal = (result.benefitScore + result.harmScore) * 0.5f;
-        t.dominance = std::abs(result.netUtility);
-        t.trust = result.benefitScore;
-        t.joy = result.benefitScore;
-        t.fear = result.harmScore;
-        t.anger = result.netUtility < 0.0f ? -result.netUtility : 0.0f;
-        t.surprise = t.arousal;
+        return emotion::EmotionTensor(
+            result.driveVector[0], result.driveVector[1], result.driveVector[2],
+            result.driveVector[3], result.driveVector[4], result.driveVector[5],
+            result.driveVector[6], result.driveVector[7]);
     }
-    return t;
+    return emotion::fromAppraisal(result.benefitScore, result.harmScore);
 }
 
 BenefitHarmResult InstinctEngine::evaluateAction(

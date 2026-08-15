@@ -108,6 +108,16 @@ public:
 
     /**
      * @brief Evaluate sensations and return benefit/harm recommendation.
+     *
+     * Uses a goal-conduciveness appraisal (Smith & Lazarus, 1990): positive
+     * valence contributes benefit, negative valence contributes harm, each
+     * weighted by intensity, sensation/instinct affinity, and the instinct's
+     * pursue/avoid sensitivity.  The 8-d drive vector is produced by the
+     * canonical emotion::fromAppraisal mapping (no ad-hoc matrix).
+     *
+     * @param temperature Boltzmann inverse-temperature, reserved for stochastic
+     *                    action selection; the deterministic recommendation is
+     *                    the argmax and is temperature-invariant.
      */
     BenefitHarmResult evaluate(const std::vector<primal::PrimalSensation> &sensations,
                                float temperature = 1.0f) const;
@@ -130,12 +140,18 @@ public:
     static InstinctEngine defaultEngine();
 
 private:
+    /** Goal-conduciveness appraisal of a single sensation for an instinct. */
+    struct Appraisal {
+        float benefit = 0.0f;   /*!< Signed benefit contribution. */
+        float harm = 0.0f;      /*!< Signed harm contribution. */
+    };
+
     std::vector<Instinct> instincts_;
     std::vector<float> currentActivations_;       /*!< Runtime activation per instinct. */
     float activationDecayHalfLife_ = 60.0f;       /*!< Seconds for current activation to halve. */
 
-    float sensationInstinctScore(const primal::PrimalSensation &s,
-                                 const Instinct &instinct) const;
+    Appraisal appraise(const primal::PrimalSensation &s,
+                       const Instinct &instinct) const;
 };
 
 }  // namespace instinct

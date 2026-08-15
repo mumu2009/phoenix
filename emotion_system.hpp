@@ -168,6 +168,69 @@ struct EmotionTensor {
         };
     }
 };
+/**
+ * @brief Canonical PAD -> 8-dimension affect mapping.
+ *
+ * Grounds the 8-d emotion tensor in the Pleasure-Arousal-Dominance (PAD)
+ * model (Mehrabian & Russell, 1974) as the three core dimensions, and derives
+ * the five appraisal emotions (trust, joy, fear, anger, surprise) as documented
+ * functions of PAD per appraisal theory (Ortony, Clore & Collins, 1988;
+ * Smith & Lazarus, 1990).
+ *
+ * Let V = valence, A = arousal, D = dominance, each in [-1, 1]. Then:
+ *   valence   = V
+ *   arousal   = A
+ *   dominance = D
+ *   trust     = (V + D) / 2     // approach + control -> trust; else suspicion
+ *   joy       = (V + A) / 2     // approach + energy  -> joy;  else sadness
+ *   fear      = (-V - D) / 2    // threat  + submission -> fear; else courage
+ *   anger     = (-V + D) / 2    // threat  + control   -> anger; else calm
+ *   surprise  = A * (1 - |D|)   // energy x uncertainty  -> surprise
+ *
+ * All outputs lie in [-1, 1] (see doc/v7.0/algorithm.md section 15 for the
+ * boundedness proof).  The mapping is linear in (V, A, D) except for the |D|
+ * term in surprise, hence Lipschitz-continuous.
+ */
+inline EmotionTensor padToTensor(float valence, float arousal, float dominance) {
+    const float V = std::clamp(valence, -1.0f, 1.0f);
+    const float A = std::clamp(arousal, -1.0f, 1.0f);
+    const float D = std::clamp(dominance, -1.0f, 1.0f);
+    EmotionTensor t;
+    t.valence = V;
+    t.arousal = A;
+    t.dominance = D;
+    t.trust = (V + D) * 0.5f;
+    t.joy = (V + A) * 0.5f;
+    t.fear = (-V - D) * 0.5f;
+    t.anger = (-V + D) * 0.5f;
+    t.surprise = A * (1.0f - std::abs(D));
+    return t;
+}
+
+/**
+ * @brief Benefit/harm appraisal -> 8-dimension affect tensor.
+ *
+ * Maps a benefit-harm (趋利避害) appraisal to PAD and then to the 8-d tensor.
+ * Given benefit B and harm H in [0, 1]:
+ *   U = (B - H) / (B + H + eps)      // net utility, [-1, 1]
+ *   A = 2 * min(B + H, 1) - 1        // arousal energy mapped to [-1, 1]
+ * and dominance is set equal to U because the instinct layer carries no
+ * independent coping/blame signal (approach implies dominance, avoidance
+ * implies submission).  The result is padToTensor(U, A, U).
+ *
+ * This single canonical function replaces the previous ad-hoc 8x5 fixed
+ * matrix in InstinctEngine::evaluate().  See algorithm.md section 7/15 for
+ * the monotonicity and boundedness proofs.
+ */
+inline EmotionTensor fromAppraisal(float benefit, float harm) {
+    const float B = std::clamp(benefit, 0.0f, 1.0f);
+    const float H = std::clamp(harm, 0.0f, 1.0f);
+    const float eps = 1e-6f;
+    const float U = (B - H) / (B + H + eps);
+    const float A = 2.0f * std::min(B + H, 1.0f) - 1.0f;
+    return padToTensor(U, A, U);
+}
+
 
 /* Emotion state with temporal information */
 struct EmotionState {
@@ -289,7 +352,8 @@ public:
         bool enabled{true};                       /* Enable emotion system */
         std::string storageBackend{"sqlite"};     /* Storage backend type */
         std::string storagePath{"emotion_states.db"}; /* Storage path */
-        float emotionDecayRate{0.95f};            /* Emotion decay per turn */
+        float emotionDecayRate{0.95f};            /* Emotion decay per turn (retention of previous state) */
+        float homeostasisRate{0.05f};        /* Homeostatic pull toward baseline per turn */
         float emotionInfluence{0.3f};            /* How much emotion affects LLM */
         bool enableRuntimeFineTuning{true};       /* Enable runtime fine-tuning */
         int historyLength{10};                    /* How many emotion states to keep */

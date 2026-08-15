@@ -10,11 +10,15 @@
 
 #include "concept_matrix.hpp"
 
+#include "async_task_system.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <functional>
 #include <sstream>
+#include <thread>
+#include <vector>
 
 namespace phoenix {
 namespace conceptmatrix {
@@ -166,25 +170,98 @@ void ConceptMatrix::propagate(size_t steps) {
   std::lock_guard<std::mutex> lock(mutex_);
   for (size_t s = 0; s < steps; ++s) {
     std::unordered_map<uint64_t, float> boosts;
-    for (const auto &[k, unit] : units_) {
-      if (unit.confidence < config_.sparsityThreshold) continue;
-      auto [row, col] = conceptToPosition(unit.id);
-      for (int dr = -2; dr <= 2; ++dr) {
-        for (int dc = -2; dc <= 2; ++dc) {
-          if (dr == 0 && dc == 0) continue;
-          size_t nr = (row + dr + config_.rows) % config_.rows;
-          size_t nc = (col + dc + config_.cols) % config_.cols;
-          uint64_t nk = key(nr, nc);
-          auto it = units_.find(nk);
-          if (it == units_.end()) continue;
-          float sim = phoenix::multimodal::cosineSimilarity(unit.semanticVector,
-                                                            it->second.semanticVector);
-          if (sim > 0.2f) {
-            boosts[nk] += unit.confidence * sim * 0.25f;
+
+    using UnitPtr =
+        const std::pair<const uint64_t, phoenix::multimodal::SemanticUnit> *;
+    std::vector<UnitPtr> allUnits;
+    allUnits.reserve(units_.size());
+    for (const auto &kv : units_) {
+      allUnits.push_back(&kv);
+    }
+
+    // Gather boosts for a contiguous range of units into `out`.
+    // Each unit's 24-neighbour scan is independent and only reads `units_`.
+    // `begin` and `end` are pointers into the `allUnits` array, not into the
+    // unordered_map (which is not contiguous), so we dereference once.
+    auto gatherBoosts = [this](const UnitPtr *begin, const UnitPtr *end,
+                               std::unordered_map<uint64_t, float> &out) {
+      const auto &unitsC = this->units_;
+      for (const UnitPtr *p = begin; p != end; ++p) {
+        const auto &unit = (*p)->second;
+        if (unit.confidence < this->config_.sparsityThreshold) continue;
+        auto [row, col] = this->conceptToPosition(unit.id);
+        for (int dr = -2; dr <= 2; ++dr) {
+          for (int dc = -2; dc <= 2; ++dc) {
+            if (dr == 0 && dc == 0) continue;
+            size_t nr = (row + dr + this->config_.rows) % this->config_.rows;
+            size_t nc = (col + dc + this->config_.cols) % this->config_.cols;
+            uint64_t nk = this->key(nr, nc);
+            auto it = unitsC.find(nk);
+            if (it == unitsC.end()) continue;
+            float sim = phoenix::multimodal::cosineSimilarity(
+                unit.semanticVector, it->second.semanticVector);
+            if (sim > 0.2f) {
+              out[nk] += unit.confidence * sim * 0.25f;
+            }
+          }
+        }
+      }
+    };
+
+    const bool tryParallel = allUnits.size() > 16;
+    bool usedParallel = false;
+
+    const size_t workerCount =
+        std::max<size_t>(1, std::thread::hardware_concurrency());
+    const size_t chunkCount = std::min(allUnits.size(), workerCount);
+
+    if (tryParallel && chunkCount > 1) {
+      auto &ats = phoenix::v7::AsyncTaskSystem::global();
+      ats.start();
+
+      std::vector<std::unordered_map<uint64_t, float>> chunkBoosts(chunkCount);
+      std::vector<std::future<void>> futures;
+      futures.reserve(chunkCount);
+
+      for (size_t c = 0; c < chunkCount; ++c) {
+        const size_t start = c * allUnits.size() / chunkCount;
+        const size_t end = (c + 1) * allUnits.size() / chunkCount;
+        auto *local = &chunkBoosts[c];
+        std::future<void> f = ats.submitWithFuture(
+            phoenix::v7::TaskModule::Encoder,
+            phoenix::v7::TaskPriority::High,
+            [this, gatherBoosts, &allUnits, local, start, end]() {
+              gatherBoosts(&allUnits[start], &allUnits[end], *local);
+            },
+            "propagate_chunk");
+        futures.push_back(std::move(f));
+      }
+
+      bool ok = true;
+      for (auto &f : futures) {
+        try {
+          f.get();
+        } catch (...) {
+          ok = false;
+        }
+      }
+
+      if (ok) {
+        usedParallel = true;
+        for (const auto &local : chunkBoosts) {
+          for (const auto &kv : local) {
+            boosts[kv.first] += kv.second;
           }
         }
       }
     }
+
+    if (!usedParallel) {
+      gatherBoosts(allUnits.data(), allUnits.data() + allUnits.size(),
+                   boosts);
+    }
+
+    // Apply the accumulated boosts under the matrix mutex, sequential.
     for (const auto &[k, delta] : boosts) {
       auto it = units_.find(k);
       if (it != units_.end()) {

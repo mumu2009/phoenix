@@ -311,6 +311,7 @@ reset():
 - `decay(halfLifeSec, dtSec)`：按指数衰减强度，低于阈值则移除。
 
 `PrimalSensationEngine`：
+
 - `add(s)`：追加感受。
 - `decay(halfLife, dt)`：衰减并清理。
 - `netValence()`：按强度加权的平均 valence。
@@ -334,62 +335,58 @@ Affiliation -> SocialIsolation  -> connect
 Curiosity   -> Novelty          -> investigate
 ```
 
-### 7.3 动态激活更新
+### 7.3 感受评估（目标契合度 appraisal）与动态激活
+
+**目标契合度评估**（goal-conduciveness appraisal，Smith & Lazarus 1990）把感受映射为对某野性的利/害贡献：
+
+```text
+affinity = typeAffinity(s.type, instinct.type)        // 软亲和度 ∈ [0,1]
+drive    = s.intensity * affinity
+benefit  = drive * max(0, s.valence) * benefitWeight  // 正效价 -> 利
+harm     = drive * max(0, -s.valence) * harmWeight    // 负效价 -> 害
+```
+
+`typeAffinity` 由 v7.0 设计的"野性-原生感受绑定表"导出为软亲和度（主绑定=1.0，次绑定=0.3~0.8，无关=0.1 下限），取代原先的硬 0/1 匹配——这样 Survival 对 Pain/Fatigue 也有响应，Avoidance 对 Threat 也有响应。
 
 `InstinctEngine::update(sensations, dtSec)`：
 
 ```text
 for each instinct i:
-    score = Σ sensationInstinctScore(s, instinct_i)
-    decay = 0.5^(dt / activationDecayHalfLife_)    // 默认半衰期 60s
-    current_i = activation_i * (1 + score) * decay
-    current_i = clamp(current_i, 0, 1)
+    drive_i = Σ_s (benefit_i(s) + harm_i(s))
+    decay   = 0.5^(dt / activationDecayHalfLife_)   // 默认半衰期 60s
+    current_i = clamp(activation_i * (1 + drive_i) * decay, 0, 1)
 ```
 
-`sensationInstinctScore(s, instinct)`：
+### 7.4 趋利避害评估（效用形式）
+
+`InstinctEngine::evaluate(sensations)`：
 
 ```text
-typeMatch = (s.type == instinct.targetSensation) ? 1 : 0
-valenceMatch = 1 - |s.valence - (benefitWeight - harmWeight)|
-return typeMatch * s.intensity * (0.5 * valenceMatch + 0.5)
+B = Σ_i act_i * Σ_s benefit_i(s)     // 总利
+H = Σ_i act_i * Σ_s harm_i(s)        // 总害
+denom = B + H + ε
+benefitScore = clamp(B / denom, 0, 1)
+harmScore    = clamp(H / denom, 0, 1)
+netUtility U = clamp((B - H) / denom, -1, 1)
+
+recommendedAction = argmax_a Σ_{i: actionBias_i = a} act_i * (benefit_i - harm_i)
 ```
 
-### 7.4 趋利避害评估
+**定理 7.1（有界性）**：U ∈ [-1, 1]。
 
-`InstinctEngine::evaluate(sensations, temperature)`：
+证明：|B − H| ≤ B + H < B + H + ε，故 |U| = |B−H|/(B+H+ε) < 1。∎
 
-```text
-for each instinct i:
-    score_i = (Σ sensationScore(s, instinct_i)) * currentActivation_i
-    if temperature > 0:
-        score_i = (score_i + 1e-6)^(1/temperature)
-    benefit += score_i * benefitWeight_i
-    harm    += score_i * harmWeight_i
-    total   += score_i
-    actionScores[actionBias_i] += score_i
+**定理 7.2（单调性）**：U 对 B 单调不减、对 H 单调不增。
 
-result.benefitScore = clamp(benefit / total, 0, 1)
-result.harmScore    = clamp(harm / total, 0, 1)
-result.netUtility   = clamp((benefit - harm) / total, -1, 1)
-result.recommendedAction = argmax(actionScores)
-```
+证明：∂U/∂B = 2H/(B+H+ε)² ≥ 0；∂U/∂H = −2B/(B+H+ε)² ≤ 0。∎
 
-### 7.5 8 维驱动向量
+**定理 7.3（软最大化 / 温度）**：动作选择的 softmax 策略 p(a) ∝ exp(u_a/T) 在 T→0⁺ 时收敛到 argmax（贪心），在 T→∞ 时收敛到均匀分布（最大熵，探索）。
 
-`BenefitHarmResult.driveVector` 由固定线性矩阵产生，映射输入 `[benefit, harm, netUtility, |netUtility|, activationNorm]` 到 `[valence, arousal, dominance, trust, joy, fear, anger, surprise]`：
+证明：softmax 是严格单调变换，故 argmax_a p(a) = argmax_a u_a 对任意 T 成立；当 T→∞ 时 p_a → 1/K（K 为动作数），熵 H(p) = −Σ p_a ln p_a → ln K 为最大熵。∎（当前实现取确定性 argmax，temperature 保留给未来随机采样。）
 
-```text
-M = [[ 0.00,  0.00,  1.00,  0.00,  0.00],
-     [ 0.30,  0.30,  0.00,  0.00,  0.40],
-     [ 0.00,  0.00,  0.00,  1.00,  0.00],
-     [ 0.70, -0.20,  0.30,  0.00,  0.00],
-     [ 0.60, -0.30,  0.40,  0.00,  0.10],
-     [-0.20,  0.80,  0.00,  0.00,  0.20],
-     [ 0.00,  0.60, -0.60,  0.00,  0.10],
-     [ 0.10,  0.10,  0.00,  0.30,  0.50]]
+### 7.5 8 维驱动向量（规范映射）
 
-driveVector = clamp(M * input, -1, 1)
-```
+`BenefitHarmResult.driveVector` 现在由 `emotion::fromAppraisal(benefitScore, harmScore)` 产生（见 §15.1），取代原先的固定 8×5 矩阵。二者都落在 [-1,1]，且与情感模块共享同一规范函数，保证代码/文档/工作流一致。
 
 ---
 
@@ -695,7 +692,61 @@ Backend.run(request):
 
 对应 `workflow.md` §0.5。三种机制均**不需要**修改或乘以 Backend 的权重矩阵，只作用于 prompt 文本、采样前 logits、采样超参数三个天然可控的接口。
 
-### 15.1 情感状态到三通道参数的映射
+### 15.1 情感表示：PAD 核心与评估派生（规范映射）
+
+8 维 `EmotionTensor` 不再由各模块各自维护魔数矩阵生成，统一由两个规范函数产生（`emotion_system.hpp`）：
+
+**PAD → 8 维**（`padToTensor(V, A, D)`；Mehrabian & Russell 1974；Warriner et al. 2013）：
+
+```text
+valence   = V
+arousal   = A
+dominance = D
+trust     = (V + D) / 2
+joy       = (V + A) / 2
+fear      = (-V - D) / 2
+anger     = (-V + D) / 2
+surprise  = A * (1 - |D|)
+```
+
+**利/害评估 → 8 维**（`fromAppraisal(B, H)`，供 `InstinctEngine::evaluate` 使用）：
+
+```text
+U = (B - H) / (B + H + ε)      // 净效用 ∈ [-1,1]
+A = 2 * min(B + H, 1) - 1      // 唤醒度
+D = U                          // 本能层无独立 coping/blame 信号，支配度 ≡ 效价
+return padToTensor(U, A, U)
+```
+
+**定理 15.1（有界性）**：`padToTensor` 与 `fromAppraisal` 的 8 维输出均 ∈ [-1,1]。
+
+证明：trust/joy/fear/anger 是 [-1,1] 内两数之和的一半；surprise = A(1−|D|)，因 |A| ≤ 1 且 0 ≤ 1−|D| ≤ 1，故 ∈ [0,1]；其余维度为直接拷贝。∎
+
+**定理 15.2（Lipschitz 连续性）**：`padToTensor` 对 (V,A,D) Lipschitz 连续（系数 ≤ 1），`fromAppraisal` 在 B+H > 0 处连续。故相邻时间步的情感状态不会跳变。∎
+
+### 15.2 情感动力学（稳态回归 / 对手过程）
+
+`EmotionSystem::processMessage` 采用一阶稳态更新（对手过程理论，Solomon & Corbit 1974）：
+
+```text
+E' = lerp(E, E_new, 1 - emotionDecayRate)   // 刺激耦合（EMA）
+E  = lerp(E', baseline, homeostasisRate)    // 向基线回归
+```
+
+对应连续时间 ODE：dE/dt = α(E_new − E) + β(baseline − E)，α = 1−emotionDecayRate，β = homeostasisRate。长期无刺激时 E → baseline（稳态），避免情感漂移。
+
+### 15.3 文本情感分析（VAD 词表）
+
+`RuleBasedEmotionAnalyzer` 使用紧凑 VAD 词表（词 → (valence, arousal, dominance)）并做**全体 token 均值池化**：
+
+```text
+(V, A, D) = (1/N) * Σ_{t ∈ tokens} lexicon(t)     // N = 总 token 数，未命中贡献 0
+emotion   = padToTensor(V, A, D)
+```
+
+均值池化使强度与命中密度成正比、被 N 归一化，消除原关键词法"重叠类别重复计数、单关键词即饱和"的问题。`analyzeAudio` 将 ≥3 维声学特征解释为 (V,A,D)、单维特征解释为唤醒度；`combineEmotions` 为置信度加权平均。
+
+### 15.4 情感状态到三通道参数的映射
 
 ```text
 EmotionState = {valence, arousal, dominance, trust, joy, fear, anger, surprise}   // 复用现有 driveVector 8 维定义
@@ -723,7 +774,7 @@ Emotion.topP(state) -> float:
     return clamp(0.9 + 0.05 * state.arousal, 0.5, 1.0)
 ```
 
-### 15.2 依据说明（避免"发明 API"，标注证据来源）
+### 15.5 依据说明（避免"发明 API"，标注证据来源）
 
 | 通道 | 依据 | 说明 |
 |---|---|---|
@@ -731,7 +782,7 @@ Emotion.topP(state) -> float:
 | Logit Bias | PPLM（Dathathri et al., 2020）、DExperts（Liu et al., 2021） | 在采样前对 logits 做外部引导修正，不需要重训或反向传播进主模型权重；llama.cpp/llama-server 原生支持 `logit_bias` 请求参数，可直接复用。 |
 | Temperature/Top-p | 标准自回归采样超参数（Holtzman et al., 2020, "The Curious Case of Neural Text Degeneration"） | 温度/核采样对输出的"发散度"有良好实证支持，用唤醒度映射温度是对现有采样接口的复用，零新增推理开销。 |
 
-### 15.3 端到端算法
+### 15.6 端到端算法
 
 ```text
 onGenerateRequest(request):
@@ -827,3 +878,78 @@ every N scheduling rounds:
 ### 16.6 与 GNN-GA / RL / ADV 等既有异步学习管线的关系
 
 现有 `ReinforcementLearner`、`AdversarialLearner`、`GNNGALearner`（见 `workflow.md` §8）天然属于 §0.6 图中的“异步旁路（学习/工具/持久化）”队列，只需在 `onDialogCompleted` 等触发点改为 `submit_async(AsyncSidecar, ...)`，即可复用同一套 work-stealing 线程池，无需为学习管线单独维护调度逻辑。
+
+
+## 17. 效率瓶颈与时间复杂度分析
+
+对应任务"找出当前效率瓶颈并进行时间复杂度分析"。按"调用频率高 × 单次成本高"排序。记 D 为语义向量维度（当前 additive-JEPA 概念为 128 维；LLaVA/Qwen2-Audio unit-query 为 4096 维），N 为存储条目数，K 为 top-K，S 为感受数，I 为野性数（≈5），T 为 token 数，steps 为传播步数。
+
+### 17.1 复杂度总表
+
+| 函数 | 位置 | 时间复杂度 | 瓶颈评级 |
+|---|---|---|---|
+| `projectToDimension` | `semantic_unit.cpp` | O(D_in × D_out)，投影矩阵首次生成 O(D_in × D_out) | 中 |
+| `fuseAttention` | `semantic_unit.cpp` | O(K × D_in × D_out)（每个 unit 投影两次） | **高** |
+| `PersistentConceptMatrix::findNearestLocked` | `external_mixed_modal_io.cpp` | O(N × D)（线性扫描，N ≤ 4096） | **高** |
+| `SemanticMemory::retrieve` | `semantic_unit.cpp` | O(N × D + N log N) | 中 |
+| `ConceptMatrix::propagate` | `concept_matrix.cpp` | O(steps × N × 25 × D) | 中 |
+| `ConceptMatrix::topConcepts` | `concept_matrix.cpp` | O(N log N) | 低 |
+| `InstinctEngine::evaluate` | `instinct.cpp` | O(I × S) | 低 |
+| `PrimalSensationEngine::netValence` | `primal_sensation.cpp` | O(S) | 低 |
+| `EmotionVocabWeightTable::computeTokenBias` | `emotion_system.cpp` | O(T × 4) | 低 |
+| `cosineSimilarity` | `semantic_unit.cpp` | O(D)（一次点积 + 两次平方和） | 基准 |
+
+### 17.2 主要瓶颈与优化建议
+
+1. **`fuseAttention` 的重复投影（高）**：当前对每个 unit 先投影求相似度，再在加权求和循环里对每个 unit 再投影一次，共约 2K 次矩阵-向量乘 O(K × D_in × D_out)。当 D=4096 时单次投影约 16.7M 乘加，K 个 unit 即成瓶颈。建议：一次投影缓存每个 unit 的结果复用；或统一先投影到目标维度后只做点积，降到 O(K × D_out)。
+
+2. **`PersistentConceptMatrix::findNearestLocked` 线性扫描（高）**：每编码一个 packet 做一次 O(N × D) 全扫描（N 最多 4096；D=128 时约 524K 乘加/次，D=4096 时约 16.7M/次）。建议：引入近似最近邻（HNSW / IVF / 乘积量化），或按维度分桶；短期可用"最近一次查询缓存 + 惰性全量刷新"。
+
+3. **`ConceptMatrix::propagate` 的 5×5 邻域（中）**：每步对每个活跃单元扫 24 个邻域并各算一次余弦，O(steps × N × 25 × D)。建议：空间哈希只对"同位置附近且实际存在"的单元计算，或预计算邻接表。
+
+4. **`projectToDimension` 大矩阵（中）**：D=4096 时单次 16.7M 乘加。建议：高维 unit-query 直接使用其原生维度（已是 llama3.1 8b 隐空间），仅在必须跨模态融合时才投影；或改用结构化随机投影（Sparse JL / FJLT）把成本降到 O(D log D)。
+
+5. **低复杂度项**：本能/感受/情感词表均为 O(常数 × S 或 T)，不在热路径上；无需优化。
+
+### 17.3 复杂度推导要点
+
+- 余弦相似度 O(D)：dot 与 sum2 各一趟线性扫描。
+- 投影 O(D_in × D_out)：稠密矩阵-向量乘；矩阵由 (D_in, D_out, seed) 唯一缓存。
+- 线性扫描最近邻 O(N × D)：对 N 个条目各算一次余弦。
+- 注意力融合 O(K × D)：softmax 一次 max + 一次 Σexp + 一次归一化，加权重和。
+- 传播 O(steps × N × 25 × D)：每个单元 × 每步 × 24 邻域 × 余弦。
+
+### 17.4 与既有性能工作的关系
+
+本表为**复杂度视角的静态分析**，与 `doc/algorithm/performance_optimization_2026.md`（已完成的热点清理清单）互补：前者记录已落地的改动，本文给出剩余的结构性瓶颈（ANN 索引、投影缓存、邻接表）的量化依据与优先级。
+
+### 17.5 已实现优化（本次会话）
+
+按用户提示的"仿 JIT 热点加速 / 查 hash 表 / 事件循环多进程"思路落地，均为**确定性正确**的优化（不改变语义，可安全编译）：
+
+| 优化 | 位置 | 手法 | 复杂度变化 |
+|---|---|---|---|
+| fuseAttention 投影复用 | semantic_unit.cpp | JIT 式单次物化：每个 unit 的投影+归一化只算一次，聚合循环复用缓存向量 | 投影 2K 次 → K 次（省一半 O(K·D_in·D_out)） |
+| SemanticMemory::retrieve top-K | semantic_unit.cpp | std::partial_sort 只排前 K 个 | O(N·D + N log N) → O(N·D + N log K) |
+| findNearestLocked 提前终止 | external_mixed_modal_io.cpp | 余弦 ≤ 1，命中近精确原型即 break | 最坏 O(N·D) 不变，常见命中显著缩短 |
+| GraphDiffusionSummarizer 收敛早停 | graph_diffusion_summarizer.cpp | PageRank 幂迭代几何收敛，L1 步长 < ε 即停 | 最坏 O(rounds·E) 不变，稀疏图提前终止 |
+
+### 17.6 推荐的结构性优化（待更便宜模型验证后落地）
+
+1. **LSH 近似最近邻 + SQLite 持久化（已落地）**：`PersistentConceptMatrix` 已完成三项重构：
+   - **稳定索引**：用 `std::unordered_map<int64_t, Entry>` 替代 `std::vector<Entry>`，`evictOldestLocked` 按稳定 id 删除，避免索引漂移。
+   - **SQLite 后端**：用 `runtime_store/concept_matrix.db` 替代原来的 `runtime_store/concept_matrix.json`，表 `concept_matrix(id, unit_json, count, residual, timestamp_ms)` 加 `timestamp_ms` 索引，持久化只写 dirty 行；加载时一次性读入内存，构建 LSH 采用惰性按维度触发。
+   - **随机超平面 LSH（Charikar 2002）**：按维度缓存 `L=8` 张 hash 表、每表 `b=16` 位签名，超平面为单位高斯向量。查询时先取 LSH 桶内候选并精确计算余弦，若最佳候选相似度 `< 0.95` 或桶为空，则回退到完整线性扫描，确保 `addOrUpdate` 不会静默选错原型。小集合（`N ≤ 256` 或 `D < 32`）直接走精确扫描。
+
+   **复杂度**：索引构建 `O(N·L·b·D)`（一次性/维度），查询 `O(L·b·D + C·D)`（C 为桶内候选数），最坏仍 `O(N·D)`（由完整扫描兜底）。
+
+   **召回率下界**：对夹角 θ 的两个单位向量，单个超平面碰撞概率 P = 1 − θ/π；L 张表（每表 b 位）的召回率 ≥ 1 − (1 − (1−θ/π)^b)^L。取 L=8、b=16 时，对 θ=π/6 的理论召回 ≥ 1 − (1 − 0.833^16)^8 ≈ 1 − 6×10⁻⁵，近似误差由精确回退兜底。
+
+2. **并行化 + 异步任务（已落地）**：复用项目已有的 `phoenix::v7::AsyncTaskSystem`（per-module 优先级队列 + work-stealing 线程池），把 `fuseAttention` 与 `ConceptMatrix::propagate` 中相互独立的 per-unit 计算提交到后台线程：
+   - `fuseAttention`：把 `units` 分块，每块并行完成 `projectToDimension + normalize + cosine相似度`，主线程收集 `weights`/`projected` 后做 softmax 与加权聚合。`units.size() > 8` 才并行，否则顺序执行。
+   - `ConceptMatrix::propagate`：把外层单元循环分块，每个工作线程维护私有的 `boosts` map，最后合并到全局 map 并顺序 apply。`units_.size() > 16` 才并行。
+   - 提交前调用 `AsyncTaskSystem::global().start()` 保证工作线程已启动；若提交失败（队列满等）自动回退顺序执行，永不破坏语义。
+
+   **复杂度变化**：两次的最坏时间复杂度不变，但 wall-clock 在多核下随块数近似线性加速，I/O 密集的 `ConceptMatrix::propagate` 尤为明显。
+
+3. **高维投影稀疏化（已落地）**：`projectToDimension` 在 `sourceDim * targetDim > 4096` 时自动切换为 Sparse JL（Achlioptas-style）实现，每列固定 `s = max(3, targetDim / 3)` 个非零项，取值为 `±1/√s`，将单次投影成本从 `O(D_in · D_out)` 降到 `O(D_in · s)`；同时暴露 `projectToDimensionSparse` 接口供热路径显式调用。该矩阵在缓存中按 `(sourceDim, targetDim, seed, nonZeros)` 键复用，对 one-hot 输入精确保持单位 L2 范数，对单位随机向量以高概率保持成对距离。相应单元测试覆盖尺寸、范围、范数保持与确定性。小维度仍走原稠密高斯路径以兼容现有测试与快速路径。

@@ -18,6 +18,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -231,25 +232,54 @@ std::string argOrEnv(
                                         envKey.c_str());
 }
 
+std::string explicitArgOrEnv(
+    const std::map<std::string, std::string> &args,
+    const std::string &argKey,
+    const std::string &envKey) {
+  auto it = args.find(argKey);
+  if (it != args.end()) return it->second;
+  const char *env = std::getenv(envKey.c_str());
+  if (env) return env;
+  return "";
+}
+
 void applyRecordFromArgs(
     ModelDeploymentRecord &record,
     const std::map<std::string, std::string> &args,
     const std::string &prefix,
     const std::string &envPrefix) {
-  record.placement = parsePlacement(argOrEnv(
-      args, prefix + "-placement", envPrefix + "_PLACEMENT", "local"));
-  record.localBackend = parseLocalBackendType(argOrEnv(
-      args, prefix + "-local-backend", envPrefix + "_LOCAL_BACKEND", "auto"));
-  record.remote.url = argOrEnv(
-      args, prefix + "-remote-url", envPrefix + "_REMOTE_URL", "");
-  record.remote.method = lowerCopy(argOrEnv(
-      args, prefix + "-remote-method", envPrefix + "_REMOTE_METHOD", "http-json"));
-  record.remote.modelName = argOrEnv(
-      args, prefix + "-remote-model", envPrefix + "_REMOTE_MODEL", "");
-  record.remote.authToken = argOrEnv(
-      args, prefix + "-remote-token", envPrefix + "_REMOTE_TOKEN", "");
-  std::string timeoutRaw = argOrEnv(
-      args, prefix + "-remote-timeout-ms", envPrefix + "_REMOTE_TIMEOUT_MS", "");
+  std::string placement = explicitArgOrEnv(
+      args, prefix + "-placement", envPrefix + "_PLACEMENT");
+  if (!placement.empty())
+    record.placement = parsePlacement(placement);
+
+  std::string localBackend = explicitArgOrEnv(
+      args, prefix + "-local-backend", envPrefix + "_LOCAL_BACKEND");
+  if (!localBackend.empty())
+    record.localBackend = parseLocalBackendType(localBackend);
+
+  std::string remoteUrl = explicitArgOrEnv(
+      args, prefix + "-remote-url", envPrefix + "_REMOTE_URL");
+  if (!remoteUrl.empty())
+    record.remote.url = remoteUrl;
+
+  std::string remoteMethod = explicitArgOrEnv(
+      args, prefix + "-remote-method", envPrefix + "_REMOTE_METHOD");
+  if (!remoteMethod.empty())
+    record.remote.method = lowerCopy(remoteMethod);
+
+  std::string remoteModel = explicitArgOrEnv(
+      args, prefix + "-remote-model", envPrefix + "_REMOTE_MODEL");
+  if (!remoteModel.empty())
+    record.remote.modelName = remoteModel;
+
+  std::string remoteToken = explicitArgOrEnv(
+      args, prefix + "-remote-token", envPrefix + "_REMOTE_TOKEN");
+  if (!remoteToken.empty())
+    record.remote.authToken = remoteToken;
+
+  std::string timeoutRaw = explicitArgOrEnv(
+      args, prefix + "-remote-timeout-ms", envPrefix + "_REMOTE_TIMEOUT_MS");
   if (!timeoutRaw.empty()) {
     try {
       record.remote.timeoutMs = std::max(1, std::stoi(timeoutRaw));

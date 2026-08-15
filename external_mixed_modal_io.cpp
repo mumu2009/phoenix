@@ -9,11 +9,20 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <limits>
+#include <numeric>
 #include <fstream>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
+
+#ifdef HAVE_SQLITE
+#include <sqlite3.h>
+#endif
 
 namespace phoenix {
 namespace io {
@@ -101,7 +110,7 @@ VideoModel &videoEncoder(size_t targetDim = 0) {
     int key = static_cast<int>(targetDim);
     auto it = cache.find(key);
     if (it != cache.end()) return *it->second;
-    auto model = createVideoEncoder("ijepa_vith14_1k", static_cast<int>(targetDim));
+    auto model = createVideoEncoder("video-encoder", static_cast<int>(targetDim));
     auto &ref = *model;
     cache.emplace(key, std::move(model));
     return ref;
@@ -114,7 +123,7 @@ VideoModel &videoDecoder(size_t targetDim = 0) {
     int key = static_cast<int>(targetDim);
     auto it = cache.find(key);
     if (it != cache.end()) return *it->second;
-    auto model = createVideoDecoder("ijepa_vith14_1k", static_cast<int>(targetDim));
+    auto model = createVideoDecoder("video-encoder", static_cast<int>(targetDim));
     auto &ref = *model;
     cache.emplace(key, std::move(model));
     return ref;
@@ -132,7 +141,7 @@ AudioModel &audioEncoder(size_t targetDim = 0) {
     int key = static_cast<int>(targetDim);
     auto it = cache.find(key);
     if (it != cache.end()) return *it->second;
-    auto model = createAudioEncoder("audio-16k", static_cast<int>(targetDim));
+    auto model = createAudioEncoder("audio-encoder", static_cast<int>(targetDim));
     auto &ref = *model;
     cache.emplace(key, std::move(model));
     return ref;
@@ -145,7 +154,7 @@ AudioModel &audioDecoder(size_t targetDim = 0) {
     int key = static_cast<int>(targetDim);
     auto it = cache.find(key);
     if (it != cache.end()) return *it->second;
-    auto model = createAudioDecoder("audio-16k", static_cast<int>(targetDim));
+    auto model = createAudioDecoder("audio-encoder", static_cast<int>(targetDim));
     auto &ref = *model;
     cache.emplace(key, std::move(model));
     return ref;
@@ -233,15 +242,20 @@ class PersistentConceptMatrix {
     };
 
     PersistentConceptMatrix() = default;
+    ~PersistentConceptMatrix() {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (!entries_.empty() || !deletedIds_.empty()) save();
+        closeDb();
+    }
 
     Result addOrUpdate(const phoenix::multimodal::SemanticUnit &query, bool pretrain) {
         if (query.semanticVector.empty()) return {query, 0.0f, "empty"};
-        load();
         std::lock_guard<std::mutex> lock(mu_);
+        load();
 
-        size_t nearestIdx = 0;
+        int64_t nearestId = -1;
         float sim = 0.0f;
-        const bool hasNearest = findNearestLocked(query, nearestIdx, sim);
+        const bool hasNearest = findNearestLocked(query, nearestId, sim);
         const float residual = hasNearest ? (1.0f - sim) : 1.0f;
 
         Result result;
@@ -251,26 +265,42 @@ class PersistentConceptMatrix {
             if (entries_.size() >= maxEntries_) evictOldestLocked();
             phoenix::multimodal::SemanticUnit u = query;
             if (u.timestampMs == 0) u.timestampMs = nowMs();
-            entries_.push_back({u, 1, residual});
-            result.unit = std::move(u);
+            int64_t id = nextId_++;
+            Entry e;
+            e.unit = std::move(u);
+            e.count = 1;
+            e.residual = residual;
+            e.id = id;
+            e.dirty = true;
+            maybeRecomputeAndAddToLsh(e, id);
+            auto it = entries_.emplace(id, std::move(e));
+            result.unit = it.first->second.unit;
             result.action = "added";
             ++additions_;
         } else {
-            auto &entry = entries_[nearestIdx];
-            const size_t n = entry.count;
-            std::vector<float> &stored = entry.unit.semanticVector;
-            const size_t dim = std::min(stored.size(), query.semanticVector.size());
-            for (size_t i = 0; i < dim; ++i) {
-                stored[i] = (stored[i] * static_cast<float>(n) + query.semanticVector[i]) / static_cast<float>(n + 1);
+            auto it = entries_.find(nearestId);
+            if (it != entries_.end()) {
+                Entry &entry = it->second;
+                removeFromLsh(entry, nearestId);
+                const size_t n = entry.count;
+                std::vector<float> &stored = entry.unit.semanticVector;
+                const size_t dim = std::min(stored.size(), query.semanticVector.size());
+                for (size_t i = 0; i < dim; ++i) {
+                    stored[i] = (stored[i] * static_cast<float>(n) + query.semanticVector[i]) / static_cast<float>(n + 1);
+                }
+                stored = phoenix::multimodal::normalizeVector(stored);
+                entry.unit.timestampMs = nowMs();
+                entry.unit.metadata["lastResidual"] = std::to_string(residual);
+                ++entry.count;
+                entry.residual = residual;
+                entry.dirty = true;
+                maybeRecomputeAndAddToLsh(entry, nearestId);
+                result.unit = entry.unit;
+                result.action = "updated";
+                ++updates_;
+            } else {
+                result.action = "error";
             }
-            stored = phoenix::multimodal::normalizeVector(stored);
-            entry.unit.timestampMs = nowMs();
-            entry.unit.metadata["lastResidual"] = std::to_string(residual);
-            ++entry.count;
-            entry.residual = residual;
-            result.unit = entry.unit;
-            result.action = "updated";
-            ++updates_;
         }
 
         if (pretrain || ++inferenceSaves_ % 32 == 0) save();
@@ -293,13 +323,23 @@ class PersistentConceptMatrix {
 
     void clear() {
         std::lock_guard<std::mutex> lock(mu_);
+        for (const auto &kv : entries_) {
+            deletedIds_.push_back(kv.first);
+        }
         entries_.clear();
+        lshCache_.clear();
+        nextId_ = 1;
         loaded_ = true;
         additions_ = 0;
         updates_ = 0;
         inferenceSaves_ = 0;
+#ifdef HAVE_SQLITE
+        save();
+#else
         std::error_code ec;
         std::filesystem::remove(path_, ec);
+        deletedIds_.clear();
+#endif
     }
 
  private:
@@ -307,36 +347,121 @@ class PersistentConceptMatrix {
         phoenix::multimodal::SemanticUnit unit;
         size_t count = 1;
         float residual = 0.0f;
+        int64_t id = 0;
+        std::vector<uint64_t> lshSignatures;
+        bool dirty = true;
     };
 
-    bool findNearestLocked(const phoenix::multimodal::SemanticUnit &query, size_t &idx, float &sim) const {
+    struct LSHIndex {
+        int dim = 0;
+        int L = 0;
+        int b = 0;
+        std::vector<std::vector<float>> hyperplanes;
+        std::vector<std::unordered_map<uint64_t, std::vector<int64_t>>> buckets;
+    };
+
+    static constexpr int kLshL = 8;
+    static constexpr int kLshBits = 16;
+    static constexpr size_t kBruteForceLimit = 256;
+    static constexpr size_t kDimBruteForceLimit = 32;
+    static constexpr float kExactThreshold = 1.0f - 1e-4f;
+    static constexpr float kLshFallbackThreshold = 0.95f;
+    static constexpr uint64_t kLshSeedA = 0x9E3779B97F4A7C15ULL;
+    static constexpr uint64_t kLshSeedB = 0x123456789ABCDEFULL;
+
+    bool bruteForceFindLocked(const phoenix::multimodal::SemanticUnit &query,
+                              int64_t &bestId,
+                              float &bestSim) const {
         const size_t dim = query.semanticVector.size();
         float best = -1.0f;
         bool found = false;
-        for (size_t i = 0; i < entries_.size(); ++i) {
-            if (entries_[i].unit.semanticVector.size() != dim) continue;
-            const float s = phoenix::multimodal::cosineSimilarity(query.semanticVector, entries_[i].unit.semanticVector);
+        int64_t foundId = -1;
+        for (const auto &kv : entries_) {
+            if (kv.second.unit.semanticVector.size() != dim) continue;
+            const float s = phoenix::multimodal::cosineSimilarity(query.semanticVector, kv.second.unit.semanticVector);
             if (s > best) {
                 best = s;
-                idx = i;
+                foundId = kv.first;
                 found = true;
+                if (s >= kExactThreshold) break;
             }
         }
-        sim = best;
+        if (found) {
+            bestId = foundId;
+            bestSim = best;
+        }
         return found;
+    }
+
+    bool findNearestLocked(const phoenix::multimodal::SemanticUnit &query,
+                           int64_t &bestId,
+                           float &bestSim) {
+        const size_t dim = query.semanticVector.size();
+        const size_t n = entries_.size();
+        if (n <= kBruteForceLimit || dim < kDimBruteForceLimit) {
+            return bruteForceFindLocked(query, bestId, bestSim);
+        }
+
+        LSHIndex *lsh = ensureLshIndex(dim);
+        if (!lsh) return bruteForceFindLocked(query, bestId, bestSim);
+
+        const std::vector<uint64_t> qSigs = computeLshSignatures(query.semanticVector, *lsh);
+        std::unordered_set<int64_t> candidates;
+        candidates.reserve(lsh->L * 16);
+        for (int l = 0; l < lsh->L; ++l) {
+            const auto &bucket = lsh->buckets[l];
+            auto it = bucket.find(qSigs[l]);
+            if (it != bucket.end()) {
+                for (int64_t id : it->second) candidates.insert(id);
+            }
+        }
+
+        if (candidates.empty()) {
+            return bruteForceFindLocked(query, bestId, bestSim);
+        }
+
+        float best = -1.0f;
+        bool found = false;
+        int64_t foundId = -1;
+        for (int64_t id : candidates) {
+            auto it = entries_.find(id);
+            if (it == entries_.end()) continue;
+            if (it->second.unit.semanticVector.size() != dim) continue;
+            const float s = phoenix::multimodal::cosineSimilarity(query.semanticVector, it->second.unit.semanticVector);
+            if (s > best) {
+                best = s;
+                foundId = id;
+                found = true;
+                if (s >= kExactThreshold) break;
+            }
+        }
+
+        if (!found || best < kLshFallbackThreshold) {
+            return bruteForceFindLocked(query, bestId, bestSim);
+        }
+
+        bestId = foundId;
+        bestSim = best;
+        return true;
     }
 
     void evictOldestLocked() {
         if (entries_.empty()) return;
-        size_t idx = 0;
-        uint64_t oldest = entries_[0].unit.timestampMs;
-        for (size_t i = 1; i < entries_.size(); ++i) {
-            if (entries_[i].unit.timestampMs < oldest) {
-                oldest = entries_[i].unit.timestampMs;
-                idx = i;
+        int64_t oldestId = -1;
+        uint64_t oldestTs = std::numeric_limits<uint64_t>::max();
+        for (const auto &kv : entries_) {
+            if (kv.second.unit.timestampMs < oldestTs) {
+                oldestTs = kv.second.unit.timestampMs;
+                oldestId = kv.first;
             }
         }
-        entries_.erase(entries_.begin() + idx);
+        if (oldestId < 0) return;
+        auto it = entries_.find(oldestId);
+        if (it != entries_.end()) {
+            removeFromLsh(it->second, oldestId);
+            deletedIds_.push_back(oldestId);
+            entries_.erase(it);
+        }
     }
 
     uint64_t nowMs() const {
@@ -346,58 +471,288 @@ class PersistentConceptMatrix {
                 .count());
     }
 
-    void load() {
-        if (loaded_) return;
-        loaded_ = true;
-        std::ifstream in(path_);
-        if (!in) return;
-        try {
-            nlohmann::json j;
-            in >> j;
-            if (!j.is_array()) return;
-            std::lock_guard<std::mutex> lock(mu_);
-            for (const auto &item : j) {
-                if (!item.is_object() || !item.contains("unit")) continue;
-                Entry e;
-                e.unit = phoenix::multimodal::SemanticUnit::fromJson(item["unit"]);
-                e.count = item.value("count", 1u);
-                e.residual = item.value("residual", 0.0f);
-                entries_.push_back(std::move(e));
+    std::vector<uint64_t> computeLshSignatures(const std::vector<float> &v,
+                                               const LSHIndex &lsh) const {
+        std::vector<uint64_t> sigs(lsh.L, 0);
+        for (int l = 0; l < lsh.L; ++l) {
+            uint64_t sig = 0;
+            const float *hp = lsh.hyperplanes[l].data();
+            for (int bit = 0; bit < lsh.b; ++bit) {
+                const float *p = hp + static_cast<size_t>(bit) * lsh.dim;
+                double dot = std::inner_product(v.begin(), v.end(), p, 0.0);
+                if (dot >= 0.0) sig |= (1ULL << bit);
             }
-        } catch (...) {
-            std::lock_guard<std::mutex> lock(mu_);
-            entries_.clear();
+            sigs[l] = sig;
+        }
+        return sigs;
+    }
+
+    LSHIndex *ensureLshIndex(size_t dim) {
+        auto it = lshCache_.find(dim);
+        if (it != lshCache_.end()) return it->second.get();
+        if (dim == 0) return nullptr;
+        auto lsh = std::make_unique<LSHIndex>();
+        lsh->dim = static_cast<int>(dim);
+        lsh->L = kLshL;
+        lsh->b = kLshBits;
+        lsh->hyperplanes.resize(lsh->L, std::vector<float>(lsh->b * lsh->dim));
+        lsh->buckets.resize(lsh->L);
+        uint64_t seed = static_cast<uint64_t>(dim) * kLshSeedA + kLshSeedB;
+        std::mt19937_64 rng(seed);
+        std::normal_distribution<double> normal(0.0, 1.0);
+        for (int l = 0; l < lsh->L; ++l) {
+            for (int bit = 0; bit < lsh->b; ++bit) {
+                float *p = lsh->hyperplanes[l].data() + static_cast<size_t>(bit) * lsh->dim;
+                double sum2 = 0.0;
+                for (int i = 0; i < lsh->dim; ++i) {
+                    double v = normal(rng);
+                    p[i] = static_cast<float>(v);
+                    sum2 += v * v;
+                }
+                if (sum2 == 0.0) {
+                    double inv = 1.0 / std::sqrt(static_cast<double>(dim));
+                    for (int i = 0; i < lsh->dim; ++i) p[i] = static_cast<float>(inv);
+                } else {
+                    double inv = 1.0 / std::sqrt(sum2);
+                    for (int i = 0; i < lsh->dim; ++i) p[i] *= static_cast<float>(inv);
+                }
+            }
+        }
+        for (auto &kv : entries_) {
+            if (kv.second.unit.semanticVector.size() != dim) continue;
+            kv.second.lshSignatures = computeLshSignatures(kv.second.unit.semanticVector, *lsh);
+            for (int l = 0; l < lsh->L; ++l) {
+                lsh->buckets[l][kv.second.lshSignatures[l]].push_back(kv.first);
+            }
+        }
+        LSHIndex *ptr = lsh.get();
+        lshCache_[dim] = std::move(lsh);
+        return ptr;
+    }
+
+    void maybeRecomputeAndAddToLsh(Entry &e, int64_t id) {
+        const size_t dim = e.unit.semanticVector.size();
+        auto it = lshCache_.find(dim);
+        if (it == lshCache_.end()) {
+            e.lshSignatures.clear();
+            return;
+        }
+        LSHIndex &lsh = *it->second;
+        e.lshSignatures = computeLshSignatures(e.unit.semanticVector, lsh);
+        for (int l = 0; l < lsh.L; ++l) {
+            lsh.buckets[l][e.lshSignatures[l]].push_back(id);
         }
     }
 
-    bool save() const {
+    void removeFromLsh(Entry &e, int64_t id) {
+        if (e.lshSignatures.empty()) return;
+        const size_t dim = e.unit.semanticVector.size();
+        auto it = lshCache_.find(dim);
+        if (it == lshCache_.end()) return;
+        LSHIndex &lsh = *it->second;
+        if (e.lshSignatures.size() != static_cast<size_t>(lsh.L)) return;
+        for (int l = 0; l < lsh.L; ++l) {
+            auto bucketIt = lsh.buckets[l].find(e.lshSignatures[l]);
+            if (bucketIt == lsh.buckets[l].end()) continue;
+            auto &vec = bucketIt->second;
+            auto idIt = std::find(vec.begin(), vec.end(), id);
+            if (idIt != vec.end()) {
+                *idIt = vec.back();
+                vec.pop_back();
+                if (vec.empty()) lsh.buckets[l].erase(bucketIt);
+            }
+        }
+        e.lshSignatures.clear();
+    }
+
+    void load() {
+        if (loaded_) return;
+#ifdef HAVE_SQLITE
+        if (!openDb()) {
+            loaded_ = true;
+            return;
+        }
+        const char *sql = "SELECT id, unit_json, count, residual, timestamp_ms FROM concept_matrix;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                int64_t id = sqlite3_column_int64(stmt, 0);
+                const unsigned char *uj = sqlite3_column_text(stmt, 1);
+                if (!uj) continue;
+                std::string ujStr = reinterpret_cast<const char*>(uj);
+                if (ujStr.empty()) continue;
+                int count = sqlite3_column_int(stmt, 2);
+                double residual = sqlite3_column_double(stmt, 3);
+                int64_t ts = sqlite3_column_int64(stmt, 4);
+                try {
+                    nlohmann::json j = nlohmann::json::parse(ujStr);
+                    Entry e;
+                    e.unit = phoenix::multimodal::SemanticUnit::fromJson(j);
+                    e.count = count > 0 ? static_cast<size_t>(count) : 1;
+                    e.residual = static_cast<float>(residual);
+                    e.id = id;
+                    e.dirty = false;
+                    if (e.unit.timestampMs == 0) {
+                        e.unit.timestampMs = ts > 0 ? static_cast<uint64_t>(ts) : nowMs();
+                    }
+                    entries_.emplace(id, std::move(e));
+                    if (id >= nextId_) nextId_ = id + 1;
+                } catch (...) {}
+            }
+            sqlite3_finalize(stmt);
+        }
+#else
+        std::ifstream in(path_);
+        if (!in) { loaded_ = true; return; }
+        try {
+            nlohmann::json j;
+            in >> j;
+            if (j.is_array()) {
+                for (const auto &item : j) {
+                    if (!item.is_object() || !item.contains("unit")) continue;
+                    Entry e;
+                    e.unit = phoenix::multimodal::SemanticUnit::fromJson(item["unit"]);
+                    e.count = item.value("count", 1u);
+                    e.residual = item.value("residual", 0.0f);
+                    e.id = nextId_++;
+                    e.dirty = false;
+                    entries_.emplace(e.id, std::move(e));
+                }
+            }
+        } catch (...) {
+            entries_.clear();
+        }
+#endif
+        loaded_ = true;
+    }
+
+    bool save() {
+#ifdef HAVE_SQLITE
+        if (!openDb()) return false;
+        const char *sql = "INSERT OR REPLACE INTO concept_matrix (id, unit_json, count, residual, timestamp_ms) VALUES (?, ?, ?, ?, ?);";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        execSql("BEGIN TRANSACTION;");
+        for (auto &kv : entries_) {
+            if (!kv.second.dirty) continue;
+            std::string uj = kv.second.unit.toJson().dump();
+            sqlite3_bind_int64(stmt, 1, kv.first);
+            sqlite3_bind_text(stmt, 2, uj.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(kv.second.count));
+            sqlite3_bind_double(stmt, 4, static_cast<double>(kv.second.residual));
+            sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(kv.second.unit.timestampMs));
+            sqlite3_step(stmt);
+            sqlite3_reset(stmt);
+            sqlite3_clear_bindings(stmt);
+            kv.second.dirty = false;
+        }
+        sqlite3_finalize(stmt);
+
+        if (!deletedIds_.empty()) {
+            const char *delSql = "DELETE FROM concept_matrix WHERE id=?;";
+            sqlite3_stmt *delStmt = nullptr;
+            if (sqlite3_prepare_v2(db_, delSql, -1, &delStmt, nullptr) == SQLITE_OK) {
+                for (int64_t id : deletedIds_) {
+                    sqlite3_bind_int64(delStmt, 1, id);
+                    sqlite3_step(delStmt);
+                    sqlite3_reset(delStmt);
+                    sqlite3_clear_bindings(delStmt);
+                }
+                sqlite3_finalize(delStmt);
+            }
+            deletedIds_.clear();
+        }
+        execSql("COMMIT;");
+        return true;
+#else
         std::error_code ec;
         std::filesystem::create_directories(std::filesystem::path(path_).parent_path(), ec);
         nlohmann::json j = nlohmann::json::array();
-        // Caller (addOrUpdate) already holds mu_, so do not re-lock.
-        for (const auto &e : entries_) {
+        for (const auto &kv : entries_) {
             nlohmann::json item;
-            item["unit"] = e.unit.toJson();
-            item["count"] = e.count;
-            item["residual"] = e.residual;
+            item["unit"] = kv.second.unit.toJson();
+            item["count"] = kv.second.count;
+            item["residual"] = kv.second.residual;
             j.push_back(item);
         }
         std::ofstream out(path_, std::ios::trunc);
         if (!out) return false;
         out << j.dump(2);
+        deletedIds_.clear();
         return static_cast<bool>(out);
+#endif
+    }
+
+#ifdef HAVE_SQLITE
+    bool openDb() {
+        if (db_) return true;
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(path_).parent_path(), ec);
+        int rc = sqlite3_open(path_.c_str(), &db_);
+        if (rc != SQLITE_OK) {
+            if (db_) {
+                sqlite3_close(db_);
+                db_ = nullptr;
+            }
+            return false;
+        }
+        execSql("PRAGMA journal_mode=WAL;");
+        execSql("PRAGMA synchronous=NORMAL;");
+        execSql("CREATE TABLE IF NOT EXISTS concept_matrix ("
+                "id INTEGER PRIMARY KEY,"
+                "unit_json TEXT NOT NULL,"
+                "count INTEGER NOT NULL,"
+                "residual REAL NOT NULL,"
+                "timestamp_ms INTEGER NOT NULL"
+                ");");
+        execSql("CREATE INDEX IF NOT EXISTS idx_concept_matrix_ts ON concept_matrix(timestamp_ms);");
+        return true;
+    }
+#endif
+
+    void closeDb() {
+#ifdef HAVE_SQLITE
+        if (db_) {
+            sqlite3_close(db_);
+            db_ = nullptr;
+        }
+#endif
+    }
+
+    bool execSql(const std::string &sql) {
+#ifdef HAVE_SQLITE
+        if (!db_) return false;
+        char *err = nullptr;
+        int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err);
+        if (rc != SQLITE_OK) {
+            if (err) sqlite3_free(err);
+            return false;
+        }
+        return true;
+#else
+        (void)sql;
+        return true;
+#endif
     }
 
     mutable std::mutex mu_;
-    std::vector<Entry> entries_;
+    std::unordered_map<int64_t, Entry> entries_;
+    std::unordered_map<size_t, std::unique_ptr<LSHIndex>> lshCache_;
+    std::vector<int64_t> deletedIds_;
+    int64_t nextId_ = 1;
     size_t maxEntries_ = 4096;
     float addThreshold_ = 0.5f;
     float learnThreshold_ = 0.2f;
+#ifdef HAVE_SQLITE
+    std::string path_ = "runtime_store/concept_matrix.db";
+    sqlite3 *db_ = nullptr;
+#else
     std::string path_ = "runtime_store/concept_matrix.json";
+#endif
     bool loaded_ = false;
     size_t additions_ = 0;
     size_t updates_ = 0;
-    mutable size_t inferenceSaves_ = 0;
+    size_t inferenceSaves_ = 0;
 };
 
 PersistentConceptMatrix gConceptMatrix;

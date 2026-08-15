@@ -91,6 +91,7 @@ DiffusionSummary GraphDiffusionSummarizer::summarize(
   }
 
   scores = seedDist;
+  const double kConvergenceTol = 1e-9;
   for (int r = 0; r < rounds; ++r) {
     std::vector<double> next(n, 0.0);
     for (size_t i = 0; i < n; ++i) {
@@ -99,7 +100,16 @@ DiffusionSummary GraphDiffusionSummarizer::summarize(
         next[edge.first] += damping * scores[i] * edge.second;
       }
     }
+    // Power iteration converges geometrically; stop early when the L1 step is
+    // negligible so lightly-connected graphs skip the remaining rounds.
+    double delta = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+      delta += std::fabs(next[i] - scores[i]);
+    }
     scores = std::move(next);
+    if (delta <= kConvergenceTol) {
+      break;
+    }
   }
 
   std::vector<std::pair<size_t, double>> ranked;

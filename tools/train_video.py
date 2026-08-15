@@ -19,9 +19,15 @@ import json
 import math
 import os
 import random
+import sys
 import time
 from collections import OrderedDict
 from pathlib import Path
+
+# Ensure tools/ is importable when run as a script from the project root.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import export_runtime_models
 
 os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
 
@@ -282,6 +288,13 @@ def export_onnx(model, out_dir, concept=128, resolution=224):
             'W': head_w.view(-1).tolist(),
             'b': head_b.tolist(),
         }, f, indent=2)
+
+    # Also deploy fused encoder/decoder as best.onnx for C++ local ONNX.
+    export_runtime_models.deploy_video_onnx(
+        model, out_dir,
+        deploy_root=export_runtime_models.DEFAULT_DEPLOY_ROOT,
+        concept=concept, resolution=resolution, feature_dim=feature_dim,
+    )
 
     print(f'[export] ONNX -> {out_dir}')
 
