@@ -204,7 +204,7 @@ flowchart LR
 
 ### 0.5 情感对 Backend 的影响机制（有据可查的三通道）
 
-情感层**不**对 Backend 的权重矩阵做原始小矩阵乘法（v6.0 曾有“固定线性矩阵 → 8 维 driveVector”的设计，但那只用于生成 prompt 里的数值提示，从未直接乘到 llama 权重上）。v7.0 明确采用三种在可控文本生成文献中有支持的机制：
+情感层**不**对 Backend 的权重矩阵做原始小矩阵乘法（v6.0 曾有“固定线性矩阵 → 8 维 driveVector”的魔数矩阵设计；v7.0 已改为规范映射 `emotion::fromAppraisal` / `padToTensor`，见 `algorithm.md` §15，同样只用于生成 prompt 里的数值提示，从未直接乘到 llama 权重上）。v7.0 明确采用三种在可控文本生成文献中有支持的机制：
 
 1. **Prompt 调制（Prompt Modulation）**：将情感状态（如 `driveVector` 或高层标签）转成自然语言/结构化片段注入 `MemoryPrompt`（沿用 `PromptComposer`），属于“情感条件化生成”（affect-conditioned generation），参考 CTRL（Keskar et al., 2019）式的控制码前缀思路。
 2. **Logit Bias（词表偏置）**：在 `dec` 输出 logits 之后、采样之前，对特定 token/token 群组加一个与情感强度相关的偏置向量，参考 Plug-and-Play Language Models（Dathathri et al., 2020, PPLM）与 DExperts（Liu et al., 2021）等“解码期引导”方法——不需要重训主模型，只在采样前对 logits 做加法偏移。
@@ -231,7 +231,7 @@ flowchart TB
     style P3 fill:#fff2cc
 ```
 
-详见 `algorithm.md` §12（情感影响算法）与 `model_deployment.md`（情感模块部署形态）。
+详见 `algorithm.md` §15（情感影响算法）与 `model_deployment.md`（情感模块部署形态）。与 `model_deployment.md`（情感模块部署形态）。
 
 ### 0.6 异步执行模型：per-module 优先级队列 + work-stealing 线程池（不使用中心事件循环）
 
@@ -696,7 +696,7 @@ flowchart TB
 **说明**：
 
 - `observe()` 接收外部观测，可包含原生感受（sensation）或多模态包；`iterate()` 是主循环，每次计算时间差 `dtSec` 并更新本能强度。
-- `InstinctEngine::update()` 根据感受匹配分和时间半衰期更新当前激活度；`evaluate()` 计算 benefit/harm 并输出 8 维 `driveVector`。
+- `InstinctEngine::update()` 按目标契合度 appraisal（软亲和度 × 强度 × 效价）与时间半衰期更新当前激活度；`evaluate()` 用效用形式 B/H/U 计算 benefit/harm，`driveVector` 由规范映射 `emotion::fromAppraisal` 产生（见 `algorithm.md` §7/§15）。
 - `MemoryPrompt.benefitHarmBias` 不再硬编码为 `approach/avoid/wait`，而是直接写入 `driveVector` 数值权值，作为下游矩阵（如 logit-bias）的潜在信号。
 - `SystemPrompt` 不可变，`MemoryPrompt` 每轮根据上下文和趋利避害结果重建。
 

@@ -59,6 +59,7 @@ dump.rdb
 *.pid
 *.log
 *.rdb
+emotion_states.db
 
 # ─── Edge device credentials / local config (do not commit) ─────────────────────
 config/edge_devices.json
