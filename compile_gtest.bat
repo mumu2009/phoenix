@@ -100,7 +100,7 @@ set "EDGE_CFLAGS=-DPHOENIX_EDGE_IMAGE_ENABLED=%PHOENIX_EDGE_IMAGE% -DPHOENIX_EDG
 
 echo [INFO] Edge device compile flags: image=%PHOENIX_EDGE_IMAGE%, speech=%PHOENIX_EDGE_SPEECH%
 
-set "COMMON_SOURCES=transformer_main.cpp transformer_ollama_fine_tuning.cpp addon.cpp addons\builtin_registry.cpp addons\math_addon.cpp addons\search_addon.cpp addons\computer_shell_addon.cpp loggerCXX.cpp DATABASE_079.cpp frontend_server.cpp speak_io.cpp model_lifecycle.cpp autonomy_stack.cpp v51_runtime.cpp external_runtime.cpp edge_platform.cpp gguf_tensor_parser.cpp physics_world_runtime.cpp emotion_system.cpp llamacpp_emotion_adjuster.cpp plugin_system.cpp modern_context_system.cpp semantic_unit.cpp concept_matrix.cpp primal_sensation.cpp instinct.cpp prompt_split.cpp external_mixed_modal_io.cpp multimodal_world_model.cpp local_onnx.cpp video_model.cpp audio_model.cpp graph_diffusion_summarizer.cpp hierarchical_memory.cpp model_deployment.cpp rdk_x5_bpu.cpp active_inference.cpp subconscious_profile.cpp sparse_block_matmul.cpp module_overrides\adversarial_learner_advanced.cpp module_overrides\gnn_ga_learner_advanced.cpp module_overrides\reinforcement_learner_advanced.cpp module_overrides\async_task_system.cpp %BULLET3_EMBEDDED_SOURCES%"
+set "COMMON_SOURCES=transformer_main.cpp transformer_ollama_fine_tuning.cpp addon.cpp addons\builtin_registry.cpp addons\math_addon.cpp addons\search_addon.cpp addons\computer_shell_addon.cpp loggerCXX.cpp DATABASE_079.cpp frontend_server.cpp speak_io.cpp model_lifecycle.cpp autonomy_stack.cpp v51_runtime.cpp external_runtime.cpp edge_platform.cpp gguf_tensor_parser.cpp physics_world_runtime.cpp emotion_system.cpp llamacpp_emotion_adjuster.cpp plugin_system.cpp modern_context_system.cpp semantic_unit.cpp concept_matrix.cpp primal_sensation.cpp instinct.cpp prompt_split.cpp external_mixed_modal_io.cpp multimodal_world_model.cpp local_onnx.cpp video_model.cpp audio_model.cpp graph_diffusion_summarizer.cpp hierarchical_memory.cpp model_deployment.cpp rdk_x5_bpu.cpp active_inference.cpp subconscious_profile.cpp sparse_block_matmul.cpp agi_action_registry.cpp mission_lifecycle.cpp module_overrides\adversarial_learner_advanced.cpp module_overrides\gnn_ga_learner_advanced.cpp module_overrides\reinforcement_learner_advanced.cpp module_overrides\async_task_system.cpp %BULLET3_EMBEDDED_SOURCES%"
 
 echo [STEP] Compile GTest test runner
 set "ALL_TEST_SOURCES_FILE=%CD%\build\gtest_all_sources.txt"
@@ -111,13 +111,18 @@ for /r "tests\gtest" %%f in (*.cpp) do (
     set "src=!src:\=/!"
     echo !src! >> "%ALL_TEST_SOURCES_FILE%"
 )
+for /r "test\gtest" %%f in (*.cpp) do (
+    set "src=%%f"
+    set "src=!src:\=/!"
+    echo !src! >> "%ALL_TEST_SOURCES_FILE%"
+)
 for %%a in (%COMMON_SOURCES%) do (
     set "src=%%a"
     set "src=!src:\=/!"
     echo !src! >> "%ALL_TEST_SOURCES_FILE%"
 )
 
-"%GXX_EXE%" -o gtest_runner.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% -I"%CD%\tests\gtest" @"%ALL_TEST_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 -O0 -g
+"%GXX_EXE%" -o gtest_runner.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% -I"%CD%\tests\gtest" -I"%CD%\test\gtest" @"%ALL_TEST_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 -O0 -g
 
 if errorlevel 1 (
   echo [ERROR] GTest compilation failed.

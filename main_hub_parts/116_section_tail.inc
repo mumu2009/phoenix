@@ -2004,6 +2004,24 @@
               verify = json{{"ok", true}, {"cached", true}};
             }
             if (!cacheHit) {
+              // Prevent running the heavy LLM when the system is already
+              // critically low on memory.  This is a guard rail, not a
+              // business-logic change.
+              std::string memErr;
+              if (!preInferenceMemoryCheck(memErr)) {
+                appendFatalLog(std::string("oom_guard /api/chat: ") + memErr +
+                               " maxTokens=" + std::to_string(maxTokens));
+                logRouteError("/api/chat",
+                              std::string("oom_guard: ") + memErr);
+                respondJson(cb,
+                            json{{"ok", false},
+                                 {"error", memErr},
+                                 {"stage", "oom_guard"}},
+                            drogon::k503ServiceUnavailable);
+                finalizeMetric(false);
+                return;
+              }
+
               if (usingLlamaCpp || usingBitNet)
                 dispatchExternalStyleTrainStep(backendMode, body, text,
                                                gnnHint.align);
@@ -2594,6 +2612,24 @@
               verify = json{{"ok", true}, {"cached", true}};
             }
             if (!cacheHit) {
+              // Prevent running the heavy LLM when the system is already
+              // critically low on memory.  This is a guard rail, not a
+              // business-logic change.
+              std::string memErr;
+              if (!preInferenceMemoryCheck(memErr)) {
+                appendFatalLog(std::string("oom_guard /api/transformer/chat: ") + memErr +
+                               " maxTokens=" + std::to_string(maxTokens));
+                logRouteError("/api/transformer/chat",
+                              std::string("oom_guard: ") + memErr);
+                respondJson(cb,
+                            json{{"ok", false},
+                                 {"error", memErr},
+                                 {"stage", "oom_guard"}},
+                            drogon::k503ServiceUnavailable);
+                finalizeMetric(false);
+                return;
+              }
+
               if (usingLlamaCpp || usingBitNet)
                 dispatchExternalStyleTrainStep(backendMode, body, text,
                                                gnnHint.align);
@@ -7083,6 +7119,9 @@ int main(int argc, char **argv) {
     config = loadConfig(argc, argv);
     applyFrontendEnvFromConfig(config);
     installFatalHooks(config.baseDir);
+#ifdef _WIN32
+    startMemoryTelemetry(config.baseDir);
+#endif
   } catch (const std::exception &e) {
     std::cerr << "startup exception: " << e.what() << std::endl;
     return 1;

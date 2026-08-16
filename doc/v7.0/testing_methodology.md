@@ -78,3 +78,74 @@
 - C++：gtest（现有）跑不变量；固定种子 mt19937 模糊器。
 - Python：numpy 跑统计协议（沿用 memory_tier_benchmark 的 TUI 模式）；pytest 组织协议。
 - 统计：N≥30 种子、配对比较、Cohen's d；确定性测试固定种子。
+### 3.4 动作分派（action dispatch）
+- 注册动作 → `listAgiActions` 可见；重复注册按 name 幂等覆盖。
+- 规划器选中 tool 类动作且执行器已设置 → `agiPlan.execution` 非空且 `handled=true`；执行器未设置 → 不执行、只记录 `bestAction`（可验证的惰性行为）。
+- 注入 `tool:math` 且构造 EFE 使 math 占优（把其它动作 embedding 置零对比）→ 执行器收到 `addonType=math` 且 `reply` 为合法结果。
+- 执行器异常（addon 返回 handled=false）→ 系统不崩溃、`agiPlan.execution.ok=false`，其余字段完好。
+---
+
+## 8. 完整验证剧本（供廉价 AI 逐条执行）
+
+每步给出**命令、判据、失败时修什么**。按顺序执行；任一步失败即停下报告，不要继续。
+
+### 阶段 0：构建门
+- 命令：`compile.bat`（生成 phoenix_main.exe / bug_shooter.exe / phoenix_sql_cli.exe）；`compile_gtest.bat`（生成 gtest_runner.exe）。
+- 判据：两个命令 Exit code 0；日志无 `error:` 行（允许 OpenCV/依赖 deprecation warning）。
+- 失败修什么：新增的 5 个 .cpp（active_inference / subconscious_profile / sparse_block_matmul / agi_action_registry + 各模块）的符号错误；先修 `active_inference.cpp`，再修 `subconscious_profile.cpp`。
+
+### 阶段 1：单元不变量（gtest）
+- 命令（按模块逐个跑，记录通过数）：
+  - `gtest_runner.exe --gtest_filter=InstinctTest.*:PrimalSensationTest.*`（趋利避害/感受）
+  - `gtest_runner.exe --gtest_filter=EmotionSystemTest.*:EmotionTensorTest.*:EmotionWeightTest.*`（情感）
+  - `gtest_runner.exe --gtest_filter=MixedModalIOTest.*:CognitionMixedModalTest.*`（混合模态桥）
+  - `gtest_runner.exe --gtest_filter=DeploymentMatrixLoadAll.*`（649 配置矩阵，~15 分钟）
+  - `gtest_runner.exe --gtest_filter=SemanticUnitTest.*:ConceptMatrixTest.*`（若存在）
+- 判据：全部 PASS（当前全量基线 2099/2099）。
+- 失败修什么：对应模块；§1 不变量表是最小检查集。
+
+### 阶段 2：自我进化协议（gtest）
+- 命令：`gtest_runner.exe --gtest_filter=ActiveInferenceProtocol.*`。
+- 判据：4/4 PASS（学习曲线 ≥9/10 种子、双无失控、探索调度）。
+- 失败修什么：先看 §2.1 的种子通过率——若 cos(w,w*) 低，检查奖励定义（必须是**当前状态** r_t = w*·z_t，不是下一状态）；若 w 发散，查 valueClamp 是否被 setValueClamp 覆盖。
+
+### 阶段 3：动作分派（新协议，先写后跑）
+- 新增 gtest（照 §3.4 写）：注册 4 个 tool 动作 → `listAgiActions` 幂等；设置一个记录式 executor（lambda 把调用写入 vector）→ 构造 EFE 使 `tool:math` 占优 → iterate 一次 → 断言 executor 收到 `addonType=math`、`agiPlan.execution.ok=true`；executor 返回 handled=false → `execution.ok=false` 且其余字段完好；未设 executor → 不执行、`bestAction` 仍在。
+- 判据：新 gtest 全 PASS。
+
+### 阶段 4：系统回归
+- 命令：`powershell -ExecutionPolicy Bypass -File test-tools\api_regression.ps1`；`python tools\validate_phoenix_config.py`；`test\apis\run_backend_matrix.bat`（需 llama-server 8082 + tinyllama 8086 先起）。
+- 判据：api_regression 42/42 PASS；validate 报告 0 missing dot-path；backend_matrix 按 AGENTS.md 预期（ollama/bitnet/native 预期失败，llama 模式通过）。
+- 失败修什么：新增 `agi.*`、`subconscious.*` 配置键若缺默认值，补 `config/phoenix.json`；网关 111 的新增 cfgOr 若拼错路径，对照 validate 输出。
+
+### 阶段 5：性能/并发专项（本轮去锁与激进优化的验证）
+1. **LSH 召回**：写一个 gtest（或临时 main）：向 PersistentConceptMatrix 灌入 ≥1000 个 128 维归一化随机原型，随机扰动出 1000 个查询（扰动角度 ≤18°），对每个查询比较 LSH 结果与暴力扫描的 argmax 是否一致；判据 recall@1 ≥ 0.95；低于则调 L/b 或关闭 LSH（改 `kLshL/kLshBits`）。
+2. **save 去锁**：起 4 线程并发 `addOrUpdate`（不同语义向量）+ 主线程并发 `status()`，跑 10⁴ 次；判据无崩溃、无死锁（超时即失败）、SQLite 文件可重新加载且条数一致。
+3. **投影缓存 shared_mutex**：8 线程并发 `projectToDimension`（同一 (D,s) 键）+ 期间首次触发新键生成；判据结果与单线程逐位一致、无崩溃。
+4. **稀疏 JL 距离保持**：1000 个随机 4096 维向量对，稀疏投影到 128 维后，成对距离相对误差 ≤ 0.2 的比例 ≥ 95%；不达标则提高 `nonZerosPerColumn`（改 `projectToDimensionSparse` 默认 max(3, D_out/3)）。
+5. **并行 propagate 一致性**：同一概念矩阵分别跑串行（禁并行）与并行 propagate，终态 confidence 逐位差 ≤ 1e-6；并行版耗时 ≤ 串行（大 N 下）。
+
+### 阶段 6：llama.cpp 路径
+1. `sparse_block_matmul` 单测：τ=0 与 denseMatMul 逐位一致（随机矩阵模糊 1000 次）；τ>0 误差在 Frobenius 界内。
+2. `python tools\llama_prune_analyzer.py <model.gguf> --analyze --backup-dir build\prune_backup --sparsity 0.3 --mask build\mask.npz --report build\prune_report.json`：manifest SHA-256 与原件一致、mask 置零比例在 30%±1%。
+3. 剪枝模型 perplexity 回归（对照原模型，涨幅 ≤ 预算）后才允许写 ggml 补丁（挂点见 llamacpp_optimization.md §4）。
+
+### 阶段 7：长期纵向
+按 §5 每日指标跑 7 天；判据：无指标单调恶化、多种子方差受控。此阶段由人工/定时任务执行，不属于廉价 AI 单次验证范围。
+
+---
+
+**执行顺序总纲**：0 → 1 → 2 → 3 → 4 → 5 →（通过后才）6 →（人工）7 → 8（任务层，默认关闭模块的独立门）。任何阶段的失败修复都要**重跑该阶段 + 阶段 4**（回归门），不要只修不回归。
+
+## 9. 任务层（Meeseeks）验证协议
+
+前置：`mission.enabled=false` 时一切行为与现状逐位一致（回归门阶段 4 覆盖）。以下全部针对 `phoenix::mission`（gtest）与 `CognitionAutonomyManager` 的 mission API。
+
+1. **压力单调与截断（gtest）**：`Mission m{painGainPerSec=0.1, maxPain=1.0}`，Running 后按固定 nowMs 序列采样 `pressure()`：判据 ① 对 0≤t≤10 严格递增（0.1/秒）；② t≥10 后恒等于 1.0（饱和）；③ Idle/Completed/Failed 状态恒返回 0。
+2. **markComplete 终结疼痛**：Running 中途 `markComplete()` 后 `pressureNow()==0` 且 `state==Completed`、`endMs≥startMs`；再次 `markComplete()` 幂等（状态不倒退）。`markFailed()` 同理且不可再 Complete。
+3. **累积疼痛定理**：数值积分 g=0.1、P_max=1 的 p(t) 曲线，对照 P(T)=gT²/2（T≤10 段）与 P(T)=5+P_max(T−10)（T>10 段）；判据相对误差 ≤1e-6（验证 §2 定理的分段公式，防实现回归）。
+4. **spawnChild 变异有界**：以 `SubconsciousProfile::defaults()` + learningRate=0.05 为父本，rate=0.05，spawn 100 个子代：判据 ① 所有标量都在文档声明的 clamp 界内（PAD∈[−1,1]、riskAversion∈[0.2,3]、gain∈[0,5]、halfLife∈[1,3600]、learningRate∈[0.001,0.5]）；② 变异前后均值差 ≤ 2σ（无漂移）；③ rate=0 时子代与父本逐位相等（纯遗传）。
+5. **多代完成时间下降（统计趋势）**：模拟 G=10 代、每代 λ=8 子代（同一合成任务、完成时间 = 基线 + 高斯噪声，完成时间越短适应度越高），按 (1+λ) 保留最优父本；判据后 5 代均值 < 前 5 代均值（单侧 t 检验 p<0.05 才记为通过；噪声任务下允许失败并记录，不掩盖为“进化必然”）。
+6. **自主栈注入（gtest）**：`assignMission({enabled,goal,..})` 后调 `iterate`：判据 ① 返回 `result.mission.active==true` 且 `pressure>0`；② `sensationEngine_.active()` 中存在 `type=Pain, source="mission-pressure", valence=−1, intensity==pressure` 的感受；③ `reportMissionOutcome({goalAchieved:true})` 后再 iterate：`active==false`、`pressure==0`、不再注入新 Pain（旧 Pain 按半衰期衰减）。
+7. **空目标幂等**：`assignMission({enabled:true})`（goal 为空）→ 不进入 Running、压力恒 0、`missionStatus().enabled==true`（武装但空闲）；随后带 goal 的 assignMission 正常启动。
+8. **配置门（阶段 8，系统级）**：`mission.enabled=true` 且配置 goal 非空时，网关启动后 `missionStatus` 返回 Running（出生即绑定）；`mission.enabled=false` 时任何 mission 字段都不出现在 iterate 结果里（`mission` 为空对象）。

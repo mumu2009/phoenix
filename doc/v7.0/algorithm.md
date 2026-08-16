@@ -969,3 +969,13 @@ every N scheduling rounds:
 - `subconscious_profile.{hpp,cpp}`：全稳态剖面（气质/敏感度/稳态设定点/风险态度/自定义野性表），接 `configureSubconscious`；理论见 `doc/v7.0/subconscious.md`。
 - `tools/llama_prune_analyzer.py`：GGUF 幅度剪枝（逐层自适应阈值 + 原始备份 manifest + keep-mask），只看矩阵不看输出。
 - `sparse_block_matmul.{hpp,cpp}`：块稀疏矩阵乘法（τ=0 精确、τ>0 带 Frobenius 界）；ggml 集成规格与上游更新核查见 `doc/v7.0/llamacpp_optimization.md`。
+
+
+## 20. 任务层（Meeseeks 盒，可选，mission.*）
+
+新增可选子系统（默认关闭，config `mission.enabled=false`）：把一个实例包装为**目标域化（goal-scoped）**生命周期——出生绑定单一目标，疼痛随时间线性增长，只有目标被判定完成（`reportMissionOutcome({goalAchieved:true})`）疼痛才停止。这回答了“AI 的角色不必是服务用户”的问题：估值来源从外部反馈移到内部目标完成判定，闭环完全在系统内部。
+
+- **形式化**：疼痛 p(t)=min(g·t, P_max)，g=`mission.painGainPerSec`，P_max=`mission.maxPain`。**定理**：任务在 T 时刻完成时累积总疼痛 P(T)=∫₀ᵀ p(t)dt = gT²/2（未饱和段），且 P(T) 对 T 严格递增——最小化累积疼痛 ⟺ 最小化完成时间（证明见 `doc/v7.0/mission_layer.md` §2）。已有趋利避害/主动推理闭环本来就最小化稳态代价（Pain 的 setpoint=0），因此**无需新优化器**，压力自动内化为“尽快完成”的偏好（pragmatic 项的终止状态先验偏好，Friston）。
+- **实现**：`mission_lifecycle.{hpp,cpp}`（状态机 Idle/Running/Completed/Failed + 基因组 `MissionGenome`，互斥量保护）；`autonomy_stack` 接入 `assignMission/missionStatus/reportMissionOutcome/spawnMissionChild`，`iterate()` 在本能评估前把 pressure 注入为 Pain 感受（source="mission-pressure"）并在结果暴露 `mission` 字段；网关 `111_class_gatewayserver.inc` 加载 `mission.*` 配置。已入 `compile.bat` / `compile_gtest.bat` 的 COMMON_SOURCES 与 `tools/build_rdk_x5.sh`。
+- **繁殖/遗传/变异**：`spawnChild(parent, rate)` 对可遗传参数（SubconsciousProfile + learningRate）做高斯扰动（clamp），完成时间作适应度 fitness=−T，构成 (1+λ)-ES；子代基因组可注入新实例/新会话。**无独立运行时外层**：外层 = 进程内状态机 + 基因组对象，`iterate()` 内 `pressureNow()` 为 O(1)，无跨层翻译成本。
+- **诚实的边界**：时间依赖疼痛不是势函数塑形（Ng, Harada & Russell 1999），γ<1 时与总疼痛 gT²/2 的等价性会被折扣打破；因此压力只走稳态通道、完成判定由显式门控（防走捷径）、仅适用于目标域化实例。完整推导、探索-利用权衡与参考文献见 `doc/v7.0/mission_layer.md`。

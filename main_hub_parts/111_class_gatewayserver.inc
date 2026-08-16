@@ -116,6 +116,50 @@ public:
       subCfg["instincts"] = phoenix::cfgOr<nlohmann::json>("subconscious.instincts", nlohmann::json::array());
       cognitionManager_.configureSubconscious(subCfg);
     }
+    /* v7.0 mission layer: load mission.* config (disabled by default).  When
+       enabled AND a goal is configured, this instance is born as a Meeseeks:
+       ONE mission whose time-increasing pain ends only when the mission is
+       judged complete (reportMissionOutcome).  With no goal the layer stays
+       armed but idle, and missions can be assigned at runtime. */
+    {
+      json missionCfg;
+      missionCfg["enabled"] = phoenix::cfgOr<bool>("mission.enabled", false);
+      missionCfg["id"] = phoenix::cfgOr<std::string>("mission.id", std::string());
+      missionCfg["goal"] = phoenix::cfgOr<std::string>("mission.goal", std::string());
+      missionCfg["deadlineSec"] = phoenix::cfgOr<double>("mission.defaultDeadlineSec", 300.0);
+      missionCfg["painGainPerSec"] = phoenix::cfgOr<double>("mission.painGainPerSec", 0.01);
+      missionCfg["maxPain"] = phoenix::cfgOr<double>("mission.maxPain", 1.0);
+      missionCfg["mutationRate"] = phoenix::cfgOr<double>("mission.mutationRate", 0.05);
+      cognitionManager_.assignMission(missionCfg);
+    }
+    /* AGI action space: register the real addon capabilities as planner
+       actions and set the executor that dispatches the chosen tool.  The
+       planner may now choose math/search/research/web in addition to the
+       instinct verbs; the executor performs the actual tool call. */
+    {
+      json agiActions = phoenix::cfgOr<nlohmann::json>("agi.actions", nlohmann::json::array());
+      if (!agiActions.is_array()) agiActions = nlohmann::json::array();
+      // The manager already registers its default capabilities in its
+      // constructor (math/search/computer/goal_advance); config entries ADD
+      // or REPLACE them (registerAgiAction is idempotent by name).
+      for (const auto &item : agiActions) {
+        cognitionManager_.registerAgiAction(item);
+      }
+      cognitionManager_.setAgiActionExecutor(
+          [this](const phoenix::agi::AgiActionSpec &spec, const json &context) -> json {
+            AddonToolCall call;
+            call.requested = true;
+            call.type = spec.addonType.empty() ? spec.name : spec.addonType;
+            call.input = context.value("userPrompt", std::string());
+            addon::AddonResult result;
+            const bool handled = invokeAddonTool(call, context, result);
+            return json{{"ok", handled},
+                        {"handled", handled},
+                        {"action", spec.name},
+                        {"reply", result.reply},
+                        {"meta", result.meta}};
+          });
+    }
     rlDisabled_ = config_.disableLearning || config_.disableRL;
     advDisabled_ = config_.disableLearning || config_.disableADV;
     gnnGaDisabled_ = config_.disableLearning;
@@ -561,6 +605,23 @@ private:
       pack.emotionTensor = r.value("emotionTensor", nlohmann::json::object());
       pack.mixedModalOutputs = r.value("mixedModalOutputs", nlohmann::json::array()).get<std::vector<nlohmann::json>>();
       pack.worldEvidence = r.value("worldEvidence", nlohmann::json::array());
+      // AGI action execution: fold the chosen tool's output back into the
+      // context so the generation step can use it (closes the plan->act->
+      // observe loop).
+      if (r.contains("agiPlan") && r["agiPlan"].is_object()) {
+        const auto &agiPlan = r["agiPlan"];
+        if (agiPlan.contains("execution") && agiPlan["execution"].is_object()) {
+          const auto &exec = agiPlan["execution"];
+          if (exec.value("handled", false)) {
+            const std::string toolOut = exec.value("reply", std::string());
+            const std::string toolAction = exec.value("action", std::string());
+            if (!toolOut.empty()) {
+              pack.context += "\n[tool_result action=" + toolAction +
+                              "] output=" + toolOut + " [/tool_result]";
+            }
+          }
+        }
+      }
       std::string mod = r.value("cognitionModulation", "");
       if (!mod.empty()) {
         if (pack.context.empty())

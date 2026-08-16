@@ -24,9 +24,23 @@ def flatten_config(data, prefix=""):
         for k, v in data.items():
             new_p = f"{prefix}.{k}" if prefix else k
             if isinstance(v, dict):
-                out.update(flatten_config(v, new_p))
+                if v:
+                    out.update(flatten_config(v, new_p))
+                else:
+                    out[new_p] = v
             else:
                 out[new_p] = v
+    return out
+
+
+def all_prefixes(keys):
+    """Return every dot-path prefix present in the given leaf keys so that
+    code can query an intermediate object (e.g. cfgOr<json>("v7.ahead"))."""
+    out = set(keys)
+    for key in keys:
+        parts = key.split(".")
+        for i in range(1, len(parts)):
+            out.add(".".join(parts[:i]))
     return out
 
 
@@ -61,14 +75,22 @@ def dot_paths_from_code():
 def main():
     with (ROOT / "config/phoenix.json").open(encoding="utf-8") as f:
         cfg = json.load(f)
-    cfg_keys = set(flatten_config(cfg).keys())
+    cfg_leaves = flatten_config(cfg)
+    cfg_prefixes = all_prefixes(cfg_leaves.keys())
     code_keys = dot_paths_from_code()
 
-    missing = sorted(code_keys - cfg_keys)
-    unused = sorted(cfg_keys - code_keys)
+    missing = sorted(code_keys - cfg_prefixes)
+
+    def covered_by_code(leaf):
+        for code_key in code_keys:
+            if leaf == code_key or leaf.startswith(code_key + "."):
+                return True
+        return False
+
+    unused = sorted([k for k in cfg_leaves if not covered_by_code(k)])
 
     print(f"code dot paths:        {len(code_keys)}")
-    print(f"config leaf keys:      {len(cfg_keys)}")
+    print(f"config leaf keys:      {len(cfg_leaves)}")
     print(f"missing in config:     {len(missing)}")
     print(f"unused in config:      {len(unused)}")
 
