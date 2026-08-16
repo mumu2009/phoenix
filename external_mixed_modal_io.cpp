@@ -243,14 +243,21 @@ class PersistentConceptMatrix {
 
     PersistentConceptMatrix() = default;
     ~PersistentConceptMatrix() {
-        std::lock_guard<std::mutex> lock(mu_);
-        if (!entries_.empty() || !deletedIds_.empty()) save();
+        bool needSave = false;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            needSave = !entries_.empty() || !deletedIds_.empty();
+        }
+        if (needSave) save();  // save() locks internally
         closeDb();
     }
 
     Result addOrUpdate(const phoenix::multimodal::SemanticUnit &query, bool pretrain) {
         if (query.semanticVector.empty()) return {query, 0.0f, "empty"};
-        std::lock_guard<std::mutex> lock(mu_);
+        Result result;
+        bool shouldSave = false;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
         load();
 
         int64_t nearestId = -1;
@@ -258,7 +265,6 @@ class PersistentConceptMatrix {
         const bool hasNearest = findNearestLocked(query, nearestId, sim);
         const float residual = hasNearest ? (1.0f - sim) : 1.0f;
 
-        Result result;
         result.residual = residual;
 
         if (!hasNearest || residual > addThreshold_) {
@@ -303,7 +309,9 @@ class PersistentConceptMatrix {
             }
         }
 
-        if (pretrain || ++inferenceSaves_ % 32 == 0) save();
+            shouldSave = (pretrain || ++inferenceSaves_ % 32 == 0);
+        }
+        if (shouldSave) save();  // SQLite I/O outside the lock (de-locked hot path)
         return result;
     }
 
@@ -322,23 +330,32 @@ class PersistentConceptMatrix {
     }
 
     void clear() {
-        std::lock_guard<std::mutex> lock(mu_);
-        for (const auto &kv : entries_) {
-            deletedIds_.push_back(kv.first);
-        }
-        entries_.clear();
-        lshCache_.clear();
-        nextId_ = 1;
-        loaded_ = true;
-        additions_ = 0;
-        updates_ = 0;
-        inferenceSaves_ = 0;
+        bool shouldSave = false;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            for (const auto &kv : entries_) {
+                deletedIds_.push_back(kv.first);
+            }
+            entries_.clear();
+            lshCache_.clear();
+            nextId_ = 1;
+            loaded_ = true;
+            additions_ = 0;
+            updates_ = 0;
+            inferenceSaves_ = 0;
 #ifdef HAVE_SQLITE
-        save();
+            shouldSave = true;
+#endif
+        }
+#ifdef HAVE_SQLITE
+        if (shouldSave) save();  // save() locks internally
 #else
         std::error_code ec;
         std::filesystem::remove(path_, ec);
-        deletedIds_.clear();
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            deletedIds_.clear();
+        }
 #endif
     }
 
@@ -627,6 +644,9 @@ class PersistentConceptMatrix {
     }
 
     bool save() {
+    // Locks internally (keeps SQLite I/O off the hot path); callers must NOT
+    // hold mu_ when calling.
+    std::lock_guard<std::mutex> lock(mu_);
 #ifdef HAVE_SQLITE
         if (!openDb()) return false;
         const char *sql = "INSERT OR REPLACE INTO concept_matrix (id, unit_json, count, residual, timestamp_ms) VALUES (?, ?, ?, ?, ?);";

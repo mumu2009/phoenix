@@ -112,7 +112,13 @@
   },
   "tinyllama": {
     "baseUrl": "http://127.0.0.1:8086",
-    "timeoutMs": 5000
+    "timeoutMs": 5000,
+    "summaryTimeoutMs": 5000
+  },
+  "transformer": {
+    "nLayers": 4,
+    "dModel": 128,
+    "nHeads": 4
   },
   "model_defaults": {
     "decayFactor": 0.5,
@@ -417,7 +423,8 @@
     "learningRate": 0.05,
     "discount": 0.9,
     "consolidateEvery": 16,
-    "adaptiveExploration": true
+    "adaptiveExploration": true,
+    "actions": []
   },
   "subconscious": {
     "enabled": false,
@@ -429,7 +436,16 @@
     "anticipatoryGain": 1.0,
     "sensationTuning": {},
     "instincts": []
+  },  "mission": {
+    "enabled": false,
+    "id": "",
+    "goal": "",
+    "painGainPerSec": 0.01,
+    "maxPain": 1.0,
+    "defaultDeadlineSec": 300,
+    "mutationRate": 0.05
   },
+
   "api": {
     "upstreamTimeoutMs": 45000,
     "gatewayHost": "127.0.0.1",
@@ -565,7 +581,7 @@
       "ollamaBaseUrl": "http://127.0.0.1:11434",
       "ollamaTimeoutMs": 120000,
       "llamaCppModel": "blobs/sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29",
-      "llamaCppBaseUrl": "http://127.0.0.1:8082",
+      "llamaCppBaseUrl": "http://192.168.0.107:8082",
       "llamaCppTimeoutMs": 120000,
       "llamaCppLoraFiles": "",
       "llamaCppLoraInitWithoutApply": false,

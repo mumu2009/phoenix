@@ -18,6 +18,8 @@
 
 #include "autonomy_stack.hpp"
 
+#include "addons/builtin_registry.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -59,6 +61,17 @@ std::string lowerLocal(std::string value) {
         return static_cast<char>(std::tolower(ch));
     });
     return value;
+}
+
+void padActionEmbedding(std::vector<float> &emb, size_t targetDim) {
+    while (emb.size() < targetDim) emb.push_back(0.0f);
+    if (emb.size() > targetDim) emb.resize(targetDim);
+}
+
+std::vector<float> oneHotEmbedding(size_t index, size_t dim) {
+    std::vector<float> out(dim, 0.0f);
+    if (index < dim) out[index] = 1.0f;
+    return out;
 }
 
 std::string truncateLocal(const std::string &value, std::size_t maxChars) {
@@ -635,7 +648,14 @@ json OptimizerAutonomyManager::modernizeTransformer(const json &payload, const j
 CognitionAutonomyManager::CognitionAutonomyManager()
     : promptComposer_(phoenix::prompt::SystemPrompt::arthurDefault(),
                       phoenix::prompt::MemoryPrompt::empty()),
-      instinctEngine_(phoenix::instinct::InstinctEngine::defaultEngine()) {}
+      instinctEngine_(phoenix::instinct::InstinctEngine::defaultEngine()),
+      addonManager_(addon::createDefaultAddons()) {
+    // Default AGI executor: real tool dispatch (math/search/shell) + goal tracking.
+    agiActionExecutor_ = [this](const phoenix::agi::AgiActionSpec &spec, const json &ctx) {
+        return this->executeAgiAction(spec, ctx);
+    };
+    registerDefaultAgiActions();
+}
 
 json CognitionAutonomyManager::status() const {
     std::lock_guard<std::mutex> lock(mu_);
@@ -671,10 +691,91 @@ json CognitionAutonomyManager::status() const {
                                  {"instincts", instinctEngine_.toJson()},
                                  {"lastBenefitHarmBias", lastBenefitHarmBias_},
                                  {"agi", agiEnabled_ ? agiController_.status() : json{{"enabled", false}}},
+                                 {"subconscious", subconsciousEnabled_ ? subProfile_.toJson() : json{{"enabled", false}}},
+                                 {"agiActions", agiActionRegistry_.toJson()},
+                                 {"agiGoals", goals_},
                                  {"mixedModalInputSize", inputBuffer_.size()},
                                  {"mixedModalOutputSize", outputQueue_.size()},
                                  {"channels", channelRegistry_.toJson()},
                                  {"sessions", sessions}}}};
+}
+
+
+void CognitionAutonomyManager::registerDefaultAgiActions() {
+    // Four real capabilities: math, search, computer shell, goal advancement.
+    // They use a fixed 4-D one-hot action embedding so the latent transition
+    // model can learn distinct effects per tool.
+    struct DefaultAction {
+        std::string name;
+        std::string category;
+        std::string addonType;
+        std::string description;
+        size_t oneHotIndex;
+    };
+    const DefaultAction defaults[] = {
+        {"math", "tool", "math", "Evaluate arithmetic expressions", 0},
+        {"search", "tool", "search", "Retrieve indexed or online knowledge", 1},
+        {"computer", "tool", "computer", "List or read files on the local computer", 2},
+        {"goal_advance", "goal", "", "Push the current mission goal forward", 3},
+    };
+    for (const auto &d : defaults) {
+        if (agiActionRegistry_.find(d.name) != nullptr) continue;  // idempotent
+        phoenix::agi::AgiActionSpec spec;
+        spec.name = d.name;
+        spec.category = d.category;
+        spec.addonType = d.addonType;
+        spec.description = d.description;
+        spec.embedding = oneHotEmbedding(d.oneHotIndex, 4);
+        agiActionRegistry_.registerAction(std::move(spec));
+    }
+}
+
+nlohmann::json CognitionAutonomyManager::executeAgiAction(
+    const phoenix::agi::AgiActionSpec &spec, const json &context) {
+    if (spec.category == "instinct") {
+        return json{{"ok", true}, {"result", json{{"noop", true}, {"reason", "instinct verb"}}}};
+    }
+
+    if (spec.category == "goal") {
+        const std::string goal = context.value("userPrompt", spec.description);
+        goals_.push_back(goal);
+        if (goals_.size() > 1024) goals_.erase(goals_.begin());
+        return json{{"ok", true},
+                    {"result",
+                     json{{"goal", spec.name}, {"description", goal}, {"goals", goals_}}}};
+    }
+
+    if (spec.category != "tool" || !addonManager_) {
+        return json{{"ok", false}, {"error", "no executor for category " + spec.category}};
+    }
+
+    std::string userPrompt = context.value("userPrompt", std::string());
+    std::string text = userPrompt;
+    if (spec.addonType == "math" && !text.empty() && text.find("math:") != 0 && text.find("calc:") != 0) {
+        text = "math: " + text;
+    } else if (spec.addonType == "search" && !text.empty() && text.find("search:") != 0) {
+        text = "search: " + text;
+    } else if (spec.addonType == "computer" && !text.empty() && text.find("computer:") != 0 &&
+               text.find("shell:") != 0) {
+        text = "computer: " + text;
+    }
+
+    json payload = context;
+    if (!spec.addonType.empty()) payload["__addonType"] = spec.addonType;
+
+    addon::AddonResult res = addonManager_->run(text, payload);
+    if (!res.handled) {
+        return json{{"ok", false}, {"error", "tool not handled: " + spec.addonType}};
+    }
+
+    json out = json{{"ok", true},
+                    {"result",
+                     json{{"addon", res.meta.value("addon", spec.addonType)},
+                          {"name", spec.name},
+                          {"reply", res.reply},
+                          {"meta", res.meta},
+                          {"extraTokens", res.extraTokens}}}};
+    return out;
 }
 
 json CognitionAutonomyManager::observe(const json &payload, const json &worldState) {
@@ -688,6 +789,21 @@ json CognitionAutonomyManager::observe(const json &payload, const json &worldSta
     /* v7.0 primal sensation / mixed-modal I/O ingestion */
     if (payload.contains("sensation") && payload["sensation"].is_object()) {
         sensationEngine_.add(phoenix::primal::PrimalSensation::fromJson(payload["sensation"]));
+    }
+    /* v7.0 autonomous evolution: turn the world model's uncertainty into a
+       real epistemic signal.  With agi.enabled, every observation ingests a
+       Novelty sensation scaled by the reported uncertainty, so the TD(0)
+       reward (the benefit-harm netUtility) reflects genuine environment
+       dynamics instead of staying neutral in text-only loops. */
+    if (agiEnabled_ && payload.contains("worldUncertainty") &&
+        payload["worldUncertainty"].is_number()) {
+        phoenix::primal::PrimalSensation nov;
+        nov.type = phoenix::primal::SensationType::Novelty;
+        nov.intensity = std::clamp(payload["worldUncertainty"].get<float>(), 0.0f, 1.0f);
+        nov.valence = 0.2f;  // novelty is mildly attractive (exploration drive)
+        nov.source = "world-uncertainty";
+        nov.timestampMs = static_cast<uint64_t>(nowMs());
+        sensationEngine_.add(nov);
     }
     if (payload.contains("mixedModalPacket") && payload["mixedModalPacket"].is_object()) {
         auto packet = phoenix::io::MixedModalPacket::fromJson(payload["mixedModalPacket"]);
@@ -730,7 +846,10 @@ json CognitionAutonomyManager::observe(const json &payload, const json &worldSta
                                 std::max(1, previousObservations + 1);
     record["lastVerifyScore"] = verifyScore;
     record["reflectionSuggested"] = reflectionSuggested;
-    record["worldEvidenceCount"] = worldState.value("evidenceCount", worldState.value("recentEvidence", json::array()).size());
+    record["worldEvidenceCount"] = worldState.is_object()
+                                      ? worldState.value("evidenceCount",
+                                                         worldState.value("recentEvidence", json::array()).size())
+                                      : 0;
     if (reasoningAgenda.is_object()) {
         record["lastAgenda"] = reasoningAgenda;
     }
@@ -748,7 +867,8 @@ json CognitionAutonomyManager::observe(const json &payload, const json &worldSta
     const std::string nextStep = trimLocal(reasoningAgenda.value("nextStep", std::string()));
     const std::string goalFrame = trimLocal(responsePlan.value("goalFrame", std::string()));
     const double revisionBudget = clampDouble(responsePlan.value("revisionBudget", uncertainty), 0.0, 1.0);
-    json mobilityPlan = responsePlan.value("mobilityPlan", worldState.value("mobilityPlan", json::object()));
+    json mobilityPlan = responsePlan.value(
+        "mobilityPlan", worldState.is_object() ? worldState.value("mobilityPlan", json::object()) : json::object());
 
     std::vector<std::string> mobilitySimulationTargets;
     std::vector<std::string> mobilityWaypoints;
@@ -1203,6 +1323,23 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
         record["lastScheduledHeads"] = scheduledHeads;
     }
 
+    /* v7.0 mission layer: an active mission exerts time-increasing pain
+       (allostatic urgency; total pain = g * T^2 / 2).  The pain ends when the
+       mission is judged complete; the existing half-life decay then lets the
+       Pain sensation subside naturally. */
+    if (missionEnabled_) {
+        const float pressure = mission_.pressureNow();
+        if (pressure > 0.0f) {
+            phoenix::primal::PrimalSensation pain;
+            pain.type = phoenix::primal::SensationType::Pain;
+            pain.intensity = std::clamp(pressure, 0.0f, 1.0f);
+            pain.valence = -1.0f;  // maximal harm valence
+            pain.source = "mission-pressure";
+            pain.timestampMs = static_cast<uint64_t>(nowMs());
+            sensationEngine_.add(pain);
+        }
+    }
+
     /* v7.0 instinct / benefit-harm evaluation and prompt split update */
     float dtSec = 1.0f;
     if (lastIterAtMs_ > 0) {
@@ -1283,10 +1420,20 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
             agiController_.episodeCount() % agiConsolidateEvery_ == 0) {
             agiController_.consolidate(64, agiAlpha_ * 0.4, agiGamma_);
         }
+        json executionResult = nullptr;
         if (plan.bestAction >= 0 && plan.bestAction < static_cast<int>(agiController_.actions().size())) {
             lastAgiAction_ = agiController_.actions()[static_cast<size_t>(plan.bestAction)].name;
             if (agiController_.episodeCount() >= 1) {
                 memory.benefitHarmBias = lastAgiAction_;
+            }
+            /* Execute real capabilities chosen by the planner (tools / goals),
+               not just inject the verb into the prompt. */
+            const auto *spec = agiActionRegistry_.find(lastAgiAction_);
+            if (spec && spec->category != "instinct" && agiActionExecutor_) {
+                json execCtx;
+                execCtx["userPrompt"] = payload.value("userPrompt", json(std::string()));
+                if (payload.contains("graphContext")) execCtx["graphContext"] = payload["graphContext"];
+                executionResult = agiActionExecutor_(*spec, execCtx);
             }
         }
         agiPlanJson = json{{"bestAction", lastAgiAction_},
@@ -1295,7 +1442,8 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
                            {"driveCost", driveCost},
                            {"episodes", agiController_.episodeCount()},
                            {"surpriseEma", agiController_.surpriseEma()},
-                           {"explorationMultiplier", agiController_.explorationMultiplier()}};
+                           {"explorationMultiplier", agiController_.explorationMultiplier()},
+                           {"execution", executionResult}};
     }
     if (memory.benefitHarmBias.empty())
         memory.benefitHarmBias = memory.emotionTensor.modulationHint();
@@ -1317,6 +1465,14 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
 
     iteration_ += 1;
     lastIterAtMs_ = nowMs();
+    nlohmann::json missionInfo = nlohmann::json::object();
+    if (missionEnabled_) {
+        missionInfo = json{{"enabled", true},
+                           {"active", mission_.active()},
+                           {"pressure", mission_.pressureNow()},
+                           {"state", static_cast<int>(mission_.mission().state)},
+                           {"goal", mission_.mission().goal}};
+    }
     return json{{"ok", true},
                 {"result", json{{"iteration", iteration_},
                                  {"sessions", sessions},
@@ -1330,7 +1486,8 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
                                  {"cognitionModulation", cognitionModulation},
                                  {"mixedModalOutputs", mixedModalOutputs},
                                  {"composedPrompt", composedPrompt},
-                                 {"agiPlan", agiPlanJson}}}};
+                                 {"agiPlan", agiPlanJson},
+                                 {"mission", missionInfo}}}};
 }
 
 json CognitionAutonomyManager::session(const std::string &sessionId) const {
@@ -1361,6 +1518,9 @@ json CognitionAutonomyManager::importState(const json &state) {
     if (!state.is_object()) {
         return json{{"ok", false}, {"error", "state must be an object"}};
     }
+    if (!state.contains("sessions") || !state["sessions"].is_object()) {
+        return json{{"ok", false}, {"error", "state.sessions object required"}};
+    }
 
     enabled_ = state.value("enabled", enabled_);
     backgroundEnabled_ = state.value("backgroundEnabled", backgroundEnabled_);
@@ -1370,17 +1530,15 @@ json CognitionAutonomyManager::importState(const json &state) {
 
     sessions_.clear();
     std::size_t sessionsLoaded = 0;
-    if (state.contains("sessions") && state["sessions"].is_object()) {
-        for (const auto &entry : state["sessions"].items()) {
-            const std::string sessionId = trimLocal(entry.key());
-            if (sessionId.empty() || !entry.value().is_object()) {
-                continue;
-            }
-            auto record = entry.value();
-            record["sessionId"] = sessionId;
-            sessions_[sessionId] = std::move(record);
-            sessionsLoaded += 1;
+    for (const auto &entry : state["sessions"].items()) {
+        const std::string sessionId = trimLocal(entry.key());
+        if (sessionId.empty() || !entry.value().is_object()) {
+            continue;
         }
+        auto record = entry.value();
+        record["sessionId"] = sessionId;
+        sessions_[sessionId] = std::move(record);
+        sessionsLoaded += 1;
     }
 
     return json{{"ok", true},
@@ -1422,9 +1580,6 @@ json CognitionAutonomyManager::configureAgi(const json &payload) {
     agiConsolidateEvery_ = static_cast<size_t>(clampInt(asInt(payload.value("consolidateEvery", json(16)), 16), 0, 4096));
     agiAdaptiveExploration_ = payload.value("adaptiveExploration", agiAdaptiveExploration_);
 
-    // Rebuild the controller: latent dim + scalar control (actionDim=1) + horizon.
-    agiController_.configure(static_cast<size_t>(dim), 1, static_cast<size_t>(horizon));
-
     // Seed the action space from the instinct action biases.
     std::vector<phoenix::agi::Action> actions;
     for (const auto &i : instinctEngine_.instincts()) {
@@ -1434,12 +1589,41 @@ json CognitionAutonomyManager::configureAgi(const json &payload) {
         a.embedding = {i.benefitWeight - i.harmWeight};  // scalar control direction
         actions.push_back(std::move(a));
     }
+    /* Append registered real capabilities (tools / goals) so the MPC loop can
+       choose among actual executable effects, not only instinct verbs. */
+    for (auto &a : agiActionRegistry_.toPlannerActions()) {
+        actions.push_back(std::move(a));
+    }
+
+    // Normalise all action embeddings to the same dimension so the forward
+    // model has a fixed actionDim.  This is what lets the planner distinguish
+    // tools with distinct one-hot embeddings.
+    size_t actionDim = 1;
+    for (const auto &a : actions) {
+        actionDim = std::max(actionDim, a.embedding.size());
+    }
+    for (auto &a : actions) {
+        padActionEmbedding(a.embedding, actionDim);
+    }
+
+    // Rebuild the controller: latent dim + actionDim + horizon.
+    agiController_.configure(static_cast<size_t>(dim), actionDim, static_cast<size_t>(horizon));
     agiController_.setActions(std::move(actions));
 
     // Preferences track the current benefit-harm drive direction.
     auto bh = instinctEngine_.evaluate(sensationEngine_.active());
     agiController_.bootstrapPreferences(
         phoenix::multimodal::projectToDimension(bh.driveVector, static_cast<size_t>(dim), 0x41474955U));
+
+    // Optional: caller-supplied preference vector (useful for tests / manual steering).
+    if (payload.contains("preferences") && payload["preferences"].is_array()) {
+        std::vector<float> w;
+        for (const auto &e : payload["preferences"]) {
+            if (e.is_number()) w.push_back(e.get<float>());
+        }
+        if (!w.empty()) agiController_.setPreferences(w);
+    }
+
     return json{{"ok", true}, {"result", agiController_.status()}};
 }
 
@@ -1489,6 +1673,65 @@ json CognitionAutonomyManager::ingestAgiTransition(const json &payload) {
                                 {"episodes", agiController_.episodeCount()}}}};
 }
 
+json CognitionAutonomyManager::registerAgiAction(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    phoenix::agi::AgiActionSpec spec = phoenix::agi::AgiActionSpec::fromJson(payload);
+    if (spec.name.empty()) {
+        return json{{"ok", false}, {"error", "action name required"}};
+    }
+    agiActionRegistry_.registerAction(std::move(spec));
+    /* Rebuild the planner action space: instinct verbs + registered capabilities. */
+    if (agiEnabled_) {
+        std::vector<phoenix::agi::Action> actions;
+        for (const auto &i : instinctEngine_.instincts()) {
+            if (i.actionBias.empty()) continue;
+            phoenix::agi::Action a;
+            a.name = i.actionBias;
+            a.embedding = {i.benefitWeight - i.harmWeight};
+            actions.push_back(std::move(a));
+        }
+        for (auto &a : agiActionRegistry_.toPlannerActions()) actions.push_back(std::move(a));
+
+        // Keep a fixed actionDim; pad shorter embeddings, reconfigure only if a
+        // new action truly needs a larger embedding space.
+        size_t actionDim = agiController_.model().actionDim();
+        for (auto &a : actions) {
+            padActionEmbedding(a.embedding, actionDim);
+        }
+        size_t neededDim = actionDim;
+        for (const auto &a : actions) {
+            neededDim = std::max(neededDim, a.embedding.size());
+        }
+        if (neededDim > actionDim) {
+            agiController_.configure(
+                agiController_.model().dim(), neededDim, agiController_.horizon());
+            for (auto &a : actions) {
+                padActionEmbedding(a.embedding, neededDim);
+            }
+        }
+        agiController_.setActions(std::move(actions));
+    }
+    return json{{"ok", true}, {"result", agiActionRegistry_.toJson()}};
+}
+
+json CognitionAutonomyManager::listAgiActions() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return json{{"ok", true}, {"result", agiActionRegistry_.toJson()}};
+}
+
+void CognitionAutonomyManager::setAgiActionExecutor(AgiActionExecutor executor) {
+    std::lock_guard<std::mutex> lock(mu_);
+    agiActionExecutor_ = std::move(executor);
+}
+
+json CognitionAutonomyManager::executeAgiActionByName(const std::string &name,
+                                                      const json &context) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto *spec = agiActionRegistry_.find(name);
+    if (!spec) return json{{"ok", false}, {"error", "action not found: " + name}};
+    return executeAgiAction(*spec, context);
+}
+
 json CognitionAutonomyManager::configureSubconscious(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
     subconsciousEnabled_ = payload.value("enabled", subconsciousEnabled_);
@@ -1498,6 +1741,59 @@ json CognitionAutonomyManager::configureSubconscious(const json &payload) {
     subProfile_.applyTo(instinctEngine_);
     subProfile_.applyTo(agiController_);
     return json{{"ok", true}, {"result", subProfile_.toJson()}};
+}
+
+json CognitionAutonomyManager::assignMission(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const json &p = payload.is_null() ? json::object() : payload;
+    missionEnabled_ = p.value("enabled", missionEnabled_);
+    missionMutationRate_ = static_cast<float>(clampDouble(p.value("mutationRate", missionMutationRate_), 0.0, 10.0));
+    phoenix::mission::Mission m;
+    m.id = p.value("id", std::string());
+    m.goal = p.value("goal", std::string());
+    m.deadlineSec = clampDouble(p.value("deadlineSec", 300.0), 1.0, 3.2e7);
+    m.painGainPerSec = static_cast<float>(clampDouble(p.value("painGainPerSec", 0.01), 0.0, 100.0));
+    m.maxPain = static_cast<float>(clampDouble(p.value("maxPain", 1.0), 0.0, 1.0));
+    if (m.id.empty()) m.id = "mission-" + std::to_string(iteration_ + 1);
+    if (p.contains("genome") && p["genome"].is_object()) {
+        missionGenome_ = phoenix::mission::MissionGenome::fromJson(p["genome"]);
+    }
+    /* A mission without a goal is a no-op (config-only enable). */
+    if (m.goal.empty()) {
+        return json{{"ok", true}, {"result", mission_.stats()}};
+    }
+    mission_.assign(m);
+    return json{{"ok", true}, {"result", mission_.stats()}};
+}
+
+json CognitionAutonomyManager::missionStatus() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return json{{"ok", true},
+                {"result", json{{"enabled", missionEnabled_},
+                                {"stats", mission_.stats()},
+                                {"genome", missionGenome_.toJson()}}}};
+}
+
+json CognitionAutonomyManager::reportMissionOutcome(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const bool achieved = payload.value("goalAchieved", false);
+    if (achieved) {
+        mission_.markComplete();
+    } else {
+        mission_.markFailed();
+    }
+    return json{{"ok", true}, {"result", mission_.stats()}};
+}
+
+json CognitionAutonomyManager::spawnMissionChild(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const json &p = payload.is_null() ? json::object() : payload;
+    const float rate = static_cast<float>(clampDouble(p.value("mutationRate", missionMutationRate_), 0.0, 10.0));
+    const auto parent = (p.contains("genome") && p["genome"].is_object())
+                            ? phoenix::mission::MissionGenome::fromJson(p["genome"])
+                            : missionGenome_;
+    const auto child = mission_.spawnChild(parent, rate);
+    return json{{"ok", true}, {"result", child.toJson()}};
 }
 
 

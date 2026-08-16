@@ -3,7 +3,7 @@
     "focus": "token-to-unit-many-to-many",
     "gradientFit": {
       "convergence": {
-        "generatedAtMs": 1786594574282,
+        "generatedAtMs": 1786860723862,
         "reached": false,
         "reason": "insufficient-semantic-units",
         "sampleCount": 0
@@ -41,7 +41,7 @@
     },
     "tokenSplitPolicy": "semantic-dense"
   },
-  "generatedAtMs": 1786594574281,
+  "generatedAtMs": 1786860723862,
   "inspection": {
     "error": "gguf file not found",
     "exists": false,

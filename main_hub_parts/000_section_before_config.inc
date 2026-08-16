@@ -107,6 +107,7 @@ void transformer_ollama_ft_bridge_finalize(void);
 #ifdef _WIN32
 #include <psapi.h>
 #include <windows.h>
+#include <tlhelp32.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
@@ -505,6 +506,11 @@ static BOOL WINAPI onConsoleControl(DWORD ctrlType) {
   }
 }
 
+// Forward declaration for the minidump writer defined below.
+namespace crash_dump {
+bool writeMinidump(EXCEPTION_POINTERS *ep, const fs::path &dumpPath);
+}
+
 static LONG WINAPI onUnhandledException(EXCEPTION_POINTERS *exceptionInfo) {
   try {
     DWORD code = exceptionInfo && exceptionInfo->ExceptionRecord
@@ -540,6 +546,20 @@ static LONG WINAPI onUnhandledException(EXCEPTION_POINTERS *exceptionInfo) {
     oss << std::dec << " mem_avail_mb=" << getAvailablePhysicalMemoryMB()
         << " process_ws_mb=" << getProcessWorkingSetMB();
     appendFatalLog(oss.str());
+
+    // Write a Windows minidump for post-mortem analysis.  The dump is
+    // intentionally written without linking against dbghelp.lib (runtime load).
+    try {
+      fs::path dumpPath = fs::path("runtime_store") / "logs" / "crash.dmp";
+      if (crash_dump::writeMinidump(exceptionInfo, dumpPath)) {
+        appendFatalLog(std::string("wrote crash minidump to ") +
+                       dumpPath.string());
+      } else {
+        appendFatalLog("failed to write crash minidump");
+      }
+    } catch (...) {
+      appendFatalLog("exception while writing crash minidump");
+    }
   } catch (...) {
   }
   return EXCEPTION_EXECUTE_HANDLER;
@@ -603,6 +623,187 @@ static void installFatalHooks(const fs::path &baseDir) {
   std::signal(SIGFPE, onFatalSignal);
   std::signal(SIGTERM, onFatalSignal);
 }
+
+#ifdef _WIN32
+namespace crash_dump {
+
+typedef enum _PHX_MINIDUMP_TYPE {
+  PhxMiniDumpNormal = 0x00000000,
+  PhxMiniDumpWithDataSegs = 0x00000001,
+} PHX_MINIDUMP_TYPE;
+
+typedef struct _PHX_MINIDUMP_EXCEPTION_INFORMATION {
+  DWORD ThreadId;
+  PEXCEPTION_POINTERS ExceptionPointers;
+  BOOL ClientPointers;
+} PHX_MINIDUMP_EXCEPTION_INFORMATION, *PPHX_MINIDUMP_EXCEPTION_INFORMATION;
+
+typedef BOOL(WINAPI *MiniDumpWriteDumpFn)(
+    HANDLE hProcess, DWORD ProcessId, HANDLE hFile, PHX_MINIDUMP_TYPE DumpType,
+    PPHX_MINIDUMP_EXCEPTION_INFORMATION ExceptionParam, PVOID UserStreamParam,
+    PVOID CallbackParam);
+
+bool writeMinidump(EXCEPTION_POINTERS *ep, const fs::path &dumpPath) {
+  HMODULE hDbgHelp = LoadLibraryA("dbghelp.dll");
+  if (!hDbgHelp) return false;
+  auto fn = (MiniDumpWriteDumpFn)GetProcAddress(hDbgHelp, "MiniDumpWriteDump");
+  if (!fn) {
+    FreeLibrary(hDbgHelp);
+    return false;
+  }
+  try {
+    fs::create_directories(dumpPath.parent_path());
+  } catch (...) {
+  }
+  HANDLE hFile =
+      CreateFileA(dumpPath.string().c_str(), GENERIC_WRITE, 0, nullptr,
+                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (hFile == INVALID_HANDLE_VALUE) {
+    FreeLibrary(hDbgHelp);
+    return false;
+  }
+  PHX_MINIDUMP_EXCEPTION_INFORMATION mei{};
+  mei.ThreadId = GetCurrentThreadId();
+  mei.ExceptionPointers = ep;
+  mei.ClientPointers = FALSE;
+  BOOL ok = fn(GetCurrentProcess(), GetCurrentProcessId(), hFile,
+               PhxMiniDumpWithDataSegs, &mei, nullptr, nullptr);
+  CloseHandle(hFile);
+  FreeLibrary(hDbgHelp);
+  return ok == TRUE;
+}
+
+} // namespace crash_dump
+
+static bool readProcessMemoryCounters(DWORD pid, size_t &wsMb, size_t &privMb) {
+  wsMb = 0;
+  privMb = 0;
+  HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+  if (!hProc) return false;
+  PROCESS_MEMORY_COUNTERS_EX pmc{};
+  pmc.cb = sizeof(pmc);
+  bool ok = false;
+  if (GetProcessMemoryInfo(hProc, (PROCESS_MEMORY_COUNTERS *)&pmc, sizeof(pmc))) {
+    wsMb = (size_t)(pmc.WorkingSetSize / (1024ULL * 1024ULL));
+    privMb = (size_t)(pmc.PrivateUsage / (1024ULL * 1024ULL));
+    ok = true;
+  }
+  CloseHandle(hProc);
+  return ok;
+}
+
+static bool findProcessByName(const std::string &name, DWORD &outPid,
+                              size_t &wsMb, size_t &privMb) {
+  outPid = 0;
+  wsMb = 0;
+  privMb = 0;
+  HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (hSnap == INVALID_HANDLE_VALUE) return false;
+  PROCESSENTRY32 pe{};
+  pe.dwSize = sizeof(pe);
+  bool found = false;
+  if (Process32First(hSnap, &pe)) {
+    do {
+      std::string exe(pe.szExeFile);
+      if (exe == name) {
+        size_t ws = 0, priv = 0;
+        if (readProcessMemoryCounters(pe.th32ProcessID, ws, priv)) {
+          if (!found || ws > wsMb) {
+            outPid = pe.th32ProcessID;
+            wsMb = ws;
+            privMb = priv;
+            found = true;
+          }
+        }
+      }
+    } while (Process32Next(hSnap, &pe));
+  }
+  CloseHandle(hSnap);
+  return found;
+}
+
+static std::atomic<bool> gMemoryTelemetryRunning{false};
+
+static void memoryTelemetryLoop(const fs::path &logDir) {
+  fs::path logPath = logDir / "memory_telemetry.log";
+  try {
+    fs::create_directories(logPath.parent_path());
+  } catch (...) {
+  }
+  while (gMemoryTelemetryRunning.load()) {
+    try {
+      size_t availMb = getAvailablePhysicalMemoryMB();
+      size_t selfWs = getProcessWorkingSetMB();
+      size_t selfPriv = 0;
+      size_t llamaWs = 0, llamaPriv = 0;
+      size_t frontWs = 0, frontPriv = 0;
+      DWORD llamaPid = 0, frontPid = 0;
+      PROCESS_MEMORY_COUNTERS_EX pmc{};
+      pmc.cb = sizeof(pmc);
+      if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pmc,
+                               sizeof(pmc))) {
+        selfPriv = (size_t)(pmc.PrivateUsage / (1024ULL * 1024ULL));
+      }
+      findProcessByName("llama-server.exe", llamaPid, llamaWs, llamaPriv);
+      // The frontend child is also phoenix_main.exe.  Pick the one with the
+      // largest working set that is NOT the current process.
+      DWORD selfPid = GetCurrentProcessId();
+      HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+      if (hSnap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32 pe{};
+        pe.dwSize = sizeof(pe);
+        if (Process32First(hSnap, &pe)) {
+          do {
+            if (pe.th32ProcessID != selfPid &&
+                std::string(pe.szExeFile) == "phoenix_main.exe") {
+              size_t ws = 0, priv = 0;
+              if (readProcessMemoryCounters(pe.th32ProcessID, ws, priv)) {
+                if (ws > frontWs) {
+                  frontPid = pe.th32ProcessID;
+                  frontWs = ws;
+                  frontPriv = priv;
+                }
+              }
+            }
+          } while (Process32Next(hSnap, &pe));
+        }
+        CloseHandle(hSnap);
+      }
+      std::ofstream out(logPath.string(), std::ios::app | std::ios::out);
+      if (!out) {
+        std::cerr << "[memoryTelemetry] cannot open " << logPath.string()
+                  << std::endl;
+      } else {
+        auto now = std::chrono::system_clock::now();
+        auto t = std::chrono::system_clock::to_time_t(now);
+        std::tm *tmBuf = std::localtime(&t);
+        if (tmBuf) {
+          char buf[64];
+          if (std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tmBuf))
+            out << buf;
+        }
+        out << " "
+            << "avail=" << availMb
+            << " self_ws=" << selfWs << " self_priv=" << selfPriv
+            << " llama_pid=" << llamaPid << " llama_ws=" << llamaWs
+            << " llama_priv=" << llamaPriv
+            << " front_pid=" << frontPid << " front_ws=" << frontWs
+            << " front_priv=" << frontPriv << "\n";
+      }
+    } catch (...) {
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(30));
+  }
+}
+
+static void startMemoryTelemetry(const fs::path &logDir) {
+  if (gMemoryTelemetryRunning.exchange(true)) return;
+  std::cout << "[memoryTelemetry] starting, log="
+            << (logDir / "memory_telemetry.log").string() << std::endl;
+  std::thread([logDir]() { memoryTelemetryLoop(logDir); }).detach();
+}
+
+#endif // _WIN32
 
 // 将常见环境变量名映射到 config/phoenix.json 中的 dot path。
 // 未映射的变量返回空串，调用方应使用原始 fallback。

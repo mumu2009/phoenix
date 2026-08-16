@@ -9,7 +9,7 @@
   },
   "collection": {
     "lastAdded": 660,
-    "lastCollectAt": "2026-08-13T16:36:26",
+    "lastCollectAt": "2026-08-16T14:13:33",
     "lastSources": [
       "tests",
       "robots",
@@ -36,8 +36,8 @@
   ],
   "internalCorpus": {
     "robotsDir": "robots",
-    "sampleCount": 104980,
+    "sampleCount": 114220,
     "testsDir": "tests"
   },
-  "updatedAt": "2026-08-13T16:36:26"
+  "updatedAt": "2026-08-16T14:13:33"
 }

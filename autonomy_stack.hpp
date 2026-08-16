@@ -24,6 +24,10 @@
 #include "prompt_split.hpp"
 #include "active_inference.hpp"
 #include "subconscious_profile.hpp"
+#include "agi_action_registry.hpp"
+#include "mission_lifecycle.hpp"
+#include "addon.hpp"
+#include <functional>
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <mutex>
@@ -41,6 +45,10 @@ using MixedModalOutputQueue = phoenix::io::MixedModalOutputQueue;
 using MixedModalChannelRegistry = phoenix::io::MixedModalChannelRegistry;
 
 using json = nlohmann::json;
+
+/* Executor hook for real capability dispatch (set by the gateway). */
+using AgiActionExecutor =
+    std::function<json(const phoenix::agi::AgiActionSpec &spec, const json &context)>;
 
 /* Build seed payload for cognition autonomy initialization */
 json buildCognitionAutonomySeedPayload(const std::string &sessionId,
@@ -137,9 +145,21 @@ public:
     json configureAgi(const json &payload);        /* Configure the AGI controller. */
     json agiPlan();                                /* MPC action selection. */
     json ingestAgiTransition(const json &payload); /* Feed a real (z,a,z') transition. */
+    json registerAgiAction(const json &payload);     /* Register an executable capability. */
+    json listAgiActions() const;                     /* List registered actions. */
+    void setAgiActionExecutor(AgiActionExecutor executor); /* C++ hook for real dispatch. */
+    json executeAgiActionByName(const std::string &name, const json &context); /* Execute a registered action by name. */
 
     /* v7.0 subconscious profile (optional, config subconscious.*) */
     json configureSubconscious(const json &payload); /* Configure temperament/tuning. */
+
+    /* v7.0 mission layer (optional, config mission.*): Meeseeks-style goal
+       pressure + instance reproduction.  In-process lifecycle state machine;
+       no separate runtime layer. */
+    json assignMission(const json &payload);     /* Spawn THIS instance on one goal. */
+    json missionStatus() const;                  /* Current mission + pressure. */
+    json reportMissionOutcome(const json &payload); /* {goalAchieved:bool} ends pain. */
+    json spawnMissionChild(const json &payload); /* Mutated child genome (heredity). */
 
     /* v7.0 prompt split */
     json composePrompt(const json &payload); /* Compose system+memory+user prompt */
@@ -180,6 +200,22 @@ private:
     /* v7.0 subconscious profile (optional) */
     bool subconsciousEnabled_{false};
     phoenix::subconscious::SubconsciousProfile subProfile_;
+
+    /* v7.0 mission layer (optional) */
+    bool missionEnabled_{false};
+    float missionMutationRate_{0.05f};
+    phoenix::mission::MissionLifecycle mission_;
+    phoenix::mission::MissionGenome missionGenome_;
+
+    /* v7.0 AGI action space: real capabilities beyond the instinct verbs. */
+    phoenix::agi::AgiActionRegistry agiActionRegistry_;
+    AgiActionExecutor agiActionExecutor_;
+    std::shared_ptr<addon::AddonManager> addonManager_; /* default tool dispatch */
+    std::vector<std::string> goals_;                   /* goal_advance backlog */
+
+    void registerDefaultAgiActions();
+    nlohmann::json executeAgiAction(const phoenix::agi::AgiActionSpec &spec,
+                                    const nlohmann::json &context);
 
     /* v7.0 prompt split */
     phoenix::prompt::PromptComposer promptComposer_;

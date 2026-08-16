@@ -26,6 +26,7 @@
 #include <cstddef>
 #include <iomanip>
 #include <mutex>
+#include <shared_mutex>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -59,7 +60,7 @@ struct ProjectionKeyHash {
   }
 };
 
-std::mutex gProjectionCacheMu;
+std::shared_mutex gProjectionCacheMu;  // read-mostly cache: shared reads, unique inserts.
 std::unordered_map<ProjectionKey, Eigen::MatrixXf, ProjectionKeyHash> gProjectionCache;
 std::unordered_map<ProjectionKey, Eigen::SparseMatrix<float>, ProjectionKeyHash> gSparseProjectionCache;
 
@@ -68,7 +69,7 @@ const Eigen::MatrixXf &getProjectionMatrix(size_t sourceDim,
                                            unsigned int seed) {
   ProjectionKey key{sourceDim, targetDim, seed, 0};
   {
-    std::lock_guard<std::mutex> lock(gProjectionCacheMu);
+    std::shared_lock<std::shared_mutex> lock(gProjectionCacheMu);
     auto it = gProjectionCache.find(key);
     if (it != gProjectionCache.end()) {
       return it->second;
@@ -90,7 +91,7 @@ const Eigen::MatrixXf &getProjectionMatrix(size_t sourceDim,
     }
   }
 
-  std::lock_guard<std::mutex> lock(gProjectionCacheMu);
+  std::unique_lock<std::shared_mutex> lock(gProjectionCacheMu);
   auto it = gProjectionCache.find(key);
   if (it != gProjectionCache.end()) {
     return it->second;  // another thread already inserted the same matrix
@@ -106,7 +107,7 @@ const Eigen::SparseMatrix<float> &getSparseProjectionMatrix(size_t sourceDim,
                                                             unsigned int seed) {
   ProjectionKey key{sourceDim, targetDim, seed, nonZeros};
   {
-    std::lock_guard<std::mutex> lock(gProjectionCacheMu);
+    std::shared_lock<std::shared_mutex> lock(gProjectionCacheMu);
     auto it = gSparseProjectionCache.find(key);
     if (it != gSparseProjectionCache.end()) {
       return it->second;
@@ -139,7 +140,7 @@ const Eigen::SparseMatrix<float> &getSparseProjectionMatrix(size_t sourceDim,
                                  static_cast<Eigen::Index>(sourceDim));
   mat.setFromTriplets(triplets.begin(), triplets.end());
 
-  std::lock_guard<std::mutex> lock(gProjectionCacheMu);
+  std::unique_lock<std::shared_mutex> lock(gProjectionCacheMu);
   auto it = gSparseProjectionCache.find(key);
   if (it != gSparseProjectionCache.end()) {
     return it->second;

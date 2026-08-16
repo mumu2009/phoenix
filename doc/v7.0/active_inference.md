@@ -166,3 +166,17 @@ $$ m = \operatorname{clip}\left(1 + \frac{\overline{S} - S_t}{\overline{S}},\, 0
     plan: EFE 滚动时域（pragmatic = 学习到的 V(z)，intrinsic = 全稳态代价，epistemic = surprise × 自适应乘子）
     act: 覆盖 instinct argmax → memory.benefitHarmBias
     consolidate: 每 K 回合重放情景记忆
+---
+
+## 11. 动作空间扩展：从本能动词到真实能力
+
+`agi_action_registry.{hpp,cpp}` 把规划器的动作空间从 5 个本能动词扩展到**任何可执行能力**：
+
+- `AgiActionSpec{name, category, embedding, addonType, description}`；category ∈ {instinct, tool, goal}。
+- `configureAgi`/`registerAgiAction` 构建规划器动作集 = 本能动词 + 注册能力（去重按 name）。
+- `iterate()` 规划后：若选中动作为非 instinct 且已设置执行器（`setAgiActionExecutor`），**真正执行**并把结果写入 `agiPlan.execution`，而非仅注入 prompt 动词。
+- 网关（`111_class_gatewayserver.inc`）默认注册 math/search/research/web 四个 addon 工具（配置 `agi.actions` 可覆盖），执行器复用既有 `invokeAddonTool`。
+
+**理论**：主动推理中动作空间即效应器集合；扩大动作空间 = 扩大 EFE 最小化的策略空间。旧动作仍在，故最优 EFE 只降不升（min 的单调性）。
+
+**注意**：执行器在管理器互斥锁内调用——工具分派应保持有界耗时（如超时的 HTTP 调用）；若未来接入长时间工具，应把执行移出锁外（文档已标注）。
