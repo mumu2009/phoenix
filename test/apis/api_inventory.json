@@ -1,226 +1,401 @@
 {
   "summary": {
-    "total": 35,
+    "total": 64,
     "byMethod": {
-      "ANY": 31,
-      "GET": 4
+      "ANY": 58,
+      "POST": 1,
+      "GET": 5
     },
     "byKind": {
-      "literal": 32,
-      "regex": 3
+      "literal": 62,
+      "regex": 2
     }
   },
   "endpoints": [
     {
       "path": "/",
       "method": "ANY",
-      "source_line": 3466,
+      "source_line": 5278,
       "kind": "literal"
     },
     {
       "path": "/api/gguf/export",
       "method": "ANY",
-      "source_line": 3935,
+      "source_line": 5917,
       "kind": "literal"
     },
     {
       "path": "/api/gguf/inspect",
       "method": "ANY",
-      "source_line": 3915,
+      "source_line": 5897,
+      "kind": "literal"
+    },
+    {
+      "path": "/api/health",
+      "method": "ANY",
+      "source_line": 5407,
+      "kind": "literal"
+    },
+    {
+      "path": "/api/platform/budget",
+      "method": "ANY",
+      "source_line": 5972,
+      "kind": "literal"
+    },
+    {
+      "path": "/api/platform/config",
+      "method": "ANY",
+      "source_line": 5988,
+      "kind": "literal"
+    },
+    {
+      "path": "/api/platform/dispatch/compute",
+      "method": "ANY",
+      "source_line": 6007,
+      "kind": "literal"
+    },
+    {
+      "path": "/api/platform/plan",
+      "method": "ANY",
+      "source_line": 5998,
+      "kind": "literal"
+    },
+    {
+      "path": "/api/platform/refresh",
+      "method": "POST",
+      "source_line": 5968,
+      "kind": "literal"
+    },
+    {
+      "path": "/api/platform/status",
+      "method": "GET",
+      "source_line": 5964,
       "kind": "literal"
     },
     {
       "path": "/asset-manifest.json",
       "method": "GET",
-      "source_line": 3543,
+      "source_line": 5355,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/admin/cleanup-test-users",
+      "method": "ANY",
+      "source_line": 5854,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/admin/users",
+      "method": "ANY",
+      "source_line": 5822,
       "kind": "literal"
     },
     {
       "path": "/auth/bootstrap",
       "method": "ANY",
-      "source_line": 3608,
+      "source_line": 5437,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/change-password",
+      "method": "ANY",
+      "source_line": 5647,
       "kind": "literal"
     },
     {
       "path": "/auth/config",
       "method": "ANY",
-      "source_line": 3595,
+      "source_line": 5421,
       "kind": "literal"
     },
     {
       "path": "/auth/forgot",
       "method": "ANY",
-      "source_line": 3854,
+      "source_line": 5754,
       "kind": "literal"
     },
     {
       "path": "/auth/login",
       "method": "ANY",
-      "source_line": 3719,
+      "source_line": 5548,
       "kind": "literal"
     },
     {
       "path": "/auth/logout",
       "method": "ANY",
-      "source_line": 3905,
+      "source_line": 5805,
       "kind": "literal"
     },
     {
       "path": "/auth/me",
       "method": "ANY",
-      "source_line": 3758,
+      "source_line": 5587,
+      "kind": "literal"
+    },
+    {
+      "path": "/auth/profile",
+      "method": "ANY",
+      "source_line": 5603,
       "kind": "literal"
     },
     {
       "path": "/auth/register",
       "method": "ANY",
-      "source_line": 3662,
+      "source_line": 5491,
       "kind": "literal"
     },
     {
       "path": "/auth/reset",
       "method": "ANY",
-      "source_line": 3881,
+      "source_line": 5781,
       "kind": "literal"
     },
     {
       "path": "/auth/verify",
       "method": "ANY",
-      "source_line": 3818,
+      "source_line": 5718,
       "kind": "literal"
     },
     {
       "path": "/auth/verify/request",
       "method": "ANY",
-      "source_line": 3783,
+      "source_line": 5683,
+      "kind": "literal"
+    },
+    {
+      "path": "/camera/analyze",
+      "method": "ANY",
+      "source_line": 7146,
+      "kind": "literal"
+    },
+    {
+      "path": "/context/hint",
+      "method": "ANY",
+      "source_line": 6267,
       "kind": "literal"
     },
     {
       "path": "/context/ingest",
       "method": "ANY",
-      "source_line": 3989,
+      "source_line": 6025,
+      "kind": "literal"
+    },
+    {
+      "path": "/context/knowledge",
+      "method": "ANY",
+      "source_line": 6333,
+      "kind": "literal"
+    },
+    {
+      "path": "/context/record",
+      "method": "ANY",
+      "source_line": 6302,
       "kind": "literal"
     },
     {
       "path": "/context/reset",
       "method": "ANY",
-      "source_line": 4099,
+      "source_line": 6219,
       "kind": "literal"
     },
     {
       "path": "/context/status",
       "method": "ANY",
-      "source_line": 4124,
+      "source_line": 6246,
+      "kind": "literal"
+    },
+    {
+      "path": "/emotion/bias",
+      "method": "ANY",
+      "source_line": 7529,
+      "kind": "literal"
+    },
+    {
+      "path": "/emotion/feedback",
+      "method": "ANY",
+      "source_line": 7566,
+      "kind": "literal"
+    },
+    {
+      "path": "/emotion/observe",
+      "method": "ANY",
+      "source_line": 7499,
+      "kind": "literal"
+    },
+    {
+      "path": "/emotion/state",
+      "method": "ANY",
+      "source_line": 7600,
       "kind": "literal"
     },
     {
       "path": "/favicon.ico",
       "method": "GET",
-      "source_line": 3591,
+      "source_line": 5403,
       "kind": "literal"
     },
     {
       "path": "/logo192.png",
       "method": "ANY",
-      "source_line": 3547,
+      "source_line": 5359,
       "kind": "literal"
     },
     {
       "path": "/logo512.png",
       "method": "ANY",
-      "source_line": 3567,
+      "source_line": 5379,
       "kind": "literal"
     },
     {
       "path": "/manifest.json",
       "method": "GET",
-      "source_line": 3539,
+      "source_line": 5351,
+      "kind": "literal"
+    },
+    {
+      "path": "/mechanical_mind/analyze",
+      "method": "ANY",
+      "source_line": 7633,
       "kind": "literal"
     },
     {
       "path": "/robots.txt",
       "method": "GET",
-      "source_line": 3587,
+      "source_line": 5399,
       "kind": "literal"
     },
     {
       "path": "/speech/analyze",
       "method": "ANY",
-      "source_line": 4195,
+      "source_line": 7250,
       "kind": "literal"
     },
     {
       "path": "/speech/ingest",
       "method": "ANY",
-      "source_line": 4248,
+      "source_line": 7323,
       "kind": "literal"
     },
     {
       "path": "/speech/synthesize",
       "method": "ANY",
-      "source_line": 4223,
+      "source_line": 7298,
       "kind": "literal"
     },
     {
       "path": "/static/css/{1}",
       "method": "ANY",
-      "source_line": 3528,
+      "source_line": 5340,
       "kind": "literal"
     },
     {
       "path": "/static/js/{1}",
       "method": "ANY",
-      "source_line": 3516,
+      "source_line": 5328,
       "kind": "literal"
     },
     {
       "path": "/v51/chat",
       "method": "ANY",
-      "source_line": 4034,
+      "source_line": 6146,
       "kind": "literal"
     },
     {
       "path": "/v51/learn",
       "method": "ANY",
-      "source_line": 4333,
+      "source_line": 7420,
       "kind": "literal"
     },
     {
       "path": "/v51/process",
       "method": "ANY",
-      "source_line": 4303,
+      "source_line": 7390,
       "kind": "literal"
     },
     {
       "path": "/v51/status",
       "method": "ANY",
-      "source_line": 4363,
+      "source_line": 7450,
       "kind": "literal"
     },
     {
       "path": "/vision/analyze",
       "method": "ANY",
-      "source_line": 4145,
+      "source_line": 7043,
+      "kind": "literal"
+    },
+    {
+      "path": "/world/brain",
+      "method": "ANY",
+      "source_line": 6465,
+      "kind": "literal"
+    },
+    {
+      "path": "/world/cognitive",
+      "method": "ANY",
+      "source_line": 6421,
+      "kind": "literal"
+    },
+    {
+      "path": "/world/collective-compute",
+      "method": "ANY",
+      "source_line": 6567,
+      "kind": "literal"
+    },
+    {
+      "path": "/world/conscious-compute",
+      "method": "ANY",
+      "source_line": 6512,
+      "kind": "literal"
+    },
+    {
+      "path": "/world/earth-map/import",
+      "method": "ANY",
+      "source_line": 6666,
+      "kind": "literal"
+    },
+    {
+      "path": "/world/ingest",
+      "method": "ANY",
+      "source_line": 6641,
+      "kind": "literal"
+    },
+    {
+      "path": "/world/physics/status",
+      "method": "ANY",
+      "source_line": 6362,
+      "kind": "literal"
+    },
+    {
+      "path": "/world/simulate",
+      "method": "ANY",
+      "source_line": 6719,
+      "kind": "literal"
+    },
+    {
+      "path": "/world/state",
+      "method": "ANY",
+      "source_line": 6387,
+      "kind": "literal"
+    },
+    {
+      "path": "/world/status",
+      "method": "ANY",
+      "source_line": 6347,
       "kind": "literal"
     },
     {
       "path": "^/api/.*$",
       "method": "ANY",
-      "source_line": 3977,
-      "kind": "regex"
-    },
-    {
-      "path": "^/openclaw/.*$",
-      "method": "ANY",
-      "source_line": 3981,
+      "source_line": 6017,
       "kind": "regex"
     },
     {
       "path": "^/robots/.*$",
       "method": "ANY",
-      "source_line": 3985,
+      "source_line": 6021,
       "kind": "regex"
     }
   ],
-  "generatedAt": "2026-03-22T18:10:08.764070"
+  "generatedAt": "2026-08-17T10:34:20.711794"
 }
