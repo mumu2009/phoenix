@@ -436,7 +436,8 @@
     "anticipatoryGain": 1.0,
     "sensationTuning": {},
     "instincts": []
-  },  "mission": {
+  },
+  "mission": {
     "enabled": false,
     "id": "",
     "goal": "",
@@ -445,7 +446,6 @@
     "defaultDeadlineSec": 300,
     "mutationRate": 0.05
   },
-
   "api": {
     "upstreamTimeoutMs": 45000,
     "gatewayHost": "127.0.0.1",
@@ -581,19 +581,19 @@
       "ollamaBaseUrl": "http://127.0.0.1:11434",
       "ollamaTimeoutMs": 120000,
       "llamaCppModel": "blobs/sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29",
-      "llamaCppBaseUrl": "http://192.168.0.107:8082",
+      "llamaCppBaseUrl": "http://192.168.0.104:8082",
       "llamaCppTimeoutMs": 120000,
       "llamaCppLoraFiles": "",
       "llamaCppLoraInitWithoutApply": false,
       "llamaCppFineTuning": false,
-      "llamaUseSplitBackend": true,
+      "llamaUseSplitBackend": false,
       "bitnetModel": "",
       "bitnetBaseUrl": "http://127.0.0.1:8090",
       "bitnetTimeoutMs": 120000,
       "tinyllamaModel": "GGUF_models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
-      "tinyllamaBaseUrl": "",
-      "tinyllamaTimeoutMs": 120000,
-      "tinyllamaEnabled": false,
+      "tinyllamaBaseUrl": "http://192.168.0.104:8086",
+      "tinyllamaTimeoutMs": 5000,
+      "tinyllamaEnabled": true,
       "conceptMatrixEnabled": false,
       "conceptMatrixClearPerRequest": true,
       "ggufModelsDir": "GGUF_models",

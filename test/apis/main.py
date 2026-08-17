@@ -139,7 +139,7 @@ class SmartHttpClient:
             deadline = time.time() + max(ready_wait_sec, 1.0)
             while time.time() < deadline:
                 try:
-                    probe = self.session.get(f"{self.base_url}/auth/config", timeout=1.5)
+                    probe = self.session.get(f"{self.base_url}/api/system/status", timeout=1.5)
                     if probe.status_code < 500:
                         return True
                 except requests.RequestException:
@@ -326,6 +326,13 @@ class V51ApiTester:
         email = f"{username}@example.com"
 
         cfg = self.client.request("GET", "/auth/config")
+        # If auth endpoints are not compiled (RDK X5 slim build / auth disabled),
+        # fall back to the local-dev shared bearer token configured in phoenix_main.
+        if cfg.status_code == 404:
+            fixed = os.getenv("TEST_BEARER_TOKEN", "local-dev")
+            self.auth_token = fixed
+            self.logger.info(f"Authenticated by fixed bearer token (auth disabled build): {fixed[:8]}...")
+            return
         cfg_json = self._json(cfg)
         allow_register = bool(cfg_json.get("allowRegister", True))
 

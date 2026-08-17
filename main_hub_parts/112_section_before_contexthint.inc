@@ -155,7 +155,8 @@
         ioctlsocket(sock, FIONBIO, &nonblk);
         int cr = connect(sock, (struct sockaddr*)&addr, sizeof(addr));
         bool connected = false;
-        if (cr == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+        if (cr == SOCKET_ERROR &&
+            (WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == EINPROGRESS)) {
           fd_set wfds;
           FD_ZERO(&wfds);
           FD_SET(sock, &wfds);

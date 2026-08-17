@@ -129,7 +129,10 @@ HttpResult httpRequest(const std::string &host, int port,
     ioctlsocket(sock, FIONBIO, &nonblk);
     int cr = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     bool connected = false;
-    if (cr == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+    // On Windows non-blocking connect returns WSAEWOULDBLOCK; on Linux it
+    // returns EINPROGRESS.  Both mean "connection in progress, use select()".
+    if (cr == SOCKET_ERROR &&
+        (WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == EINPROGRESS)) {
       fd_set wfds;
       FD_ZERO(&wfds);
       FD_SET(sock, &wfds);

@@ -1,6 +1,7 @@
 # ─── Local runtime lock files ──────────────────────────────────────────────────
 tools/.x5_tunnel.lock
 .evolve.lock
+tools/
 
 # ─── Build artifacts ───────────────────────────────────────────────────────────
 build/
