@@ -282,6 +282,7 @@ TEST_F(AutonomyMissionFixture, ReportMissionOutcomeFalseFails) {
                            {"goal", "fail"},
                            {"painGainPerSec", 100.0},
                            {"maxPain", 1.0}});
+
   std::this_thread::sleep_for(std::chrono::milliseconds(2));
   mgr_->iterate(json{{"sessionId", "edge-fail"}}, json{});
 
@@ -299,6 +300,7 @@ TEST_F(AutonomyMissionFixture, CompleteMissionTwiceIsIdempotent) {
                            {"goal", "twice"},
                            {"painGainPerSec", 100.0},
                            {"maxPain", 1.0}});
+
   std::this_thread::sleep_for(std::chrono::milliseconds(2));
   mgr_->iterate(json{{"sessionId", "edge-twice"}}, json{});
 

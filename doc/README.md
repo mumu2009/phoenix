@@ -13,6 +13,13 @@
 - `algorithm/`：算法说明与数据流文档。
 - `math/`：数学推导与证明材料。
 - `v5.1/`、`v5.2/`：版本演进文档。
+- `v7.0/`：v7.0 "Arthur" 文档集：
+  - `v7.0.md`：目标架构总纲；`workflow.md`：数据流；`algorithm.md`：算法（§1–§23，含全部数学证明）；
+  - `active_inference.md`：EFE/MPC 与 TD(0) 自进化；`subconscious.md`：PAD 气质/稳态调谐；
+  - `mission_layer.md`：Meeseeks 任务层（g·T²/2 定理、自由复制）；`plugins.md`：插件生态（cli-json/MCP/数学/搜索）；
+  - `autonomy_loop.md`：长期自主心跳 + 持久化 + 插话；`safety.md`：系统级急停（E-stop）；
+  - `model_deployment.md` / `complexity_bounds.md` / `llamacpp_optimization.md` / `testing_methodology.md`（§1–§12 验证协议） / `testing_plan.md`；
+  - `archive/uncontrolled_evolution.md`：封存的不受控进化设想（原因与重启条件）。
 
 ## 适用场景
 

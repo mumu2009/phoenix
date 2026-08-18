@@ -444,7 +444,33 @@
     "painGainPerSec": 0.01,
     "maxPain": 1.0,
     "defaultDeadlineSec": 300,
-    "mutationRate": 0.05
+    "mutationRate": 0.05,
+    "maxReplicas": 4
+  },
+  "mcp": {
+    "enabled": false,
+    "servers": []
+  },
+  "safety": {
+    "estop": {
+      "enabled": true
+    }
+  },
+  "autonomyLoop": {
+    "enabled": false,
+    "intervalSec": 10,
+    "maxStepsPerTick": 8,
+    "persistEveryTicks": 5,
+    "persistPath": "runtime_store/autonomy_state.json"
+  },
+  "cliTools": []
+,  "search": {
+    "enabled": true,
+    "backends": ["ddg_lite"],
+    "endpoint": "",
+    "timeoutMs": 5000,
+    "maxResults": 8,
+    "userAgent": "PhoenixWebSearch/1.0"
   },
   "api": {
     "upstreamTimeoutMs": 45000,

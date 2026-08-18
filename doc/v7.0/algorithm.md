@@ -400,8 +400,8 @@ recommendedAction = argmax_a Σ_{i: actionBias_i = a} act_i * (benefit_i - harm_
 
 默认 `SystemPrompt::arthurDefault`：
 
-- identity: "You are Phoenix, an autonomous cognitive assistant codenamed Arthur."
-- version: "Phoenix v7.0 Arthur"
+- identity: "You are Phoenix, an autonomous cognitive assistant codenamed Lancelot."
+- version: "Phoenix v8.0 Lancelot"
 - constraints: 诚实、安全、隐私等硬规则。
 - coreDirective: 协助用户、从上下文学习、保护系统、平衡探索与回避。
 
@@ -975,7 +975,30 @@ every N scheduling rounds:
 
 新增可选子系统（默认关闭，config `mission.enabled=false`）：把一个实例包装为**目标域化（goal-scoped）**生命周期——出生绑定单一目标，疼痛随时间线性增长，只有目标被判定完成（`reportMissionOutcome({goalAchieved:true})`）疼痛才停止。这回答了“AI 的角色不必是服务用户”的问题：估值来源从外部反馈移到内部目标完成判定，闭环完全在系统内部。
 
-- **形式化**：疼痛 p(t)=min(g·t, P_max)，g=`mission.painGainPerSec`，P_max=`mission.maxPain`。**定理**：任务在 T 时刻完成时累积总疼痛 P(T)=∫₀ᵀ p(t)dt = gT²/2（未饱和段），且 P(T) 对 T 严格递增——最小化累积疼痛 ⟺ 最小化完成时间（证明见 `doc/v7.0/mission_layer.md` §2）。已有趋利避害/主动推理闭环本来就最小化稳态代价（Pain 的 setpoint=0），因此**无需新优化器**，压力自动内化为“尽快完成”的偏好（pragmatic 项的终止状态先验偏好，Friston）。
+- **形式化**：疼痛 p(t)=min(g·t, P_max)，g=`mission.painGainPerSec`，P_max=`mission.maxPain`。**定理**：任务在 T 时刻完成时累积总疼痛 P(T)=∫₀ᵀ p(t)dt = gT²/2（未饱和段），且 P(T) 对 T 严格递增——最小化累积疼痛 ⟺ 最小化完成时间（证明见 `doc/v7.0/mission_layer.md` §2）。实现与模型严格对齐：`add()` 对同 (type,source) 信号**刷新而非堆叠**（压力恒为单信号 p(t)，稳态代价即 p(t) 而非 N·p）；`iterate()` 每轮先 `decayAuto(dt)`（缺省半衰期 300s，按潜意识调谐覆盖）再注入，完成后疼痛沿半衰期衰减并剪除。已有趋利避害/主动推理闭环本来就最小化稳态代价（Pain 的 setpoint=0），因此**无需新优化器**，压力自动内化为“尽快完成”的偏好（pragmatic 项的终止状态先验偏好，Friston）。
 - **实现**：`mission_lifecycle.{hpp,cpp}`（状态机 Idle/Running/Completed/Failed + 基因组 `MissionGenome`，互斥量保护）；`autonomy_stack` 接入 `assignMission/missionStatus/reportMissionOutcome/spawnMissionChild`，`iterate()` 在本能评估前把 pressure 注入为 Pain 感受（source="mission-pressure"）并在结果暴露 `mission` 字段；网关 `111_class_gatewayserver.inc` 加载 `mission.*` 配置。已入 `compile.bat` / `compile_gtest.bat` 的 COMMON_SOURCES 与 `tools/build_rdk_x5.sh`。
-- **繁殖/遗传/变异**：`spawnChild(parent, rate)` 对可遗传参数（SubconsciousProfile + learningRate）做高斯扰动（clamp），完成时间作适应度 fitness=−T，构成 (1+λ)-ES；子代基因组可注入新实例/新会话。**无独立运行时外层**：外层 = 进程内状态机 + 基因组对象，`iterate()` 内 `pressureNow()` 为 O(1)，无跨层翻译成本。
+- **繁殖/遗传/变异（复制是实例的自由能力，使命必达，非自然选择）**：`replicate` 是默认规划器动作（category="replicate"），实例经由 EFE 规划**自由决定何时复制**——无固定触发条件、**无接班**（任务完成前压力只增不减、实例不中途结束）；执行时变异自身基因组（`MissionGenome::mutate`）并召唤绑定同一目标的新会话（`MissionChild` 记录 + `sessions_` 子会话，携带子基因组）。`mission.maxReplicas`（默认 4）是唯一护栏。没有 fitness 比较/淘汰/最优父本保留；`stats()` 的 `completionTimeMs`/`children` 供人类监督。不受控 (1+λ)-ES 自进化设想封存于 `doc/v7.0/archive/uncontrolled_evolution.md`。**无独立运行时外层**：后继 = 进程内新会话 + `MissionChild` 记录，`pressureNow()` O(1)，无跨层翻译成本。
 - **诚实的边界**：时间依赖疼痛不是势函数塑形（Ng, Harada & Russell 1999），γ<1 时与总疼痛 gT²/2 的等价性会被折扣打破；因此压力只走稳态通道、完成判定由显式门控（防走捷径）、仅适用于目标域化实例。完整推导、探索-利用权衡与参考文献见 `doc/v7.0/mission_layer.md`。
+
+
+## 21. 插件生态（可选：cli-json 桥 / MCP 兼容 / 增强搜索与数学）
+
+- **任意软件→插件（结合 outsides/CLI-Anything 方法论）**：`addons/cli_json_addon.*` + `phoenix/subprocess.*`。白名单命令模板直接 exec（不经过 shell），stdout 可解析为 JSON 时结构化返回；未注册工具一律拒绝（fail-closed）。复杂度：单次调用 = 子进程启动 + O(输出长度)。
+- **MCP 兼容（主流插件市场）**：`phoenix/mcp_client.*` 实现 MCP stdio 传输客户端（JSON-RPC 2.0，严格按 id 匹配，读线程 + 条件变量），initialize/tools/list/tools/call/resources/read/prompts/get/ping/shutdown；`autonomy_stack` 的 `configureMcp` 把每个工具注册为规划器动作 `mcp.<server>.<tool>`（category="mcp"），`executeAgiAction` 派发。默认关闭（config `mcp.enabled=false`）。
+- **数学插件增强（"模型必须能信任算术"）**：`addons/math_exact.hpp` 大整数（1e9 进制肢 + Knuth 长除 O(n²)）与有理数；整数/普通小数表达式全程精确（0.1+0.2=0.3、1/3×3=1、100! 精确），超越函数走浮点并显式报域错误；语句/变量/错误定位。Python 侧用 Fraction 对齐。
+- **搜索插件增强（进化的材料来源）**：`phoenix/web_search_engine.*` 免依赖原始 socket HTTP/1.1 + DuckDuckGo Lite 解析（无 API key 开箱即用）+ 可配置 JSON 端点；`search_addon` 先走网关 OnlineResearcher（HAVE_CURL 索引/爬取），失败回退引擎，返回结构化 top-N {title,url,snippet}。已知限制：ddg_lite 依赖网络可达性（本机实测被墙区域不可达，需配置 search.endpoint）。
+- 全部新源已入 `compile.bat` / `compile_gtest.bat` / `tools/build_rdk_x5.sh` 及 compat 脚本；gtest 见 `testing_methodology.md` §10。完整设计见 `doc/v7.0/plugins.md`。
+
+## 22. 长期自主循环 + 插话（可选，autonomyLoop.*）
+
+- **心跳（自主循环长期化）**：`CognitionAutonomyManager` 内置心跳线程（`loopRun`），每 `intervalSec` 执行一个 tick：`ensureHeartbeatSession` → 最多 `maxStepsPerTick` 次 `iterate({}, {})`（完整 plan/act/observe/learn 闭环）→ 每 `persistEveryTicks` 写盘。复杂度：每 tick O(maxStepsPerTick × 动作数 × 时域 × dim²)，有界可控。
+- **持久化（自主进化长期化）**：`exportState/importState` 覆盖全部可学习状态——`ActiveInferenceController::toJson/fromJson`（价值头 w、前向模型 A/B/b、情景记忆≤1024 条、surprise EMA、探索状态、动作空间）、感受引擎、任务生命周期（mission+genome+children+maxReplicas）、潜意识剖面、goals。TD(0)/在线前向模型均为增量算法（Sutton & Barto；Tsitsiklis & Van Roy），序列化即长期化。
+- **插话（中途提示）**：`interject({text})` 入队（上限 64），下一 tick/回合消费为 userPrompt 并注入 `[human interjections]` 调制块；`interject({amendGoal})` 调 `MissionLifecycle::amendGoal()`——Running 不变、startMs 不变（压力继续增长），目标被重定向而非重启。路由：POST /api/cognition/autonomy/interject、/loop、GET /status。
+- 理论边界见 `doc/v7.0/autonomy_loop.md`（反馈质量决定学习质量；心跳默认关闭；单进程心跳=单实例循环，多实例=replicate 子会话同进程调度）。
+
+## 23. 系统级急停（多实例安全层，safety.estop）
+
+- **实例登记**：`phoenix::safety::InstanceRegistry`（进程级单例）——实例在生命周期开始时登记（自主循环 start、任务 assignMission），携带停堆处理函数，析构注销；O(1) 登记/注销，stopAll 先快照后逐项调用（异常逐项捕获）。
+- **急停闩锁**：`phoenix::safety::EmergencyStop::press(reason)`——顺序：① 闩锁置位（原子，先于一切）；② stopAll 杀全部登记实例（停心跳/停 MCP）；③ 关停处理函数（网关：持久化 `runtime_store/estop_state.json` → `drogon::app().quit()`）。幂等：二次按下返回原报告；代码不可解锁（测试专用 resetForTesting 除外）。
+- **最高优先级检查点**：`iterate()`/`interject()`/`startAutonomyLoop()` 入口 + 心跳每 tick——置位后任何实例拒绝新工作。默认开启（`safety.estop.enabled=true`）：安全装置是"默认关闭"原则的唯一例外。
+- 路由：`POST /api/safety/estop`、`GET /api/safety/estop/status`。分层：memebarrier（单实例图安全）→ E-stop（多实例进程级）→ 进程退出。完整设计、诚实边界（进程内作用域、协作式停堆窗口）见 `doc/v7.0/safety.md`。

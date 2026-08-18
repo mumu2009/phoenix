@@ -130,7 +130,56 @@ public:
       missionCfg["painGainPerSec"] = phoenix::cfgOr<double>("mission.painGainPerSec", 0.01);
       missionCfg["maxPain"] = phoenix::cfgOr<double>("mission.maxPain", 1.0);
       missionCfg["mutationRate"] = phoenix::cfgOr<double>("mission.mutationRate", 0.05);
+      missionCfg["maxReplicas"] = phoenix::cfgOr<int>("mission.maxReplicas", 4);
       cognitionManager_.assignMission(missionCfg);
+    }
+    /* v7.0 MCP compatibility: load mcp.* config (disabled by default).  When
+       enabled, each configured MCP server (JSON-RPC over stdio) is launched
+       and its tools become planner actions named "mcp.<server>.<tool>". */
+    {
+      json mcpCfg;
+      mcpCfg["enabled"] = phoenix::cfgOr<bool>("mcp.enabled", false);
+      mcpCfg["servers"] = phoenix::cfgOr<nlohmann::json>("mcp.servers", nlohmann::json::array());
+      cognitionManager_.configureMcp(mcpCfg);
+    }
+    /* v7.0 long-term autonomous loop: the heartbeat that runs the
+       plan/act/observe/learn cycle without external messages and persists
+       the evolved state (long-term evolution).  Disabled by default. */
+    {
+      json loopCfg;
+      loopCfg["enabled"] = phoenix::cfgOr<bool>("autonomyLoop.enabled", false);
+      loopCfg["intervalSec"] = phoenix::cfgOr<int>("autonomyLoop.intervalSec", 10);
+      loopCfg["maxStepsPerTick"] = phoenix::cfgOr<int>("autonomyLoop.maxStepsPerTick", 8);
+      loopCfg["persistEveryTicks"] = phoenix::cfgOr<int>("autonomyLoop.persistEveryTicks", 5);
+      loopCfg["persistPath"] = phoenix::cfgOr<std::string>(
+          "autonomyLoop.persistPath", "runtime_store/autonomy_state.json");
+      cognitionManager_.configureAutonomyLoop(loopCfg);
+      if (phoenix::cfgOr<bool>("autonomyLoop.enabled", false)) {
+        cognitionManager_.startAutonomyLoop();
+      }
+    }
+    /* v7.0 system-level E-stop: when pressed, the latch kills every
+       registered instance, persists the evolved state, and quits this
+       process (the system shuts ITSELF down - it cannot keep running
+       uncontrolled). */
+    phoenix::safety::EmergencyStop::instance().setShutdownHandler([this] {
+      try {
+        auto state = cognitionManager_.exportState();
+        std::filesystem::create_directories("runtime_store");
+        std::ofstream f("runtime_store/estop_state.json");
+        f << state.dump(2);
+      } catch (...) {
+        /* persistence is best-effort during an emergency */
+      }
+      drogon::app().quit();
+    });
+    /* v7.0 cli-json bridge: whitelist of external CLI tools ("any software
+       becomes a plugin").  Empty by default (nothing is runnable). */
+    {
+      nlohmann::json cliTools = phoenix::cfgOr<nlohmann::json>("cliTools", nlohmann::json::array());
+      if (!cliTools.is_array()) cliTools = nlohmann::json::array();
+      std::string cliErr;
+      addon::builtins::setCliJsonRegistry(cliTools, &cliErr);
     }
     /* AGI action space: register the real addon capabilities as planner
        actions and set the executor that dispatches the chosen tool.  The
