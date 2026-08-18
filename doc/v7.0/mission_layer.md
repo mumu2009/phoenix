@@ -17,7 +17,7 @@ $$
 p(t) = \min\{ g \cdot t,\; P_{\max} \},\qquad g > 0
 $$
 
-其中 t 是任务开始后的经过秒数，g 是疼痛增长率（配置 `mission.painGainPerSec`），P_max 是疼痛上限（`mission.maxPain`）。任务完成后 p(t) = 0（疼痛源被移除，已有的 Pain 感受由 `PrimalSensationEngine` 的半衰期自然衰减）。
+其中 t 是任务开始后的经过秒数，g 是疼痛增长率（配置 `mission.painGainPerSec`），P_max 是疼痛上限（`mission.maxPain`）。任务完成后 p(t) = 0（疼痛源被移除）。实现要点（与模型一一对应）：`PrimalSensationEngine::add()` 对同 (type, source) 信号**刷新而非堆叠**——任务期间"mission-pressure" Pain 始终是单条信号 p(t)；`iterate()` 每轮先 `decayAuto(dt)`（按潜意识调谐的半衰期，缺省 300 秒）再注入最新 p(t)，任务完成后疼痛沿半衰期衰减直至剪除。
 
 **稳态（allostasis）诠释（Sterling 1988）**：疼痛是“目标未完成”这一稳态偏差的**信号强度**，g 是该偏差的**精度（precision）**。稳态偏差不随时间缩小（任务未完成），而系统的稳态代价随偏差持续积分，于是“越拖越痛”——这正是紧迫感的可计算定义。它与饥饿/疲劳同类：都是偏差驱动、可被趋利避害层最小化的原生感受，而不是一条硬编码的规则。
 
@@ -62,23 +62,26 @@ Ng, Harada & Russell (1999) 证明：只有**势函数塑形**（potential-based
 
 ---
 
-## 4. 繁殖 / 遗传 / 变异：(1+λ)-ES over a genome
+## 4. 繁殖 / 遗传 / 变异：复制是实例的自由能力（使命必达，非自然选择）
+
+**定位（2026-08 修订三）**：**复制的权力交给实例本身**。`replicate` 是一个普通的规划器动作（与 math/search/computer 同级），实例经由自己的 EFE 规划**自由决定何时复制**——没有固定触发条件（不由压力阈值触发）、没有接班过程。这正对应 Meeseeks 盒：任务未完成前，压力只增不减、实例不会中途结束；它唯一"召唤帮手"的理由就是它自己判断"多一个我为同一目标工作"有利。
+
+- **不是人来做**：`executeAgiAction(category="replicate")` 在 `iterate()` 的规划-执行环内由实例自己选择；
+- **不是自然选择**：没有适应度比较、没有淘汰、没有最优父本保留——`MissionGenome::mutate`（高斯扰动 + clamp）只为多个并行尝试提供多样性；
+- **唯一护栏**：`mission.maxReplicas`（默认 4）封顶复制数，防无限繁殖风暴；`mission.enabled=false` 仍是总开关。
 
 **基因组（heritable genome）**：`MissionGenome` = 可遗传参数集合：
 
-- `SubconsciousProfile`：PAD 气质基线、temperamentStrength、riskAversion（前景理论曲率）、anticipatoryGain、每种感受的 {gain, halfLifeSec, setpoint} 调谐、自定义本能表；
+- `SubconsciousProfile`：PAD 气质基线、temperamentStrength、riskAversion、anticipatoryGain、每感受 {gain, halfLifeSec, setpoint}、自定义本能表；
 - `learningRate`：价值学习器（TD(0)）的学习率。
 
-**变异**：`spawnChild(parent, rate)` 对每个可遗传标量做高斯扰动 x′ = clamp(x + σ·N(0,1), lo, hi)，σ = rate（可按参数族缩放）。这是标准进化策略变异算子（Beyer & Schwefel 2002）。
+**复制（replicate）**：`MissionLifecycle::replicate(rate)` 变异自身基因组，记录后继 `MissionChild{id, genome, goal, bornMs, generation}`，并在 `sessions_` 中创建绑定同一目标的新会话（携带子基因组）。父与子并行工作同一目标；父完成即目标完成。
 
-**选择**：适应度 fitness = −completionTime（完成越快越适应）；由完成记录（`markComplete` 的 endMs − startMs）充当选择信号。每代保留最优父本、生成 λ 个子代继续任务——即 (1+λ)-ES。
+**变异**：对每个可遗传标量 x′ = clamp(x + σ·N(0,1), lo, hi)，σ = rate（Beyer & Schwefel 2002 变异算子，仅作多样性来源）。
 
-**收敛性（诚实表述）**：对球形/二次目标，单亲 (1+λ)-ES 的期望进步率有解析下界（Beyer & Schwefel 2002，第 3 章），“多代完成时间下降”是**可检验的统计趋势**而非必然保证——环境噪声、目标难度与 σ 的选择都会影响。因此测试协议（见 `testing_methodology.md` §9）把结论限定为统计假设检验：连续 G 代完成时间的均值单调下降 + 变异幅度有界。
+**监督者信号**：`stats()` 暴露 `completionTimeMs`、`children`、`maxReplicas`；进程内**没有** fitness 字段、没有按完成时间的自动选择——选择（是否停用、是否采纳某变体）永远属于人。原"不受控 (1+λ)-ES 自进化"设想仍封存于 `doc/v7.0/archive/uncontrolled_evolution.md`。
 
-**为什么不是跨运行时层**：传统“外层+内层”方案要在层间做状态翻译/序列化，每次交互都有成本。这里“外层”就是进程内的：一个状态机（Idle/Running/Completed/Failed）+ 一个基因组对象 + 一个互斥量，`iterate()` 内一次 `pressureNow()` 是 O(1)，`spawnChild` 是 O(基因组维数) 的纯计算——没有第二个进程、没有协议、没有翻译损耗。
-
----
-
+**为什么不是跨运行时层**：后继是同一进程内的新会话 + 一个 `MissionChild` 记录；`replicate` 是 O(基因组维数) 纯计算，无第二进程、无协议、无翻译损耗。
 ## 5. 实现映射与用法
 
 | 层 | 位置 |
@@ -92,6 +95,7 @@ Ng, Harada & Russell (1999) 证明：只有**势函数塑形**（potential-based
 
 ```json
 "mission": { "enabled": true, "goal": "在本实例生命周期内解出该问题并给出最短答案",
+             "maxReplicas": 4,
              "painGainPerSec": 0.01, "maxPain": 1.0, "defaultDeadlineSec": 300,
              "mutationRate": 0.05 }
 ```

@@ -1,8 +1,8 @@
-# Phoenix v7.0 "Arthur"
+# Phoenix v8.0 "Lancelot"
 
 A set of facilities based on LLM, which can efficiently boost the speed and accuracy of LLM in long context, making it more like a person.
 
-> This branch is the v7.0 "Arthur" upgrade of the Phoenix system, focused on true multimodal fusion, primal-sensation/instinct/emotion integration, and comprehensive test coverage.
+> This branch is the **v8.0 "Lancelot"** release: the full autonomous-agent era, built on the v7.0 "Arthur" upgrade — true multimodal fusion, primal-sensation/instinct/emotion integration, a **self-evolving active-inference agent** (EFE/MPC + TD(0) + episodic consolidation), the **mission layer** (Meeseeks-style goal pressure with free, bounded replication), a **plugin ecosystem** (cli-json bridge, MCP compatibility, exact-math and web-search addons), a **long-term autonomous heartbeat** with state persistence and human interjection, and a **system-level emergency stop** (kill all registered instances + self-shutdown).  Full gtest suite: **4148 tests, 0 failures**.
 
 ---
 
@@ -36,12 +36,22 @@ A set of facilities based on LLM, which can efficiently boost the speed and accu
 - **Transformer feedback loop** — user feedback collected at `/api/transformer/feedback`, triggers background training at `/api/transformer/feedback/train`
 - **Dialog-triggered auto-learning** — after each completed dialog, RL / ADV / GNN-GA fire automatically based on turn counters; counters reset via `/api/learn/dialog/reset`
 
+### Autonomous Agent (self-evolving)
+- **Active inference / MPC** (`active_inference.{hpp,cpp}`) — Expected Free Energy planner (pragmatic/epistemic/intrinsic) over a latent forward model; online model learning from prediction error; episodic memory with sleep-like consolidation
+- **Self-evolution** — TD(0) value learning from realised benefit-harm utility, bootstrap-once preferences, prospect-theory risk attitude, VDBE-style adaptive exploration (0.5–2.0)
+- **Subconscious profile** (`subconscious_profile.{hpp,cpp}`) — PAD temperament, allostatic per-sensation tuning, risk aversion, anticipatory gain, custom instinct table (config `subconscious.*`)
+- **Mission layer** (`mission_lifecycle.{hpp,cpp}`) — Meeseeks-style goal pressure: pain grows linearly with time (total pain = g·T²/2, proven monotone in completion time) and ends only on completion; `replicate` is a free planner action (mutated genome, same goal, bounded by `mission.maxReplicas`)
+- **Long-term autonomy loop** (`autonomyLoop.*`) — internal heartbeat runs the plan/act/observe/learn cycle without external messages and persists the evolved state to disk (evolution survives restarts)
+- **Human interjection** — `POST /api/cognition/autonomy/interject` injects mid-lifecycle instructions or amends the mission goal (redirected, not restarted)
+- **Plugin ecosystem** — cli-json bridge (whitelisted CLI tools become plugins, fail-closed), MCP stdio client (`mcp.*`, tools become planner actions `mcp.<server>.<tool>`), exact-arithmetic math addon (`0.1+0.2 == 0.3` exactly, arbitrary precision), dependency-free web-search addon (DuckDuckGo Lite + configurable JSON endpoint)
+
 ### Safety & Monitoring
 - **MemeBarrier** — background thread scanning the meme graph for anomalous growth patterns; TextCNN + RNN/LSTM Torch models score and isolate malicious nodes; threshold, scan interval, and all model hyperparameters are runtime-configurable via `config/phoenix_tuned.json`
 - **Bug Shooter** — subprocess (`bug_shooter.exe`) monitoring process memory; soft and hard RSS limits with configurable thresholds
 - **Optimizer Autonomy** — self-monitoring autonomy agent that proposes GNN and Transformer upgrades (`/api/optimizer/autonomy/iterate`, `/api/gnn/upgrade`, `/api/transformer/upgrade`)
 - **Spider Autonomy** — adaptive web-crawl scheduling agent (`/api/spider/autonomy/adapt`)
 - **Route metrics** — every API route records latency and success/failure counters; queryable at `/api/monitoring/stats`; training jobs tracked at `/api/monitoring/training`
+- **System E-stop** (`safety.estop.enabled=true`) — latching kill switch: `POST /api/safety/estop` stops every registered instance (instances register when their lifecycle begins) and shuts the process down; `GET /api/safety/estop/status` shows the registry snapshot
 
 ### Data Pipeline
 - **Robots corpus** — text files in `robots/` loaded at startup as the base knowledge corpus; configurable chunk size, warmup limit, shuffle, and autoload
@@ -479,6 +489,11 @@ All routes require `Authorization: Bearer <token>` except `/api/system/status`.
 | `POST` | `/api/optimizer/autonomy/iterate` | Run optimizer iteration (auto-applies patch) |
 | `POST` | `/api/perf/profile` | Apply performance profile patch |
 | `POST` | `/api/gnn/upgrade` | Autonomy-proposed GNN upgrade |
+| `GET` | `/api/cognition/autonomy/status` | Cognition autonomy status |
+| `POST` | `/api/cognition/autonomy/interject` | Inject a human instruction / amend the mission goal mid-flight |
+| `POST` | `/api/cognition/autonomy/loop` | Configure / start / stop the long-term autonomy heartbeat |
+| `POST` | `/api/safety/estop` | Emergency stop: kill all registered instances + self-shutdown |
+| `GET` | `/api/safety/estop/status` | E-stop latch status + instance registry snapshot |
 
 ### System & Monitoring
 
@@ -593,6 +608,14 @@ Declared in `conanfile.txt`:
 | `doc/brain_dual_track_and_conscious_compute_20260405.md` | Dual-track brain architecture |
 | `doc/indexOfOutside.md` | External submodule file index |
 | `doc/algorithm/algorithm.md` | Algorithm overview |
+| `doc/v7.0/active_inference.md` | EFE/MPC, TD(0) self-evolution, proofs |
+| `doc/v7.0/subconscious.md` | PAD temperament / allostatic tuning |
+| `doc/v7.0/mission_layer.md` | Meeseeks mission layer: g·T²/2 theorem, free replication |
+| `doc/v7.0/plugins.md` | cli-json bridge, MCP compatibility, math/search addons |
+| `doc/v7.0/autonomy_loop.md` | Long-term heartbeat, persistence, interjection |
+| `doc/v7.0/safety.md` | System-level E-stop (multi-instance safety layer) |
+| `doc/v7.0/archive/uncontrolled_evolution.md` | Sealed design: uncontrolled (1+λ)-ES (reasons + restart conditions) |
+| `doc/v7.0/testing_methodology.md` | Verification protocols §1–§12 |
 | `module_overrides/README.md` | Module mounting examples |
 
 ---

@@ -1,4 +1,4 @@
-/* math_addon.hpp - Math addon
+/* cli_json_addon.hpp - Generic "any CLI software becomes a plugin" addon.
    Copyright (C) 2026 079 Project
 
    This file is part of 079 Project.
@@ -15,7 +15,6 @@
 
    You should have received a copy of the GNU Lesser General Public License
    along with 079 Project.  If not, see <http://www.gnu.org/licenses/>. */
-
 #pragma once
 
 #include <memory>
@@ -25,13 +24,19 @@
 
 namespace addon::builtins {
 
-/* Create math addon */
-std::shared_ptr<Addon> createMathAddon(const std::string &name);
+/* Create the cli-json addon.  Commands are dispatched through a process-wide
+   whitelist registry (set by the gateway from config cliTools.*); without a
+   registered template the addon refuses to run (fail-closed). */
+std::shared_ptr<Addon> createCliJsonAddon(const std::string &name = std::string());
 
-/* Evaluate a math expression directly (exact + float modes).
-   Returns {"ok":true,"value":"...","exact":bool,"mode":"exact"|"float",
-            "numeric":number|null,"expression":...}
-   or      {"ok":false,"error":"...","position":n,"expression":...}. */
-json evaluateMathExpression(const std::string &expr);
+/* Registry: template name -> {command, fixedArgs[], timeoutMs, jsonOutput}.
+   Process-global; the gateway installs it from config. */
+bool setCliJsonRegistry(const json &registry, std::string *error = nullptr);
+void clearCliJsonRegistry();
+json getCliJsonRegistry();
+
+/* Run one whitelisted command; exposed for tests. */
+json runCliJsonCommand(const std::string &tool, const std::vector<std::string> &args,
+                       const json &options);
 
 } // namespace addon::builtins

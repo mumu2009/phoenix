@@ -4082,6 +4082,85 @@
         },
         {drogon::Post});
 
+    /* v7.0 cognition autonomy: interjection (插话) + long-term loop + status */
+    /* v7.0 system-level safety: E-stop (kill all instances + self-shutdown) */
+    drogon::app().registerHandler(
+        "/api/safety/estop/status",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          respondJson(cb, phoenix::safety::EmergencyStop::instance().status());
+        },
+        {drogon::Get});
+
+    drogon::app().registerHandler(
+        "/api/safety/estop",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          bool ok = true;
+          json payload = parseRequestBody(req, ok);
+          if (!ok)
+            return badRequest(cb, "invalid json");
+          const bool enabled = phoenix::cfgOr<bool>("safety.estop.enabled", true);
+          if (!enabled) {
+            return respondJson(cb, json{{"ok", false},
+                                        {"error", "emergency stop disabled in config"}});
+          }
+          const std::string reason = payload.value("reason", std::string());
+          respondJson(cb, phoenix::safety::EmergencyStop::instance().press(reason));
+        },
+        {drogon::Post});
+
+    drogon::app().registerHandler(
+        "/api/cognition/autonomy/status",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          respondJson(cb, cognitionManager_.status());
+        },
+        {drogon::Get});
+
+    drogon::app().registerHandler(
+        "/api/cognition/autonomy/interject",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          bool ok = true;
+          json payload = parseRequestBody(req, ok);
+          if (!ok)
+            return badRequest(cb, "invalid json");
+          respondJson(cb, cognitionManager_.interject(payload));
+        },
+        {drogon::Post});
+
+    drogon::app().registerHandler(
+        "/api/cognition/autonomy/loop",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          bool ok = true;
+          json payload = parseRequestBody(req, ok);
+          if (!ok)
+            return badRequest(cb, "invalid json");
+          const std::string action = payload.value("action", "configure");
+          if (action == "configure") {
+            respondJson(cb, cognitionManager_.configureAutonomyLoop(payload));
+          } else if (action == "start") {
+            respondJson(cb, cognitionManager_.startAutonomyLoop());
+          } else if (action == "stop") {
+            respondJson(cb, cognitionManager_.stopAutonomyLoop());
+          } else {
+            respondJson(cb, cognitionManager_.autonomyLoopStatus());
+          }
+        },
+        {drogon::Post});
+
     drogon::app().registerHandler(
         "/api/perf/profile",
         [this](const drogon::HttpRequestPtr &req,

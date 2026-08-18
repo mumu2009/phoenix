@@ -145,7 +145,33 @@
 2. **markComplete 终结疼痛**：Running 中途 `markComplete()` 后 `pressureNow()==0` 且 `state==Completed`、`endMs≥startMs`；再次 `markComplete()` 幂等（状态不倒退）。`markFailed()` 同理且不可再 Complete。
 3. **累积疼痛定理**：数值积分 g=0.1、P_max=1 的 p(t) 曲线，对照 P(T)=gT²/2（T≤10 段）与 P(T)=5+P_max(T−10)（T>10 段）；判据相对误差 ≤1e-6（验证 §2 定理的分段公式，防实现回归）。
 4. **spawnChild 变异有界**：以 `SubconsciousProfile::defaults()` + learningRate=0.05 为父本，rate=0.05，spawn 100 个子代：判据 ① 所有标量都在文档声明的 clamp 界内（PAD∈[−1,1]、riskAversion∈[0.2,3]、gain∈[0,5]、halfLife∈[1,3600]、learningRate∈[0.001,0.5]）；② 变异前后均值差 ≤ 2σ（无漂移）；③ rate=0 时子代与父本逐位相等（纯遗传）。
-5. **多代完成时间下降（统计趋势）**：模拟 G=10 代、每代 λ=8 子代（同一合成任务、完成时间 = 基线 + 高斯噪声，完成时间越短适应度越高），按 (1+λ) 保留最优父本；判据后 5 代均值 < 前 5 代均值（单侧 t 检验 p<0.05 才记为通过；噪声任务下允许失败并记录，不掩盖为“进化必然”）。
-6. **自主栈注入（gtest）**：`assignMission({enabled,goal,..})` 后调 `iterate`：判据 ① 返回 `result.mission.active==true` 且 `pressure>0`；② `sensationEngine_.active()` 中存在 `type=Pain, source="mission-pressure", valence=−1, intensity==pressure` 的感受；③ `reportMissionOutcome({goalAchieved:true})` 后再 iterate：`active==false`、`pressure==0`、不再注入新 Pain（旧 Pain 按半衰期衰减）。
+5. **多代完成时间下降（协议层模拟）**：模拟 G=10 代、每代 λ=8 子代（同一合成任务、完成时间 = 基线 + 高斯噪声），按 (1+λ) 保留最优父本；判据后 5 代均值 < 前 5 代均值（单侧 t 检验 p<0.05 才记为通过；噪声任务下允许失败并记录）。注意：这是**协议层**验证"若编排多代重试，完成时间会下降"的性质；运行时**没有**进程内自动选择循环（见 `doc/v7.0/archive/uncontrolled_evolution.md`）。运行时繁殖 = **复制是实例的自由能力**：`replicate` 是默认规划器动作、无固定触发条件、无接班（gtest：ReplicateMutatesAndRecords / ReplicaLimitBoundsReproduction / ReplicateActionRegisteredByDefault / ExecuteReplicateSpawnsSuccessorSession / ReplicateRespectsMaxReplicas / ReportOutcomeFalseKeepsMissionFailed）。
+6. **自主栈注入（gtest）**：`assignMission({enabled,goal,..})` 后调 `iterate`：判据 ① 返回 `result.mission.active==true` 且 `pressure>0`；② `sensationEngine_.active()` 中存在 `type=Pain, source="mission-pressure", valence=−1, intensity==pressure` 的感受；③ `reportMissionOutcome({goalAchieved:true})` 后再 iterate：`active==false`、`pressure==0`、不再注入新 Pain。**单信号与衰减（新）**：连续 3 次 iterate 后 status 中 mission-pressure Pain 恰为 **1 条**（刷新而非堆叠）；`decayAuto(150s)` 后强度 ≈0.707（缺省半衰期 300s），`decayAuto(1500s)` 后整条剪除、homeostaticCost==0；per-type 调谐（如 pain halfLife=60s）覆盖缺省值。
 7. **空目标幂等**：`assignMission({enabled:true})`（goal 为空）→ 不进入 Running、压力恒 0、`missionStatus().enabled==true`（武装但空闲）；随后带 goal 的 assignMission 正常启动。
 8. **配置门（阶段 8，系统级）**：`mission.enabled=true` 且配置 goal 非空时，网关启动后 `missionStatus` 返回 Running（出生即绑定）；`mission.enabled=false` 时任何 mission 字段都不出现在 iterate 结果里（`mission` 为空对象）。
+
+## 10. 插件生态验证协议
+
+1. **数学精确性（gtest，test_math_addon_exact.cpp）**：0.1+0.2=="0.3"（exact）、1/3*3=="1"、2^100 与 100! 精确十进制、-17 mod 5=="3"（Python 语义）、floor(-7/2)=="-4"、a=2;b=3;a^b=="8"；sin(pi/6)≈0.5（浮点容差 1e-9）；1/0、sqrt(-1)、foo(1)、"1+" 全部 ok=false 且带 position。另对拍随机大整数（见 addons/math_exact.hpp 设计注释）：(a+b)-b==a、q*b+r==a、gcd 整除——独立测试程序已跑 4000 组通过。
+2. **搜索引擎解析（gtest，离线无网络）**：urlEncode/htmlToText 单元断言；DDG Lite HTML fixture → {title,url,snippet}（uddg= 解包 + 实体解码顺序）；端点 JSON 两种形态（results 对象 / 顶层数组 + link/description 别名）。联网冒烟（可选，被墙区域跳过）：engine.search("Phoenix AI") 返回 count>0 且每条含 url。
+3. **MCP（gtest，test_mcp_client.cpp）**：帧协议往返（id/method/params、响应/通知/坏版本/垃圾输入）；进程内匿名管道 + fake 服务器完整会话（initialize 握手→tools/list→tools/call 取值→isError→ping→shutdown 不悬挂）。真实服务器联调：`mcp.enabled=true` 配一个真实 MCP 服务器，判据 configureMcp 返回 tools 非空且 callMcpTool 返回内容。
+4. **cli-json（gtest）**：白名单外工具被拒（fail-closed）；白名单内 echo 命令返回原文；注册表往返一致。进程安全判据：请求文本含 `; rm -rf` 时不得执行任何命令（无 shell 语义）。
+5. **subprocess（gtest）**：echo 捕获 stdout、exitCode==0；不存在的命令 started==false 或 exitCode!=0；超时路径（写一个 sleep 命令，timeoutMs=200，判据 timedOut==true 且耗时 < 5s）。
+6. **回归门**：以上全部通过后跑阶段 4 系统回归；数学/搜索插件改动不得影响 emotion/instinct/agi 既有 43 项进化协议测试。
+## 11. 长期自主循环与插话验证协议
+
+1. **心跳自驱动（gtest，AutonomyLoopTest.AutonomyLoopTicksWithoutExternalIterate）**：configure{enabled:true, intervalSec:1, maxStepsPerTick:2} + start → 睡眠 2.6s → 判据 ① status.tickCount ≥ 1；② status.iteration ≥ 1（无任何外部 iterate 调用）；③ stop 后 running=false。
+2. **插话消费一次（InterjectQueuesAndIterateConsumes）**：interject{text} 后首次 iterate 结果 interjectionsConsumed==1 且 cognitionModulation 含原文；第二次 iterate 为 0。
+3. **目标改写不重启（InterjectAmendGoalRedirectsRunningMission）**：interject{amendGoal} 后 mission goal 已改、state 仍 Running、startMs 不变（压力继续）；无任务时 goalAmended=false 且带 warning。
+4. **进化状态往返（ExportImportRoundTripsEvolution）**：configureAgi+configureSubconscious+assignMission → 3 次 iterate → exportState 含 agi/sensations/mission → 新实例 importState → preferences 逐位一致、mission goal 一致、iteration>0。
+5. **控制器全量序列化（ControllerPersistence.JsonRoundTripPreservesLearnedState）**：20 步 observeRewarded 后 toJson/fromJson → 价值头逐位一致、surpriseEma 一致、动作空间一致、episodes>0、prefsBootstrapped 保持、模型 dim/actionDim 一致。
+6. **amendGoal 生命周期（AmendGoalRedirectsWithoutRestart）**：Running 时改目标成功且 startMs 保持；Completed 后返回 false 且目标不变。
+7. **回归门**：以上全过后跑阶段 4；心跳默认关闭时所有既有行为逐位不变（配置门）。
+## 12. 系统级急停验证协议
+
+1. **登记表（RegistryRegisterUnregisterStopAll）**：登记 2 实例 → count==2、snapshot==2；注销 1 → count==1；stopAll → total==1、stopped==1、处理函数恰好一次；全注销 → count==0。
+2. **闩锁一次性（PressLatchesOnceAndStopsAll）**：press 后 latched=true、reason 记录、report.stopped==2、各处理函数恰好一次；二次 press → alreadyLatched=true 且处理函数不再执行。
+3. **关停处理函数恰好一次（PressRunsShutdownHandler）**：press 执行关停函数一次；再 press 不再执行。
+4. **阻断（LatchBlocksIterateAndInterject）**：press 后 iterate/interject/startAutonomyLoop 全部返回 ok=false 且错误含 "emergency stop"。
+5. **杀运行中心跳（EstopKillsRunningAutonomyLoop）**：intervalSec=1 的循环启动后 press → 1.5s 内 autonomyLoopStatus.running==false。
+6. **回归门**：E-stop 未按下时全部既有行为逐位不变；以上测试后必须 resetForTesting/clearForTesting 以免污染同进程其它测试。

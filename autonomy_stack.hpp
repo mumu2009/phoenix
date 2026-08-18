@@ -26,6 +26,9 @@
 #include "subconscious_profile.hpp"
 #include "agi_action_registry.hpp"
 #include "mission_lifecycle.hpp"
+#include "mcp_client.hpp"
+#include "emergency_stop.hpp"
+#include "instance_registry.hpp"
 #include "addon.hpp"
 #include <functional>
 #include <nlohmann/json.hpp>
@@ -130,6 +133,7 @@ private:
 class CognitionAutonomyManager {
 public:
     CognitionAutonomyManager();
+    ~CognitionAutonomyManager();
     json status() const; /* Get cognition status */
     json observe(const json &payload, const json &worldState); /* Observe world state */
     json iterate(const json &payload, const json &worldState); /* Run cognition iteration */
@@ -161,8 +165,28 @@ public:
     json reportMissionOutcome(const json &payload); /* {goalAchieved:bool} ends pain. */
     json spawnMissionChild(const json &payload); /* Mutated child genome (heredity). */
 
+    /* v7.0 MCP compatibility (optional, config mcp.*): launch external MCP
+       servers (JSON-RPC over stdio) and expose their tools to the planner as
+       AGI actions with category "mcp".  Mainstream plugin-market bridge. */
+    json configureMcp(const json &payload);  /* {enabled, servers:[...]} */
+    json listMcpTools() const;               /* aggregated tool snapshot */
+    json callMcpTool(const json &payload);   /* {server, tool, arguments} */
+
     /* v7.0 prompt split */
     json composePrompt(const json &payload); /* Compose system+memory+user prompt */
+
+    /* v7.0 human interjection (插话): inject an instruction mid-lifecycle
+       without ending the mission.  Optionally amend the mission goal. */
+    json interject(const json &payload);       /* {text, sessionId?, amendGoal?} */
+
+    /* v7.0 long-term autonomous loop (optional, config autonomyLoop.*):
+       an internal heartbeat that runs the plan/act/observe/learn cycle
+       WITHOUT external messages, and persists the evolved state to disk so
+       evolution survives restarts. */
+    json configureAutonomyLoop(const json &payload); /* {enabled, intervalSec, ...} */
+    json startAutonomyLoop();                       /* spawn the heartbeat thread */
+    json stopAutonomyLoop();                        /* stop and join */
+    json autonomyLoopStatus() const;
 
     /* v7.0 external mixed-modal I/O */
     json ingestMixedModalPacket(const json &payload); /* Accept external mixed-modal input */
@@ -204,8 +228,34 @@ private:
     /* v7.0 mission layer (optional) */
     bool missionEnabled_{false};
     float missionMutationRate_{0.05f};
+    size_t missionMaxReplicas_{4};            /* guardrail on free replication */
+
+    /* v7.0 human interjection queue (插话) */
+    std::vector<std::pair<uint64_t, std::string>> interjections_;
+
+    /* v7.0 long-term autonomous loop (heartbeat + persistence) */
+    bool loopEnabled_{false};
+    std::thread loopThread_;
+    std::atomic<bool> loopStop_{true};
+    int loopIntervalSec_{10};
+    int loopMaxStepsPerTick_{8};
+    int loopPersistEveryTicks_{5};
+    std::string loopPersistPath_{"runtime_store/autonomy_state.json"};
+    std::atomic<uint64_t> loopTickCount_{0};
+    std::atomic<int64_t> loopLastTickAtMs_{0};
+    uint64_t safetyRegId_{0}; /* entry in the system instance registry */
+    bool safetyRegistered_{false};
+    void loopRun();
+    void ensureHeartbeatSession();
+    void registerWithSafetyRegistry();
+    void unregisterFromSafetyRegistry();
     phoenix::mission::MissionLifecycle mission_;
     phoenix::mission::MissionGenome missionGenome_;
+
+    /* v7.0 MCP compatibility (optional) */
+    bool mcpEnabled_{false};
+    phoenix::mcp::McpManager mcpManager_;
+    std::map<std::string, std::pair<std::string, std::string>> mcpActionMap_;
 
     /* v7.0 AGI action space: real capabilities beyond the instinct verbs. */
     phoenix::agi::AgiActionRegistry agiActionRegistry_;

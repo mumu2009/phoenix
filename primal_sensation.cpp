@@ -85,7 +85,24 @@ void PrimalSensationEngine::add(const PrimalSensation &s) {
         // Precision weighting: scale the incoming signal by its gain.
         tuned.intensity = std::clamp(s.intensity * it->second.gain, 0.0f, 1.0f);
     }
+    /* Same-source signals are REFRESHED, not stacked.  Mission pressure must
+       stay a single signal p(t) whose time integral is the total pain
+       (g*T^2/2): stacking one copy per iteration would make the allostatic
+       cost grow like N*p(t) and break that model.  Empty-source events keep
+       the old accumulate semantics (transient, sensor-driven). */
+    if (!tuned.source.empty()) {
+        for (auto &existing : sensations_) {
+            if (existing.type == tuned.type && existing.source == tuned.source) {
+                existing = tuned;
+                return;
+            }
+        }
+    }
     sensations_.push_back(tuned);
+}
+
+void PrimalSensationEngine::decayAuto(float dtSec) {
+    decay(defaultHalfLifeSec_, dtSec);
 }
 
 void PrimalSensationEngine::decay(float halfLifeSec, float dtSec) {

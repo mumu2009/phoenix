@@ -92,6 +92,30 @@ nlohmann::json LatentTransitionModel::status() const {
           {"model", "linear-latent-transition"}};
 }
 
+nlohmann::json LatentTransitionModel::toJson() const {
+  return {{"dim", dim_}, {"actionDim", actionDim_}, {"A", A_}, {"B", B_}, {"b", b_}};
+}
+
+LatentTransitionModel LatentTransitionModel::fromJson(const nlohmann::json &jIn,
+                                                      size_t dim, size_t actionDim) {
+  LatentTransitionModel m(dim, actionDim);
+  if (!jIn.is_object()) return m;
+  const size_t storedDim = jIn.value("dim", dim);
+  const size_t storedActionDim = jIn.value("actionDim", actionDim);
+  if (storedDim == dim && storedActionDim == actionDim) {
+    auto loadVec = [](const nlohmann::json &j, const char *key,
+                      std::vector<float> &out, size_t expect) {
+      if (j.contains(key) && j[key].is_array() && j[key].size() == expect) {
+        for (const auto &v : j[key]) out.push_back(v.get<float>());
+      }
+    };
+    loadVec(jIn, "A", m.A_, dim * dim);
+    loadVec(jIn, "B", m.B_, dim * actionDim);
+    loadVec(jIn, "b", m.b_, dim);
+  }
+  return m;
+}
+
 ActiveInferenceController::ActiveInferenceController(size_t dim, size_t actionDim,
                                                      size_t horizon)
     : model_(dim, actionDim), horizon_(horizon), w_(dim, 0.0f) {}
@@ -239,6 +263,82 @@ double ActiveInferenceController::explorationMultiplier() const {
   // epistemic term should be amplified to explore; above -> exploit.
   const double ratio = (surpriseEma_ - lastSurprise_) / surpriseEma_;
   return std::clamp(1.0 + ratio, 0.5, 2.0);
+}
+
+nlohmann::json ActiveInferenceController::toJson() const {
+  nlohmann::json episodes = nlohmann::json::array();
+  const size_t cap = std::min<size_t>(Episodes_.size(), 1024);
+  for (size_t i = Episodes_.size() - cap; i < Episodes_.size(); ++i) {
+    const auto &ep = Episodes_[i];
+    episodes.push_back({{"z", ep.z}, {"a", ep.a}, {"zNext", ep.zNext},
+                        {"utility", ep.utility}, {"surprise", ep.surprise},
+                        {"reward", ep.reward}});
+  }
+  nlohmann::json actions = nlohmann::json::array();
+  for (const auto &a : actions_) actions.push_back({{"name", a.name}, {"embedding", a.embedding}});
+  return {{"model", model_.toJson()},
+          {"horizon", horizon_},
+          {"preferences", w_},
+          {"riskAversion", riskAversion_},
+          {"surpriseEma", surpriseEma_},
+          {"lastSurprise", lastSurprise_},
+          {"valueClamp", valueClamp_},
+          {"prefsBootstrapped", prefsBootstrapped_},
+          {"actions", actions},
+          {"episodes", episodes}};
+}
+
+ActiveInferenceController ActiveInferenceController::fromJson(const nlohmann::json &j) {
+  ActiveInferenceController ctl;
+  if (!j.is_object()) return ctl;
+  const size_t dim = j.contains("model") && j["model"].is_object() &&
+                             j["model"].contains("dim")
+                         ? j["model"]["dim"].get<size_t>() : 128;
+  const size_t actionDim = j.contains("model") && j["model"].is_object() &&
+                                   j["model"].contains("actionDim")
+                               ? j["model"]["actionDim"].get<size_t>() : 1;
+  const size_t horizon = j.value("horizon", size_t{3});
+  ctl.configure(dim, actionDim, horizon);
+  ctl.model() = LatentTransitionModel::fromJson(j.value("model", nlohmann::json::object()),
+                                                dim, actionDim);
+  if (j.contains("preferences") && j["preferences"].is_array()) {
+    std::vector<float> w;
+    for (const auto &v : j["preferences"]) w.push_back(v.get<float>());
+    ctl.setPreferences(w);
+  }
+  ctl.setRiskAversion(j.value("riskAversion", 1.0f));
+  ctl.setValueClamp(j.value("valueClamp", 10.0));
+  ctl.surpriseEma_ = j.value("surpriseEma", 0.0);
+  ctl.lastSurprise_ = j.value("lastSurprise", 0.0);
+  ctl.prefsBootstrapped_ = j.value("prefsBootstrapped", false);
+  if (j.contains("actions") && j["actions"].is_array()) {
+    std::vector<Action> acts;
+    for (const auto &a : j["actions"]) {
+      Action act;
+      act.name = a.value("name", std::string());
+      if (a.contains("embedding") && a["embedding"].is_array())
+        for (const auto &v : a["embedding"]) act.embedding.push_back(v.get<float>());
+      if (!act.name.empty()) acts.push_back(std::move(act));
+    }
+    ctl.setActions(std::move(acts));
+  }
+  if (j.contains("episodes") && j["episodes"].is_array()) {
+    for (const auto &e : j["episodes"]) {
+      Episode ep;
+      auto loadV = [](const nlohmann::json &x, const char *k, std::vector<float> &out) {
+        if (x.contains(k) && x[k].is_array())
+          for (const auto &v : x[k]) out.push_back(v.get<float>());
+      };
+      loadV(e, "z", ep.z);
+      loadV(e, "a", ep.a);
+      loadV(e, "zNext", ep.zNext);
+      ep.utility = e.value("utility", 0.0f);
+      ep.surprise = e.value("surprise", 0.0f);
+      ep.reward = e.value("reward", 0.0f);
+      ctl.Episodes_.push_back(std::move(ep));
+    }
+  }
+  return ctl;
 }
 
 nlohmann::json ActiveInferenceController::status() const {

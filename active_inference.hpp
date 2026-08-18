@@ -84,6 +84,11 @@ class LatentTransitionModel {
 
   nlohmann::json status() const;
 
+  /** Full-state serialization (long-term evolution persistence). */
+  nlohmann::json toJson() const;
+  static LatentTransitionModel fromJson(const nlohmann::json &j, size_t dim,
+                                        size_t actionDim);
+
  private:
   size_t dim_;
   size_t actionDim_;
@@ -204,6 +209,12 @@ class ActiveInferenceController {
 
   size_t episodeCount() const { return Episodes_.size(); }
   nlohmann::json status() const;
+
+  /** Full-state serialization: learned value head, forward model, episodic
+      memory and all evolution bookkeeping (long-term evolution survives
+      restarts through exportState/importState). */
+  nlohmann::json toJson() const;
+  static ActiveInferenceController fromJson(const nlohmann::json &j);
 
  private:
   static constexpr size_t kMaxEpisodes_ = 4096;

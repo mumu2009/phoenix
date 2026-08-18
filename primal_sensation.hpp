@@ -93,8 +93,18 @@ class PrimalSensationEngine {
 public:
     void add(const PrimalSensation &s);
 
-    /** Decay all sensations. */
+    /** Decay all sensations (explicit default half-life). */
     void decay(float halfLifeSec, float dtSec);
+
+    /** Decay all sensations using each type's tuned half-life (falls back to
+        defaultHalfLifeSec_, 300 s).  Opponent-process decay: without this,
+        sensations only accumulate and a completed mission would leave
+        permanent Pain pinning valence at -1. */
+    void decayAuto(float dtSec);
+
+    /** Engine-wide default half-life for untuned sensation types. */
+    void setDefaultHalfLife(float sec) { defaultHalfLifeSec_ = sec; }
+    float defaultHalfLife() const { return defaultHalfLifeSec_; }
 
     /** Remove all sensations. */
     void clear() { sensations_.clear(); }
@@ -123,6 +133,7 @@ public:
 private:
     std::vector<PrimalSensation> sensations_;
     std::unordered_map<SensationType, SensationTuning> tuning_;
+    float defaultHalfLifeSec_{300.0f};
 };
 
 }  // namespace primal

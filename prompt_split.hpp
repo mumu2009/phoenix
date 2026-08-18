@@ -28,14 +28,14 @@ namespace prompt {
  */
 struct SystemPrompt {
     std::string identity;       /*!< Who/what the assistant is. */
-    std::string version;        /*!< Version tag, e.g. "Arthur v7.0". */
+    std::string version;        /*!< Version tag, e.g. "Lancelot v8.0". */
     std::string constraints;      /*!< Hard rules and safety guardrails. */
     std::string coreDirective;  /*!< Primary mission statement. */
 
     nlohmann::json toJson() const;
     static SystemPrompt fromJson(const nlohmann::json &j);
 
-    /** Default Phoenix Arthur v7.0 system prompt. */
+    /** Default Phoenix Lancelot v8.0 system prompt. */
     static SystemPrompt arthurDefault();
 };
 

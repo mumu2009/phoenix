@@ -98,17 +98,32 @@ MissionGenome MissionGenome::fromJson(const nlohmann::json &j) {
   return g;
 }
 
+nlohmann::json MissionChild::toJson() const {
+  return {{"id", id},
+          {"genome", genome.toJson()},
+          {"goal", goal},
+          {"bornMs", bornMs},
+          {"generation", generation}};
+}
+
 MissionLifecycle::MissionLifecycle()
     : rng_(static_cast<uint32_t>(sysNowMs() ^ 0x4D495353ULL)) {}
 
 uint64_t MissionLifecycle::nowMs() const { return sysNowMs(); }
 
 void MissionLifecycle::assign(const Mission &m) {
+  assign(m, MissionGenome{});
+}
+
+void MissionLifecycle::assign(const Mission &m, const MissionGenome &genome) {
   std::lock_guard<std::mutex> lock(mu_);
   mission_ = m;
   mission_.state = MissionState::Running;
   mission_.startMs = sysNowMs();
   mission_.endMs = 0;
+  genome_ = genome;
+  children_.clear(); /* fresh lineage: a new mission does not inherit stale
+                        successors from a previous one */
   ++generation_;
 }
 
@@ -142,6 +157,13 @@ void MissionLifecycle::markFailed() {
   mission_.endMs = sysNowMs();
 }
 
+bool MissionLifecycle::amendGoal(const std::string &newGoal) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (mission_.state != MissionState::Running || newGoal.empty()) return false;
+  mission_.goal = newGoal;
+  return true;
+}
+
 MissionGenome MissionLifecycle::spawnChild(const MissionGenome &parent,
                                            float mutationRate) {
   std::lock_guard<std::mutex> lock(mu_);
@@ -149,17 +171,74 @@ MissionGenome MissionLifecycle::spawnChild(const MissionGenome &parent,
   return parent.mutate(mutationRate, rng_);
 }
 
-nlohmann::json MissionLifecycle::stats() const {
+MissionGenome MissionLifecycle::replicate(float mutationRate) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (children_.size() >= maxReplicas_) {
+    throw std::runtime_error("maxReplicas reached (" +
+                             std::to_string(maxReplicas_) +
+                             "); replication is bounded");
+  }
+  const MissionGenome child = genome_.mutate(mutationRate, rng_);
+  ++spawnCount_;
+  MissionChild rec;
+  rec.id = "child-" + std::to_string(generation_) + "-" + std::to_string(children_.size());
+  rec.genome = child;
+  rec.goal = mission_.goal;
+  rec.bornMs = sysNowMs();
+  rec.generation = static_cast<int>(generation_);
+  children_.push_back(rec);
+  return child;
+}
+
+size_t MissionLifecycle::maxReplicas() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return maxReplicas_;
+}
+
+void MissionLifecycle::setMaxReplicas(size_t n) {
+  std::lock_guard<std::mutex> lock(mu_);
+  maxReplicas_ = n;
+}
+
+std::vector<MissionChild> MissionLifecycle::children() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return children_;
+}
+
+nlohmann::json MissionLifecycle::statsLocked() const {
+  /* completionTimeMs is the SELECTION signal for the human supervisor: the
+     model exists to serve human needs, so the decision to spawn a mutated
+     retry (or to keep a genome) is made OUTSIDE this process, from this
+     number.  There is deliberately no in-process fitness field, no elite
+     retention and no autonomous cross-generation loop. */
+  const bool terminal = (mission_.state == MissionState::Completed ||
+                         mission_.state == MissionState::Failed);
+  const int64_t completionTimeMs =
+      (terminal && mission_.endMs >= mission_.startMs)
+          ? static_cast<int64_t>(mission_.endMs - mission_.startMs)
+          : -1;
+  nlohmann::json childArr = nlohmann::json::array();
+  for (const auto &c : children_) childArr.push_back(c.toJson());
   return {{"generations", generation_},
           {"spawns", spawnCount_},
           {"completions", completeCount_},
           {"mission", mission_.toJson()},
-          {"pressure", mission_.pressure(sysNowMs())}};
+          {"pressure", mission_.pressure(sysNowMs())},
+          {"completionTimeMs", completionTimeMs},
+          {"maxReplicas", maxReplicas_},
+          {"children", childArr}};
+}
+
+nlohmann::json MissionLifecycle::stats() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return statsLocked();
 }
 
 nlohmann::json MissionLifecycle::toJson() const {
-  return stats();
+  std::lock_guard<std::mutex> lock(mu_);
+  nlohmann::json out = statsLocked();
+  out["genome"] = genome_.toJson();
+  return out;
 }
 
 void MissionLifecycle::fromJson(const nlohmann::json &j) {
@@ -168,6 +247,23 @@ void MissionLifecycle::fromJson(const nlohmann::json &j) {
   if (j.contains("spawns") && j["spawns"].is_number()) spawnCount_ = j["spawns"].get<size_t>();
   if (j.contains("completions") && j["completions"].is_number()) completeCount_ = j["completions"].get<size_t>();
   if (j.contains("generations") && j["generations"].is_number()) generation_ = j["generations"].get<size_t>();
+  if (j.contains("maxReplicas") && j["maxReplicas"].is_number()) maxReplicas_ = j["maxReplicas"].get<size_t>();
+  if (j.contains("genome") && j["genome"].is_object()) {
+    genome_ = MissionGenome::fromJson(j["genome"]);
+  }
+  if (j.contains("children") && j["children"].is_array()) {
+    children_.clear();
+    for (const auto &ch : j["children"]) {
+      if (!ch.is_object()) continue;
+      MissionChild rec;
+      rec.id = ch.value("id", std::string());
+      if (ch.contains("genome")) rec.genome = MissionGenome::fromJson(ch["genome"]);
+      rec.goal = ch.value("goal", std::string());
+      rec.bornMs = ch.value("bornMs", 0ull);
+      rec.generation = ch.value("generation", 0);
+      if (!rec.id.empty()) children_.push_back(std::move(rec));
+    }
+  }
 }
 
 }  // namespace mission

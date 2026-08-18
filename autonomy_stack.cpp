@@ -657,6 +657,13 @@ CognitionAutonomyManager::CognitionAutonomyManager()
     registerDefaultAgiActions();
 }
 
+CognitionAutonomyManager::~CognitionAutonomyManager() {
+    /* never leave the heartbeat thread running */
+    loopStop_.store(true, std::memory_order_release);
+    if (loopThread_.joinable()) loopThread_.join();
+    unregisterFromSafetyRegistry();
+}
+
 json CognitionAutonomyManager::status() const {
     std::lock_guard<std::mutex> lock(mu_);
     json sessions = json::array();
@@ -717,6 +724,8 @@ void CognitionAutonomyManager::registerDefaultAgiActions() {
         {"search", "tool", "search", "Retrieve indexed or online knowledge", 1},
         {"computer", "tool", "computer", "List or read files on the local computer", 2},
         {"goal_advance", "goal", "", "Push the current mission goal forward", 3},
+        {"replicate", "replicate", "replicate",
+         "Replicate: summon a successor instance (mutated genome, same goal)", 4},
     };
     for (const auto &d : defaults) {
         if (agiActionRegistry_.find(d.name) != nullptr) continue;  // idempotent
@@ -725,7 +734,7 @@ void CognitionAutonomyManager::registerDefaultAgiActions() {
         spec.category = d.category;
         spec.addonType = d.addonType;
         spec.description = d.description;
-        spec.embedding = oneHotEmbedding(d.oneHotIndex, 4);
+        spec.embedding = oneHotEmbedding(d.oneHotIndex, 5);
         agiActionRegistry_.registerAction(std::move(spec));
     }
 }
@@ -743,6 +752,67 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
         return json{{"ok", true},
                     {"result",
                      json{{"goal", spec.name}, {"description", goal}, {"goals", goals_}}}};
+    }
+
+    if (spec.category == "replicate") {
+        /* The instance freely replicates: mutate its own genome and summon a
+           successor SESSION bound to the same goal.  No fixed trigger, no
+           hand-off - the planner chose this action itself. */
+        if (!missionEnabled_ || !mission_.active()) {
+            return json{{"ok", false}, {"error", "no active mission to replicate for"}};
+        }
+        try {
+            const auto childGenome = mission_.replicate(missionMutationRate_);
+            const phoenix::mission::Mission snap = mission_.mission();
+            const std::string childId =
+                "child-" + snap.id + "-" + std::to_string(mission_.children().size());
+            nlohmann::json childRec;
+            childRec["sessionId"] = childId;
+            childRec["observations"] = 1;
+            childRec["seedMission"] = snap.goal;
+            childRec["lastObservedAtMs"] = nowMs();
+            childRec["shouldIterate"] = true;
+            childRec["missionGenome"] = childGenome.toJson();
+            childRec["spawnedBy"] = "instance-replicate";
+            sessions_[childId] = childRec;
+            return json{{"ok", true},
+                        {"result", json{{"replicated", true},
+                                        {"childSessionId", childId},
+                                        {"goal", snap.goal},
+                                        {"genome", childGenome.toJson()},
+                                        {"reply", "summoned successor " + childId +
+                                                  " for goal: " + snap.goal}}}};
+        } catch (const std::runtime_error &e) {
+            return json{{"ok", false}, {"error", e.what()}};
+        }
+    }
+
+    if (spec.category == "mcp") {
+        /* MCP tool: dispatch through the running server session. */
+        auto it = mcpActionMap_.find(spec.name);
+        if (it == mcpActionMap_.end()) {
+            return json{{"ok", false}, {"error", "mcp action not registered: " + spec.name}};
+        }
+        nlohmann::json args = nlohmann::json::object();
+        if (context.contains("mcpArguments") && context["mcpArguments"].is_object()) {
+            args = context["mcpArguments"];
+        }
+        nlohmann::json out = mcpManager_.callTool(it->second.first, it->second.second, args);
+        /* flatten MCP text content into a reply for the prompt pipeline */
+        std::string reply;
+        if (out.contains("content") && out["content"].is_array()) {
+            for (const auto &c : out["content"]) {
+                if (c.is_object() && c.value("type", "") == "text") {
+                    if (!reply.empty()) reply += "\n";
+                    reply += c.value("text", std::string());
+                }
+            }
+        }
+        return json{{"ok", out.value("ok", false)},
+                    {"result", json{{"server", it->second.first},
+                                    {"tool", it->second.second},
+                                    {"reply", reply},
+                                    {"mcp", out}}}};
     }
 
     if (spec.category != "tool" || !addonManager_) {
@@ -1160,6 +1230,10 @@ json CognitionAutonomyManager::observe(const json &payload, const json &worldSta
 
 json CognitionAutonomyManager::iterate(const json &payload, const json &worldState) {
     std::unique_lock<std::mutex> lock(mu_);
+    if (phoenix::safety::EmergencyStop::instance().latched()) {
+        lock.unlock();
+        return json{{"ok", false}, {"error", "emergency stop engaged: iterate rejected"}};
+    }
     enabled_ = payload.value("enabled", enabled_);
     backgroundEnabled_ = payload.value("backgroundEnabled", backgroundEnabled_);
     backgroundEvery_ = clampInt(payload.value("backgroundEvery", backgroundEvery_), 1, 128);
@@ -1323,10 +1397,22 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
         record["lastScheduledHeads"] = scheduledHeads;
     }
 
+    /* v7.0 sensation hygiene: decay every sensation FIRST (opponent-process
+       decay, half-life per subconscious tuning or the engine default 300 s).
+       Without this call sensations only accumulate: a completed mission would
+       leave its Pain forever, pinning valence at -1. */
+    float dtSec = 1.0f;
+    if (lastIterAtMs_ > 0) {
+        dtSec = static_cast<float>(std::max<int64_t>(0, nowMs() - lastIterAtMs_)) / 1000.0f;
+        if (dtSec <= 0.0f) dtSec = 1.0f;
+    }
+    sensationEngine_.decayAuto(dtSec);
+
     /* v7.0 mission layer: an active mission exerts time-increasing pain
-       (allostatic urgency; total pain = g * T^2 / 2).  The pain ends when the
-       mission is judged complete; the existing half-life decay then lets the
-       Pain sensation subside naturally. */
+       (allostatic urgency; total pain = g * T^2 / 2).  add() REFRESHES the
+       single (pain, "mission-pressure") signal instead of stacking, so the
+       allostatic cost IS p(t).  Pain ends when the mission is judged
+       complete; decayAuto above then releases it along the half-life. */
     if (missionEnabled_) {
         const float pressure = mission_.pressureNow();
         if (pressure > 0.0f) {
@@ -1338,14 +1424,15 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
             pain.timestampMs = static_cast<uint64_t>(nowMs());
             sensationEngine_.add(pain);
         }
+        /* v7.0 replication: the instance REPLICATES FREELY - there is no
+           fixed trigger here.  "replicate" is a planner action (see
+           registerDefaultAgiActions / executeAgiAction); the instance itself
+           chooses when to summon a successor, and the successor is another
+           instance working the same goal.  No hand-off: before the goal
+           completes, pressure only grows and this instance keeps going. */
     }
 
     /* v7.0 instinct / benefit-harm evaluation and prompt split update */
-    float dtSec = 1.0f;
-    if (lastIterAtMs_ > 0) {
-        dtSec = static_cast<float>(std::max<int64_t>(0, nowMs() - lastIterAtMs_)) / 1000.0f;
-        if (dtSec <= 0.0f) dtSec = 1.0f;
-    }
     instinctEngine_.update(sensationEngine_.active(), dtSec);
     auto bh = instinctEngine_.evaluate(sensationEngine_.active());
 
@@ -1454,9 +1541,26 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
 
     std::string composedPrompt;
     std::string cognitionModulation;
+    /* drain human interjections: delivered once, on the next tick/turn */
+    std::vector<std::string> consumedInterjections;
+    for (const auto &inj : interjections_) consumedInterjections.push_back(inj.second);
+    interjections_.clear();
+    std::string userText;
     if (payload.contains("userPrompt") && payload["userPrompt"].is_string()) {
-        composedPrompt = promptComposer_.compose(payload["userPrompt"].get<std::string>(), true);
+        userText = payload["userPrompt"].get<std::string>();
+    }
+    if (userText.empty() && !consumedInterjections.empty()) {
+        userText = consumedInterjections.back();
+    }
+    if (!userText.empty()) {
+        composedPrompt = promptComposer_.compose(userText, true);
         cognitionModulation = promptComposer_.modulationHint();
+    }
+    if (!consumedInterjections.empty()) {
+        std::string injBlock = "[human interjections]";
+        for (const auto &s : consumedInterjections) injBlock += "\n- " + s;
+        if (!cognitionModulation.empty()) cognitionModulation += "\n";
+        cognitionModulation += injBlock;
     }
 
     auto outbound = outputQueue_.drain(0);
@@ -1471,7 +1575,9 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
                            {"active", mission_.active()},
                            {"pressure", mission_.pressureNow()},
                            {"state", static_cast<int>(mission_.mission().state)},
-                           {"goal", mission_.mission().goal}};
+                           {"goal", mission_.mission().goal},
+                           {"children", mission_.stats().value("children", json::array())}};
+
     }
     return json{{"ok", true},
                 {"result", json{{"iteration", iteration_},
@@ -1487,7 +1593,8 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
                                  {"mixedModalOutputs", mixedModalOutputs},
                                  {"composedPrompt", composedPrompt},
                                  {"agiPlan", agiPlanJson},
-                                 {"mission", missionInfo}}}};
+                                 {"mission", missionInfo},
+                                 {"interjectionsConsumed", consumedInterjections.size()}}}};
 }
 
 json CognitionAutonomyManager::session(const std::string &sessionId) const {
@@ -1510,7 +1617,19 @@ json CognitionAutonomyManager::exportState() const {
                 {"backgroundEnabled", backgroundEnabled_},
                 {"iteration", iteration_},
                 {"observations", observations_},
-                {"sessions", sessions}};
+                {"sessions", sessions},
+                /* long-term evolution: everything the agent LEARNS */
+                {"agiEnabled", agiEnabled_},
+                {"agi", agiController_.toJson()},
+                {"agiLatentState", agiLatentState_},
+                {"lastAgiAction", lastAgiAction_},
+                {"sensations", sensationEngine_.toJson()},
+                {"mission", mission_.toJson()},
+                {"missionEnabled", missionEnabled_},
+                {"missionGenome", missionGenome_.toJson()},
+                {"goals", goals_},
+                {"subconsciousEnabled", subconsciousEnabled_},
+                {"subconscious", subProfile_.toJson()}};
 }
 
 json CognitionAutonomyManager::importState(const json &state) {
@@ -1526,7 +1645,41 @@ json CognitionAutonomyManager::importState(const json &state) {
     backgroundEnabled_ = state.value("backgroundEnabled", backgroundEnabled_);
     iteration_ = std::max(0, state.value("iteration", iteration_));
     observations_ = std::max(0, state.value("observations", observations_));
-    // Additional state variables can be restored here
+
+    /* long-term evolution restoration */
+    if (state.contains("agi") && state["agi"].is_object()) {
+        agiController_ = phoenix::agi::ActiveInferenceController::fromJson(state["agi"]);
+    }
+    if (state.contains("agiLatentState") && state["agiLatentState"].is_array()) {
+        agiLatentState_.clear();
+        for (const auto &v : state["agiLatentState"]) agiLatentState_.push_back(v.get<float>());
+    }
+    lastAgiAction_ = state.value("lastAgiAction", std::string());
+    agiEnabled_ = state.value("agiEnabled", agiEnabled_);
+    if (state.contains("sensations") && state["sensations"].is_object()) {
+        sensationEngine_ = phoenix::primal::PrimalSensationEngine::fromJson(state["sensations"]);
+    }
+    if (state.contains("mission") && state["mission"].is_object()) {
+        mission_.fromJson(state["mission"]);
+    }
+    missionEnabled_ = state.value("missionEnabled", missionEnabled_);
+    if (state.contains("missionGenome") && state["missionGenome"].is_object()) {
+        missionGenome_ = phoenix::mission::MissionGenome::fromJson(state["missionGenome"]);
+    }
+    if (state.contains("goals") && state["goals"].is_array()) {
+        goals_.clear();
+        for (const auto &g : state["goals"])
+            if (g.is_string()) goals_.push_back(g.get<std::string>());
+    }
+    subconsciousEnabled_ = state.value("subconsciousEnabled", subconsciousEnabled_);
+    if (state.contains("subconscious") && state["subconscious"].is_object()) {
+        subProfile_ = phoenix::subconscious::SubconsciousProfile::fromJson(state["subconscious"]);
+        if (subconsciousEnabled_) {
+            subProfile_.applyTo(sensationEngine_);
+            subProfile_.applyTo(instinctEngine_);
+            subProfile_.applyTo(agiController_);
+        }
+    }
 
     sessions_.clear();
     std::size_t sessionsLoaded = 0;
@@ -1748,6 +1901,12 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
     const json &p = payload.is_null() ? json::object() : payload;
     missionEnabled_ = p.value("enabled", missionEnabled_);
     missionMutationRate_ = static_cast<float>(clampDouble(p.value("mutationRate", missionMutationRate_), 0.0, 10.0));
+    missionMaxReplicas_ = static_cast<size_t>(
+        clampInt(p.value("maxReplicas", static_cast<int>(missionMaxReplicas_)), 0, 64));
+    mission_.setMaxReplicas(missionMaxReplicas_);
+    if (p.value("enabled", false)) {
+        registerWithSafetyRegistry(); /* mission lifecycle begins: register */
+    }
     phoenix::mission::Mission m;
     m.id = p.value("id", std::string());
     m.goal = p.value("goal", std::string());
@@ -1762,7 +1921,7 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
     if (m.goal.empty()) {
         return json{{"ok", true}, {"result", mission_.stats()}};
     }
-    mission_.assign(m);
+    mission_.assign(m, missionGenome_);
     return json{{"ok", true}, {"result", mission_.stats()}};
 }
 
@@ -1776,7 +1935,11 @@ json CognitionAutonomyManager::missionStatus() const {
 
 json CognitionAutonomyManager::reportMissionOutcome(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
-    const bool achieved = payload.value("goalAchieved", false);
+    const json &p = payload.is_null() ? json::object() : payload;
+    const bool achieved = p.value("goalAchieved", false);
+    /* No hand-off: before the goal completes, pressure only grows and this
+       instance keeps going.  Successors replicated by this instance stay in
+       the children list (observability); judgement stays with the caller. */
     if (achieved) {
         mission_.markComplete();
     } else {
@@ -1796,6 +1959,238 @@ json CognitionAutonomyManager::spawnMissionChild(const json &payload) {
     return json{{"ok", true}, {"result", child.toJson()}};
 }
 
+json CognitionAutonomyManager::configureMcp(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const json &p = payload.is_null() ? json::object() : payload;
+    std::string err;
+    mcpManager_.configure(p, err);
+    mcpEnabled_ = p.value("enabled", false);
+    mcpActionMap_.clear();
+    nlohmann::json report = mcpManager_.startAll();
+    nlohmann::json toolSnapshot = nlohmann::json::array();
+    if (mcpEnabled_) {
+        /* expose every MCP tool as a planner action (category "mcp") */
+        toolSnapshot = mcpManager_.listTools();
+        for (const auto &entry : toolSnapshot) {
+            const std::string server = entry.value("server", std::string());
+            const nlohmann::json &tool = entry["tool"];
+            const std::string toolName = tool.value("name", std::string());
+            if (server.empty() || toolName.empty()) continue;
+            const std::string actionName = "mcp." + server + "." + toolName;
+            phoenix::agi::AgiActionSpec spec;
+            spec.name = actionName;
+            spec.category = "mcp";
+            spec.addonType = "mcp";
+            spec.description = tool.value("description", std::string("MCP tool " + toolName));
+            agiActionRegistry_.registerAction(spec);
+            mcpActionMap_[actionName] = {server, toolName};
+        }
+    }
+    return json{{"ok", true},
+                {"result", json{{"enabled", mcpEnabled_},
+                                {"report", report},
+                                {"tools", toolSnapshot}}}};
+}
+
+json CognitionAutonomyManager::listMcpTools() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return json{{"ok", true}, {"result", mcpManager_.listTools()}};
+}
+
+json CognitionAutonomyManager::callMcpTool(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const json &p = payload.is_null() ? json::object() : payload;
+    const std::string server = p.value("server", std::string());
+    const std::string tool = p.value("tool", std::string());
+    const nlohmann::json args = p.contains("arguments") ? p["arguments"]
+                                                       : nlohmann::json::object();
+    nlohmann::json out = mcpManager_.callTool(server, tool, args);
+    return json{{"ok", out.value("ok", false)}, {"result", out}};
+}
+
+
+void CognitionAutonomyManager::registerWithSafetyRegistry() {
+    if (safetyRegistered_) return;
+    safetyRegistered_ = true;
+    safetyRegId_ = phoenix::safety::InstanceRegistry::instance().registerInstance(
+        "cognition-autonomy", "manager", [this] {
+            /* E-stop stop handler: kill this instance's autonomous activity.
+               Idempotent and safe to run on any thread except the loop thread
+               itself (which is why we only flag, not join, there). */
+            loopStop_.store(true, std::memory_order_release);
+            mcpManager_.stopAll();
+            if (loopThread_.joinable() &&
+                loopThread_.get_id() != std::this_thread::get_id()) {
+                loopThread_.join();
+            }
+        });
+}
+
+void CognitionAutonomyManager::unregisterFromSafetyRegistry() {
+    if (safetyRegistered_) {
+        phoenix::safety::InstanceRegistry::instance().unregister(safetyRegId_);
+        safetyRegistered_ = false;
+        safetyRegId_ = 0;
+    }
+}
+
+json CognitionAutonomyManager::interject(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (phoenix::safety::EmergencyStop::instance().latched()) {
+        return json{{"ok", false}, {"error", "emergency stop engaged: interjection rejected"}};
+    }
+    const json &p = payload.is_null() ? json::object() : payload;
+    const std::string text = trimLocal(p.value("text", std::string()));
+    if (text.empty()) {
+        return json{{"ok", false}, {"error", "interjection text required"}};
+    }
+    interjections_.push_back({nowMs(), text});
+    if (interjections_.size() > 64) interjections_.erase(interjections_.begin());
+    nlohmann::json out = json{{"ok", true}, {"queued", interjections_.size()}};
+    /* optional mid-flight goal amendment: the mission is REDIRECTED, not
+       restarted (start time and pressure are preserved). */
+    const std::string amend = trimLocal(p.value("amendGoal", std::string()));
+    if (!amend.empty()) {
+        out["goalAmended"] = mission_.amendGoal(amend);
+        out["goal"] = mission_.mission().goal;
+        if (!out["goalAmended"].get<bool>()) {
+            out["warning"] = "no running mission; goal not amended";
+        }
+    }
+    return out;
+}
+
+json CognitionAutonomyManager::configureAutonomyLoop(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const json &p = payload.is_null() ? json::object() : payload;
+    loopEnabled_ = p.value("enabled", loopEnabled_);
+    loopIntervalSec_ = clampInt(p.value("intervalSec", loopIntervalSec_), 1, 3600);
+    loopMaxStepsPerTick_ = clampInt(p.value("maxStepsPerTick", loopMaxStepsPerTick_), 1, 64);
+    loopPersistEveryTicks_ = clampInt(p.value("persistEveryTicks", loopPersistEveryTicks_), 1, 10000);
+    if (p.contains("persistPath") && p["persistPath"].is_string()) {
+        loopPersistPath_ = p["persistPath"].get<std::string>();
+    }
+    return json{{"ok", true},
+                {"result", json{{"enabled", loopEnabled_},
+                                {"intervalSec", loopIntervalSec_},
+                                {"maxStepsPerTick", loopMaxStepsPerTick_},
+                                {"persistEveryTicks", loopPersistEveryTicks_},
+                                {"persistPath", loopPersistPath_}}}};
+}
+
+json CognitionAutonomyManager::startAutonomyLoop() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (phoenix::safety::EmergencyStop::instance().latched()) {
+        return json{{"ok", false}, {"error", "emergency stop engaged: loop will not start"}};
+    }
+    if (!loopEnabled_) {
+        return json{{"ok", false}, {"error", "autonomy loop not enabled (configure first)"}};
+    }
+    registerWithSafetyRegistry(); /* lifecycle begins: register with the system */
+    if (loopThread_.joinable() && !loopStop_.load(std::memory_order_acquire)) {
+        return json{{"ok", true}, {"result", json{{"running", true}}}};
+    }
+    /* restore long-term evolution from disk when present */
+    nlohmann::json restored = nullptr;
+    try {
+        std::ifstream f(loopPersistPath_);
+        if (f.good()) {
+            nlohmann::json saved;
+            f >> saved;
+            restored = importState(saved);
+        }
+    } catch (...) {
+        restored = json{{"ok", false}, {"error", "persist file unreadable; starting fresh"}};
+    }
+    loopStop_.store(false, std::memory_order_release);
+    if (loopThread_.joinable()) loopThread_.join();
+    loopThread_ = std::thread([this] { loopRun(); });
+    return json{{"ok", true},
+                {"result", json{{"running", true}, {"restored", restored}}}};
+}
+
+json CognitionAutonomyManager::stopAutonomyLoop() {
+    loopStop_.store(true, std::memory_order_release);
+    if (loopThread_.joinable()) loopThread_.join();
+    std::lock_guard<std::mutex> lock(mu_);
+    return json{{"ok", true},
+                {"result", json{{"running", false}, {"ticks", loopTickCount_.load()}}}};
+}
+
+json CognitionAutonomyManager::autonomyLoopStatus() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return json{{"ok", true},
+                {"result", json{{"enabled", loopEnabled_},
+                                {"running", loopThread_.joinable() &&
+                                               !loopStop_.load(std::memory_order_acquire)},
+                                {"intervalSec", loopIntervalSec_},
+                                {"maxStepsPerTick", loopMaxStepsPerTick_},
+                                {"persistEveryTicks", loopPersistEveryTicks_},
+                                {"persistPath", loopPersistPath_},
+                                {"tickCount", loopTickCount_.load()},
+                                {"lastTickAtMs", loopLastTickAtMs_.load()}}}};
+}
+
+void CognitionAutonomyManager::ensureHeartbeatSession() {
+    std::lock_guard<std::mutex> lock(mu_);
+    const std::string id = "__autonomy_heartbeat__";
+    auto it = sessions_.find(id);
+    if (it != sessions_.end()) {
+        it->second["shouldIterate"] = true;
+        return;
+    }
+    nlohmann::json rec;
+    rec["sessionId"] = id;
+    rec["observations"] = 1;
+    const std::string goal = mission_.mission().goal;
+    rec["seedMission"] = goal.empty() ? "autonomous loop" : goal;
+    rec["lastObservedAtMs"] = nowMs();
+    rec["shouldIterate"] = true;
+    sessions_[id] = std::move(rec);
+}
+
+void CognitionAutonomyManager::loopRun() {
+    /* Heartbeat: the REAL autonomous loop.  Each tick runs the full
+       plan/act/observe/learn cycle through iterate() - no external message
+       required - and periodically persists the evolved state to disk so
+       evolution is long-term. */
+    while (!loopStop_.load(std::memory_order_acquire)) {
+        if (phoenix::safety::EmergencyStop::instance().latched()) break;
+        const int64_t tickStart = nowMs();
+        try {
+            ensureHeartbeatSession();
+            for (int step = 0; step < loopMaxStepsPerTick_; ++step) {
+                if (loopStop_.load(std::memory_order_acquire)) break;
+                iterate(nlohmann::json::object(), nlohmann::json::object());
+            }
+        } catch (...) {
+            /* the loop must never die from one bad tick */
+        }
+        loopTickCount_.fetch_add(1, std::memory_order_relaxed);
+        loopLastTickAtMs_.store(nowMs(), std::memory_order_relaxed);
+        if (loopTickCount_.load(std::memory_order_relaxed) % loopPersistEveryTicks_ == 0) {
+            try {
+                nlohmann::json state = exportState();
+                std::filesystem::path path(loopPersistPath_);
+                if (!path.parent_path().empty()) {
+                    std::filesystem::create_directories(path.parent_path());
+                }
+                std::ofstream f(path);
+                f << state.dump(2);
+            } catch (...) {
+                /* persistence is best-effort */
+            }
+        }
+        const int64_t elapsed = nowMs() - tickStart;
+        const int64_t sleepMs =
+            std::max<int64_t>(50, static_cast<int64_t>(loopIntervalSec_) * 1000 - elapsed);
+        for (int64_t slept = 0;
+             slept < sleepMs && !loopStop_.load(std::memory_order_acquire);
+             slept += 50) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+}
 
 json CognitionAutonomyManager::composePrompt(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);

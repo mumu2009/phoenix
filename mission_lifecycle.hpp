@@ -90,18 +90,52 @@ struct MissionGenome {
   static MissionGenome fromJson(const nlohmann::json &j);
 };
 
+/**
+ * @brief A replicated successor instance ("Meeseeks summons another Meeseeks").
+ *
+ * Replication is a FREE CAPABILITY of the instance: the instance itself
+ * decides (through its planner) WHEN to replicate.  There is no fixed trigger
+ * and no hand-off - before the goal completes the pressure only grows and the
+ * instance does not end; the child is simply another instance working the
+ * same goal with a mutated genome.  Mutation provides diversity only; there
+ * is no fitness comparison and no culling (not natural selection).
+ */
+struct MissionChild {
+  std::string id;        /*!< "child-<generation>-<n>" */
+  MissionGenome genome;  /*!< mutated heredity */
+  std::string goal;      /*!< inherited goal */
+  uint64_t bornMs{0};
+  int generation{0};
+  nlohmann::json toJson() const;
+};
+
 /** @brief Lifecycle state machine + reproduction bookkeeping. */
 class MissionLifecycle {
  public:
   MissionLifecycle();
 
   void assign(const Mission &m);
+  void assign(const Mission &m, const MissionGenome &genome); /*!< bind heredity */
   Mission mission() const;   /*!< snapshot copy (mutex-guarded). */
   bool active() const;       /*!< true while Running (mutex-guarded). */
   float pressureNow() const;
 
+  /** @brief Replicate: mutate THIS instance's genome and record a successor
+      bound to the current goal.  Returns the child genome.  Throws
+      std::runtime_error when maxReplicas is exhausted (the only guardrail on
+      the instance's free replication power - no runaway spawning). */
+  MissionGenome replicate(float mutationRate);
+  size_t maxReplicas() const;
+  void setMaxReplicas(size_t n);
+  std::vector<MissionChild> children() const; /*!< successors (observability) */
+
   void markComplete();
   void markFailed();
+
+  /** Amend the goal mid-flight (human interjection): keeps Running and the
+      original start time, so pressure keeps growing - the mission is
+      redirected, not restarted.  Returns false when not Running. */
+  bool amendGoal(const std::string &newGoal);
 
   /** Reproduction step: mutate the parent genome (heredity + variation). */
   MissionGenome spawnChild(const MissionGenome &parent, float mutationRate);
@@ -111,8 +145,12 @@ class MissionLifecycle {
   void fromJson(const nlohmann::json &j);
 
  private:
+  nlohmann::json statsLocked() const; /*!< stats body without locking */
   mutable std::mutex mu_;
   Mission mission_;
+  MissionGenome genome_;      /*!< heredity of THIS instance */
+  std::vector<MissionChild> children_; /*!< replicated successors (observability) */
+  size_t maxReplicas_{4};    /*!< guardrail cap on free replication */
   std::mt19937 rng_;
   size_t spawnCount_{0};
   size_t completeCount_{0};

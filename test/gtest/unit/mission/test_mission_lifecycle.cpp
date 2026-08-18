@@ -144,6 +144,79 @@ TEST(MissionPressureTest, MonotoneAndSaturated) {
 // ---------------------------------------------------------------------------
 // §9.2 markComplete 终结疼痛 + 幂等
 // ---------------------------------------------------------------------------
+TEST(MissionLifecycleTest, StatsExposeCompletionTimeForSupervisorSelection) {
+    MissionLifecycle lc;
+    Mission m;
+    m.id = "sel";
+    m.goal = "g";
+    m.painGainPerSec = 1.0f;
+    m.maxPain = 1.0f;
+    lc.assign(m);
+    /* while running there is no completion time yet */
+    EXPECT_EQ(lc.stats().value("completionTimeMs", -2), -1);
+    lc.markComplete();
+    auto st = lc.stats();
+    ASSERT_TRUE(st.contains("completionTimeMs"));
+    EXPECT_GE(st["completionTimeMs"].get<int64_t>(), 0);
+    /* selection stays OUTSIDE the process: stats carry the signal, but there
+       is no fitness field / elite genome / autonomous retry loop in the API */
+    EXPECT_FALSE(st.contains("fitness"));
+    EXPECT_FALSE(st.contains("elite"));
+}
+
+TEST(MissionLifecycleTest, ReplicateMutatesAndRecords) {
+    MissionLifecycle lc;
+    Mission m;
+    m.id = "repl-m";
+    m.goal = "must complete";
+    m.painGainPerSec = 1.0f;
+    m.maxPain = 1.0f;
+    MissionGenome parent;
+    parent.learningRate = 0.05f;
+    lc.assign(m, parent);
+    auto child = lc.replicate(0.1f);
+    EXPECT_NEAR(child.learningRate, 0.05f, 0.5f); /* mutated but bounded */
+    auto children = lc.children();
+    ASSERT_EQ(children.size(), 1u);
+    EXPECT_EQ(children[0].goal, "must complete"); /* goal inherited */
+    EXPECT_EQ(children[0].id, "child-1-0");
+    auto st = lc.stats();
+    EXPECT_EQ(st["spawns"].get<size_t>(), 1u);
+    ASSERT_TRUE(st.contains("children"));
+    EXPECT_EQ(st["children"].size(), 1u);
+}
+
+TEST(MissionLifecycleTest, ReplicaLimitBoundsReproduction) {
+    MissionLifecycle lc;
+    Mission m;
+    m.id = "bounded";
+    m.goal = "g";
+    lc.assign(m, MissionGenome{});
+    lc.setMaxReplicas(2);
+    lc.replicate(0.05f);
+    lc.replicate(0.05f);
+    EXPECT_THROW(lc.replicate(0.05f), std::runtime_error);
+    EXPECT_EQ(lc.children().size(), 2u); /* bounded, no runaway spawning */
+}
+
+TEST(MissionLifecycleTest, AmendGoalRedirectsWithoutRestart) {
+    MissionLifecycle lc;
+    Mission m;
+    m.id = "amend";
+    m.goal = "original goal";
+    m.painGainPerSec = 1.0f;
+    m.maxPain = 1.0f;
+    lc.assign(m, MissionGenome{});
+    const uint64_t start = lc.mission().startMs;
+    EXPECT_TRUE(lc.amendGoal("redirected goal"));
+    EXPECT_EQ(lc.mission().goal, "redirected goal");
+    EXPECT_EQ(lc.mission().state, MissionState::Running);
+    EXPECT_EQ(lc.mission().startMs, start); /* pressure keeps growing */
+    lc.markComplete();
+    EXPECT_FALSE(lc.amendGoal("too late"));
+    EXPECT_EQ(lc.mission().goal, "redirected goal");
+}
+
 TEST(MissionLifecycleTest, MarkCompleteEndsPainAndIsIdempotent) {
   MissionLifecycle lc;
   Mission m;
@@ -472,6 +545,90 @@ TEST_F(AutonomyMissionTest, IterateInjectsMissionPressurePain) {
   EXPECT_FLOAT_EQ(pain.value("valence", 0.0f), -1.0f);
   EXPECT_GT(pain.value("intensity", 0.0f), 0.0f);
   EXPECT_LE(pain.value("intensity", 0.0f), 1.0f);
+}
+
+TEST_F(AutonomyMissionTest, PressureIsSingleSignalNotStacked) {
+    const std::string sid = "mission-single-signal";
+    seedSession(sid);
+    mgr_->assignMission(json{{"enabled", true},
+                               {"goal", "keep one signal"},
+                               {"painGainPerSec", 1000.0},
+                               {"maxPain", 1.0}});
+    for (int i = 0; i < 3; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        mgr_->iterate(json{{"sessionId", sid}}, json{});
+    }
+    auto st = mgr_->status();
+    size_t count = 0;
+    for (const auto &s : st["result"]["sensations"]) {
+        if (s.value("type", std::string()) == "pain" &&
+            s.value("source", std::string()) == "mission-pressure") {
+            ++count;
+        }
+    }
+    EXPECT_EQ(count, 1u)
+        << "mission pressure must be ONE refreshed signal p(t), not stacked "
+           "copies (N*p would break the gT^2/2 model)";
+}
+
+TEST_F(AutonomyMissionTest, ReplicateActionRegisteredByDefault) {
+    auto actions = mgr_->listAgiActions();
+    ASSERT_TRUE(actions.contains("result"));
+    bool found = false;
+    for (const auto &a : actions["result"]) {
+        if (a.value("name", std::string()) == "replicate") {
+            found = true;
+            EXPECT_EQ(a.value("category", std::string()), "replicate");
+        }
+    }
+    EXPECT_TRUE(found) << "replicate must be a default planner action";
+}
+
+TEST_F(AutonomyMissionTest, ExecuteReplicateSpawnsSuccessorSession) {
+    mgr_->assignMission(json{{"enabled", true},
+                             {"goal", "replicate for me"},
+                             {"painGainPerSec", 1.0},
+                             {"maxPain", 1.0}});
+    nlohmann::json ctx{{"userPrompt", "spawn help"}};
+    auto res = mgr_->executeAgiActionByName("replicate", ctx);
+    ASSERT_TRUE(res.value("ok", false)) << res.dump();
+    const std::string childId = res["result"].value("childSessionId", std::string());
+    EXPECT_FALSE(childId.empty());
+    EXPECT_EQ(res["result"].value("goal", std::string()), "replicate for me");
+    /* the successor is a real session bound to the same goal */
+    auto st = mgr_->status();
+    bool found = false;
+    for (const auto &s : st["result"]["sessions"]) {
+        if (s.value("sessionId", std::string()) == childId) found = true;
+    }
+    EXPECT_TRUE(found) << "successor session must exist";
+    auto mst = mgr_->missionStatus();
+    EXPECT_EQ(mst["result"]["stats"]["children"].size(), 1u);
+}
+
+TEST_F(AutonomyMissionTest, ReplicateRespectsMaxReplicas) {
+    mgr_->assignMission(json{{"enabled", true},
+                             {"goal", "bounded replication"},
+                             {"maxReplicas", 1}});
+    nlohmann::json ctx;
+    auto first = mgr_->executeAgiActionByName("replicate", ctx);
+    EXPECT_TRUE(first.value("ok", false));
+    auto second = mgr_->executeAgiActionByName("replicate", ctx);
+    EXPECT_FALSE(second.value("ok", true)) << "maxReplicas is the only guardrail";
+    EXPECT_NE(second.value("error", std::string()).find("maxReplicas"), std::string::npos);
+}
+
+TEST_F(AutonomyMissionTest, ReportOutcomeFalseKeepsMissionFailed) {
+    mgr_->assignMission(json{{"enabled", true},
+                             {"goal", "no hand-off semantics"},
+                             {"maxReplicas", 2}});
+    mgr_->executeAgiActionByName("replicate", json{});
+    auto r = mgr_->reportMissionOutcome(json{{"goalAchieved", false}});
+    EXPECT_TRUE(r.value("ok", false));
+    /* no takeover: before completion pressure only grows, the instance keeps
+       going; judgement is the caller's.  Children stay for observability. */
+    EXPECT_EQ(r["result"]["mission"].value("state", 0), 3); /* Failed */
+    EXPECT_EQ(r["result"]["children"].size(), 1u);
 }
 
 TEST_F(AutonomyMissionTest, CompleteMissionStopsPainInjection) {
