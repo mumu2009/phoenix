@@ -165,6 +165,17 @@ public:
     json reportMissionOutcome(const json &payload); /* {goalAchieved:bool} ends pain. */
     json spawnMissionChild(const json &payload); /* Mutated child genome (heredity). */
 
+    /* v8.0 mission worker: the gateway registers an LLM-backed deliberator.
+       While a mission is Running the heartbeat calls it OUTSIDE the manager
+       lock (slow LLM replies must not stall interject/status); its output
+       accumulates in the mission deliverable, which is the work product the
+       human supervisor reads and judges.  Optional: without it the loop is
+       pure introspection and produces no text deliverables. */
+    using MissionDeliberator = std::function<std::string(
+        const std::string &goal, const std::string &deliverable, int maxTokens)>;
+    void setMissionDeliberator(MissionDeliberator fn);
+    json appendMissionDeliverable(const json &payload); /* {text} appends. */
+
     /* v7.0 MCP compatibility (optional, config mcp.*): launch external MCP
        servers (JSON-RPC over stdio) and expose their tools to the planner as
        AGI actions with category "mcp".  Mainstream plugin-market bridge. */
@@ -250,6 +261,8 @@ private:
     void registerWithSafetyRegistry();
     void unregisterFromSafetyRegistry();
     phoenix::mission::MissionLifecycle mission_;
+  MissionDeliberator missionDeliberator_;
+  int loopDeliberateMaxTokens_{512};
     phoenix::mission::MissionGenome missionGenome_;
 
     /* v7.0 MCP compatibility (optional) */

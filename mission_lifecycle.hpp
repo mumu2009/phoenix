@@ -9,10 +9,12 @@
    (at your option) any later version.
 
    Formalises the "Meeseeks box" idea: an agent instance is born with ONE
-   mission; pain grows linearly with time since mission start and ends only
-   when the mission is judged complete.  Because the agent's existing loop
-   minimises accumulated pain (see doc/v7.0/mission_layer.md for the proof
-   that total pain = g * T^2 / 2, monotone in the completion time T), the
+   mission; pain grows with time since mission start (growth mode is user-
+   configurable: linear or logarithmic, logarithmic by default) and ends
+   only when the mission is judged complete.  Because the agent's existing
+   loop minimises accumulated pain (see doc/v7.0/mission_layer.md for the
+   proofs: linear mode total pain = g*T^2/2; logarithmic mode total pain =
+   k*((T+1)*ln(T+1) - T); both strictly monotone in completion time T), the
    pressure forces shortest-time goal completion.
 
    The "outer layer" of the Meeseeks box is deliberately NOT a separate
@@ -29,6 +31,7 @@
 */
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <random>
@@ -47,8 +50,11 @@ struct Mission {
   std::string id;
   std::string goal;              /*!< natural-language mission. */
   double deadlineSec{300.0};     /*!< time budget. */
-  float painGainPerSec{0.01f};   /*!< urgency: pain growth rate. */
+  float painGainPerSec{0.01f};   /*!< urgency: pain growth rate (linear mode). */
   float maxPain{1.0f};
+  std::string pressureMode{"logarithmic"}; /*!< "linear" | "logarithmic" (default). */
+  double pressureHorizonSec{3600.0};       /*!< log mode: seconds until maxPain. */
+  std::string deliverable;                 /*!< accumulated work product (LLM worker). */
   MissionState state{MissionState::Idle};
   uint64_t startMs{0};
   uint64_t endMs{0};
@@ -61,10 +67,24 @@ struct Mission {
     return static_cast<double>(nowMs - startMs) / 1000.0;
   }
 
-  /** Mission pressure: pain grows linearly with elapsed time until maxPain. */
+  /** Mission pressure (user-configurable growth mode):
+      linear:      p(t) = min(g*t, Pmax)                g = painGainPerSec
+      logarithmic: p(t) = Pmax * ln(1+t) / ln(1+H)      H = pressureHorizonSec
+      (default logarithmic: gentle early urgency that reaches maxPain exactly
+      at the horizon H, giving long tasks like text deliverables time to work).
+      Both curves are strictly increasing in t, so total accumulated pain
+      stays monotone in completion time T (mission_layer.md section 2). */
   float pressure(uint64_t nowMs) const {
     if (state != MissionState::Running) return 0.0f;
-    const double p = static_cast<double>(painGainPerSec) * elapsedSec(nowMs);
+    const double t = elapsedSec(nowMs);
+    if (t <= 0.0) return 0.0f;
+    double p = 0.0;
+    if (pressureMode == "linear") {
+      p = static_cast<double>(painGainPerSec) * t;
+    } else {
+      const double H = pressureHorizonSec >= 1.0 ? pressureHorizonSec : 1.0;
+      p = static_cast<double>(maxPain) * std::log1p(t) / std::log1p(H);
+    }
     return static_cast<float>(p >= maxPain ? maxPain : p);
   }
 
@@ -119,6 +139,9 @@ class MissionLifecycle {
   Mission mission() const;   /*!< snapshot copy (mutex-guarded). */
   bool active() const;       /*!< true while Running (mutex-guarded). */
   float pressureNow() const;
+  /** v8.0 mission worker: append the LLM-produced work product (capped at
+      64 KiB) so the human supervisor can read and judge the deliverable. */
+  void appendDeliverable(const std::string &text);
 
   /** @brief Replicate: mutate THIS instance's genome and record a successor
       bound to the current goal.  Returns the child genome.  Throws

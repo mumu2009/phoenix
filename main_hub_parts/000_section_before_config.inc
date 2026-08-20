@@ -814,7 +814,7 @@ static std::string dotPathForEnv(const std::string &env) {
   if (env == "AI_BASE_DIR") return "main.baseDir";
   if (env == "AI_GATEWAY_HOST") return "main.gateway.host";
   if (env == "CONTROLLER_PORT") return "main.gateway.port";
-  if (env == "AI_STUDY_PORT") return "main.studyPort";
+  // v8.0 audit C1: AI_STUDY_PORT / main.studyPort retired; frontend_server.port is the single source.
   if (env == "AI_HTTP_LOG") return "main.httpLog";
   if (env == "AI_COUNT" || env == "AI_NUM") return "main.aiCount";
   if (env == "AI_GROUP_COUNT" || env == "GROUP_COUNT") return "main.groupCount";
@@ -934,10 +934,6 @@ applyFrontendEnvFromArgs(const std::map<std::string, std::string> &args) {
   if (itJwt != args.end() && !itJwt->second.empty())
     syncJwtSecret(itJwt->second);
 
-  auto itStudyPort = args.find("study-port");
-  if (itStudyPort != args.end() && !itStudyPort->second.empty())
-    setRuntimeEnvValue("FRONTEND_PORT", itStudyPort->second);
-
   std::string host = phoenix::resolveConfigAsString("api.gatewayHost", "127.0.0.1", "AI_GATEWAY_HOST");
   std::string port = phoenix::resolveConfigAsString("api.gatewayPort", "5080", "CONTROLLER_PORT");
   auto itHost = args.find("gateway-host");
@@ -946,6 +942,12 @@ applyFrontendEnvFromArgs(const std::map<std::string, std::string> &args) {
   auto itPort = args.find("port");
   if (itPort != args.end() && !itPort->second.empty())
     port = itPort->second;
+  // Wildcard bind addresses (0.0.0.0/::/*) are not connectable destinations.
+  // The frontend subprocess proxies to the gateway on the SAME machine, so map
+  // them back to loopback - otherwise every proxied call fails with
+  // "disconnected" (drogon HttpClient cannot connect to 0.0.0.0).
+  if (host.empty() || host == "0.0.0.0" || host == "::" || host == "*")
+    host = "127.0.0.1";
   setRuntimeEnvValue("AI_API_BASE", std::string("http://") + host + ":" + port);
 }
 

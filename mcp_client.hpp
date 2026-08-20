@@ -144,6 +144,7 @@ private:
   int outFd_{-1};  /* client writes to here   */
   bool ownsFds_{true};
   void *procHandle_{nullptr};
+  int procPid_{-1}; /* POSIX child pid */
   std::thread reader_;
   std::mutex mu_;
   std::condition_variable cv_;

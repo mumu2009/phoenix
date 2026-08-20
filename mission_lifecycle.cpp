@@ -35,6 +35,9 @@ nlohmann::json Mission::toJson() const {
           {"deadlineSec", deadlineSec},
           {"painGainPerSec", painGainPerSec},
           {"maxPain", maxPain},
+          {"pressureMode", pressureMode},
+          {"pressureHorizonSec", pressureHorizonSec},
+          {"deliverable", deliverable},
           {"state", static_cast<int>(state)},
           {"startMs", startMs},
           {"endMs", endMs}};
@@ -48,6 +51,14 @@ Mission Mission::fromJson(const nlohmann::json &j) {
   if (j.contains("deadlineSec") && j["deadlineSec"].is_number()) m.deadlineSec = j["deadlineSec"].get<double>();
   if (j.contains("painGainPerSec") && j["painGainPerSec"].is_number()) m.painGainPerSec = j["painGainPerSec"].get<float>();
   if (j.contains("maxPain") && j["maxPain"].is_number()) m.maxPain = j["maxPain"].get<float>();
+  if (j.contains("pressureMode") && j["pressureMode"].is_string()) {
+    const std::string mode = j["pressureMode"].get<std::string>();
+    m.pressureMode = (mode == "linear") ? "linear" : "logarithmic";
+  }
+  if (j.contains("pressureHorizonSec") && j["pressureHorizonSec"].is_number())
+    m.pressureHorizonSec = j["pressureHorizonSec"].get<double>();
+  if (j.contains("deliverable") && j["deliverable"].is_string())
+    m.deliverable = j["deliverable"].get<std::string>();
   if (j.contains("state") && j["state"].is_number_integer()) {
     const int s = j["state"].get<int>();
     if (s >= 0 && s <= 3) m.state = static_cast<MissionState>(s);
@@ -140,6 +151,17 @@ bool MissionLifecycle::active() const {
 float MissionLifecycle::pressureNow() const {
   std::lock_guard<std::mutex> lock(mu_);
   return mission_.pressure(sysNowMs());
+}
+
+void MissionLifecycle::appendDeliverable(const std::string &text) {
+  if (text.empty()) return;
+  std::lock_guard<std::mutex> lock(mu_);
+  if (mission_.state != MissionState::Running) return;
+  constexpr size_t kMaxDeliverableBytes = 64u * 1024u;
+  mission_.deliverable += text;
+  if (mission_.deliverable.size() > kMaxDeliverableBytes)
+    mission_.deliverable = mission_.deliverable.substr(
+        mission_.deliverable.size() - kMaxDeliverableBytes);
 }
 
 void MissionLifecycle::markComplete() {

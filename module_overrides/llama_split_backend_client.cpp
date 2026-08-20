@@ -377,16 +377,138 @@ std::string buildPrompt(const std::string &text, const std::string &graphContext
 // as an input and by guarding `llama_decode_impl()` against single-node
 // graphs. This fallback remains as a safety net so a single request never
 // leaves chatWithLlamaCpp() completely unable to produce a reply.
-bool textCompletionFallback(const std::string &host, int port,
-                             const std::string &prompt, int timeoutMs,
-                             double temperature, double topP, int maxTokens,
+// The gateway's Ahead-memory context block ends with the CURRENT user text.
+// Feeding the question twice (context + actual message) drives instruct
+// models into degenerate loops; strip the trailing echo and any now-empty
+// "[Ahead memory]" marker before the context is used as a system message.
+std::string cleanGraphContextForSystem(const std::string &graphContext,
+                                       const std::string &text) {
+  std::string ctx = graphContext;
+  const auto rtrim = [](std::string &s) {
+    while (!s.empty() &&
+           (s.back() == ' ' || s.back() == '\t' || s.back() == '\n' || s.back() == '\r'))
+      s.pop_back();
+  };
+  if (!text.empty()) {
+    std::string tail = text;
+    rtrim(tail);
+    if (!tail.empty()) {
+      const size_t pos = ctx.rfind(tail);
+      if (pos != std::string::npos && pos + tail.size() == ctx.size()) {
+        ctx = ctx.substr(0, pos);
+      }
+    }
+    rtrim(ctx);
+    const std::string marker = "[Ahead memory]";
+    const size_t mpos = ctx.rfind(marker);
+    if (mpos != std::string::npos) {
+      bool onlyMarkerLeft = true;
+      for (size_t i = mpos + marker.size(); i < ctx.size(); ++i) {
+        if (ctx[i] != ' ' && ctx[i] != '\t' && ctx[i] != '\n' && ctx[i] != '\r') {
+          onlyMarkerLeft = false;
+          break;
+        }
+      }
+      if (onlyMarkerLeft) {
+        ctx = ctx.substr(0, mpos);
+        rtrim(ctx);
+      }
+    }
+  }
+  return ctx;
+}
+
+// Maps one word to its token ids via the patched server's /phx/enc.
+// Returns the ids (usually 1; more when the word splits into subwords).
+// Empty on failure (caller then drops the entry instead of sending garbage).
+std::vector<int> tokenizeWord(const std::string &host, int port,
+                              const std::string &word, int timeoutMs) {
+  std::vector<int> out;
+  json resp;
+  std::string err;
+  if (!postJson(host, port, "/phx/enc", json{{"content", word}}, timeoutMs, resp,
+                err)) {
+    return out;
+  }
+  if (!resp.is_object() || !resp.contains("tokens") ||
+      !resp["tokens"].is_array()) {
+    return out;
+  }
+  for (const auto &t : resp["tokens"]) {
+    if (t.is_number_integer()) out.push_back(t.get<int>());
+  }
+  return out;
+}
+
+// Rewrites a string-keyed logit_bias map into the integer-token-id map that
+// llama-server accepts.  Entries that cannot be mapped are dropped (never
+// send garbage); numeric-string keys are used as-is.
+json normalizeLogitBias(const std::string &host, int port,
+                        const json &rawBias, int timeoutMs) {
+  json out = json::object();
+  if (!rawBias.is_object()) return out;
+  for (auto it = rawBias.begin(); it != rawBias.end(); ++it) {
+    const std::string key = it.key();
+    if (!it.value().is_number()) continue;
+    const double v = it.value().get<double>();
+    bool allDigits = !key.empty();
+    for (char ch : key) {
+      if (ch < '0' || ch > '9') { allDigits = false; break; }
+    }
+    if (allDigits) {
+      out[key] = v;
+      continue;
+    }
+    for (int id : tokenizeWord(host, port, key, timeoutMs)) {
+      out[std::to_string(id)] = v;
+    }
+  }
+  return out;
+}
+
+bool
+textCompletionFallback(const std::string &host, int port,
+                             const std::string &text,
+                             const std::string &graphContext, int timeoutMs,
+                             int maxTokens, const json &options,
                              std::string &reply, std::string &error) {
+  /* v8.0: the graph context goes out as a SYSTEM message (RAG-style memory),
+     never folded into the user message - the old "Context:/User:" wrapper
+     confused instruct models.  Default sampling is GREEDY (temperature 0),
+     matching the split-path contract; the observed llama.cpp snapshot leaks
+     raw template tokens at temperature > 0, and greedy is deterministic. */
+  const std::string cleanCtx = cleanGraphContextForSystem(graphContext, text);
+  json messages = json::array();
+  if (!cleanCtx.empty())
+    messages.push_back(json{{"role", "system"}, {"content", cleanCtx}});
+  messages.push_back(json{{"role", "user"}, {"content", text}});
   json payload = {
-      {"messages", json::array({json{{"role", "user"}, {"content", prompt}}})},
+      {"messages", messages},
       {"stream", false},
-      {"temperature", temperature},
-      {"top_p", topP},
+      {"temperature", 0.0},
+      {"top_p", 0.9},
       {"max_tokens", std::max(1, maxTokens)}};
+  /* v8.0 sampling passthrough: llama-server's OpenAI-compatible endpoint
+     accepts the full sampling surface; only forward keys that are actually
+     provided so the payload never drifts from the server schema. */
+  if (options.is_object()) {
+    if (options.contains("temperature") && options["temperature"].is_number())
+      payload["temperature"] = options["temperature"];
+    if (options.contains("top_p") && options["top_p"].is_number())
+      payload["top_p"] = options["top_p"];
+    for (const char *key : {"top_k", "min_p", "presence_penalty",
+                            "frequency_penalty", "seed"}) {
+      if (options.contains(key) && options[key].is_number())
+        payload[key] = options[key];
+    }
+    if (options.contains("logit_bias") && options["logit_bias"].is_object() &&
+        !options["logit_bias"].empty()) {
+      /* word -> token-id mapping via /phx/enc (emotion layer produces
+         STRING-keyed biases; llama-server wants integer token ids) */
+      json mapped = normalizeLogitBias(host, port, options["logit_bias"], timeoutMs);
+      if (!mapped.empty()) payload["logit_bias"] = mapped;
+    }
+  }
   json resp;
   if (!postJson(host, port, "/v1/chat/completions", payload, timeoutMs, resp,
                 error)) {
@@ -499,23 +621,25 @@ json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
   splitHostPort(endpoint, host, port);
 
   int effectiveMaxTokens = std::max(1, maxTokens);
-  // The split hidden-state pipeline implements its own sampling, so it ignores
-  // the high temperatures that the affect/cognition layers may suggest.  Greedy
-  // decoding keeps the unit-query regression stable and matches the behavior of
-  // the /phx/dec top-token output.
+  // Greedy by default (keeps the unit-query regression stable); an EXPLICIT
+  // temperature from the affect/cognition layers is now honoured (v8.0
+  // migration of the ollama-era sampling-modulation channel).
   double temperature = 0.0;
   double topP = 0.9;
+  bool skipGraphContext = false;
   if (inferenceOptions.is_object()) {
+    if (inferenceOptions.contains("temperature") &&
+        inferenceOptions["temperature"].is_number())
+      temperature = inferenceOptions["temperature"].get<double>();
     if (inferenceOptions.contains("top_p") && inferenceOptions["top_p"].is_number())
       topP = inferenceOptions["top_p"].get<double>();
-    // num_predict from inference options can override the caller's maxTokens;
-    // do not allow it to shorten the answer for unit tests.
+    skipGraphContext = inferenceOptions.value("skipGraphContext", false);
   }
 
-  // Ignore graphContext for the split pipeline for now.  The cognition/affect
-  // modulation strings in graphContext confuse the 8B model on the unit query,
-  // causing it to answer "The answer is 2." instead of an arithmetic equation.
-  std::string prompt = buildPrompt(text, "");
+  // v8.0: graphContext (the ollama-era long-context memory channel) is now
+  // included again; callers that need the bare unit query (regression tests)
+  // pass skipGraphContext=true.
+  std::string prompt = buildPrompt(text, skipGraphContext ? "" : graphContext);
 
   json pipelineResult = hiddenStatePipeline(host, port, endpoint, prompt,
                                              effectiveMaxTokens, temperature,
@@ -537,8 +661,8 @@ json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
   // currently necessary against llama_server_mods/enc_dec_separation.patch.
   std::string fallbackReply;
   std::string fallbackError;
-  if (textCompletionFallback(host, port, prompt, timeoutMs, temperature, topP,
-                              effectiveMaxTokens, fallbackReply,
+  if (textCompletionFallback(host, port, text, graphContext, timeoutMs, effectiveMaxTokens,
+                              inferenceOptions, fallbackReply,
                               fallbackError)) {
     out["ok"] = true;
     out["reply"] = fallbackReply;
@@ -571,25 +695,17 @@ json llamaTextOnlyChat(const std::string &baseUrl, int timeoutMs,
   splitHostPort(endpoint, host, port);
 
   int effectiveMaxTokens = std::max(1, maxTokens);
-  double temperature = 0.7;
-  double topP = 0.9;
   if (inferenceOptions.is_object()) {
-    if (inferenceOptions.contains("temperature") &&
-        inferenceOptions["temperature"].is_number())
-      temperature = inferenceOptions["temperature"].get<double>();
-    if (inferenceOptions.contains("top_p") && inferenceOptions["top_p"].is_number())
-      topP = inferenceOptions["top_p"].get<double>();
     if (inferenceOptions.contains("num_predict") &&
         inferenceOptions["num_predict"].is_number_integer())
       effectiveMaxTokens = std::max(1, inferenceOptions["num_predict"].get<int>());
   }
 
-  std::string prompt = buildPrompt(text, graphContext);
   std::string reply;
   std::string error;
   try {
-    if (textCompletionFallback(host, port, prompt, timeoutMs, temperature,
-                                topP, effectiveMaxTokens, reply, error)) {
+    if (textCompletionFallback(host, port, text, graphContext, timeoutMs, effectiveMaxTokens,
+                               inferenceOptions, reply, error)) {
       out["ok"] = true;
       out["reply"] = reply;
       return out;

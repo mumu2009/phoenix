@@ -55,3 +55,78 @@ describe('api.chat provider routing', () => {
     expect(simulation?.physicsExecution?.status).toBe('executed');
   });
 });
+
+describe('mission & autonomy api helpers', () => {
+  beforeEach(() => {
+    jest.resetModules();
+    localStorage.clear();
+    global.fetch = jest.fn();
+  });
+
+  const json = (data) => ({ ok: true, text: async () => JSON.stringify(data) });
+
+  test('missionStatus GETs /api/mission/status', async () => {
+    fetch.mockResolvedValueOnce(json({ ok: true, result: { enabled: true, stats: { generations: 3 } } }));
+
+    const { api } = require('./client');
+    const out = await api.missionStatus();
+
+    expect(fetch).toHaveBeenCalledWith('/api/mission/status', expect.objectContaining({ method: 'GET' }));
+    expect(out?.result?.stats?.generations).toBe(3);
+  });
+
+  test('missionAssign POSTs the lifecycle payload', async () => {
+    fetch.mockResolvedValueOnce(json({ ok: true, result: { mission: { id: 'm1' } } }));
+
+    const { api } = require('./client');
+    await api.missionAssign({ goal: 'g', deadlineSec: 300 });
+
+    const [url, opts] = fetch.mock.calls[0];
+    expect(url).toBe('/api/mission/assign');
+    expect(opts.method).toBe('POST');
+    expect(JSON.parse(opts.body)).toEqual({ goal: 'g', deadlineSec: 300 });
+  });
+
+  test('missionReport sends goalAchieved flag', async () => {
+    fetch.mockResolvedValueOnce(json({ ok: true, result: {} }));
+
+    const { api } = require('./client');
+    await api.missionReport(true);
+
+    expect(fetch.mock.calls[0][0]).toBe('/api/mission/report');
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ goalAchieved: true });
+  });
+
+  test('autonomy interject/loop/status and estop route to the contract endpoints', async () => {
+    fetch
+      .mockResolvedValueOnce(json({ ok: true }))
+      .mockResolvedValueOnce(json({ ok: true }))
+      .mockResolvedValueOnce(json({ ok: true }))
+      .mockResolvedValueOnce(json({ ok: true }));
+
+    const { api } = require('./client');
+    await api.autonomyInterject({ text: 'hi', amendGoal: 'new' });
+    await api.autonomyLoop({ action: 'start' });
+    await api.autonomyStatus();
+    await api.estop({ reason: 'r' });
+
+    expect(fetch).toHaveBeenNthCalledWith(1, '/api/cognition/autonomy/interject', expect.objectContaining({ method: 'POST' }));
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ text: 'hi', amendGoal: 'new' });
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/cognition/autonomy/loop', expect.objectContaining({ method: 'POST' }));
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ action: 'start' });
+    expect(fetch).toHaveBeenNthCalledWith(3, '/api/cognition/autonomy/status', expect.objectContaining({ method: 'GET' }));
+    expect(fetch).toHaveBeenNthCalledWith(4, '/api/safety/estop', expect.objectContaining({ method: 'POST' }));
+    expect(JSON.parse(fetch.mock.calls[3][1].body)).toEqual({ reason: 'r' });
+  });
+
+  test('non-ok response throws with the backend error text', async () => {
+    fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      text: async () => JSON.stringify({ error: 'mission disabled' })
+    });
+
+    const { api } = require('./client');
+    await expect(api.missionAssign({ goal: 'g' })).rejects.toThrow('mission disabled');
+  });
+});

@@ -461,8 +461,14 @@ static Config loadConfig(int argc, char **argv) {
 
 static void applyFrontendEnvFromConfig(const Config &config) {
   setRuntimeEnvValue("FRONTEND_PORT", std::to_string(config.portStudy));
+  std::string gatewayHostForApi = config.gatewayHost;
+  // Same rule as applyFrontendEnvFromArgs: a wildcard BIND address is not a
+  // connectable destination for the same-machine frontend proxy.
+  if (gatewayHostForApi.empty() || gatewayHostForApi == "0.0.0.0" ||
+      gatewayHostForApi == "::" || gatewayHostForApi == "*")
+    gatewayHostForApi = "127.0.0.1";
   setRuntimeEnvValue("AI_API_BASE", std::string("http://") +
-                                        config.gatewayHost + ":" +
+                                        gatewayHostForApi + ":" +
                                         std::to_string(config.portGateway));
   std::string gatewayJwtSecret = phoenix::resolveConfig<std::string>(
       "auth.jwtSecret", "dev-secret-change-me", "AI_AUTH_JWT_SECRET",

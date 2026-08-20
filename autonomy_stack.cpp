@@ -1913,6 +1913,9 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
     m.deadlineSec = clampDouble(p.value("deadlineSec", 300.0), 1.0, 3.2e7);
     m.painGainPerSec = static_cast<float>(clampDouble(p.value("painGainPerSec", 0.01), 0.0, 100.0));
     m.maxPain = static_cast<float>(clampDouble(p.value("maxPain", 1.0), 0.0, 1.0));
+    m.pressureMode = p.value("pressureMode", std::string("logarithmic"));
+    if (m.pressureMode != "linear") m.pressureMode = "logarithmic";
+    m.pressureHorizonSec = clampDouble(p.value("pressureHorizonSec", 3600.0), 60.0, 3.2e7);
     if (m.id.empty()) m.id = "mission-" + std::to_string(iteration_ + 1);
     if (p.contains("genome") && p["genome"].is_object()) {
         missionGenome_ = phoenix::mission::MissionGenome::fromJson(p["genome"]);
@@ -1945,6 +1948,20 @@ json CognitionAutonomyManager::reportMissionOutcome(const json &payload) {
     } else {
         mission_.markFailed();
     }
+    return json{{"ok", true}, {"result", mission_.stats()}};
+}
+
+void CognitionAutonomyManager::setMissionDeliberator(MissionDeliberator fn) {
+    std::lock_guard<std::mutex> lock(mu_);
+    missionDeliberator_ = std::move(fn);
+}
+
+json CognitionAutonomyManager::appendMissionDeliverable(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const std::string text = trimLocal(payload.value("text", std::string()));
+    if (text.empty())
+        return json{{"ok", false}, {"error", "deliverable text required"}};
+    mission_.appendDeliverable(text);
     return json{{"ok", true}, {"result", mission_.stats()}};
 }
 
@@ -2079,18 +2096,23 @@ json CognitionAutonomyManager::configureAutonomyLoop(const json &payload) {
 }
 
 json CognitionAutonomyManager::startAutonomyLoop() {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (phoenix::safety::EmergencyStop::instance().latched()) {
-        return json{{"ok", false}, {"error", "emergency stop engaged: loop will not start"}};
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (phoenix::safety::EmergencyStop::instance().latched()) {
+            return json{{"ok", false}, {"error", "emergency stop engaged: loop will not start"}};
+        }
+        if (!loopEnabled_) {
+            return json{{"ok", false}, {"error", "autonomy loop not enabled (configure first)"}};
+        }
+        registerWithSafetyRegistry(); /* lifecycle begins: register with the system */
+        if (loopThread_.joinable() && !loopStop_.load(std::memory_order_acquire)) {
+            return json{{"ok", true}, {"result", json{{"running", true}}}};
+        }
+        loopStop_.store(false, std::memory_order_release);
     }
-    if (!loopEnabled_) {
-        return json{{"ok", false}, {"error", "autonomy loop not enabled (configure first)"}};
-    }
-    registerWithSafetyRegistry(); /* lifecycle begins: register with the system */
-    if (loopThread_.joinable() && !loopStop_.load(std::memory_order_acquire)) {
-        return json{{"ok", true}, {"result", json{{"running", true}}}};
-    }
-    /* restore long-term evolution from disk when present */
+    /* v8.0 fix: restore OUTSIDE the manager lock.  importState() takes mu_
+       itself, and calling it while holding mu_ self-deadlocks (the assign
+       route wedged every drogon worker on this). */
     nlohmann::json restored = nullptr;
     try {
         std::ifstream f(loopPersistPath_);
@@ -2099,12 +2121,15 @@ json CognitionAutonomyManager::startAutonomyLoop() {
             f >> saved;
             restored = importState(saved);
         }
-    } catch (...) {
+    } catch (...)
+    {
         restored = json{{"ok", false}, {"error", "persist file unreadable; starting fresh"}};
     }
-    loopStop_.store(false, std::memory_order_release);
-    if (loopThread_.joinable()) loopThread_.join();
-    loopThread_ = std::thread([this] { loopRun(); });
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (loopThread_.joinable()) loopThread_.join();
+        loopThread_ = std::thread([this] { loopRun(); });
+    }
     return json{{"ok", true},
                 {"result", json{{"running", true}, {"restored", restored}}}};
 }
@@ -2158,6 +2183,24 @@ void CognitionAutonomyManager::loopRun() {
         if (phoenix::safety::EmergencyStop::instance().latched()) break;
         const int64_t tickStart = nowMs();
         try {
+            /* v8.0 mission worker: actually WORK on a Running mission via the
+               gateway-registered LLM deliberator.  Runs BEFORE the iterate
+               steps and OUTSIDE the manager lock (a slow LLM reply must not
+               stall interject/status/E-stop).  Output accumulates in the
+               mission deliverable; the human supervisor judges completion. */
+            if (missionDeliberator_) {
+                nlohmann::json ms = missionStatus();
+                const auto &stats = ms.value("result", nlohmann::json::object()).value("stats", nlohmann::json::object());
+                const auto &m = stats.value("mission", nlohmann::json::object());
+                if (m.value("state", 0) == 1) {
+                    const std::string goal = m.value("goal", std::string());
+                    const std::string prior = m.value("deliverable", std::string());
+                    const std::string work =
+                        missionDeliberator_(goal, prior, loopDeliberateMaxTokens_);
+                    if (!work.empty())
+                        appendMissionDeliverable(nlohmann::json{{"text", work}});
+                }
+            }
             ensureHeartbeatSession();
             for (int step = 0; step < loopMaxStepsPerTick_; ++step) {
                 if (loopStop_.load(std::memory_order_acquire)) break;

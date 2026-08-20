@@ -6509,136 +6509,9 @@ void setupFrontendServer()
         }
         cb(resp); }, {drogon::Get});
 
-    drogon::app().registerHandler("/world/conscious-compute", [&worldModel](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
-                                  {
-        auto resp = drogon::HttpResponse::newHttpResponse();
-        try {
-            const std::string sessionId = req->getParameter("sessionId");
-            if (sessionId.empty()) {
-                resp->setStatusCode(drogon::k400BadRequest);
-                resp->setContentTypeString("application/json");
-                nlohmann::json out{{"ok", false}, {"error", "Missing sessionId"}};
-                resp->setBody(out.dump(2));
-                cb(resp);
-                return;
-            }
-            int limit = 8;
-            try {
-                const std::string rawLimit = req->getParameter("limit");
-                if (!rawLimit.empty())
-                    limit = std::stoi(rawLimit);
-            } catch (...) {
-                limit = 8;
-            }
-            if (limit < 1)
-                limit = 1;
-
-            world_model::ConsciousComputeOptions options;
-            try {
-                const std::string rawStages = req->getParameter("maxStages");
-                if (!rawStages.empty())
-                    options.maxStages = static_cast<std::size_t>(std::max(1, std::stoi(rawStages)));
-            } catch (...) {
-            }
-            try {
-                const std::string rawPrompts = req->getParameter("maxHumanPrompts");
-                if (!rawPrompts.empty())
-                    options.maxHumanPrompts = static_cast<std::size_t>(std::max(1, std::stoi(rawPrompts)));
-            } catch (...) {
-            }
-            try {
-                const std::string rawMachine = req->getParameter("maxMachineSteps");
-                if (!rawMachine.empty())
-                    options.maxMachineSteps = static_cast<std::size_t>(std::max(1, std::stoi(rawMachine)));
-            } catch (...) {
-            }
-            auto state = worldModel.sessionState(sessionId, static_cast<std::size_t>(limit));
-            resp->setStatusCode(drogon::k200OK);
-            resp->setContentTypeString("application/json");
-            resp->setBody(world_model::buildConsciousComputePlan(state, options).dump(2));
-        } catch (const std::exception &e) {
-            resp->setStatusCode(drogon::k500InternalServerError);
-            resp->setContentTypeString("application/json");
-            nlohmann::json out{{"ok", false}, {"error", "world conscious compute exception"}, {"message", e.what()}};
-            resp->setBody(out.dump(2));
-        }
-        cb(resp); }, {drogon::Get});
-
-    drogon::app().registerHandler("/world/collective-compute", [&worldModel](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
-                                  {
-        auto resp = drogon::HttpResponse::newHttpResponse();
-        try {
-            auto json = req->getJsonObject();
-            if (!json) {
-                resp->setStatusCode(drogon::k400BadRequest);
-                resp->setContentTypeString("application/json");
-                nlohmann::json out{{"ok", false}, {"error", "Missing JSON body"}};
-                resp->setBody(out.dump(2));
-                cb(resp);
-                return;
-            }
-
-            auto payload = jsonCppToNlohmann(*json);
-            const std::string sessionId = payload.value("sessionId", std::string());
-            if (sessionId.empty()) {
-                resp->setStatusCode(drogon::k400BadRequest);
-                resp->setContentTypeString("application/json");
-                nlohmann::json out{{"ok", false}, {"error", "Missing sessionId"}};
-                resp->setBody(out.dump(2));
-                cb(resp);
-                return;
-            }
-
-            std::size_t limit = 8;
-            if (payload.contains("limit") && payload["limit"].is_number_unsigned())
-                limit = payload["limit"].get<std::size_t>();
-            else if (payload.contains("limit") && payload["limit"].is_number_integer())
-                limit = static_cast<std::size_t>(std::max<int64_t>(1, payload["limit"].get<int64_t>()));
-
-            world_model::CollectiveComputeOptions options;
-            if (payload.contains("participantCount") && payload["participantCount"].is_number_unsigned())
-                options.participantCount = payload["participantCount"].get<std::size_t>();
-            else if (payload.contains("participantCount") && payload["participantCount"].is_number_integer())
-                options.participantCount = static_cast<std::size_t>(std::max<int64_t>(1, payload["participantCount"].get<int64_t>()));
-            if (payload.contains("shardCount") && payload["shardCount"].is_number_unsigned())
-                options.shardCount = payload["shardCount"].get<std::size_t>();
-            else if (payload.contains("shardCount") && payload["shardCount"].is_number_integer())
-                options.shardCount = static_cast<std::size_t>(std::max<int64_t>(1, payload["shardCount"].get<int64_t>()));
-            if (payload.contains("redundancyFactor") && payload["redundancyFactor"].is_number_unsigned())
-                options.redundancyFactor = payload["redundancyFactor"].get<std::size_t>();
-            else if (payload.contains("redundancyFactor") && payload["redundancyFactor"].is_number_integer())
-                options.redundancyFactor = static_cast<std::size_t>(std::max<int64_t>(1, payload["redundancyFactor"].get<int64_t>()));
-            if (payload.contains("maxMnemonicWords") && payload["maxMnemonicWords"].is_number_unsigned())
-                options.maxMnemonicWords = payload["maxMnemonicWords"].get<std::size_t>();
-            else if (payload.contains("maxMnemonicWords") && payload["maxMnemonicWords"].is_number_integer())
-                options.maxMnemonicWords = static_cast<std::size_t>(std::max<int64_t>(1, payload["maxMnemonicWords"].get<int64_t>()));
-            if (payload.contains("maxCandidatesPerShard") && payload["maxCandidatesPerShard"].is_number_unsigned())
-                options.maxCandidatesPerShard = payload["maxCandidatesPerShard"].get<std::size_t>();
-            else if (payload.contains("maxCandidatesPerShard") && payload["maxCandidatesPerShard"].is_number_integer())
-                options.maxCandidatesPerShard = static_cast<std::size_t>(std::max<int64_t>(1, payload["maxCandidatesPerShard"].get<int64_t>()));
-            if (payload.contains("acceptableRelativeError") && payload["acceptableRelativeError"].is_number())
-                options.acceptableRelativeError = std::max(0.0, std::min(1.0, payload["acceptableRelativeError"].get<double>()));
-            if (payload.contains("allowMnemonicEncoding") && payload["allowMnemonicEncoding"].is_boolean())
-                options.allowMnemonicEncoding = payload["allowMnemonicEncoding"].get<bool>();
-            if (payload.contains("requireConsensus") && payload["requireConsensus"].is_boolean())
-                options.requireConsensus = payload["requireConsensus"].get<bool>();
-
-            auto state = worldModel.sessionState(sessionId, std::max<std::size_t>(1, limit));
-            const auto computeTask = (payload.contains("computeTask") && payload["computeTask"].is_object()) ? payload["computeTask"] : nlohmann::json::object();
-            const auto plan = world_model::buildCollectiveConsciousComputePlan(state, computeTask, options);
-
-            resp->setStatusCode(drogon::k200OK);
-            resp->setContentTypeString("application/json");
-            resp->setBody(plan.dump(2));
-        } catch (const std::exception &e) {
-            resp->setStatusCode(drogon::k500InternalServerError);
-            resp->setContentTypeString("application/json");
-            nlohmann::json out{{"ok", false}, {"error", "world collective compute exception"}, {"message", e.what()}};
-            resp->setBody(out.dump(2));
-        }
-        cb(resp); }, {drogon::Post});
-
-    drogon::app().registerHandler("/world/ingest", [&worldModel](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+        // v8.0: /world/conscious-compute and /world/collective-compute are SEALED
+    // (pseudoscience naming, no consumers) - see doc/v8.0/archive/conscious_compute.md
+drogon::app().registerHandler("/world/ingest", [&worldModel](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
                                   {
         auto resp = drogon::HttpResponse::newHttpResponse();
         try {
@@ -6878,7 +6751,26 @@ void setupFrontendServer()
                 }
             }
 
-            if (payload.value("persist", false) && simulation.contains("timeline") && simulation["timeline"].is_array()) {
+            /* v8.0 audit C: when the simulation is persisted, the physics
+               execution summary is ALSO ingested as a physics observation,
+               so the predict->align->calibrate loop has a real observed
+               next state to score against (physics becomes a first-class
+               evidence modality, not just a display artifact). */
+            if (payload.value("persist", false) && physicsExecution.contains("summary") &&
+                physicsExecution["summary"].is_string()) {
+                nlohmann::json physicsIngest{
+                    {"sessionId", sessionId},
+                    {"modality", "physics"},
+                    {"graphSummary", physicsExecution["summary"].get<std::string>()},
+                    {"metadata", {
+                        {"source", "world/simulate/physics"},
+                        {"status", physicsExecution.value("status", std::string("unknown"))},
+                        {"substeps", static_cast<int>(options.physicsSubsteps)}
+                    }}
+                };
+                worldModel.ingestEvidence(std::move(physicsIngest));
+            }
+                        if (payload.value("persist", false) && simulation.contains("timeline") && simulation["timeline"].is_array()) {
                 for (const auto &step : simulation["timeline"]) {
                     if (!step.is_object() || !step.contains("events") || !step["events"].is_array())
                         continue;

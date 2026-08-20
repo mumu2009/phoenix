@@ -60,6 +60,7 @@ class AutonomyMissionFixture : public ::testing::Test {
 // ---------------------------------------------------------------------------
 TEST(MissionPressureEdgeCases, ZeroGainKeepsPressureZero) {
   Mission m;
+  m.pressureMode = "linear";
   m.painGainPerSec = 0.0f;
   m.maxPain = 1.0f;
   m.state = MissionState::Running;
@@ -71,6 +72,7 @@ TEST(MissionPressureEdgeCases, ZeroGainKeepsPressureZero) {
 
 TEST(MissionPressureEdgeCases, VeryHighGainSaturatesImmediately) {
   Mission m;
+  m.pressureMode = "linear";
   m.painGainPerSec = 1.0e6f;
   m.maxPain = 0.5f;
   m.state = MissionState::Running;
@@ -82,6 +84,7 @@ TEST(MissionPressureEdgeCases, VeryHighGainSaturatesImmediately) {
 
 TEST(MissionPressureEdgeCases, CompletedAndFailedStatesAreZero) {
   Mission m;
+  m.pressureMode = "linear";
   m.painGainPerSec = 1.0f;
   m.maxPain = 1.0f;
   m.state = MissionState::Running;

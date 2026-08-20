@@ -237,7 +237,11 @@ bool McpClient::start(std::string &err) {
   inFd_ = r.inFd;
   outFd_ = r.outFd;
   ownsFds_ = true;
+#ifdef _WIN32
   procHandle_ = reinterpret_cast<void *>(r.process);
+#else
+  procPid_ = r.pid;
+#endif
   return startWithFds(inFd_, outFd_, true, err);
 }
 
@@ -440,6 +444,13 @@ void McpClient::shutdown() {
     if (inFd_ >= 0) { _close(inFd_); inFd_ = -1; }
     if (outFd_ >= 0) { _close(outFd_); outFd_ = -1; }
 #else
+    /* SIGTERM the child first so a non-cooperative server cannot linger
+       after the client is gone. */
+    if (procPid_ > 0) {
+      kill(procPid_, SIGTERM);
+      waitpid(procPid_, nullptr, 0);
+      procPid_ = -1;
+    }
     if (inFd_ >= 0) { close(inFd_); inFd_ = -1; }
     if (outFd_ >= 0) { close(outFd_); outFd_ = -1; }
 #endif

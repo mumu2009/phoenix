@@ -8,7 +8,7 @@ import random
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Optional, Any, Dict, List, Sequence
 
 
 COMMON_LORA_TARGET_MODULES = (
@@ -160,6 +160,37 @@ def ollama_chat(client, model: str, prompt: str, temperature: float, num_ctx: in
         options={"temperature": temperature, "num_ctx": num_ctx},
     )
     return response["message"]["content"].strip()
+
+
+class LlamaServerClient:
+    """Minimal ollama-compatible adapter over llama-server's OpenAI-compatible
+    /v1/chat/completions endpoint.  Lets the self-play generators talk to the
+    mainline backend without any ollama dependency (v8.0 migration of the
+    ollama-era fine-tuning bridge)."""
+
+    def __init__(self, base_url: str, timeout: int = 120):
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    def chat(self, model: str, messages: Sequence[Dict[str, str]],
+             options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        import json as _json
+        import urllib.request
+
+        payload: Dict[str, Any] = {"model": model, "messages": messages,
+                                   "stream": False}
+        if options:
+            if "temperature" in options:
+                payload["temperature"] = options["temperature"]
+            if "num_ctx" in options:
+                payload["n_ctx"] = options["num_ctx"]
+        req = urllib.request.Request(
+            self.base_url + "/v1/chat/completions",
+            data=_json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        return {"message": {"content": data["choices"][0]["message"]["content"]}}
 
 
 def build_self_play_samples(
@@ -574,7 +605,7 @@ def build_execution_report(
         "seedTopics": parse_seed_topics(args.seed_topics),
         "appendSampleCount": len(append_samples),
         "selfPlayPairs": args.self_play_pairs,
-        "requiresOllama": args.self_play_pairs > 0,
+        "requiresOllama": args.self_play_pairs > 0 and not (args.llama_server_url or os.environ.get("AI_LLAMACPP_BASE_URL", "")),
         "distillation": {
             "enabled": bool(teacher_plan.teachers),
             "selectionStrategy": teacher_plan.selection_strategy,
@@ -719,6 +750,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=Path("./checkpoints/personality_ft"))
     parser.add_argument("--training-mode", type=str, default="lora", choices=["lora", "full"], help="Use PEFT LoRA adapters or full checkpoint tuning")
     parser.add_argument("--ollama-model", type=str, default="gpt-oss:20b", help="Any available Ollama model name")
+    parser.add_argument("--llama-server-url", type=str, default="", help="llama-server base URL (OpenAI-compatible /v1); when set, self-play uses it instead of Ollama (v8.0)")
     parser.add_argument("--hf-model", type=str, default="gpt-oss:20b", help="Trainable HuggingFace CausalLM")
     parser.add_argument("--fallback-hf-model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct")
     parser.add_argument("--self-play-pairs", type=int, default=128)
@@ -771,7 +803,6 @@ def main() -> None:
 
     import torch
     import torch.nn.functional as F
-    from ollama import Client as OllamaClient
     from sentence_transformers import SentenceTransformer
     from torch.optim import AdamW
     from torch.utils.data import DataLoader
@@ -788,8 +819,17 @@ def main() -> None:
 
     seed_topics = parse_seed_topics(args.seed_topics)
     self_play_samples: List[QASample] = []
+    llama_server_url = args.llama_server_url or os.environ.get(
+        "AI_LLAMACPP_BASE_URL", "")
     if args.self_play_pairs > 0:
-        ollama_client = OllamaClient()
+        if llama_server_url:
+            from ollama import Client as OllamaClient  # only when needed
+            _unused_ollama = OllamaClient  # noqa: F841
+            chat_client = LlamaServerClient(llama_server_url)  # type: ignore[assignment]
+        else:
+            from ollama import Client as OllamaClient
+            chat_client = OllamaClient()
+        ollama_client = chat_client
         if teacher_plan.teachers:
             self_play_samples = build_multi_teacher_samples(
                 client=ollama_client,

@@ -11,15 +11,14 @@
       "file": 4096,
       "function": 512
     },
-    "maxTokens": 8192,
+    "maxTokens": 512,
     "maxContextChars": 8192,
     "reservedSystemTokens": 768,
     "importanceThreshold": 0.2,
     "similarityThreshold": 0.8,
     "semanticChunkSize": 512,
     "attentionSink": {
-      "sinkTokens": 512,
-      "sinkImportance": 0.2
+      "sinkTokens": 512
     },
     "embeddings": {
       "dim": 128,
@@ -43,7 +42,7 @@
       "rnnThresh": 15,
       "shortWindowMaxMessages": 40,
       "shortWindowMaxTokens": 2048,
-      "targetLatencyMs": 15000.0
+      "targetLatencyMs": 15000
     },
     "rnnTopK": 50
   },
@@ -129,11 +128,11 @@
     "maliciousThreshold": 0.7,
     "learningIterations": 3,
     "iteration": 5,
-    "threshold": 3.0,
-    "decay": 1.0,
-    "decayK": 1.0,
+    "threshold": 3,
+    "decay": 1,
+    "decayK": 1,
     "maxLen": 16,
-    "edgeWeight": 1.0,
+    "edgeWeight": 1,
     "activationType": "relu",
     "transferType": "linear",
     "activationCustom": "",
@@ -141,7 +140,7 @@
     "mappingDepth": 1,
     "reflectionTopMemes": 18,
     "reflectionTopWords": 24,
-    "reflectionMinScore": 1e-06
+    "reflectionMinScore": 0.000001
   },
   "dialog": {
     "rlEvery": 20,
@@ -194,8 +193,8 @@
     "vocabTablePath": "./runtime_store/emotion_vocab_weight_table.json",
     "vocabCachePath": "./runtime_store/emotion_vocab_cache.json",
     "learningRate": 0.05,
-    "maxBias": 2.0,
-    "minBias": -2.0,
+    "maxBias": 2,
+    "minBias": -2,
     "decay": 0.95,
     "momentum": 0.9,
     "applyToPrompt": true,
@@ -203,7 +202,7 @@
     "tokenBoostExponent": 1.2,
     "minTokenScore": 0.05,
     "stageWeights": {
-      "immediate": 1.0,
+      "immediate": 1,
       "short": 0.7,
       "context": 0.4,
       "long": 0.2
@@ -247,6 +246,7 @@
     }
   },
   "spark": {
+    "scopes": ["none"],
     "gnnScheduler": {
       "enabled": true,
       "minAffinity": 0.3,
@@ -254,53 +254,9 @@
       "perturbations": 2,
       "useHistory": false
     },
-    "llamaVoter": {
-      "enabled": false,
-      "rfInstances": 5,
-      "maxMasks": 3,
-      "maskRatio": 0.1,
-      "temperature": 0.7,
-      "topK": 40,
-      "topP": 0.9,
-      "voteBudget": 20,
-      "maxNewTokens": 256,
-      "timeoutMs": 60000
-    }
-  },
-  "speech": {
-    "enhanceEnabled": true,
-    "noiseFloorDb": -45.0,
-    "minSpeechDurationMs": 250,
-    "vadFrameMs": 30,
-    "maxTracks": 3,
-    "asrConfidenceThreshold": 0.6,
-    "featureWindowMs": 25,
-    "featureHopMs": 10,
-    "reservedMemMb": 64.0,
-    "envClusters": 6,
-    "emoClusters": 6,
-    "voskModelPath": ""
-  },
-  "vision": {
-    "enhanceEnabled": true,
-    "confidenceThreshold": 0.35,
     "nmsThreshold": 0.45,
     "minBoxAreaRatio": 0.001,
     "maxBoxes": 80,
-    "embeddingDim": 18,
-    "useTorchWhenAvailable": true,
-    "fallbackColorAnalysis": true,
-    "colorSpace": "bgr",
-    "pixelMean": [
-      0.485,
-      0.456,
-      0.406
-    ],
-    "pixelStd": [
-      0.229,
-      0.224,
-      0.225
-    ],
     "dataRoot": "/graphies",
     "modelDir": "./models/vision",
     "torch": {
@@ -328,14 +284,14 @@
       "topK": 5,
       "embedLayer": "",
       "mean": [
-        0.0,
-        0.0,
-        0.0
+        0,
+        0,
+        0
       ],
       "std": [
-        1.0,
-        1.0,
-        1.0
+        1,
+        1,
+        1
       ]
     }
   },
@@ -349,11 +305,10 @@
     "positiveRelaxes": true
   },
   "partial_cache": {
-    "enabled": false,
-    "tolerance": 0.0,
+    "tolerance": 0,
     "maxEntries": 2048,
     "ttlMs": 120000,
-    "correctionScale": 1.0,
+    "correctionScale": 1,
     "gnnEnabled": false,
     "transformerEnabled": false,
     "enableCorrection": false,
@@ -404,7 +359,7 @@
     "rnnWorkers": 2,
     "contextWorkers": 2,
     "episodicWorkers": 1,
-    "reservedMemMb": 96.0
+    "reservedMemMb": 96
   },
   "chat": {
     "queueWaitMs": 180000,
@@ -416,10 +371,9 @@
     "enabled": false,
     "horizon": 3,
     "dim": 128,
-    "pragmaticWeight": 1.0,
-    "intrinsicWeight": 1.0,
+    "pragmaticWeight": 1,
+    "intrinsicWeight": 1,
     "epistemicWeight": 0.25,
-    "maxEpisodes": 4096,
     "learningRate": 0.05,
     "discount": 0.9,
     "consolidateEvery": 16,
@@ -428,12 +382,12 @@
   },
   "subconscious": {
     "enabled": false,
-    "baselineValence": 0.0,
-    "baselineArousal": 0.0,
-    "baselineDominance": 0.0,
-    "temperamentStrength": 0.0,
-    "riskAversion": 1.0,
-    "anticipatoryGain": 1.0,
+    "baselineValence": 0,
+    "baselineArousal": 0,
+    "baselineDominance": 0,
+    "temperamentStrength": 0,
+    "riskAversion": 1,
+    "anticipatoryGain": 1,
     "sensationTuning": {},
     "instincts": []
   },
@@ -442,7 +396,9 @@
     "id": "",
     "goal": "",
     "painGainPerSec": 0.01,
-    "maxPain": 1.0,
+    "maxPain": 1,
+    "pressureMode": "logarithmic",
+    "pressureHorizonSec": 3600,
     "defaultDeadlineSec": 300,
     "mutationRate": 0.05,
     "maxReplicas": 4
@@ -463,10 +419,12 @@
     "persistEveryTicks": 5,
     "persistPath": "runtime_store/autonomy_state.json"
   },
-  "cliTools": []
-,  "search": {
+  "cliTools": [],
+  "search": {
     "enabled": true,
-    "backends": ["ddg_lite"],
+    "backends": [
+      "ddg_lite"
+    ],
     "endpoint": "",
     "timeoutMs": 5000,
     "maxResults": 8,
@@ -512,9 +470,6 @@
       "fps": 30
     },
     "speech": {
-      "variant": "audio-encoder",
-      "conceptDim": 128,
-      "backend": "auto",
       "horizonModel": "runtime_store/models/ijepa/speech_16k/model_encoder.bin",
       "horizonDecoderModel": "runtime_store/models/ijepa/speech_16k/model_decoder.bin"
     }
@@ -558,7 +513,7 @@
     }
   },
   "main": {
-    "reservedMemMb": 256.0,
+    "reservedMemMb": 256,
     "useTorchEmbed": false,
     "cognitionAutonomyEnabled": true,
     "disableGraphSelector": true,
@@ -591,7 +546,6 @@
     "singleProc": false,
     "snapshotDir": "snapshots",
     "sparkNumAI": 7,
-    "studyPort": 5081,
     "syncStandbyOnBoot": false,
     "tunedConfigPath": "config/phoenix_tuned.json",
     "gateway": {
@@ -626,14 +580,6 @@
       "externalBackendStyleSim": false,
       "transformerBootstrap": false,
       "transformerBootstrapDocs": 256
-    },
-    "multimodal": {
-      "encDecBaseUrl": "http://127.0.0.1:8085",
-      "encDecTimeoutMs": 120000,
-      "imageEncoderModel": "llava-hf/llava-1.5-7b-hf",
-      "audioEncoderModel": "Qwen/Qwen2-Audio-7B-Instruct",
-      "imageDecoderPath": "runtime_store/models/multimodal_dec/image_decoder.onnx",
-      "audioDecoderPath": "runtime_store/models/multimodal_dec/audio_decoder.onnx"
     },
     "lmdb": {
       "root": "lmdb",
@@ -679,7 +625,6 @@
     "configPath": "",
     "llm": {
       "placement": "local",
-      "localBackend": "auto",
       "remoteUrl": "",
       "remoteMethod": "POST",
       "remoteModel": "",
@@ -717,36 +662,6 @@
       "emotionEnabled": true,
       "audioVideoEncDecEnabled": true,
       "schedulerName": "ahead_default"
-    },
-    "memory": {
-      "cellType": "LSTM",
-      "inputDim": 128,
-      "hiddenDim": 128,
-      "outputDim": 128,
-      "maxSummaryTokens": 256,
-      "useTinyLlamaFallback": true,
-      "tinyLlamaUrl": "http://127.0.0.1:8086",
-      "tinyLlamaTimeoutMs": 5000
-    },
-    "emotion_influence": {
-      "strength": 1.0,
-      "maxBias": 2.0,
-      "minBias": -2.0,
-      "baseTemperature": 0.7,
-      "baseTopP": 0.9,
-      "decay": 0.95
-    },
-    "async_pool": {
-      "workerCount": 0,
-      "maxQueueDepth": 256,
-      "waitTimeoutMs": 20,
-      "backgroundBackPressure": true
-    },
-    "llama_server_mods": {
-      "applyPatches": true,
-      "buildLlamaServer": false,
-      "runtimeDecBaseUrl": "http://127.0.0.1:8082",
-      "runtimeDecListenPort": 8099
     }
   }
 }
