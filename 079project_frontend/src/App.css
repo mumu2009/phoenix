@@ -892,3 +892,42 @@
     grid-template-columns: 1fr;
   }
 }
+
+.btn-danger {
+  background: rgba(244, 63, 94, 0.32);
+  border-color: rgba(244, 63, 94, 0.65);
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background: rgba(244, 63, 94, 0.45);
+}
+
+.mission-wide {
+  grid-column: span 12;
+}
+
+.mission-banner {
+  border: 1px solid rgba(244, 63, 94, 0.5);
+  background: rgba(244, 63, 94, 0.12);
+  color: #fecaca;
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-weight: 700;
+}
+
+.deliverable-box {
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f7f8fa;
+  border: 1px solid #e3e6ea;
+  border-radius: 6px;
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #333;
+  margin: 6px 0 10px;
+}

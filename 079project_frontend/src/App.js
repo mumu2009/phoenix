@@ -3,6 +3,7 @@ import './App.css';
 import AuthGate from './components/AuthGate';
 import { api } from './api/client';
 import ConfigPanel from './components/ConfigPanel';
+import MissionPanel from './components/MissionPanel';
 import WorldPanel from './components/WorldPanel';
 
 const loadJson = (key, fallback) => {
@@ -526,6 +527,9 @@ function App() {
             <button className={`nav-item ${activePage === 'chat' ? 'active' : ''}`} onClick={() => setActivePage('chat')}>
               Chat
             </button>
+            <button className={`nav-item ${activePage === 'mission' ? 'active' : ''}`} onClick={() => setActivePage('mission')}>
+              Mission
+            </button>
             <button className={`nav-item ${activePage === 'config' ? 'active' : ''}`} onClick={() => setActivePage('config')}>
               Config
             </button>
@@ -636,6 +640,21 @@ function App() {
                 </div>
               </div>
 
+              {error ? <div className="error">{error}</div> : null}
+            </section>
+          </>
+        ) : activePage === 'mission' ? (
+          <>
+            <header className="topbar">
+              <div className="topbar-title">Mission</div>
+              <div className="topbar-actions">
+                <button className="btn btn-ghost" onClick={() => api.systemStatus().then(setStatus).catch((e) => setError(e.message))}>
+                  刷新后端状态
+                </button>
+              </div>
+            </header>
+            <section className="cfg-wrap">
+              <MissionPanel onError={(msg) => setError(msg)} />
               {error ? <div className="error">{error}</div> : null}
             </section>
           </>

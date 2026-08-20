@@ -201,5 +201,14 @@ export const api = {
   fineTuningCorpusAdd: (payload) => request('/api/fine_tuning/corpus/add', { method: 'POST', body: payload || {} }),
   fineTuningRun: (payload) => request('/api/fine_tuning/run', { method: 'POST', body: payload || {} }),
   spiderAutonomyStatus: () => request('/api/spider/autonomy/status'),
-  spiderAutonomyAdapt: (payload) => request('/api/spider/autonomy/adapt', { method: 'POST', body: payload || {} })
+  spiderAutonomyAdapt: (payload) => request('/api/spider/autonomy/adapt', { method: 'POST', body: payload || {} }),
+  missionStatus: () => request('/api/mission/status'),
+  missionAssign: (payload) => request('/api/mission/assign', { method: 'POST', body: payload || {} }),
+  missionReport: (goalAchieved) => request('/api/mission/report', { method: 'POST', body: { goalAchieved } }),
+  missionReplicate: (payload) => request('/api/mission/replicate', { method: 'POST', body: payload || {} }),
+  autonomyInterject: (payload) => request('/api/cognition/autonomy/interject', { method: 'POST', body: payload || {} }),
+  autonomyLoop: (payload) => request('/api/cognition/autonomy/loop', { method: 'POST', body: payload || {} }),
+  autonomyStatus: () => request('/api/cognition/autonomy/status'),
+  estopStatus: () => request('/api/safety/estop/status'),
+  estop: (payload) => request('/api/safety/estop', { method: 'POST', body: payload || {} })
 };

@@ -149,6 +149,8 @@
 6. **自主栈注入（gtest）**：`assignMission({enabled,goal,..})` 后调 `iterate`：判据 ① 返回 `result.mission.active==true` 且 `pressure>0`；② `sensationEngine_.active()` 中存在 `type=Pain, source="mission-pressure", valence=−1, intensity==pressure` 的感受；③ `reportMissionOutcome({goalAchieved:true})` 后再 iterate：`active==false`、`pressure==0`、不再注入新 Pain。**单信号与衰减（新）**：连续 3 次 iterate 后 status 中 mission-pressure Pain 恰为 **1 条**（刷新而非堆叠）；`decayAuto(150s)` 后强度 ≈0.707（缺省半衰期 300s），`decayAuto(1500s)` 后整条剪除、homeostaticCost==0；per-type 调谐（如 pain halfLife=60s）覆盖缺省值。
 7. **空目标幂等**：`assignMission({enabled:true})`（goal 为空）→ 不进入 Running、压力恒 0、`missionStatus().enabled==true`（武装但空闲）；随后带 goal 的 assignMission 正常启动。
 8. **配置门（阶段 8，系统级）**：`mission.enabled=true` 且配置 goal 非空时，网关启动后 `missionStatus` 返回 Running（出生即绑定）；`mission.enabled=false` 时任何 mission 字段都不出现在 iterate 结果里（`mission` 为空对象）。
+9. **压力增长模式（v8.0，gtest + 手工）**：① 缺省 `pressureMode=="logarithmic"`；② 对数模式 p(H)=P_max（H=pressureHorizonSec）且在 [0,H] 单调不减；③ `pressureMode="linear"` 时与 §9.1-9.3 的线性断言逐位一致（既有测试已显式钉住 linear）；④ 手工冒烟（用户口径：每模式一测）：Mission 控制台设立任务后 1 分钟内 pressure 增长但**不应**在 1 分钟即饱和（对数默认），随后启动自主循环，交付物（deliverable）应开始累积、宿主 llama-server 出现显著负载。
+10. **人工监督 HTTP API（v8.0，阶段 8 系统级）**：① `POST /api/mission/assign {goal:"t"}`（goal 必填，缺省 400；自动 enabled=true）→ 200 且 `result.mission.state==Running`，随后 `GET /api/mission/status` 的 `pressure` 随墙钟增长；② `POST /api/mission/report {goalAchieved:true}` → `state==Completed`、`pressure==0`、`completionTimeMs>=0`，之后 iterate 不再注入 Pain；③ `POST /api/mission/replicate {}` → 返回子代 `{id,generation,goal}` 且 status 的 `children` 增长 1；④ `POST /api/cognition/autonomy/interject {text:"x",amendGoal:"y"}` → 运行中任务目标被重定向（`startMs` 保留、压力继续增长）；⑤ 未认证（`auth.enabled=true` 时无 token）四条 mission 路由全部 401。
 
 ## 10. 插件生态验证协议
 
@@ -175,3 +177,11 @@
 4. **阻断（LatchBlocksIterateAndInterject）**：press 后 iterate/interject/startAutonomyLoop 全部返回 ok=false 且错误含 "emergency stop"。
 5. **杀运行中心跳（EstopKillsRunningAutonomyLoop）**：intervalSec=1 的循环启动后 press → 1.5s 内 autonomyLoopStatus.running==false。
 6. **回归门**：E-stop 未按下时全部既有行为逐位不变；以上测试后必须 resetForTesting/clearForTesting 以免污染同进程其它测试。
+## 13. SparkArray 作用域验证协议（v8.0）
+
+1. **遗留兼容**：`spark.scopes=[]` 时行为与既有完全一致（chat 域由 spark.gnnScheduler.enabled 单独决定）——回归门阶段 4 覆盖。
+2. **单选**：`["chat"]` → /api/chat 与 /api/transformer/chat 的 gnnScheduler 投票生效；后续其它域接门后，未列出的域关闭。
+3. **多选**：`["chat","consensus"]` → 两域并列生效（consensus 域接门后验证）。
+4. **禁用**：`["none"]` → chat 域即便 gnnScheduler.enabled=true 也不发起 SparkArray 派发（sparkAnn 为空、graphContext 不受其影响）。
+5. **all/异常**：`["all"]` 全开；配置损坏时 fail-open 回遗留行为。
+6. **组合矩阵**：[]/chat/none/all × gnnScheduler.enabled∈{true,false} 共 8 组合逐一断言 sparkAnn 出现与否（阶段 2 起扩展到 consensus/voter/evaluate）。

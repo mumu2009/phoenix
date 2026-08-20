@@ -11,13 +11,18 @@
 
 ## 1. 形式化：时间递增疼痛 = 稳态紧迫性（allostatic urgency）
 
-**定义**：一个任务（Mission）绑定单一目标（goal）。任务运行期间，疼痛强度
+**定义**：一个任务（Mission）绑定单一目标（goal）。任务运行期间，疼痛强度按**用户可选的增长模式**（配置 `mission.pressureMode`，默认 `logarithmic`）增长：
 
-$$
-p(t) = \min\{ g \cdot t,\; P_{\max} \},\qquad g > 0
-$$
+$
+p(t) = \begin{cases}
+\min\{ g \cdot t,\; P_{\max} \}, & \text{linear},\\[2mm]
+P_{\max} \cdot \dfrac{\ln(1+t)}{\ln(1+H)}, & \text{logarithmic}
+\end{cases}
+$
 
-其中 t 是任务开始后的经过秒数，g 是疼痛增长率（配置 `mission.painGainPerSec`），P_max 是疼痛上限（`mission.maxPain`）。任务完成后 p(t) = 0（疼痛源被移除）。实现要点（与模型一一对应）：`PrimalSensationEngine::add()` 对同 (type, source) 信号**刷新而非堆叠**——任务期间"mission-pressure" Pain 始终是单条信号 p(t)；`iterate()` 每轮先 `decayAuto(dt)`（按潜意识调谐的半衰期，缺省 300 秒）再注入最新 p(t)，任务完成后疼痛沿半衰期衰减直至剪除。
+其中 t 是任务开始后的经过秒数（单位秒），g 是线性增长率（`mission.painGainPerSec`），H 是对数模式的压力视界（`mission.pressureHorizonSec`，默认 3600 秒：t=H 时恰好 p=P_max），P_max 是疼痛上限（`mission.maxPain`）。
+
+**为什么默认对数增长**：对数曲线前段给得早、后段涨得慢——长任务（如生成千词文本交付物）在早期就感受到明确紧迫感，但不会在几十秒内被顶到 P_max 后失去梯度；线性模式仍是可选项（保留 g·T²/2 的闭式积分与既有测试）。两种曲线都严格递增，因此 §2 的"最小化总疼痛 ⟺ 最小化完成时间"等价性对两种模式都成立。任务完成后 p(t) = 0（疼痛源被移除）。实现要点（与模型一一对应）：`PrimalSensationEngine::add()` 对同 (type, source) 信号**刷新而非堆叠**——任务期间"mission-pressure" Pain 始终是单条信号 p(t)；`iterate()` 每轮先 `decayAuto(dt)`（按潜意识调谐的半衰期，缺省 300 秒）再注入最新 p(t)，任务完成后疼痛沿半衰期衰减直至剪除。
 
 **稳态（allostasis）诠释（Sterling 1988）**：疼痛是“目标未完成”这一稳态偏差的**信号强度**，g 是该偏差的**精度（precision）**。稳态偏差不随时间缩小（任务未完成），而系统的稳态代价随偏差持续积分，于是“越拖越痛”——这正是紧迫感的可计算定义。它与饥饿/疲劳同类：都是偏差驱动、可被趋利避害层最小化的原生感受，而不是一条硬编码的规则。
 
@@ -44,6 +49,14 @@ $$
 3. 两段在 T=T₀ 处连续：gT₀²/2 = g(P_max/g)²/2 = P_max²/(2g)，右侧同值。
 
 故 P 是 T 的严格增函数，argmin_T P(T) = argmin_T T。∎
+
+**对数模式的闭式总疼痛**（默认模式）：设 p(t) = k·ln(1+t)，k = P_max/ln(1+H)，任务在 T 完成，则
+
+$
+P_{\log}(T) = \int_0^T k \ln(1+t)\, dt = k\,[(T+1)\ln(T+1) - T]
+$
+
+dP/dT = k·ln(1+T) > 0（T>0），且 p(T) 在 T ≤ H 段严格递增、T > H 段 p=P_max 恒定，故 P_log(T) 依然**严格递增**——等价性保持，只是闭式形式从 gT²/2 变为上式的对数积分。∎
 
 **为什么这足以“强迫”最快完成**：Phoenix 已有的趋利避害/主动推理循环本来就最小化感受层的稳态代价（`homeostaticCost = Σ gain·|intensity − setpoint|`，Pain 的 setpoint=0）。把 p(t) 注入为 Pain 感受后，疼痛贡献的稳态代价对 T 单调递增，于是**原有闭环不需要任何新优化器**就会把“尽快完成任务”内化为偏好。这继承主动推理的 pragmatic 项：任务完成是终止状态的**先验偏好**（prior preference for terminal state, Friston），疼痛是该偏好未满足时的负对数似然 −ln p(o|C) 的实例。
 
@@ -109,7 +122,18 @@ cognition.reportMissionOutcome({{"goalAchieved", true}});   // 疼痛源停止
 auto child = cognition.spawnMissionChild({{"mutationRate", 0.05}}); // 子代基因组
 ```
 
----
+HTTP API（v8.0 起，人工监督控制台——"生命周期开始时设立问题"的用法）：
+
+| 路由 | 方法 | 语义 |
+|---|---|---|
+| `/api/mission/status` | GET | `{enabled, stats{mission, pressure, generations, spawns, completions, completionTimeMs, children}, genome}` |
+| `/api/mission/assign` | POST | body `{goal, deadlineSec?, painGainPerSec?, maxPain?, mutationRate?, maxReplicas?, pressureMode?, pressureHorizonSec?}`；goal 必填，自动置 `enabled=true` 并**自动启动自主心跳**（设立目标 = 模型立即开工；压力默认对数增长 `p(t)=Pmax·ln(1+t)/ln(1+H)`） |
+| `/api/mission/report` | POST | body `{goalAchieved}`：进程外判定门（完成/失败），`completionTimeMs` 是给人类监督者的选择信号 |
+| `/api/mission/replicate` | POST | body `{mutationRate?}`：人工召唤一个变异子代（与实例自身的 replicate 规划动作同源） |
+
+配套：`/api/cognition/autonomy/{status,interject,loop}`（插话/amendGoal/心跳循环）、
+`/api/safety/estop[/status]`（急停）。前端 Mission 控制台即上述路由的消费方
+（079project_frontend/src/components/MissionPanel.js）。
 
 ## 6. 参考文献
 

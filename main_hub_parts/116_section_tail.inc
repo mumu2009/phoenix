@@ -1817,6 +1817,10 @@
             if (body.contains("maxTokens") &&
                 body["maxTokens"].is_number_integer())
               maxTokens = body["maxTokens"].get<int>();
+            /* v8.0 hard cap: runaway generation (huge max_tokens + high
+               temperature loops until n_predict is exhausted, burning the
+               whole upstream timeout).  2048 is generous for chat replies. */
+            maxTokens = std::min(maxTokens, 2048);
             if (longQuerySafeMode)
               maxTokens = std::min(maxTokens, 32);
             if (maxTokens <= 0) maxTokens = 16;
@@ -1839,6 +1843,7 @@
             try {
               sparkGnnScheduler = phoenix::cfgOr<bool>("spark.gnnScheduler.enabled", false);
             } catch (...) {}
+            sparkGnnScheduler = sparkGnnScheduler && sparkArrayScopeEnabled("chat");
             if (sparkGnnScheduler && spark_ && !gnnModuleDisabled) {
               try {
                 json sparkPayload;
@@ -1948,6 +1953,11 @@
                 aheadInferenceOptions = ahead.emotionInfluence.inferenceOptions;
                 if (!ahead.emotionInfluence.logitBias.empty())
                   emotionLogitBias = ahead.emotionInfluence.logitBias;
+                /* v8.0: the emotion layer's vocabulary-level bias is now
+                   forwarded to the backend instead of being computed and
+                   dropped (llama-server accepts a "logit_bias" map). */
+                if (!emotionLogitBias.empty())
+                  inferenceOptions["logit_bias"] = emotionLogitBias;
                 cognitionEmotionTensor = ahead.emotion.toJson();
               } catch (...) {
               }
@@ -2497,6 +2507,7 @@
             try {
               sparkGnnScheduler = phoenix::cfgOr<bool>("spark.gnnScheduler.enabled", false);
             } catch (...) {}
+            sparkGnnScheduler = sparkGnnScheduler && sparkArrayScopeEnabled("chat");
             if (sparkGnnScheduler && spark_ && !gnnModuleDisabled) {
               try {
                 json sparkPayload;
@@ -4161,6 +4172,76 @@
         },
         {drogon::Post});
 
+    /* v8.0 mission console (human-in-the-loop supervision of the Meeseeks
+       lifecycle): set the goal at lifecycle start, watch pressure/generations,
+       judge completion from OUTSIDE the process (completionTimeMs is the
+       human selection signal), summon a mutated successor on demand, and stay
+       in charge via the interject/loop/estop routes above. */
+    drogon::app().registerHandler(
+        "/api/mission/status",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          respondJson(cb, cognitionManager_.missionStatus());
+        },
+        {drogon::Get});
+
+    drogon::app().registerHandler(
+        "/api/mission/assign",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          bool ok = true;
+          json payload = parseRequestBody(req, ok);
+          if (!ok)
+            return badRequest(cb, "invalid json");
+          const std::string goal = payload.value("goal", std::string());
+          if (goal.empty())
+            return badRequest(cb, "mission goal required");
+          /* Assigning a goal starts the mission lifecycle: force the layer
+             on so iterate() injects pressure and the instance registers with
+             the safety registry. */
+          payload["enabled"] = true;
+          /* v8.0 order matters: START the heartbeat FIRST (its restore of
+             long-term state may bring back a PREVIOUS mission), THEN assign
+             the new goal so it WINS over any restored state. */
+          cognitionManager_.configureAutonomyLoop(nlohmann::json{{"enabled", true}});
+          cognitionManager_.startAutonomyLoop();
+          json assigned = cognitionManager_.assignMission(payload);
+          respondJson(cb, assigned);
+        },
+        {drogon::Post});
+
+    drogon::app().registerHandler(
+        "/api/mission/report",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          bool ok = true;
+          json payload = parseRequestBody(req, ok);
+          if (!ok)
+            return badRequest(cb, "invalid json");
+          respondJson(cb, cognitionManager_.reportMissionOutcome(payload));
+        },
+        {drogon::Post});
+
+    drogon::app().registerHandler(
+        "/api/mission/replicate",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          bool ok = true;
+          json payload = parseRequestBody(req, ok);
+          if (!ok)
+            return badRequest(cb, "invalid json");
+          respondJson(cb, cognitionManager_.spawnMissionChild(payload));
+        },
+        {drogon::Post});
+
     drogon::app().registerHandler(
         "/api/perf/profile",
         [this](const drogon::HttpRequestPtr &req,
@@ -4732,8 +4813,21 @@
               }
             }
 
-            json result = bigRounds > 1 ? spark_->dispatchBig(*payload, opts)
-                                        : spark_->dispatch(*payload, opts);
+            /* v8.0 scopes: "evaluate" gates this SparkArray dispatch endpoint;
+               "consensus" additionally gates the multi-round bigRounds path
+               (falls back to single-round dispatch when only evaluate is on). */
+            if (!sparkArrayScopeEnabled("evaluate")) {
+              respondJson(cb, json{{"ok", false},
+                                   {"error", "spark scope 'evaluate' is disabled"}},
+                          drogon::k503ServiceUnavailable);
+              return;
+            }
+            const bool consensusAllowed = sparkArrayScopeEnabled("consensus");
+            json result = (bigRounds > 1 && consensusAllowed)
+                              ? spark_->dispatchBig(*payload, opts)
+                              : spark_->dispatch(*payload, opts);
+            if (bigRounds > 1 && !consensusAllowed)
+              result["consensusSkipped"] = true;
             if (!inferenceOptions.is_null())
               result["cognitionInferenceOptions"] = inferenceOptions;
             if (!cognitionEmotionTensor.is_null())
@@ -5130,8 +5224,10 @@
             return badRequest(cb, "invalid json");
           try {
             spark_->updateLayers(body.value("layers", json::array()));
+            json scopesView = phoenix::cfgOr<nlohmann::json>("spark.scopes", nlohmann::json::array());
             respondJson(cb,
-                        json{{"ok", true}, {"layers", spark_->getLayers()}});
+                        json{{"ok", true}, {"layers", spark_->getLayers()},
+                             {"scopes", scopesView}});
           } catch (const std::exception &e) {
             respondJson(cb, json{{"ok", false}, {"error", e.what()}},
                         drogon::k400BadRequest);
@@ -5234,6 +5330,75 @@
           respondJson(cb, out);
         },
         {drogon::Get});
+
+    /* v8.0 world model API completion: the predictive loop (expectedNextState
+       + alignment calibration) was implemented internally but never exposed;
+       these routes open it for the autonomy stack and external callers. */
+    drogon::app().registerHandler(
+        "/api/world/state/{sessionId}",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb,
+               const std::string &sessionId) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          if (!worldModel_)
+            return respondJson(cb, json{{"ok", false}, {"error", "world model unavailable"}});
+          respondJson(cb, worldModel_->sessionState(sessionId, 12));
+        },
+        {drogon::Get});
+
+    drogon::app().registerHandler(
+        "/api/world/predict/{sessionId}",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb,
+               const std::string &sessionId) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          if (!worldModel_)
+            return respondJson(cb, json{{"ok", false}, {"error", "world model unavailable"}});
+          json state = worldModel_->sessionState(sessionId, 4);
+          json prediction = state.value("prediction", json::object());
+          respondJson(cb, json{{"ok", true},
+                               {"sessionId", sessionId},
+                               {"prediction", prediction}});
+        },
+        {drogon::Get});
+
+    drogon::app().registerHandler(
+        "/api/world/evidence",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          if (!worldModel_)
+            return respondJson(cb, json{{"ok", false}, {"error", "world model unavailable"}});
+          bool ok = true;
+          json payload = parseRequestBody(req, ok);
+          if (!ok)
+            return badRequest(cb, "invalid json");
+          respondJson(cb, worldModel_->ingestEvidence(payload));
+        },
+        {drogon::Post});
+
+    drogon::app().registerHandler(
+        "/api/world/reset",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          if (!worldModel_)
+            return respondJson(cb, json{{"ok", false}, {"error", "world model unavailable"}});
+          bool ok = true;
+          json payload = parseRequestBody(req, ok);
+          if (!ok)
+            return badRequest(cb, "invalid json");
+          const std::string sid = payload.value("sessionId", std::string());
+          if (sid.empty())
+            return badRequest(cb, "sessionId required");
+          respondJson(cb, json{{"ok", true},
+                               {"reset", worldModel_->resetSession(sid)}});
+        },
+        {drogon::Post});
 
     drogon::app().registerHandler(
         "/api/groups",

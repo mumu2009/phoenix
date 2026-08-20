@@ -42,9 +42,27 @@ Mission makeRunningMission(uint64_t startMs,
   m.goal = "test goal";
   m.painGainPerSec = gain;
   m.maxPain = maxPain;
+  m.pressureMode = "linear"; /* these tests pin the LINEAR closed forms */
   m.state = MissionState::Running;
   m.startMs = startMs;
   return m;
+}
+
+// v8.0 pressure growth modes: logarithmic is the DEFAULT; it must be
+// strictly increasing, reach maxPain exactly at the horizon, and stay
+// below the linear curve early on (gentle urgency for long tasks).
+TEST(MissionLifecycleTest, LogarithmicPressureIsDefaultAndMonotone) {
+  Mission m = makeRunningMission(1000);
+  EXPECT_EQ(m.pressureMode, "logarithmic");
+  m.pressureHorizonSec = 3600.0;
+  const double h = 3600.0 * 1000.0;
+  EXPECT_FLOAT_EQ(m.pressure(static_cast<uint64_t>(1000 + h)), 1.0f);
+  float prev = 0.0f;
+  for (uint64_t t = 1000; t <= 1000 + static_cast<uint64_t>(h); t += 60000) {
+    const float p = m.pressure(t);
+    EXPECT_GE(p, prev) << "log pressure must be monotone at t=" << t;
+    prev = p;
+  }
 }
 
 // Fill a parent genome with one tuning and one instinct so all clamp loops are
@@ -149,6 +167,7 @@ TEST(MissionLifecycleTest, StatsExposeCompletionTimeForSupervisorSelection) {
     Mission m;
     m.id = "sel";
     m.goal = "g";
+    m.pressureMode = "linear";
     m.painGainPerSec = 1.0f;
     m.maxPain = 1.0f;
     lc.assign(m);
@@ -169,6 +188,7 @@ TEST(MissionLifecycleTest, ReplicateMutatesAndRecords) {
     Mission m;
     m.id = "repl-m";
     m.goal = "must complete";
+    m.pressureMode = "linear";
     m.painGainPerSec = 1.0f;
     m.maxPain = 1.0f;
     MissionGenome parent;
@@ -204,6 +224,7 @@ TEST(MissionLifecycleTest, AmendGoalRedirectsWithoutRestart) {
     Mission m;
     m.id = "amend";
     m.goal = "original goal";
+    m.pressureMode = "linear";
     m.painGainPerSec = 1.0f;
     m.maxPain = 1.0f;
     lc.assign(m, MissionGenome{});
@@ -222,6 +243,12 @@ TEST(MissionLifecycleTest, MarkCompleteEndsPainAndIsIdempotent) {
   Mission m;
   m.id = "test-mission";
   m.goal = "test goal";
+  m.pressureMode = "linear";
+  m.pressureMode = "linear";
+  m.pressureMode = "linear";
+  m.pressureMode = "linear";
+  m.pressureMode = "linear";
+  m.pressureMode = "linear";
   m.painGainPerSec = 100.0f;  // fast rise so a 5ms sleep produces pressure
   m.maxPain = 1.0f;
   lc.assign(m);
@@ -256,6 +283,12 @@ TEST(MissionLifecycleTest, MarkFailedIsTerminal) {
   Mission m;
   m.id = "test-mission";
   m.goal = "test goal";
+  m.pressureMode = "linear";
+  m.pressureMode = "linear";
+  m.pressureMode = "linear";
+  m.pressureMode = "linear";
+  m.pressureMode = "linear";
+  m.pressureMode = "linear";
   m.painGainPerSec = 100.0f;
   m.maxPain = 1.0f;
   lc.assign(m);

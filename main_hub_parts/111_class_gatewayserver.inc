@@ -38,6 +38,17 @@ public:
       evidence["text"] = text;
       evidence["graphSummary"] = graphSummary;
       evidence["metadata"] = nlohmann::json{{"source", "gateway-chat"}};
+      /* v8.0 audit B: tag the running mission so prediction docs aggregate
+         per goal (world evidence becomes goal-scoped observability). */
+      try {
+        auto ms = cognitionManager_.missionStatus();
+        const auto &stats = ms.value("result", nlohmann::json::object()).value("stats", nlohmann::json::object());
+        const auto &mission = stats.value("mission", nlohmann::json::object());
+        if (mission.value("state", 0) == 1 && !mission.value("id", std::string()).empty())
+          evidence["metadata"]["missionId"] = mission.value("id", std::string());
+      } catch (...)
+      {
+      }
       worldModel_->ingestEvidence(evidence);
     } catch (...) {
     }
@@ -89,7 +100,7 @@ public:
        optional controller at startup (disabled by default). */
     {
       json agiCfg;
-      agiCfg["enabled"] = phoenix::cfgOr<bool>("agi.enabled", false);
+      agiCfg["enabled"] = phoenix::resolveConfig<bool>("agi.enabled", false, "AI_AGI_ENABLED");
       agiCfg["dim"] = phoenix::cfgOr<int>("agi.dim", 128);
       agiCfg["horizon"] = phoenix::cfgOr<int>("agi.horizon", 3);
       agiCfg["pragmaticWeight"] = phoenix::cfgOr<double>("agi.pragmaticWeight", 1.0);
@@ -123,15 +134,46 @@ public:
        armed but idle, and missions can be assigned at runtime. */
     {
       json missionCfg;
-      missionCfg["enabled"] = phoenix::cfgOr<bool>("mission.enabled", false);
+      missionCfg["enabled"] = phoenix::resolveConfig<bool>("mission.enabled", false, "AI_MISSION_ENABLED");
       missionCfg["id"] = phoenix::cfgOr<std::string>("mission.id", std::string());
-      missionCfg["goal"] = phoenix::cfgOr<std::string>("mission.goal", std::string());
+      missionCfg["goal"] = phoenix::resolveConfig<std::string>("mission.goal", std::string(), "AI_MISSION_GOAL");
       missionCfg["deadlineSec"] = phoenix::cfgOr<double>("mission.defaultDeadlineSec", 300.0);
       missionCfg["painGainPerSec"] = phoenix::cfgOr<double>("mission.painGainPerSec", 0.01);
       missionCfg["maxPain"] = phoenix::cfgOr<double>("mission.maxPain", 1.0);
+      missionCfg["pressureMode"] = phoenix::resolveConfig<std::string>("mission.pressureMode", std::string("logarithmic"), "AI_MISSION_PRESSURE_MODE");
+      missionCfg["pressureHorizonSec"] = phoenix::resolveConfig<double>("mission.pressureHorizonSec", 3600.0, "AI_MISSION_PRESSURE_HORIZON_SEC");
       missionCfg["mutationRate"] = phoenix::cfgOr<double>("mission.mutationRate", 0.05);
       missionCfg["maxReplicas"] = phoenix::cfgOr<int>("mission.maxReplicas", 4);
       cognitionManager_.assignMission(missionCfg);
+      /* v8.0 mission worker: when the mission layer is on, register the
+         LLM-backed deliberator so the heartbeat loop can actually PRODUCE
+         the deliverable (without it the loop is pure introspection and a
+         text mission never progresses).  Same llama-server chat path as
+         interactive chat; called outside the manager lock by the loop. */
+      if (missionCfg.value("enabled", false)) {
+        cognitionManager_.setMissionDeliberator(
+            [this](const std::string &goal, const std::string &deliverable,
+                   int maxTokens) -> std::string {
+              try {
+                std::string prompt =
+                    std::string("You are an autonomous agent working toward this goal:\n") +
+                    goal + "\n\n";
+                if (!deliverable.empty()) {
+                  prompt += "Deliverable written so far:\n" +
+                            deliverable.substr(0, 8192) + "\n\n";
+                }
+                prompt += "Continue the work: produce the next chunk of the"
+                           " deliverable text only. Do not restate the goal.";
+                nlohmann::json opts =
+                    nlohmann::json{{"temperature", 0.7}};
+                const auto r = chatWithLlamaCpp(prompt, "", maxTokens, opts);
+                if (r.value("ok", false))
+                  return r.value("reply", std::string());
+              } catch (...) {
+              }
+              return std::string();
+            });
+      }
     }
     /* v7.0 MCP compatibility: load mcp.* config (disabled by default).  When
        enabled, each configured MCP server (JSON-RPC over stdio) is launched
@@ -631,6 +673,23 @@ private:
               wmOpts.maxSummaryChars = 220;
               pack.context = world_model::mergePromptContext(pack.context, wmState, wmOpts);
               worldState["graphContext"] = pack.context;
+              /* v8.0 audit A: the epistemic signal now comes from the world
+                 model\'s prediction-alignment calibration.  A misaligned
+                 prediction (low alignmentScore) raises worldUncertainty and
+                 therefore exploration, closing the predict->align->calibrate
+                 loop into the AGI planner. */
+              if (wmState.contains("prediction") && wmState["prediction"].is_object()) {
+                const auto &pred = wmState["prediction"];
+                if (pred.contains("predictionCalibration") &&
+                    pred["predictionCalibration"].is_object() &&
+                    pred["predictionCalibration"].contains("lastAlignmentScore") &&
+                    pred["predictionCalibration"]["lastAlignmentScore"].is_number()) {
+                  double alignment = pred["predictionCalibration"]["lastAlignmentScore"].get<double>();
+                  alignment = std::max(0.0, std::min(1.0, alignment));
+                  observePayload["worldUncertainty"] = 1.0 - alignment;
+                  observePayload["worldAlignmentScore"] = alignment;
+                }
+              }
             }
           } catch (...) {
           }
@@ -645,6 +704,20 @@ private:
       iterPayload["userPrompt"] = userText;
       iterPayload["graphContext"] = baseContext;
       iterPayload["body"] = body;
+      /* audit A: expose the world model\'s expected next state to the
+         iterate() payload so the EFE planner can use it as a forward-model
+         prior (field is optional; iterate() ignores it when absent). */
+      if (worldState.contains("worldModelState") &&
+          worldState["worldModelState"].is_object() &&
+          worldState["worldModelState"].contains("prediction"))
+        iterPayload["worldPrediction"] = worldState["worldModelState"]["prediction"];
+      /* audit A: expose the world model\'s expected next state to the
+         iterate() payload so the EFE planner can use it as a forward-model
+         prior (field is optional; iterate() ignores it when absent). */
+      if (worldState.contains("worldModelState") &&
+          worldState["worldModelState"].is_object() &&
+          worldState["worldModelState"].contains("prediction"))
+        iterPayload["worldPrediction"] = worldState["worldModelState"]["prediction"];
       auto iter = cognitionManager_.iterate(iterPayload, worldState);
       if (!iter.value("ok", false))
         return pack;

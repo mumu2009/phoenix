@@ -13,6 +13,12 @@
 - `algorithm/`：算法说明与数据流文档。
 - `math/`：数学推导与证明材料。
 - `v5.1/`、`v5.2/`：版本演进文档。
+- `v8.0/`：v8.0 "Lancelot" 文档集：
+  - `migration_backlog.md`：ollama/GNN 时代功能 → llama-server 迁移积压（A1–A8 状态表 + 优先级 + 不迁移清单）；
+  - `sparkarray_scopes.md`：SparkArray 作用域化设计（可选/多选/禁用，chat 域已接入）；
+  - `rdk_netboot.md`：RDK X5 网络引导部署（netboot，含 :5081 前端子进程与 UI 分发）；
+  - `config_world_audit.md`：world/config 模块审计（增强/直接使用/封存，A-I 行动清单）；
+  - `archive/conscious_compute.md`、`archive/jepa_legacy.md`、`archive/v7_stub_configs.md`：封存档案（伪科学路由、jepa 过渡层、v7 未接线配置组）。
 - `v7.0/`：v7.0 "Arthur" 文档集：
   - `v7.0.md`：目标架构总纲；`workflow.md`：数据流；`algorithm.md`：算法（§1–§23，含全部数学证明）；
   - `active_inference.md`：EFE/MPC 与 TD(0) 自进化；`subconscious.md`：PAD 气质/稳态调谐；
