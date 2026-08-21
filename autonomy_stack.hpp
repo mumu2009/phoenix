@@ -26,6 +26,7 @@
 #include "subconscious_profile.hpp"
 #include "agi_action_registry.hpp"
 #include "mission_lifecycle.hpp"
+#include "mission_workspace.hpp"
 #include "mcp_client.hpp"
 #include "emergency_stop.hpp"
 #include "instance_registry.hpp"
@@ -172,9 +173,14 @@ public:
        human supervisor reads and judges.  Optional: without it the loop is
        pure introspection and produces no text deliverables. */
     using MissionDeliberator = std::function<std::string(
-        const std::string &goal, const std::string &deliverable, int maxTokens)>;
+        const std::string &goal, const std::string &deliverable, int maxTokens,
+        const std::string &scope)>; /* scope = workspace sub-path (missionId,
+                                       or missionId/children/<childId>) */
     void setMissionDeliberator(MissionDeliberator fn);
     json appendMissionDeliverable(const json &payload); /* {text} appends. */
+    /** Snapshot of mission context-packing options (ctx / summary mode / GNN). */
+    json missionContextOptions() const;
+    void setMissionGnnSummary(const std::string &summary);
 
     /* v7.0 MCP compatibility (optional, config mcp.*): launch external MCP
        servers (JSON-RPC over stdio) and expose their tools to the planner as
@@ -262,7 +268,15 @@ private:
     void unregisterFromSafetyRegistry();
     phoenix::mission::MissionLifecycle mission_;
   MissionDeliberator missionDeliberator_;
-  int loopDeliberateMaxTokens_{512};
+  int loopDeliberateMaxTokens_{256}; /* smaller chunks = higher success rate on RDK */
+  int loopChildDeliberateMaxTokens_{256}; /* helper boxes: same budget each */
+  size_t loopMaxChildrenPerTick_{0}; /* 0 = run ALL helper boxes each tick */
+  size_t childRoundRobin_{0};        /* rotates start index when budget < N */
+  /* Context packing (sliding window + pinned summary / optional GNN). */
+  int missionCtxTokens_{4096};                 /* 4096 or 16384 typical */
+  std::string missionContextPack_{"full_and_summary"}; /* summary | full_and_summary */
+  bool missionIncludeGnnSummary_{false};
+  std::string missionGnnSummary_;              /* last known GNN/graph summary text */
     phoenix::mission::MissionGenome missionGenome_;
 
     /* v7.0 MCP compatibility (optional) */

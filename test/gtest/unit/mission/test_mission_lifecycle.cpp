@@ -14,6 +14,7 @@
 #include <cmath>
 #include <numeric>
 #include <random>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -48,12 +49,29 @@ Mission makeRunningMission(uint64_t startMs,
   return m;
 }
 
-// v8.0 pressure growth modes: logarithmic is the DEFAULT; it must be
-// strictly increasing, reach maxPain exactly at the horizon, and stay
-// below the linear curve early on (gentle urgency for long tasks).
-TEST(MissionLifecycleTest, LogarithmicPressureIsDefaultAndMonotone) {
+// v8.0+ pressure growth modes: asymptotic tanh is the DEFAULT; it must be
+// strictly increasing and approach (but never reach) maxPain for finite t.
+TEST(MissionLifecycleTest, AsymptoticPressureIsDefaultAndApproachesButNeverHitsMax) {
+  Mission m;
+  EXPECT_EQ(m.pressureMode, "asymptotic");
+  m.state = MissionState::Running;
+  m.startMs = 1000;
+  m.maxPain = 1.0f;
+  m.pressureTauSec = 1800.0;
+  float prev = 0.0f;
+  for (uint64_t t = 1000; t <= 1000 + 3600ull * 1000ull; t += 60000) {
+    const float p = m.pressure(t);
+    EXPECT_GE(p, prev) << "asymptotic pressure must be monotone at t=" << t;
+    EXPECT_LT(p, 1.0f) << "asymptotic must never reach maxPain at finite t=" << t;
+    prev = p;
+  }
+  /* At t=tau, tanh(1)≈0.7616 */
+  EXPECT_NEAR(m.pressure(1000 + 1800ull * 1000ull), static_cast<float>(std::tanh(1.0)), 1e-4f);
+}
+
+TEST(MissionLifecycleTest, LogarithmicPressureIsMonotoneWhenSelected) {
   Mission m = makeRunningMission(1000);
-  EXPECT_EQ(m.pressureMode, "logarithmic");
+  m.pressureMode = "logarithmic";
   m.pressureHorizonSec = 3600.0;
   const double h = 3600.0 * 1000.0;
   EXPECT_FLOAT_EQ(m.pressure(static_cast<uint64_t>(1000 + h)), 1.0f);
@@ -63,6 +81,20 @@ TEST(MissionLifecycleTest, LogarithmicPressureIsDefaultAndMonotone) {
     EXPECT_GE(p, prev) << "log pressure must be monotone at t=" << t;
     prev = p;
   }
+}
+
+TEST(MissionLifecycleTest, ExpressionPressureSupportsElementaryFunctions) {
+  Mission m = makeRunningMission(1000);
+  m.pressureMode = "expression";
+  m.pressureExpr = "Pmax*tanh(t/tau)";
+  m.pressureTauSec = 100.0;
+  m.maxPain = 1.0f;
+  const float p = m.pressure(1000 + 100ull * 1000ull);
+  EXPECT_NEAR(p, static_cast<float>(std::tanh(1.0)), 1e-4f);
+  EXPECT_LT(p, 1.0f);
+  m.pressureExpr = "0.5*(1-exp(-t/50))";
+  const float p2 = m.pressure(1000 + 50ull * 1000ull);
+  EXPECT_NEAR(p2, static_cast<float>(0.5 * (1.0 - std::exp(-1.0))), 1e-4f);
 }
 
 // Fill a parent genome with one tuning and one instinct so all clamp loops are
@@ -627,8 +659,8 @@ TEST_F(AutonomyMissionTest, ExecuteReplicateSpawnsSuccessorSession) {
     ASSERT_TRUE(res.value("ok", false)) << res.dump();
     const std::string childId = res["result"].value("childSessionId", std::string());
     EXPECT_FALSE(childId.empty());
-    EXPECT_EQ(res["result"].value("goal", std::string()), "replicate for me");
-    /* the successor is a real session bound to the same goal */
+    /* child goal is the bounded sub-task, not a full hand-off of the parent goal */
+    EXPECT_EQ(res["result"].value("goal", std::string()), "spawn help");
     auto st = mgr_->status();
     bool found = false;
     for (const auto &s : st["result"]["sessions"]) {
@@ -637,6 +669,35 @@ TEST_F(AutonomyMissionTest, ExecuteReplicateSpawnsSuccessorSession) {
     EXPECT_TRUE(found) << "successor session must exist";
     auto mst = mgr_->missionStatus();
     EXPECT_EQ(mst["result"]["stats"]["children"].size(), 1u);
+}
+
+TEST_F(AutonomyMissionTest, ParentCanSummonMultipleHelperBoxes) {
+    mgr_->assignMission(json{{"enabled", true},
+                             {"goal", "write a book"},
+                             {"maxReplicas", 4},
+                             {"painGainPerSec", 0.01},
+                             {"maxPain", 1.0}});
+    const char *subs[] = {"draft chapter 1", "draft chapter 2", "draft chapter 3"};
+    for (const char *sub : subs) {
+        auto res = mgr_->executeAgiActionByName(
+            "replicate", nlohmann::json{{"userPrompt", sub}});
+        ASSERT_TRUE(res.value("ok", false)) << res.dump();
+        EXPECT_EQ(res["result"].value("goal", std::string()), sub);
+    }
+    auto mst = mgr_->missionStatus();
+    ASSERT_EQ(mst["result"]["stats"]["children"].size(), 3u);
+    /* distinct box ids + goals; parent mission still Running */
+    std::set<std::string> ids;
+    std::set<std::string> goals;
+    for (const auto &c : mst["result"]["stats"]["children"]) {
+        ids.insert(c.value("id", std::string()));
+        goals.insert(c.value("goal", std::string()));
+    }
+    EXPECT_EQ(ids.size(), 3u);
+    EXPECT_EQ(goals.count("draft chapter 1"), 1u);
+    EXPECT_EQ(goals.count("draft chapter 2"), 1u);
+    EXPECT_EQ(goals.count("draft chapter 3"), 1u);
+    EXPECT_EQ(mst["result"]["stats"]["mission"].value("state", 0), 1);
 }
 
 TEST_F(AutonomyMissionTest, ReplicateRespectsMaxReplicas) {

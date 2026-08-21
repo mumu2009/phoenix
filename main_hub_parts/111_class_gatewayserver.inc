@@ -140,40 +140,202 @@ public:
       missionCfg["deadlineSec"] = phoenix::cfgOr<double>("mission.defaultDeadlineSec", 300.0);
       missionCfg["painGainPerSec"] = phoenix::cfgOr<double>("mission.painGainPerSec", 0.01);
       missionCfg["maxPain"] = phoenix::cfgOr<double>("mission.maxPain", 1.0);
-      missionCfg["pressureMode"] = phoenix::resolveConfig<std::string>("mission.pressureMode", std::string("logarithmic"), "AI_MISSION_PRESSURE_MODE");
+      missionCfg["pressureMode"] = phoenix::resolveConfig<std::string>("mission.pressureMode", std::string("asymptotic"), "AI_MISSION_PRESSURE_MODE");
       missionCfg["pressureHorizonSec"] = phoenix::resolveConfig<double>("mission.pressureHorizonSec", 3600.0, "AI_MISSION_PRESSURE_HORIZON_SEC");
+      missionCfg["pressureTauSec"] = phoenix::resolveConfig<double>("mission.pressureTauSec", 1800.0, "AI_MISSION_PRESSURE_TAU_SEC");
+      missionCfg["pressureExpr"] = phoenix::resolveConfig<std::string>("mission.pressureExpr", std::string("Pmax*tanh(t/tau)"), "AI_MISSION_PRESSURE_EXPR");
       missionCfg["mutationRate"] = phoenix::cfgOr<double>("mission.mutationRate", 0.05);
       missionCfg["maxReplicas"] = phoenix::cfgOr<int>("mission.maxReplicas", 4);
+      /* 0 = UNLIMITED task-tree depth (boxes may summon their own boxes);
+         user can cap it via mission.maxReplicaDepth / AI_MISSION_MAX_REPLICA_DEPTH. */
+      missionCfg["maxReplicaDepth"] = phoenix::resolveConfig<int>("mission.maxReplicaDepth", 0, "AI_MISSION_MAX_REPLICA_DEPTH");
       cognitionManager_.assignMission(missionCfg);
-      /* v8.0 mission worker: when the mission layer is on, register the
-         LLM-backed deliberator so the heartbeat loop can actually PRODUCE
-         the deliverable (without it the loop is pure introspection and a
-         text mission never progresses).  Same llama-server chat path as
-         interactive chat; called outside the manager lock by the loop. */
-      if (missionCfg.value("enabled", false)) {
-        cognitionManager_.setMissionDeliberator(
-            [this](const std::string &goal, const std::string &deliverable,
-                   int maxTokens) -> std::string {
+      /* v8.1 mission worker: LLM-backed deliberator with a sandboxed file
+         workspace AND tool calls.  Registered UNCONDITIONALLY - the mission
+         layer can be armed at runtime via /api/mission/assign, and a later
+         assign must not spin with an empty deliverable.
+         Reply forms the model may use:
+           1) plain text            -> appended to deliverable.md (first minimal draft)
+           2) {"action":write|append|read|list,"path","content"} -> workspace file op
+           3) {"tool":"<action-name>","arguments":{...}}          -> registered AGI action
+              (math/search/research/web/replicate/mcp.*) executed via the executor
+         Tool/action results are appended to the deliverable so the NEXT tick
+         sees them - the agent iteratively refines instead of looping. */
+      cognitionManager_.setMissionDeliberator(
+          [this](const std::string &goal, const std::string &deliverable,
+                 int maxTokens, const std::string &scope) -> std::string {
+            try {
+              const std::string workspaceRoot = phoenix::resolveConfig<std::string>(
+                  "mission.workspaceDir", std::string("./runtime_store/mission_workspace"),
+                  "AI_MISSION_WORKSPACE");
+              /* scope = workspace sub-path: missionId for the parent,
+                 missionId/children/<childId> for a helper box. */
+              const bool isChildBox = scope.find("/children/") != std::string::npos;
+              const std::string deliverablePath = "deliverable.md";
+              const auto listRes = phoenix::mission::workspaceExecute(
+                  workspaceRoot, scope, nlohmann::json{{"action", "list"}});
+              const auto readRes = phoenix::mission::workspaceExecute(
+                  workspaceRoot, scope,
+                  nlohmann::json{{"action", "read"}, {"path", deliverablePath}});
+              std::string currentFile = readRes.value("ok", false)
+                                            ? readRes.value("content", std::string())
+                                            : std::string();
+              if (currentFile.empty() && !deliverable.empty())
+                currentFile = deliverable; /* before the first write */
+
+              /* Sliding-window pack: pinned summary (+ optional GNN) + recent
+                 full text, sized to the user-selected ctx (4k/16k). */
+              phoenix::context::PackOptions packOpt;
+              packOpt.mode = "full_and_summary";
+              packOpt.includeGnnSummary = false;
+              packOpt.ctxTokens = phoenix::cfgOr<int>("llama_server.ctx_size", 4096);
+              std::string gnnText;
               try {
-                std::string prompt =
-                    std::string("You are an autonomous agent working toward this goal:\n") +
-                    goal + "\n\n";
-                if (!deliverable.empty()) {
-                  prompt += "Deliverable written so far:\n" +
-                            deliverable.substr(0, 8192) + "\n\n";
-                }
-                prompt += "Continue the work: produce the next chunk of the"
-                           " deliverable text only. Do not restate the goal.";
-                nlohmann::json opts =
-                    nlohmann::json{{"temperature", 0.7}};
-                const auto r = chatWithLlamaCpp(prompt, "", maxTokens, opts);
-                if (r.value("ok", false))
-                  return r.value("reply", std::string());
+                const auto copts = cognitionManager_.missionContextOptions();
+                const auto &cr = copts.value("result", nlohmann::json::object());
+                packOpt = phoenix::context::optionsFromJson(cr, packOpt);
+                gnnText = cr.value("gnnSummary", std::string());
               } catch (...) {
               }
-              return std::string();
-            });
-      }
+              if (packOpt.includeGnnSummary && gnnText.empty()) {
+                /* lightweight stand-in: keyword-ish extractive of the goal
+                   when no graph diffusion summary has been pushed yet */
+                gnnText = "goal focus: " + goal;
+              }
+              const auto packed = phoenix::context::packContext(currentFile, gnnText, packOpt);
+              const std::string packedBody = packed.packed;
+
+              nlohmann::json tools = nlohmann::json::array();
+              try {
+                const auto la = cognitionManager_.listAgiActions();
+                const auto &arr = la.value("result", nlohmann::json::array());
+                for (const auto &spec : arr) {
+                  if (!spec.is_object()) continue;
+
+                  tools.push_back(nlohmann::json{
+                      {"name", spec.value("name", std::string())},
+                      {"category", spec.value("category", std::string())},
+                      {"description", spec.value("description", std::string())}});
+                }
+              } catch (...) {
+              }
+
+              std::string prompt =
+                  std::string("You are an autonomous agent working toward this goal:\n") +
+                  goal + "\n\n";
+              prompt += "Workspace files:\n" + listRes.dump(2) + "\n\n";
+              if (!packedBody.empty()) {
+                prompt += "Context pack (pinned summary + sliding recent window"
+                          "; approxTokens=" +
+                          std::to_string(packed.estimatedTokens) + "):\n" +
+                          packedBody + "\n\n";
+              } else {
+                prompt += "deliverable.md does not exist yet - first write a MINIMAL draft.\n\n";
+              }
+              prompt += "Available tools:\n" + tools.dump() + "\n\n";
+              if (isChildBox) {
+                prompt +=
+                    "You are a HELPER BOX working on the sub-task above. You may summon your OWN helper boxes for bounded sub-parts (tool: replicate, arguments.userPrompt = the specific sub-task); keep every sub-task bounded and concrete. ";
+              } else {
+                /* the parent knows about its helper boxes and can READ + MERGE
+                   their drafts - but it remains fully responsible for the
+                   final deliverable and keeps working itself */
+                try {
+                  auto ms2 = cognitionManager_.missionStatus();
+                  const auto &stats2 = ms2.value("result", nlohmann::json::object())
+                                               .value("stats", nlohmann::json::object());
+                  const auto &children2 = stats2.value("children", nlohmann::json::array());
+                  if (children2.is_array() && !children2.empty()) {
+                    prompt += "Helper boxes you spawned (read their files with the file tool and merge the best parts; you remain responsible for the final deliverable):\n";
+                    for (const auto &box : children2) {
+                      prompt += "- " + box.value("id", std::string()) + ": " +
+                                box.value("goal", std::string()) +
+                                " (file: children/" + box.value("id", std::string()) + "/deliverable.md)\n";
+                    }
+                    prompt += "\n";
+                  }
+                } catch (...) {
+                }
+              }
+              prompt +=
+                  "Reply with exactly ONE of these three forms:\n"
+                  "1) Plain text - APPENDED to deliverable.md (use for the first minimal draft).\n"
+                  "2) JSON {\"action\":\"write\"|\"append\"|\"read\"|\"list\",\"path\":\"...\",\"content\":\"...\"} - file operation in your sandboxed workspace (relative paths, no \"..\").\n"
+                  "3) JSON {\"tool\":\"<tool-name>\",\"arguments\":{\"userPrompt\":\"...\"}} - invoke a tool; its result comes back to you next turn.\n"
+                  "Iterate: minimal correct version first, then expand section by section; use tools (search, math, replicate) when they help; never repeat text already in the file.";
+
+              nlohmann::json opts = nlohmann::json{{"temperature", 0.3}};
+              const auto r = chatWithLlamaCpp(prompt, "", std::max(64, maxTokens), opts);
+              if (!r.value("ok", false))
+                return std::string();
+              std::string reply = r.value("reply", std::string());
+
+              /* structured reply: tool call or file action */
+              {
+                const auto trim = [](const std::string &s) -> std::string {
+                  const auto b = s.find_first_not_of(" \t\r\n");
+                  if (b == std::string::npos) return std::string();
+                  const auto e = s.find_last_not_of(" \t\r\n");
+                  return s.substr(b, e - b + 1);
+                };
+                const std::string trimmed = trim(reply);
+                if (!trimmed.empty() && trimmed.front() == '{') {
+                  try {
+                    nlohmann::json act = nlohmann::json::parse(trimmed);
+                    if (!act.is_object()) throw 0;
+                    if (act.contains("tool") && act["tool"].is_string()) {
+                      nlohmann::json args = act.value("arguments", nlohmann::json::object());
+                      if (!args.is_object()) args = nlohmann::json::object();
+                      std::string up = args.value("userPrompt", std::string());
+                      if (up.empty()) up = args.value("query", std::string());
+                      if (up.empty()) up = args.value("input", std::string());
+                      if (up.empty()) up = args.dump();
+                      nlohmann::json ctx = args;
+                      ctx["userPrompt"] = up;
+                      /* task-tree lineage: a helper box that spawns records
+                         the child under ITSELF (parentId = this box id) */
+                      if (isChildBox) {
+                        const auto slash = scope.rfind('/');
+                        if (slash != std::string::npos && slash + 1 < scope.size())
+                          ctx["parentId"] = scope.substr(slash + 1);
+                      }
+                      const auto tr = cognitionManager_.executeAgiActionByName(
+                          act["tool"].get<std::string>(), ctx);
+                      std::string note = "[tool:" + act["tool"].get<std::string>();
+                      if (tr.value("ok", false))
+                        note += " ok " + tr.value("reply", std::string()).substr(0, 400);
+                      else
+                        note += " FAILED " + tr.value("error", std::string());
+                      note += "]";
+                      return note;
+                    }
+                    if (act.contains("action") && act["action"].is_string()) {
+                      const auto opRes = phoenix::mission::workspaceExecute(
+                          workspaceRoot, scope, act);
+                      if (opRes.value("ok", false))
+                        return "[file:" + act.value("action", std::string()) + " ok " +
+                               std::to_string(opRes.value("bytes", 0)) + "B " +
+                               act.value("path", std::string()) + "]";
+                      return "[file:" + act.value("action", std::string()) + " FAILED " +
+                             opRes.value("error", std::string()) + "]";
+                    }
+                  } catch (...) {
+                  }
+                }
+              }
+
+              /* plain text: mirror into the workspace file AND return for
+                 the in-memory deliverable (both stay in sync) */
+              phoenix::mission::workspaceExecute(
+                  workspaceRoot, scope,
+                  nlohmann::json{{"action", "append"},
+                                 {"path", deliverablePath},
+                                 {"content", reply}});
+              return reply;
+            } catch (...) {
+            }
+            return std::string();
+          });
     }
     /* v7.0 MCP compatibility: load mcp.* config (disabled by default).  When
        enabled, each configured MCP server (JSON-RPC over stdio) is launched
@@ -587,6 +749,10 @@ private:
   autonomy::DatasetCatalogManager datasetCatalog_;
   autonomy::CognitionAutonomyManager cognitionManager_;
   phoenix::memory::HierarchicalMemory cognitionMemory_;
+  /* Serialize llama-server calls (chat + mission deliberator).  With
+     --parallel 1 on the RDK, concurrent clients cancel each other and the
+     deliberator returns empty forever. */
+  mutable std::mutex llamaCallMu_;
   std::mutex transformerMu_;
   std::mutex chatMu_;
   Config config_;
@@ -760,6 +926,8 @@ private:
           pack.worldEvidence = nlohmann::json::array();
         pack.worldEvidence.push_back(
             {{"stage", "graphDiffusion"}, {"summary", diffSummary.toJson()}});
+        if (!diffSummary.summaryText.empty())
+          cognitionManager_.setMissionGnnSummary(diffSummary.summaryText);
       }
 
       // Persist the cognition pack in hierarchical memory for the next turn.

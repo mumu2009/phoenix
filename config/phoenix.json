@@ -41,7 +41,7 @@
       "concatThresh": 5,
       "rnnThresh": 15,
       "shortWindowMaxMessages": 40,
-      "shortWindowMaxTokens": 2048,
+      "shortWindowMaxTokens": 4096,
       "targetLatencyMs": 15000
     },
     "rnnTopK": 50
@@ -55,8 +55,8 @@
   },
   "llama_server": {
     "threads": 6,
-    "parallel": 1,
-    "ctx_size": 2048
+    "parallel": 2,
+    "ctx_size": 4096
   },
   "memebarrier": {
     "scanIntervalMs": 10000,
@@ -347,7 +347,7 @@
   },
   "frontend_server": {
     "webRoot": "./079project_frontend/build",
-    "host": "127.0.0.1",
+    "host": "0.0.0.0",
     "port": 5081,
     "robotsDir": "./robots",
     "bullet3Root": "./outsides/bullet3",
@@ -397,11 +397,18 @@
     "goal": "",
     "painGainPerSec": 0.01,
     "maxPain": 1,
-    "pressureMode": "logarithmic",
+    "pressureMode": "asymptotic",
     "pressureHorizonSec": 3600,
+    "pressureTauSec": 1800,
+    "pressureExpr": "Pmax*tanh(t/tau)",
+    "workspaceDir": "./runtime_store/mission_workspace",
     "defaultDeadlineSec": 300,
     "mutationRate": 0.05,
-    "maxReplicas": 4
+    "maxReplicas": 4,
+    "maxReplicaDepth": 0,
+    "ctxSize": 4096,
+    "contextPack": "full_and_summary",
+    "includeGnnSummary": false
   },
   "mcp": {
     "enabled": false,
@@ -562,7 +569,7 @@
       "ollamaTimeoutMs": 120000,
       "llamaCppModel": "blobs/sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29",
       "llamaCppBaseUrl": "http://192.168.0.104:8082",
-      "llamaCppTimeoutMs": 120000,
+      "llamaCppTimeoutMs": 300000,
       "llamaCppLoraFiles": "",
       "llamaCppLoraInitWithoutApply": false,
       "llamaCppFineTuning": false,

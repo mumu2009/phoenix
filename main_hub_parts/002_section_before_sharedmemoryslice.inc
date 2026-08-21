@@ -260,8 +260,8 @@ static Config loadConfig(int argc, char **argv) {
                                "http://127.0.0.1:8080");
   c.llamaCppRequestTimeoutMs =
       std::max(1000, (int)numberOr(argOrEnv("llamacpp-timeout-ms",
-                                            "AI_LLAMACPP_TIMEOUT_MS", "120000"),
-                                   120000));
+                                            "AI_LLAMACPP_TIMEOUT_MS", "300000"),
+                                   300000));
   c.llamaCppLoraFiles = argOrEnv("llamacpp-lora-files", "AI_LLAMACPP_LORA_FILES", "");
   c.llamaCppLoraInitWithoutApply = boolFrom(
       argOrEnv("llamacpp-lora-init-without-apply", "AI_LLAMACPP_LORA_INIT_WITHOUT_APPLY", "false"), false);

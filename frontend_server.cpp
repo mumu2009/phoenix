@@ -4435,7 +4435,7 @@ void setupFrontendServer()
 {
     ensureFrontendArena();
     const std::string webRoot = resolveConfig<std::string>("frontend_server.webRoot", std::string("./079project_frontend/build"), "WEB_ROOT");
-    const std::string host = resolveConfig<std::string>("frontend_server.host", std::string("127.0.0.1"), "FRONTEND_HOST");
+    const std::string host = resolveConfig<std::string>("frontend_server.host", std::string("0.0.0.0"), "FRONTEND_HOST");
     const int port = resolveConfig<int>("frontend_server.port", 5081, "FRONTEND_PORT");
     const std::string robotsDir = resolveConfig<std::string>("frontend_server.robotsDir", std::string("./robots"), "ROBOTS_DIR");
 

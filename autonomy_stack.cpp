@@ -19,6 +19,7 @@
 #include "autonomy_stack.hpp"
 
 #include "addons/builtin_registry.hpp"
+#include "phoenix_config.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -655,6 +656,16 @@ CognitionAutonomyManager::CognitionAutonomyManager()
         return this->executeAgiAction(spec, ctx);
     };
     registerDefaultAgiActions();
+    try {
+        missionCtxTokens_ = phoenix::cfgOr<int>("mission.ctxSize",
+            phoenix::cfgOr<int>("llama_server.ctx_size", 4096));
+        missionContextPack_ = phoenix::cfgOr<std::string>("mission.contextPack",
+                                                          std::string("full_and_summary"));
+        if (missionContextPack_ != "summary" && missionContextPack_ != "full_and_summary")
+            missionContextPack_ = "full_and_summary";
+        missionIncludeGnnSummary_ = phoenix::cfgOr<bool>("mission.includeGnnSummary", false);
+    } catch (...) {
+    }
 }
 
 CognitionAutonomyManager::~CognitionAutonomyManager() {
@@ -755,33 +766,45 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
     }
 
     if (spec.category == "replicate") {
-        /* The instance freely replicates: mutate its own genome and summon a
-           successor SESSION bound to the same goal.  No fixed trigger, no
-           hand-off - the planner chose this action itself. */
+        /* v8.2: replicate = summon a Meeseeks-BOX TOOL.  The sub-task comes
+           from context.userPrompt; empty/identical requests degrade to
+           "assist with: <parent goal>" inside recordChild, so the parent
+           can never hand its whole job to a child. */
         if (!missionEnabled_ || !mission_.active()) {
             return json{{"ok", false}, {"error", "no active mission to replicate for"}};
         }
         try {
-            const auto childGenome = mission_.replicate(missionMutationRate_);
+            const std::string subgoal = context.value("userPrompt", std::string());
+            /* parentId lets a HELPER BOX summon its own boxes (task tree);
+               empty = spawned by the root mission.  Depth is capped only if
+               the user configured mission.maxReplicaDepth > 0. */
+            const std::string parentId = context.value("parentId", std::string());
+            const auto childRec = mission_.recordChild(missionGenome_,
+                                                       missionMutationRate_, subgoal, parentId);
             const phoenix::mission::Mission snap = mission_.mission();
             const std::string childId =
                 "child-" + snap.id + "-" + std::to_string(mission_.children().size());
-            nlohmann::json childRec;
-            childRec["sessionId"] = childId;
-            childRec["observations"] = 1;
-            childRec["seedMission"] = snap.goal;
-            childRec["lastObservedAtMs"] = nowMs();
-            childRec["shouldIterate"] = true;
-            childRec["missionGenome"] = childGenome.toJson();
-            childRec["spawnedBy"] = "instance-replicate";
-            sessions_[childId] = childRec;
+            nlohmann::json childSession;
+            childSession["sessionId"] = childId;
+            childSession["observations"] = 1;
+            childSession["seedMission"] = childRec.goal;
+            childSession["lastObservedAtMs"] = nowMs();
+            childSession["shouldIterate"] = true;
+            childSession["missionGenome"] = childRec.genome.toJson();
+            childSession["spawnedBy"] = "instance-replicate";
+            childSession["parentBoxId"] = parentId;
+            childSession["boxId"] = childRec.id;
+            sessions_[childId] = childSession;
             return json{{"ok", true},
                         {"result", json{{"replicated", true},
                                         {"childSessionId", childId},
-                                        {"goal", snap.goal},
-                                        {"genome", childGenome.toJson()},
-                                        {"reply", "summoned successor " + childId +
-                                                  " for goal: " + snap.goal}}}};
+                                        {"boxId", childRec.id},
+                                        {"goal", childRec.goal},
+                                        {"parentGoal", snap.goal},
+                                        {"genome", childRec.genome.toJson()},
+                                        {"childrenCount", mission_.children().size()},
+                                        {"reply", "summoned helper box " + childRec.id +
+                                                  " for: " + childRec.goal}}}};
         } catch (const std::runtime_error &e) {
             return json{{"ok", false}, {"error", e.what()}};
         }
@@ -1904,6 +1927,24 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
     missionMaxReplicas_ = static_cast<size_t>(
         clampInt(p.value("maxReplicas", static_cast<int>(missionMaxReplicas_)), 0, 64));
     mission_.setMaxReplicas(missionMaxReplicas_);
+    mission_.setMaxReplicaDepth(static_cast<size_t>(
+        clampInt(p.value("maxReplicaDepth", static_cast<int>(mission_.maxReplicaDepth())), 0, 16)));
+    /* Context packing: user chooses summary vs full+summary, optional GNN,
+       and ctx size (4096 / 16384). */
+    if (p.contains("contextPack") && p["contextPack"].is_string()) {
+        const std::string m = p["contextPack"].get<std::string>();
+        if (m == "summary" || m == "full_and_summary") missionContextPack_ = m;
+    }
+    if (p.contains("includeGnnSummary") && p["includeGnnSummary"].is_boolean())
+        missionIncludeGnnSummary_ = p["includeGnnSummary"].get<bool>();
+    {
+        int ctx = p.value("ctxSize", p.value("ctxTokens", missionCtxTokens_));
+        if (ctx < 2048) ctx = 2048;
+        if (ctx > 32768) ctx = 32768;
+        missionCtxTokens_ = ctx;
+    }
+    if (p.contains("gnnSummary") && p["gnnSummary"].is_string())
+        missionGnnSummary_ = p["gnnSummary"].get<std::string>();
     if (p.value("enabled", false)) {
         registerWithSafetyRegistry(); /* mission lifecycle begins: register */
     }
@@ -1913,9 +1954,15 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
     m.deadlineSec = clampDouble(p.value("deadlineSec", 300.0), 1.0, 3.2e7);
     m.painGainPerSec = static_cast<float>(clampDouble(p.value("painGainPerSec", 0.01), 0.0, 100.0));
     m.maxPain = static_cast<float>(clampDouble(p.value("maxPain", 1.0), 0.0, 1.0));
-    m.pressureMode = p.value("pressureMode", std::string("logarithmic"));
-    if (m.pressureMode != "linear") m.pressureMode = "logarithmic";
+    m.pressureMode = p.value("pressureMode", std::string("asymptotic"));
+    if (m.pressureMode != "linear" && m.pressureMode != "logarithmic" &&
+        m.pressureMode != "expression" && m.pressureMode != "asymptotic") {
+      m.pressureMode = "asymptotic";
+    }
     m.pressureHorizonSec = clampDouble(p.value("pressureHorizonSec", 3600.0), 60.0, 3.2e7);
+    m.pressureTauSec = clampDouble(p.value("pressureTauSec", 1800.0), 1.0, 3.2e7);
+    m.pressureExpr = p.value("pressureExpr", std::string("Pmax*tanh(t/tau)"));
+    if (m.pressureExpr.empty()) m.pressureExpr = "Pmax*tanh(t/tau)";
     if (m.id.empty()) m.id = "mission-" + std::to_string(iteration_ + 1);
     if (p.contains("genome") && p["genome"].is_object()) {
         missionGenome_ = phoenix::mission::MissionGenome::fromJson(p["genome"]);
@@ -1933,7 +1980,26 @@ json CognitionAutonomyManager::missionStatus() const {
     return json{{"ok", true},
                 {"result", json{{"enabled", missionEnabled_},
                                 {"stats", mission_.stats()},
-                                {"genome", missionGenome_.toJson()}}}};
+                                {"genome", missionGenome_.toJson()},
+                                {"contextPack", missionContextPack_},
+                                {"includeGnnSummary", missionIncludeGnnSummary_},
+                                {"ctxSize", missionCtxTokens_}}}};
+}
+
+json CognitionAutonomyManager::missionContextOptions() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return json{{"ok", true},
+                {"result", json{{"contextPack", missionContextPack_},
+                                {"includeGnnSummary", missionIncludeGnnSummary_},
+                                {"ctxSize", missionCtxTokens_},
+                                {"gnnSummary", missionGnnSummary_}}}};
+}
+
+void CognitionAutonomyManager::setMissionGnnSummary(const std::string &summary) {
+    std::lock_guard<std::mutex> lock(mu_);
+    missionGnnSummary_ = summary;
+    if (missionGnnSummary_.size() > 4096)
+        missionGnnSummary_.resize(4096);
 }
 
 json CognitionAutonomyManager::reportMissionOutcome(const json &payload) {
@@ -1972,7 +2038,10 @@ json CognitionAutonomyManager::spawnMissionChild(const json &payload) {
     const auto parent = (p.contains("genome") && p["genome"].is_object())
                             ? phoenix::mission::MissionGenome::fromJson(p["genome"])
                             : missionGenome_;
-    const auto child = mission_.spawnChild(parent, rate);
+    /* v8.2: subgoal = the bounded request this box must fulfil. */
+    const std::string subgoal = p.value("subgoal", p.value("userPrompt", std::string()));
+    const std::string parentId = p.value("parentId", std::string());
+    const auto child = mission_.recordChild(parent, rate, subgoal, parentId);
     return json{{"ok", true}, {"result", child.toJson()}};
 }
 
@@ -2187,22 +2256,82 @@ void CognitionAutonomyManager::loopRun() {
                gateway-registered LLM deliberator.  Runs BEFORE the iterate
                steps and OUTSIDE the manager lock (a slow LLM reply must not
                stall interject/status/E-stop).  Output accumulates in the
-               mission deliverable; the human supervisor judges completion. */
+               mission deliverable; the human supervisor judges completion.
+
+               Snapshot goal/deliverable/running under the lock, then call the
+               LLM without holding mu_ - do NOT parse missionStatus() JSON
+               through dangling temporary references. */
             if (missionDeliberator_) {
-                nlohmann::json ms = missionStatus();
-                const auto &stats = ms.value("result", nlohmann::json::object()).value("stats", nlohmann::json::object());
-                const auto &m = stats.value("mission", nlohmann::json::object());
-                if (m.value("state", 0) == 1) {
-                    const std::string goal = m.value("goal", std::string());
-                    const std::string prior = m.value("deliverable", std::string());
-                    const std::string work =
-                        missionDeliberator_(goal, prior, loopDeliberateMaxTokens_);
-                    if (!work.empty())
+                std::string goal;
+                std::string prior;
+                std::string missionId;
+                bool running = false;
+                std::vector<phoenix::mission::MissionChild> helpers;
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    running = missionEnabled_ && mission_.active();
+                    if (running) {
+                        const auto snap = mission_.mission();
+                        goal = snap.goal;
+                        prior = snap.deliverable;
+                        missionId = snap.id;
+                        helpers = mission_.children();
+                    }
+                }
+                /* Prior packing happens inside the deliberator (sliding window
+                   + pinned summary).  Pass a modest tail here only as a
+                   fallback when the workspace file is still empty. */
+                if (prior.size() > 6000)
+                    prior = prior.substr(prior.size() - 6000);
+
+                /* the PARENT always works first - it can use helper boxes
+                   but it never hands its whole job to them */
+                if (running && !goal.empty()) {
+                    std::string work;
+                    try {
+                        work = missionDeliberator_(goal, prior, loopDeliberateMaxTokens_, missionId);
+                    } catch (...) {
+                        work.clear();
+                    }
+                    if (!work.empty()) {
                         appendMissionDeliverable(nlohmann::json{{"text", work}});
+                    }
+                }
+                /* helper boxes (children): ALL active boxes work each tick
+                   (sequential LLM calls under llamaCallMu_; --parallel may be
+                   >1 so a cancelled peer is less likely). Cap with
+                   loopMaxChildrenPerTick_ (0 = no cap = all children). */
+                if (running && !helpers.empty()) {
+                    size_t budget = helpers.size();
+                    if (loopMaxChildrenPerTick_ > 0)
+                        budget = std::min(budget, loopMaxChildrenPerTick_);
+                    for (size_t n = 0; n < budget; ++n) {
+                        const size_t idx = (childRoundRobin_ + n) % helpers.size();
+                        const auto &box = helpers[idx];
+                        std::string childGoal = box.goal;
+                        if (childGoal.empty()) childGoal = goal;
+                        const std::string childScope =
+                            missionId + "/children/" + box.id;
+                        try {
+                            const std::string boxWork = missionDeliberator_(
+                                childGoal, "", loopChildDeliberateMaxTokens_, childScope);
+                            (void)boxWork; /* output lives in the box workspace file */
+                        } catch (...) {
+                        }
+                    }
+                    childRoundRobin_ += budget;
                 }
             }
             ensureHeartbeatSession();
-            for (int step = 0; step < loopMaxStepsPerTick_; ++step) {
+            /* While a mission is producing text, keep iterate() light so the
+               RDK CPU stays available for llama-server.  Pure autonomy (no
+               mission) still uses the configured maxStepsPerTick. */
+            int steps = loopMaxStepsPerTick_;
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                if (missionEnabled_ && mission_.active()) steps = std::min(steps, 1);
+            }
+            for (int step = 0; step < steps; ++step) {
                 if (loopStop_.load(std::memory_order_acquire)) break;
                 iterate(nlohmann::json::object(), nlohmann::json::object());
             }

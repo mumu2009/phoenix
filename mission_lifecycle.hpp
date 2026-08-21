@@ -10,12 +10,12 @@
 
    Formalises the "Meeseeks box" idea: an agent instance is born with ONE
    mission; pain grows with time since mission start (growth mode is user-
-   configurable: linear or logarithmic, logarithmic by default) and ends
-   only when the mission is judged complete.  Because the agent's existing
-   loop minimises accumulated pain (see doc/v7.0/mission_layer.md for the
-   proofs: linear mode total pain = g*T^2/2; logarithmic mode total pain =
-   k*((T+1)*ln(T+1) - T); both strictly monotone in completion time T), the
-   pressure forces shortest-time goal completion.
+   configurable: asymptotic tanh by default, or linear / logarithmic /
+   a free-form expression) and ends only when the mission is judged
+   complete.  Because the agent's existing loop minimises accumulated pain
+   (see doc/v7.0/mission_layer.md), the pressure forces shortest-time goal
+   completion.  Asymptotic mode approaches maxPain but never saturates for
+   finite t, avoiding pressure-driven hallucination / goal forgetting.
 
    The "outer layer" of the Meeseeks box is deliberately NOT a separate
    runtime layer (no cross-layer translation cost): it is a lifecycle state
@@ -36,8 +36,10 @@
 #include <mutex>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <nlohmann/json.hpp>
 
+#include "pressure_expr.hpp"
 #include "subconscious_profile.hpp"
 
 namespace phoenix {
@@ -52,8 +54,19 @@ struct Mission {
   double deadlineSec{300.0};     /*!< time budget. */
   float painGainPerSec{0.01f};   /*!< urgency: pain growth rate (linear mode). */
   float maxPain{1.0f};
-  std::string pressureMode{"logarithmic"}; /*!< "linear" | "logarithmic" (default). */
-  double pressureHorizonSec{3600.0};       /*!< log mode: seconds until maxPain. */
+  /* pressureMode:
+       "asymptotic" (default) = Pmax * tanh(t/tau) — approaches Pmax, never hits
+       "linear"               = min(g*t, Pmax)
+       "logarithmic"          = Pmax * ln(1+t)/ln(1+H)  (saturates at H)
+       "expression"           = user formula in t (see pressureExpr); result
+                                is clamped to [0, Pmax). */
+  std::string pressureMode{"asymptotic"};
+  double pressureHorizonSec{3600.0};       /*!< log mode horizon H (seconds). */
+  double pressureTauSec{1800.0};           /*!< asymptotic tanh time-constant. */
+  /* Default expression mirrors asymptotic: Pmax*tanh(t/tau).  Users may set
+     any elementary formula (trig/hyperbolic/poly/exp/log/...); variable t is
+     elapsed seconds; H, g, Pmax, tau are also bound. */
+  std::string pressureExpr{"Pmax*tanh(t/tau)"};
   std::string deliverable;                 /*!< accumulated work product (LLM worker). */
   MissionState state{MissionState::Idle};
   uint64_t startMs{0};
@@ -67,25 +80,44 @@ struct Mission {
     return static_cast<double>(nowMs - startMs) / 1000.0;
   }
 
-  /** Mission pressure (user-configurable growth mode):
-      linear:      p(t) = min(g*t, Pmax)                g = painGainPerSec
-      logarithmic: p(t) = Pmax * ln(1+t) / ln(1+H)      H = pressureHorizonSec
-      (default logarithmic: gentle early urgency that reaches maxPain exactly
-      at the horizon H, giving long tasks like text deliverables time to work).
-      Both curves are strictly increasing in t, so total accumulated pain
-      stays monotone in completion time T (mission_layer.md section 2). */
+  /** Mission pressure (user-configurable growth mode).  Asymptotic default
+      never reaches maxPain for finite t (open interval [0, Pmax)), so the
+      agent keeps a usable gradient instead of saturating into panic. */
   float pressure(uint64_t nowMs) const {
     if (state != MissionState::Running) return 0.0f;
     const double t = elapsedSec(nowMs);
     if (t <= 0.0) return 0.0f;
+    const double Pmax = static_cast<double>(maxPain);
+    const double g = static_cast<double>(painGainPerSec);
+    const double H = pressureHorizonSec >= 1.0 ? pressureHorizonSec : 1.0;
+    const double tau = pressureTauSec >= 1.0 ? pressureTauSec : 1.0;
     double p = 0.0;
     if (pressureMode == "linear") {
-      p = static_cast<double>(painGainPerSec) * t;
+      p = g * t;
+      if (p > Pmax) p = Pmax;
+    } else if (pressureMode == "logarithmic") {
+      p = Pmax * std::log1p(t) / std::log1p(H);
+      if (p > Pmax) p = Pmax;
+    } else if (pressureMode == "expression") {
+      std::unordered_map<std::string, double> vars{
+          {"H", H}, {"g", g}, {"Pmax", Pmax}, {"tau", tau}};
+      const auto ev = evalPressureExpr(pressureExpr, t, vars);
+      if (!ev.ok || !std::isfinite(ev.value)) {
+        /* Fail closed to asymptotic so a bad formula never stalls the loop. */
+        p = Pmax * std::tanh(t / tau);
+      } else {
+        p = ev.value;
+      }
+      /* Open upper bound: approach Pmax but never claim saturation. */
+      if (p < 0.0) p = 0.0;
+      if (p >= Pmax) p = std::nextafter(Pmax, 0.0);
     } else {
-      const double H = pressureHorizonSec >= 1.0 ? pressureHorizonSec : 1.0;
-      p = static_cast<double>(maxPain) * std::log1p(t) / std::log1p(H);
+      /* asymptotic (default): Pmax * tanh(t/tau) ∈ [0, Pmax) */
+      p = Pmax * std::tanh(t / tau);
+      if (p >= Pmax) p = std::nextafter(Pmax, 0.0);
     }
-    return static_cast<float>(p >= maxPain ? maxPain : p);
+    if (p < 0.0) p = 0.0;
+    return static_cast<float>(p);
   }
 
   nlohmann::json toJson() const;
@@ -123,7 +155,10 @@ struct MissionGenome {
 struct MissionChild {
   std::string id;        /*!< "child-<generation>-<n>" */
   MissionGenome genome;  /*!< mutated heredity */
-  std::string goal;      /*!< inherited goal */
+  std::string goal;      /*!< effective goal: the bounded sub-task (or "assist with: <parent goal>") */
+  std::string subgoal;   /*!< the raw request the parent made when spawning this box */
+  std::string parentId;  /*!< empty = spawned by the root mission; otherwise the spawning box id */
+  int depth{0};          /*!< task-tree depth: 0 = direct child of the root mission */
   uint64_t bornMs{0};
   int generation{0};
   nlohmann::json toJson() const;
@@ -140,7 +175,7 @@ class MissionLifecycle {
   bool active() const;       /*!< true while Running (mutex-guarded). */
   float pressureNow() const;
   /** v8.0 mission worker: append the LLM-produced work product (capped at
-      64 KiB) so the human supervisor can read and judge the deliverable. */
+      4 MiB) so the human supervisor can read and judge the deliverable. */
   void appendDeliverable(const std::string &text);
 
   /** @brief Replicate: mutate THIS instance's genome and record a successor
@@ -148,6 +183,21 @@ class MissionLifecycle {
       std::runtime_error when maxReplicas is exhausted (the only guardrail on
       the instance's free replication power - no runaway spawning). */
   MissionGenome replicate(float mutationRate);
+  /* v8.2: children are Meeseeks-BOX TOOLS - the parent summons a bounded
+     sub-task helper.  subgoal is the parent request; empty (or identical to
+     the parent goal) becomes "assist with: <parent goal>" so the parent can
+     never hand its whole job to a child. */
+  MissionGenome replicate(float mutationRate, const std::string &subgoal);
+  /* Record + mutate in one call (used by the manager spawnMissionChild).
+     parentId: empty = spawned by the root mission; otherwise the spawning
+     box id - the new box gets depth = parentDepth + 1.  Deep task trees are
+     allowed but bounded by maxReplicaDepth (default 3): boxes CAN summon
+     their own boxes so the mission can decompose into nested sub-tasks. */
+  MissionChild recordChild(const MissionGenome &parent, float mutationRate,
+                           const std::string &subgoal,
+                           const std::string &parentId = std::string());
+  size_t maxReplicaDepth() const;
+  void setMaxReplicaDepth(size_t n);
   size_t maxReplicas() const;
   void setMaxReplicas(size_t n);
   std::vector<MissionChild> children() const; /*!< successors (observability) */
@@ -174,6 +224,9 @@ class MissionLifecycle {
   MissionGenome genome_;      /*!< heredity of THIS instance */
   std::vector<MissionChild> children_; /*!< replicated successors (observability) */
   size_t maxReplicas_{4};    /*!< guardrail cap on free replication */
+  /* 0 = UNLIMITED task-tree depth (user-decided via mission.maxReplicaDepth);
+     >0 = hard cap on how deep boxes may summon their own boxes. */
+  size_t maxReplicaDepth_{0};
   std::mt19937 rng_;
   size_t spawnCount_{0};
   size_t completeCount_{0};

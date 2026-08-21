@@ -24,7 +24,8 @@ separately rather than committed into this repo. That means:
 |---|---|
 | `existing_mods.patch` | Pre-existing Phoenix modifications: an intrusive "style adapter" that biases the attention mask with an online gradient-style update (`llama_style_adapter_*` API). Unrelated to the enc/infer/dec split; kept as-is. |
 | `enc_dec_separation.patch` | New: splits llama3.1-8b's forward pass into three independently callable conceptual stages (see below). |
-| `apply_patches.bat` | Resets `outsides/llamacpp` to a clean checkout (if needed) and applies `existing_mods.patch` then `enc_dec_separation.patch`, in order. Idempotent. |
+| `apply_patches.bat` | Windows: resets `outsides/llamacpp` if needed and applies patches. Idempotent. |
+| `apply_patches.sh` | Linux/RDK counterpart of `apply_patches.bat` (used by `tools/rdk_llama_setup.sh`). |
 | `build_llama_server.bat` | Builds `llama`, `llama-server`, and `llama-cli` from `outsides/llamacpp/build-gcc` via `ninja` (configuring with `cmake -G Ninja` first if that directory hasn't been configured yet). Skips the actual ninja invocation if nothing under `include/`, `src/`, `examples/server/`, or these `.patch` files has changed since the last successful build (tracked via a stamp file, `build-gcc/.phoenix_llama_server_build_stamp`). |
 
 ## How to apply and build

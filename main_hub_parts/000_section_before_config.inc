@@ -89,6 +89,8 @@
 #include "../graph_diffusion_summarizer.hpp"
 #include "../hierarchical_memory.hpp"
 #include "../model_deployment.hpp"
+#include "../mission_workspace.hpp"
+#include "../context_window_pack.hpp"
 
 #ifndef AI_OUTSIDES_LINK_MODE
 #define AI_OUTSIDES_LINK_MODE "headers-only"

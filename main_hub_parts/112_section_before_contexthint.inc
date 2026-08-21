@@ -341,6 +341,7 @@
   json chatWithLlamaCpp(const std::string &text,
                         const std::string &graphContext, int maxTokens,
                         const json &inferenceOptions = json::object()) {
+    std::lock_guard<std::mutex> llmLock(llamaCallMu_);
     bool voterEnabled = false;
     int numPasses = 5;
     double maskRate = 0.05;

@@ -37,6 +37,8 @@ nlohmann::json Mission::toJson() const {
           {"maxPain", maxPain},
           {"pressureMode", pressureMode},
           {"pressureHorizonSec", pressureHorizonSec},
+          {"pressureTauSec", pressureTauSec},
+          {"pressureExpr", pressureExpr},
           {"deliverable", deliverable},
           {"state", static_cast<int>(state)},
           {"startMs", startMs},
@@ -53,10 +55,19 @@ Mission Mission::fromJson(const nlohmann::json &j) {
   if (j.contains("maxPain") && j["maxPain"].is_number()) m.maxPain = j["maxPain"].get<float>();
   if (j.contains("pressureMode") && j["pressureMode"].is_string()) {
     const std::string mode = j["pressureMode"].get<std::string>();
-    m.pressureMode = (mode == "linear") ? "linear" : "logarithmic";
+    if (mode == "linear" || mode == "logarithmic" || mode == "expression" ||
+        mode == "asymptotic") {
+      m.pressureMode = mode;
+    } else {
+      m.pressureMode = "asymptotic";
+    }
   }
   if (j.contains("pressureHorizonSec") && j["pressureHorizonSec"].is_number())
     m.pressureHorizonSec = j["pressureHorizonSec"].get<double>();
+  if (j.contains("pressureTauSec") && j["pressureTauSec"].is_number())
+    m.pressureTauSec = j["pressureTauSec"].get<double>();
+  if (j.contains("pressureExpr") && j["pressureExpr"].is_string())
+    m.pressureExpr = j["pressureExpr"].get<std::string>();
   if (j.contains("deliverable") && j["deliverable"].is_string())
     m.deliverable = j["deliverable"].get<std::string>();
   if (j.contains("state") && j["state"].is_number_integer()) {
@@ -113,6 +124,9 @@ nlohmann::json MissionChild::toJson() const {
   return {{"id", id},
           {"genome", genome.toJson()},
           {"goal", goal},
+          {"subgoal", subgoal},
+          {"parentId", parentId},
+          {"depth", depth},
           {"bornMs", bornMs},
           {"generation", generation}};
 }
@@ -157,7 +171,7 @@ void MissionLifecycle::appendDeliverable(const std::string &text) {
   if (text.empty()) return;
   std::lock_guard<std::mutex> lock(mu_);
   if (mission_.state != MissionState::Running) return;
-  constexpr size_t kMaxDeliverableBytes = 64u * 1024u;
+  constexpr size_t kMaxDeliverableBytes = 4u * 1024u * 1024u; /* 4 MiB: long tutorials */
   mission_.deliverable += text;
   if (mission_.deliverable.size() > kMaxDeliverableBytes)
     mission_.deliverable = mission_.deliverable.substr(
@@ -193,23 +207,67 @@ MissionGenome MissionLifecycle::spawnChild(const MissionGenome &parent,
   return parent.mutate(mutationRate, rng_);
 }
 
-MissionGenome MissionLifecycle::replicate(float mutationRate) {
+MissionChild MissionLifecycle::recordChild(const MissionGenome &parent,
+                                             float mutationRate,
+                                             const std::string &subgoal,
+                                             const std::string &parentId) {
   std::lock_guard<std::mutex> lock(mu_);
   if (children_.size() >= maxReplicas_) {
     throw std::runtime_error("maxReplicas reached (" +
                              std::to_string(maxReplicas_) +
                              "); replication is bounded");
   }
-  const MissionGenome child = genome_.mutate(mutationRate, rng_);
+  /* task-tree depth: parentId empty = spawned by the root mission;
+     otherwise depth = parent depth + 1.  0 = unlimited (user-decided). */
+  int depth = 0;
+  if (!parentId.empty()) {
+    for (const auto &box : children_) {
+      if (box.id == parentId) {
+        depth = box.depth + 1;
+        break;
+      }
+    }
+    if (maxReplicaDepth_ > 0 && depth > static_cast<int>(maxReplicaDepth_)) {
+      throw std::runtime_error("maxReplicaDepth reached (" +
+                               std::to_string(maxReplicaDepth_) +
+                               "); recursion is capped by config");
+    }
+  }
+  const MissionGenome child = parent.mutate(mutationRate, rng_);
   ++spawnCount_;
   MissionChild rec;
   rec.id = "child-" + std::to_string(generation_) + "-" + std::to_string(children_.size());
   rec.genome = child;
-  rec.goal = mission_.goal;
+  rec.subgoal = subgoal;
+  rec.parentId = parentId;
+  rec.depth = depth;
+  /* bounded helper semantics: an empty request - or one that just echoes the
+     whole parent goal - becomes "assist with: <parent goal>".  The parent
+     can never completely delegate its own work to a box. */
+  const auto trim = [](const std::string &s) -> std::string {
+    const auto b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return std::string();
+    const auto e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+  };
+  const std::string req = trim(subgoal);
+  if (req.empty() || req == trim(mission_.goal))
+    rec.goal = "assist with: " + mission_.goal;
+  else
+    rec.goal = req;
   rec.bornMs = sysNowMs();
   rec.generation = static_cast<int>(generation_);
   children_.push_back(rec);
-  return child;
+  return rec;
+}
+
+MissionGenome MissionLifecycle::replicate(float mutationRate) {
+  return replicate(mutationRate, std::string());
+}
+
+MissionGenome MissionLifecycle::replicate(float mutationRate,
+                                           const std::string &subgoal) {
+  return recordChild(genome_, mutationRate, subgoal).genome;
 }
 
 size_t MissionLifecycle::maxReplicas() const {
@@ -220,6 +278,16 @@ size_t MissionLifecycle::maxReplicas() const {
 void MissionLifecycle::setMaxReplicas(size_t n) {
   std::lock_guard<std::mutex> lock(mu_);
   maxReplicas_ = n;
+}
+
+size_t MissionLifecycle::maxReplicaDepth() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return maxReplicaDepth_;
+}
+
+void MissionLifecycle::setMaxReplicaDepth(size_t n) {
+  std::lock_guard<std::mutex> lock(mu_);
+  maxReplicaDepth_ = n;
 }
 
 std::vector<MissionChild> MissionLifecycle::children() const {
