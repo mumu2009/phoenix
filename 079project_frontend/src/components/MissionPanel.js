@@ -62,11 +62,16 @@ export default function MissionPanel({ onError }) {
   const [goal, setGoal] = useState('');
   const [deadlineSec, setDeadlineSec] = useState('300');
   const [painGainPerSec, setPainGainPerSec] = useState('0.01');
-  const [pressureMode, setPressureMode] = useState('logarithmic');
+  const [pressureMode, setPressureMode] = useState('asymptotic');
   const [pressureHorizonSec, setPressureHorizonSec] = useState('');
+  const [pressureTauSec, setPressureTauSec] = useState('');
+  const [pressureExpr, setPressureExpr] = useState('');
   const [maxPain, setMaxPain] = useState('1.0');
   const [mutationRate, setMutationRate] = useState('0.05');
   const [maxReplicas, setMaxReplicas] = useState('4');
+  const [ctxSize, setCtxSize] = useState('4096');
+  const [contextPack, setContextPack] = useState('full_and_summary');
+  const [includeGnnSummary, setIncludeGnnSummary] = useState(false);
   const [assignBusy, setAssignBusy] = useState(false);
   const [assignedMission, setAssignedMission] = useState(null);
 
@@ -145,11 +150,22 @@ export default function MissionPanel({ onError }) {
       const d = asNum(deadlineSec); if (d !== undefined) payload.deadlineSec = d;
       const p = asNum(painGainPerSec); if (p !== undefined) payload.painGainPerSec = p;
       const mp = asNum(maxPain); if (mp !== undefined) payload.maxPain = mp;
-      const mode = String(pressureMode || 'logarithmic').trim();
-      payload.pressureMode = mode === 'linear' ? 'linear' : 'logarithmic';
+      const mode = String(pressureMode || 'asymptotic').trim();
+      if (mode === 'linear' || mode === 'logarithmic' || mode === 'expression' || mode === 'asymptotic') {
+        payload.pressureMode = mode;
+      } else {
+        payload.pressureMode = 'asymptotic';
+      }
       const ph = asNum(pressureHorizonSec); if (ph !== undefined) payload.pressureHorizonSec = ph;
+      const pt = asNum(pressureTauSec); if (pt !== undefined) payload.pressureTauSec = pt;
+      const pe = String(pressureExpr || '').trim(); if (pe) payload.pressureExpr = pe;
       const mr = asNum(mutationRate); if (mr !== undefined) payload.mutationRate = mr;
       const mx = asNum(maxReplicas); if (mx !== undefined) payload.maxReplicas = mx;
+      const ctx = asNum(ctxSize);
+      if (ctx === 4096 || ctx === 16384) payload.ctxSize = ctx;
+      else payload.ctxSize = 4096;
+      payload.contextPack = (contextPack === 'summary') ? 'summary' : 'full_and_summary';
+      payload.includeGnnSummary = !!includeGnnSummary;
       const r = await api.missionAssign(payload);
       setAssignedMission(r?.result?.mission || r?.result || null);
       await refreshStatuses();
@@ -273,13 +289,39 @@ export default function MissionPanel({ onError }) {
               <input aria-label="deadlineSec" className="input" value={deadlineSec} onChange={(e) => setDeadlineSec(e.target.value)} placeholder="deadlineSec 300" />
               <input aria-label="painGainPerSec" className="input" value={painGainPerSec} onChange={(e) => setPainGainPerSec(e.target.value)} placeholder="painGainPerSec 0.01 (linear)" />
               <select aria-label="pressureMode" className="input" value={pressureMode} onChange={(e) => setPressureMode(e.target.value)} title="压力增长模式">
-                <option value="logarithmic">压力: 对数增长 (默认)</option>
+                <option value="asymptotic">压力: 渐近 tanh (默认, 永不到顶)</option>
+                <option value="logarithmic">压力: 对数增长</option>
                 <option value="linear">压力: 线性增长</option>
+                <option value="expression">压力: 自定义表达式</option>
               </select>
               <input aria-label="pressureHorizonSec" className="input" value={pressureHorizonSec} onChange={(e) => setPressureHorizonSec(e.target.value)} placeholder="pressureHorizonSec 3600 (对数)" />
+              <input aria-label="pressureTauSec" className="input" value={pressureTauSec} onChange={(e) => setPressureTauSec(e.target.value)} placeholder="pressureTauSec 1800 (渐近)" />
+              <input aria-label="pressureExpr" className="input" value={pressureExpr} onChange={(e) => setPressureExpr(e.target.value)} placeholder="pressureExpr Pmax*tanh(t/tau)" />
               <input aria-label="maxPain" className="input" value={maxPain} onChange={(e) => setMaxPain(e.target.value)} placeholder="maxPain 1.0" />
               <input aria-label="mutationRate" className="input" value={mutationRate} onChange={(e) => setMutationRate(e.target.value)} placeholder="mutationRate 0.05" />
               <input aria-label="maxReplicas" className="input" value={maxReplicas} onChange={(e) => setMaxReplicas(e.target.value)} placeholder="maxReplicas 4" />
+            </div>
+          </FieldRow>
+
+          <FieldRow label="上下文打包" hint="滑动窗口：摘要固定占预算，近期全文滑动；整体卡在所选 ctx 内">
+            <div className="cfg-inline">
+              <select aria-label="ctxSize" className="input" value={ctxSize} onChange={(e) => setCtxSize(e.target.value)} title="llama ctx">
+                <option value="4096">ctx ≈ 4k（推荐 RDK）</option>
+                <option value="16384">ctx ≈ 16k（更慢/更吃内存）</option>
+              </select>
+              <select aria-label="contextPack" className="input" value={contextPack} onChange={(e) => setContextPack(e.target.value)} title="传摘要还是全文+摘要">
+                <option value="full_and_summary">完整近期 + 摘要（全局视野）</option>
+                <option value="summary">主要传摘要 + 短近期窗</option>
+              </select>
+              <label className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  aria-label="includeGnnSummary"
+                  type="checkbox"
+                  checked={includeGnnSummary}
+                  onChange={(e) => setIncludeGnnSummary(e.target.checked)}
+                />
+                同时传 GNN 图摘要（钉在窗口前部）
+              </label>
             </div>
           </FieldRow>
 
@@ -320,19 +362,21 @@ export default function MissionPanel({ onError }) {
           <div className="card-subtitle">deliverable（交付物，模型实际产出）</div>
           <pre className="deliverable-box">{display(mission.deliverable) === '-' ? '（尚无产出：自主循环启动后，模型每 tick 写一段交付物）' : mission.deliverable}</pre>
 
-          <div className="card-subtitle">children</div>
+          <div className="card-subtitle">children（帮手盒子，父代可同时召唤多个）</div>
           {children.length ? (
             <div className="world-list">
               {children.map((c) => (
                 <div key={c.id || c.bornMs} className="world-list-item">
                   <strong>{display(c.id)}</strong>
-                  <span>世代 {display(c.generation)} · {display(c.goal)}</span>
+                  <span>depth {display(c.depth)} · gen {display(c.generation)}</span>
+                  <span>goal {display(c.goal)}</span>
+                  {c.parentId ? <span>parent {display(c.parentId)}</span> : <span>parent root</span>}
                   <span>born {c.bornMs ? new Date(c.bornMs).toLocaleString() : '-'}</span>
                 </div>
               ))}
             </div>
           ) : (
-            <div className="muted">暂无 children</div>
+            <div className="muted">暂无 children（父代可通过 replicate 召唤多个帮手盒子）</div>
           )}
 
           <div className="card-subtitle">agiGoals（最近 5 条）</div>

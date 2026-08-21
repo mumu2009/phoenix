@@ -4242,6 +4242,37 @@
         },
         {drogon::Post});
 
+    /* v8.0 mission file-IO channel: the agent (and the console) get a
+       sandboxed workspace.  Iterative refinement protocol: the worker can
+       draft a minimal version, read it back and rewrite/expand it instead of
+       appending forever (the old append-only loop degenerated into
+       repetitions).  Sandboxed by mission_workspace.hpp. */
+    drogon::app().registerHandler(
+        "/api/mission/file",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          bool ok = true;
+          json payload = parseRequestBody(req, ok);
+          if (!ok)
+            return badRequest(cb, "invalid json");
+          const std::string workspaceRoot = phoenix::cfgOr<std::string>(
+              "mission.workspaceDir", "./runtime_store/mission_workspace");
+          std::string missionId;
+          try {
+            auto ms = cognitionManager_.missionStatus();
+            const auto &m = ms.value("result", nlohmann::json::object())
+                                 .value("stats", nlohmann::json::object())
+                                 .value("mission", nlohmann::json::object());
+            missionId = m.value("id", std::string());
+          } catch (...) {
+          }
+          respondJson(cb, phoenix::mission::workspaceExecute(
+                               workspaceRoot, missionId, payload));
+        },
+        {drogon::Post, drogon::Get});
+
     drogon::app().registerHandler(
         "/api/perf/profile",
         [this](const drogon::HttpRequestPtr &req,

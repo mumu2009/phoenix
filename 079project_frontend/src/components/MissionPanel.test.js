@@ -65,8 +65,27 @@ test('assign submits the lifecycle payload with advanced params', async () => {
   expect(payload.maxPain).toBe(1.0);
   expect(payload.mutationRate).toBe(0.05);
   expect(payload.maxReplicas).toBe(8);
+  expect(payload.ctxSize).toBe(4096);
+  expect(payload.contextPack).toBe('full_and_summary');
+  expect(payload.includeGnnSummary).toBe(false);
 
   expect(await screen.findByText('m2')).toBeInTheDocument();
+});
+
+test('context pack controls are submitted on assign', async () => {
+  render(<MissionPanel onError={jest.fn()} />);
+
+  fireEvent.change(screen.getByLabelText('目标'), { target: { value: '摘要模式任务' } });
+  fireEvent.change(screen.getByLabelText('ctxSize'), { target: { value: '16384' } });
+  fireEvent.change(screen.getByLabelText('contextPack'), { target: { value: 'summary' } });
+  fireEvent.click(screen.getByLabelText('includeGnnSummary'));
+  fireEvent.click(screen.getByRole('button', { name: '设立任务' }));
+
+  await waitFor(() => expect(api.missionAssign).toHaveBeenCalled());
+  const payload = api.missionAssign.mock.calls[0][0];
+  expect(payload.ctxSize).toBe(16384);
+  expect(payload.contextPack).toBe('summary');
+  expect(payload.includeGnnSummary).toBe(true);
 });
 
 test('polls mission/autonomy/estop and loop status on mount', async () => {

@@ -30,8 +30,8 @@
   },
   "llama_server": {
     "threads": 6,
-    "parallel": 1,
-    "ctx_size": 2048
+    "parallel": 2,
+    "ctx_size": 4096
   },
   "memebarrier": {
     "scanIntervalMs": 10000,
