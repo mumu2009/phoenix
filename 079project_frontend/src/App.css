@@ -918,7 +918,7 @@
 }
 
 .deliverable-box {
-  max-height: 260px;
+  max-height: min(70vh, 720px);
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;

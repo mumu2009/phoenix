@@ -19,7 +19,8 @@
 
 ```json
 "spark": {
-  "scopes": ["none"],      // v8.0 默认：整体禁用（质量优先、可选模块默认关闭）
+  "scopes": ["all"],       // v8.3 默认：同时作用于 gnn 与整个项目（主体交流模式）
+  // v8.0 曾是 ["none"]：chat 域的 RF 注解垃圾污染 graphContext；v8.3 交流模式重写 annotation 后已默认全开
   // "scopes": [],                       // 遗留行为（沿用各功能自己的开关，向后兼容逃生口）
   // "scopes": ["chat", "consensus"],   // 多选：并列生效
   // "scopes": ["chat"],                // 单选
@@ -55,7 +56,28 @@
 - **全部四个域已接入门**（chat/consensus/evaluate + layers 视图）；`voter`（llamaVoter）非 SparkArray 本体、保持既有开关。
 - dispatchBig 与 llamaVoter 的完整调用点盘点 = 阶段 2 的第一步（116_section_tail.inc 中 `spark_` 的其余消费点）。
 
-## 6. 参考文献
+## 6. v8.3 主体交流模式（exchange）+ 综合输出
+
+**背景**：v8.0 的 SparkArray 是"独立投票"——每个 controller 独立应答，`aggregateResults`
+只做 token 投票（删词）并返回空 `reply`，annotation（`gnn_transformer_rf_stage3|rf=...`）
+污染了 graphContext。
+
+**v8.3 改造**（`095_class_sparkarray.inc`）：
+
+1. **交流轮**（`exchangeRounds`，默认 2；设为 1 恢复旧行为）：第 1 轮各主体独立应答后，
+   把亲和度最高的 3 个回复合成"黑板"（≤1200 字符）分享给**全部**主体，每个主体带着
+   黑板再综合应答一次——低层主体（gnn 控制器层）之间、以及与主推理模块候选
+   （`sparkTransformerCandidates`）之间有了真正的信息交流；
+2. **综合输出**：`aggregate.reply` 不再为空——取交流轮中亲和度最高的综合回复；
+   chat 管线把它作为 `sparkReply` 注入 `graphContext`（综合文本先于 annotation）；
+3. **干净的 annotation**：`spark-exchange|rounds=N|agents=M|conf=...|chosen=...|top:...`
+   （人类可读，不再是无意义 token 串）。
+
+**配置**：`spark.scopes` 默认 `["all"]`（同时作用于 gnn 与整个项目）；
+`spark.gnnScheduler.exchangeRounds`（默认 2）。成本：每 chat 请求的 controller 调用数
+×2（7 控制器 → 14 次），RDK 实测由测试者记录；如延迟超标可设 `exchangeRounds=1` 回退。
+
+## 7. 参考文献
 
 - Krogh, A., & Vedelsby, J. (1995). Neural network ensembles, cross validation, and active learning. *NIPS*.
 - Breiman, L. (2001). Random forests. *Machine Learning*.（投票/集成的模型无关性）

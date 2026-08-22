@@ -321,13 +321,19 @@
   json callLlamaCppBackend(const std::string &text,
                            const std::string &graphContext, int maxTokens,
                            const json &inferenceOptions) {
+    int timeoutMs = config_.llamaCppRequestTimeoutMs;
+    if (inferenceOptions.is_object() &&
+        inferenceOptions.contains("timeoutMs") &&
+        inferenceOptions["timeoutMs"].is_number_integer()) {
+      timeoutMs = std::max(1000, inferenceOptions["timeoutMs"].get<int>());
+    }
     json r = useLlamaSplitBackend()
                  ? phoenix::v7::llamaSplitChat(
-                       config_.llamaCppBaseUrl, config_.llamaCppRequestTimeoutMs,
+                       config_.llamaCppBaseUrl, timeoutMs,
                        config_.llamaCppModel, text, graphContext, maxTokens,
                        inferenceOptions)
                  : phoenix::v7::llamaTextOnlyChat(
-                       config_.llamaCppBaseUrl, config_.llamaCppRequestTimeoutMs,
+                       config_.llamaCppBaseUrl, timeoutMs,
                        config_.llamaCppModel, text, graphContext, maxTokens,
                        inferenceOptions);
     if (config_.httpLog)

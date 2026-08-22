@@ -128,7 +128,8 @@ nlohmann::json MissionChild::toJson() const {
           {"parentId", parentId},
           {"depth", depth},
           {"bornMs", bornMs},
-          {"generation", generation}};
+          {"generation", generation},
+          {"done", done}};
 }
 
 MissionLifecycle::MissionLifecycle()
@@ -295,6 +296,17 @@ std::vector<MissionChild> MissionLifecycle::children() const {
   return children_;
 }
 
+bool MissionLifecycle::markChildDone(const std::string &childId) {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (auto &box : children_) {
+    if (box.id == childId) {
+      box.done = true;
+      return true;
+    }
+  }
+  return false;
+}
+
 nlohmann::json MissionLifecycle::statsLocked() const {
   /* completionTimeMs is the SELECTION signal for the human supervisor: the
      model exists to serve human needs, so the decision to spawn a mutated
@@ -349,6 +361,10 @@ void MissionLifecycle::fromJson(const nlohmann::json &j) {
       rec.id = ch.value("id", std::string());
       if (ch.contains("genome")) rec.genome = MissionGenome::fromJson(ch["genome"]);
       rec.goal = ch.value("goal", std::string());
+      rec.subgoal = ch.value("subgoal", std::string());
+      rec.parentId = ch.value("parentId", std::string());
+      rec.depth = ch.value("depth", 0);
+      rec.done = ch.value("done", false);
       rec.bornMs = ch.value("bornMs", 0ull);
       rec.generation = ch.value("generation", 0);
       if (!rec.id.empty()) children_.push_back(std::move(rec));

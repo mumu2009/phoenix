@@ -230,7 +230,9 @@ TEST(MissionLifecycleTest, ReplicateMutatesAndRecords) {
     EXPECT_NEAR(child.learningRate, 0.05f, 0.5f); /* mutated but bounded */
     auto children = lc.children();
     ASSERT_EQ(children.size(), 1u);
-    EXPECT_EQ(children[0].goal, "must complete"); /* goal inherited */
+    /* Empty/identical subgoal is rewritten so a box cannot inherit the
+       parent's whole goal verbatim (mission_lifecycle::recordChild). */
+    EXPECT_EQ(children[0].goal, "assist with: must complete");
     EXPECT_EQ(children[0].id, "child-1-0");
     auto st = lc.stats();
     EXPECT_EQ(st["spawns"].get<size_t>(), 1u);
@@ -704,9 +706,10 @@ TEST_F(AutonomyMissionTest, ReplicateRespectsMaxReplicas) {
     mgr_->assignMission(json{{"enabled", true},
                              {"goal", "bounded replication"},
                              {"maxReplicas", 1}});
-    nlohmann::json ctx;
+    /* Must be an object: bare json{} is null and used to throw in replicate. */
+    nlohmann::json ctx = nlohmann::json::object();
     auto first = mgr_->executeAgiActionByName("replicate", ctx);
-    EXPECT_TRUE(first.value("ok", false));
+    EXPECT_TRUE(first.value("ok", false)) << first.dump();
     auto second = mgr_->executeAgiActionByName("replicate", ctx);
     EXPECT_FALSE(second.value("ok", true)) << "maxReplicas is the only guardrail";
     EXPECT_NE(second.value("error", std::string()).find("maxReplicas"), std::string::npos);
@@ -716,13 +719,17 @@ TEST_F(AutonomyMissionTest, ReportOutcomeFalseKeepsMissionFailed) {
     mgr_->assignMission(json{{"enabled", true},
                              {"goal", "no hand-off semantics"},
                              {"maxReplicas", 2}});
-    mgr_->executeAgiActionByName("replicate", json{});
+    auto repl = mgr_->executeAgiActionByName("replicate", json::object());
+    ASSERT_TRUE(repl.value("ok", false)) << repl.dump();
     auto r = mgr_->reportMissionOutcome(json{{"goalAchieved", false}});
-    EXPECT_TRUE(r.value("ok", false));
-    /* no takeover: before completion pressure only grows, the instance keeps
-       going; judgement is the caller's.  Children stay for observability. */
-    EXPECT_EQ(r["result"]["mission"].value("state", 0), 3); /* Failed */
-    EXPECT_EQ(r["result"]["children"].size(), 1u);
+    EXPECT_TRUE(r.value("ok", false)) << r.dump();
+    /* Prefer missionStatus() — reportMissionOutcome returns stats() directly
+       under result, while missionStatus nests stats one level deeper. */
+    auto st = mgr_->missionStatus();
+    ASSERT_TRUE(st["result"]["stats"].is_object()) << st.dump();
+    ASSERT_TRUE(st["result"]["stats"]["mission"].is_object());
+    EXPECT_EQ(st["result"]["stats"]["mission"].value("state", 0), 3); /* Failed */
+    EXPECT_EQ(st["result"]["stats"]["children"].size(), 1u);
 }
 
 TEST_F(AutonomyMissionTest, CompleteMissionStopsPainInjection) {
@@ -859,8 +866,10 @@ TEST_F(AutonomyMissionTest, SpawnMissionChildProducesValidGenome) {
   auto child = mgr_->spawnMissionChild(json{});
   EXPECT_TRUE(child.value("ok", false));
   ASSERT_TRUE(child["result"].is_object());
-  EXPECT_TRUE(child["result"].contains("profile"));
-  float childLR = child["result"].value("learningRate", -1.0f);
+  /* spawnMissionChild returns MissionChild JSON: genome is nested. */
+  ASSERT_TRUE(child["result"].contains("genome")) << child.dump();
+  EXPECT_TRUE(child["result"]["genome"].contains("profile"));
+  float childLR = child["result"]["genome"].value("learningRate", -1.0f);
   EXPECT_GE(childLR, 0.001f);
   EXPECT_LE(childLR, 0.5f);
   EXPECT_NEAR(childLR, parentLR, 0.05f) << "child learningRate should stay near parent";
@@ -903,3 +912,57 @@ TEST_F(AutonomyMissionTest, ReEnableMissionResumesPressureAndPain) {
   ASSERT_FALSE(pain.empty());
   EXPECT_EQ(pain.value("source", std::string()), "mission-pressure");
 }
+
+TEST_F(AutonomyMissionTest, MarkChildDoneSkipsCompletedBoxes) {
+  mgr_->assignMission(json{{"enabled", true},
+                           {"goal", "parent-goal"},
+                           {"maxReplicas", 4}});
+  auto a = mgr_->spawnMissionChild(json{{"subgoal", "A"}});
+  auto b = mgr_->spawnMissionChild(json{{"subgoal", "B"}});
+  ASSERT_TRUE(a.value("ok", false));
+  ASSERT_TRUE(b.value("ok", false));
+  const std::string idA = a["result"].value("id", std::string());
+  ASSERT_FALSE(idA.empty());
+  auto marked = mgr_->markMissionChildDone(json{{"childId", idA}});
+  EXPECT_TRUE(marked.value("ok", false));
+  auto st = mgr_->missionStatus();
+  const auto &children = st["result"]["stats"]["children"];
+  ASSERT_TRUE(children.is_array());
+  int doneCount = 0;
+  for (const auto &c : children) {
+    if (c.value("done", false)) ++doneCount;
+  }
+  EXPECT_EQ(doneCount, 1);
+}
+
+#include "mission_workspace.hpp"
+#include <filesystem>
+#include <fstream>
+
+TEST(MissionWorkspaceTest, AppendBeyondOld256KiBCapSucceeds) {
+  namespace fs = std::filesystem;
+  const fs::path root = fs::temp_directory_path() / "phx_ws_cap_test";
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  fs::create_directories(root / "mission-cap", ec);
+
+  const std::string chunk(100 * 1024, 'x'); /* 100 KiB */
+  nlohmann::json last;
+  for (int i = 0; i < 4; ++i) { /* 400 KiB total > old 256 KiB cap */
+    last = phoenix::mission::workspaceExecute(
+        root.string(), "mission-cap",
+        nlohmann::json{{"action", "append"},
+                       {"path", "deliverable.md"},
+                       {"content", chunk}});
+    ASSERT_TRUE(last.value("ok", false)) << last.dump();
+  }
+  EXPECT_GE(last.value("bytes", 0), 400 * 1024 - 16);
+
+  auto read = phoenix::mission::workspaceExecute(
+      root.string(), "mission-cap",
+      nlohmann::json{{"action", "read"}, {"path", "deliverable.md"}});
+  ASSERT_TRUE(read.value("ok", false)) << read.dump();
+  EXPECT_GE(read.value("bytes", 0), 400 * 1024 - 16);
+  fs::remove_all(root, ec);
+}
+

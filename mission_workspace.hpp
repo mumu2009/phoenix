@@ -59,7 +59,10 @@ inline std::string sanitizeScope(const std::string &scope) {
 inline nlohmann::json workspaceExecute(const std::string &workspaceRoot,
                                        const std::string &missionId,
                                        const nlohmann::json &payload) {
-    constexpr size_t kMaxFileBytes = 256u * 1024u;
+    /* Align with MissionLifecycle in-memory deliverable cap (4 MiB).  The old
+       256 KiB cap silently blocked append once tutorials grew, so the UI
+       memory view and deliverable.md diverged / looked "truncated". */
+    constexpr size_t kMaxFileBytes = 4u * 1024u * 1024u;
     const std::string action = payload.value("action", std::string());
     const std::string rel = payload.value("path", std::string());
 
@@ -93,11 +96,17 @@ inline nlohmann::json workspaceExecute(const std::string &workspaceRoot,
         if (!in) return nlohmann::json{{"ok", false}, {"error", "cannot read: " + p.string()}};
         std::ostringstream ss;
         ss << in.rdbuf();
-        const std::string body = ss.str();
+        std::string body = ss.str();
+        bool truncated = false;
         if (body.size() > kMaxFileBytes) {
-            return nlohmann::json{{"ok", false}, {"error", "file exceeds size cap"}};
+            /* Keep the sliding tail so the deliberator still sees recent work
+               instead of hard-failing the whole tick. */
+            body = body.substr(body.size() - kMaxFileBytes);
+            truncated = true;
         }
-        return nlohmann::json{{"ok", true}, {"bytes", body.size()}, {"content", body}};
+        nlohmann::json out = {{"ok", true}, {"bytes", body.size()}, {"content", body}};
+        if (truncated) out["truncated"] = true;
+        return out;
     };
 
     if (action == "list") {
@@ -135,16 +144,23 @@ inline nlohmann::json workspaceExecute(const std::string &workspaceRoot,
             if (!existing.value("ok", false) && fs::exists(target, ec)) {
                 return existing;
             }
-            const std::string merged = (existing.value("ok", false)
-                                            ? existing.value("content", std::string())
-                                            : std::string()) + content;
+            std::string merged = (existing.value("ok", false)
+                                      ? existing.value("content", std::string())
+                                      : std::string()) +
+                                 content;
+            bool trimmed = false;
             if (merged.size() > kMaxFileBytes) {
-                return nlohmann::json{{"ok", false}, {"error", "merged file exceeds size cap"}};
+                /* Prefer keeping the newest text (same policy as in-memory
+                   Mission::deliverable). */
+                merged = merged.substr(merged.size() - kMaxFileBytes);
+                trimmed = true;
             }
             std::ofstream out(target, std::ios::binary | std::ios::trunc);
             if (!out) return nlohmann::json{{"ok", false}, {"error", "cannot write: " + target.string()}};
             out << merged;
-            return nlohmann::json{{"ok", true}, {"bytes", merged.size()}};
+            nlohmann::json res = {{"ok", true}, {"bytes", merged.size()}};
+            if (trimmed) res["trimmedToCap"] = true;
+            return res;
         }
         std::ofstream out(target, std::ios::binary | std::ios::trunc);
         if (!out) return nlohmann::json{{"ok", false}, {"error", "cannot write: " + target.string()}};

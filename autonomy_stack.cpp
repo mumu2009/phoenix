@@ -774,11 +774,14 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
             return json{{"ok", false}, {"error", "no active mission to replicate for"}};
         }
         try {
-            const std::string subgoal = context.value("userPrompt", std::string());
+            /* json{} default-constructs to null; null.value() throws
+               type_error.306 — treat non-objects as empty objects. */
+            const json ctx = context.is_object() ? context : json::object();
+            const std::string subgoal = ctx.value("userPrompt", std::string());
             /* parentId lets a HELPER BOX summon its own boxes (task tree);
                empty = spawned by the root mission.  Depth is capped only if
                the user configured mission.maxReplicaDepth > 0. */
-            const std::string parentId = context.value("parentId", std::string());
+            const std::string parentId = ctx.value("parentId", std::string());
             const auto childRec = mission_.recordChild(missionGenome_,
                                                        missionMutationRate_, subgoal, parentId);
             const phoenix::mission::Mission snap = mission_.mission();
@@ -2045,6 +2048,17 @@ json CognitionAutonomyManager::spawnMissionChild(const json &payload) {
     return json{{"ok", true}, {"result", child.toJson()}};
 }
 
+json CognitionAutonomyManager::markMissionChildDone(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const json &p = payload.is_null() ? json::object() : payload;
+    const std::string childId = p.value("childId", std::string());
+    if (childId.empty())
+        return json{{"ok", false}, {"error", "childId required"}};
+    if (!mission_.markChildDone(childId))
+        return json{{"ok", false}, {"error", "unknown child: " + childId}};
+    return json{{"ok", true}, {"result", mission_.stats()}};
+}
+
 json CognitionAutonomyManager::configureMcp(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
     const json &p = payload.is_null() ? json::object() : payload;
@@ -2300,8 +2314,15 @@ void CognitionAutonomyManager::loopRun() {
                 /* helper boxes (children): ALL active boxes work each tick
                    (sequential LLM calls under llamaCallMu_; --parallel may be
                    >1 so a cancelled peer is less likely). Cap with
-                   loopMaxChildrenPerTick_ (0 = no cap = all children). */
+                   loopMaxChildrenPerTick_ (0 = no cap = all children).
+                   v8.3: boxes that declared their sub-task done (self-verdict)
+                   are skipped - the parent merges their files and judges. */
                 if (running && !helpers.empty()) {
+                    helpers.erase(std::remove_if(helpers.begin(), helpers.end(),
+                                                 [](const phoenix::mission::MissionChild &b) {
+                                                     return b.done;
+                                                 }),
+                                  helpers.end());
                     size_t budget = helpers.size();
                     if (loopMaxChildrenPerTick_ > 0)
                         budget = std::min(budget, loopMaxChildrenPerTick_);

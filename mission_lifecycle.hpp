@@ -161,6 +161,9 @@ struct MissionChild {
   int depth{0};          /*!< task-tree depth: 0 = direct child of the root mission */
   uint64_t bornMs{0};
   int generation{0};
+  /* v8.3 self-verdict: the box itself declared its sub-task done (the parent
+     still merges/verifies; a done box is skipped by the loop). */
+  bool done{false};
   nlohmann::json toJson() const;
 };
 
@@ -201,6 +204,9 @@ class MissionLifecycle {
   size_t maxReplicas() const;
   void setMaxReplicas(size_t n);
   std::vector<MissionChild> children() const; /*!< successors (observability) */
+  /* v8.3: the box declared its sub-task complete (self-verdict).  Returns
+     false when the id is unknown. */
+  bool markChildDone(const std::string &childId);
 
   void markComplete();
   void markFailed();

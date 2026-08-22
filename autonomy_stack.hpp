@@ -165,6 +165,9 @@ public:
     json missionStatus() const;                  /* Current mission + pressure. */
     json reportMissionOutcome(const json &payload); /* {goalAchieved:bool} ends pain. */
     json spawnMissionChild(const json &payload); /* Mutated child genome (heredity). */
+    /* v8.3 self-verdict: a helper box declared its sub-task done; the loop
+       stops rotating it (its workspace stays readable for the parent). */
+    json markMissionChildDone(const json &payload); /* {childId} */
 
     /* v8.0 mission worker: the gateway registers an LLM-backed deliberator.
        While a mission is Running the heartbeat calls it OUTSIDE the manager
@@ -268,8 +271,8 @@ private:
     void unregisterFromSafetyRegistry();
     phoenix::mission::MissionLifecycle mission_;
   MissionDeliberator missionDeliberator_;
-  int loopDeliberateMaxTokens_{256}; /* smaller chunks = higher success rate on RDK */
-  int loopChildDeliberateMaxTokens_{256}; /* helper boxes: same budget each */
+  int loopDeliberateMaxTokens_{128}; /* smaller chunks = higher success rate on RDK */
+  int loopChildDeliberateMaxTokens_{128}; /* helper boxes: same budget each */
   size_t loopMaxChildrenPerTick_{0}; /* 0 = run ALL helper boxes each tick */
   size_t childRoundRobin_{0};        /* rotates start index when budget < N */
   /* Context packing (sliding window + pinned summary / optional GNN). */

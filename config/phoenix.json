@@ -246,13 +246,15 @@
     }
   },
   "spark": {
-    "scopes": ["none"],
+    "scopes": ["all"],
+    "comment": "v8.3 default: spark applies to every domain (gnn + whole project); set [\"none\"] to disable, [] for legacy per-feature flags",
     "gnnScheduler": {
       "enabled": true,
       "minAffinity": 0.3,
       "maxLayers": 3,
       "perturbations": 2,
-      "useHistory": false
+      "useHistory": false,
+      "exchangeRounds": 2
     },
     "nmsThreshold": 0.45,
     "minBoxAreaRatio": 0.001,
@@ -402,13 +404,19 @@
     "pressureTauSec": 1800,
     "pressureExpr": "Pmax*tanh(t/tau)",
     "workspaceDir": "./runtime_store/mission_workspace",
+    "maxWorkspaceFileBytes": 4194304,
     "defaultDeadlineSec": 300,
     "mutationRate": 0.05,
     "maxReplicas": 4,
     "maxReplicaDepth": 0,
     "ctxSize": 4096,
     "contextPack": "full_and_summary",
-    "includeGnnSummary": false
+    "includeGnnSummary": false,
+    "minDeliverableChars": 1200,
+    "childMinDeliverableChars": 200,
+    "outlineEnabled": true,
+    "outlineSize": 12,
+    "llmTimeoutMs": 900000
   },
   "mcp": {
     "enabled": false,

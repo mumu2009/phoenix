@@ -1839,6 +1839,7 @@
               hint = harmonizeHintWithGnn(hint, gnnHint.align);
             }
             std::string sparkAnn;
+            std::string sparkReply; /* v8.3 synthesis text from the peer exchange */
             bool sparkGnnScheduler = false;
             try {
               sparkGnnScheduler = phoenix::cfgOr<bool>("spark.gnnScheduler.enabled", false);
@@ -1854,9 +1855,22 @@
                 json sparkOptions;
                 sparkOptions["perturbations"] = phoenix::cfgOr<int>("spark.gnnScheduler.perturbations", 2);
                 sparkOptions["multiLayer"] = phoenix::cfgOr<bool>("spark.gnnScheduler.useHistory", false);
+                /* v8.3 agent exchange: peers share views, then each agent
+                   synthesizes; the aggregate now carries a real reply. */
+                sparkOptions["exchangeRounds"] = phoenix::cfgOr<int>("spark.gnnScheduler.exchangeRounds", 2);
                 auto sparkResult = spark_->dispatch(sparkPayload, sparkOptions);
-                sparkAnn = sparkResult.value("aggregate", json::object()).value("annotation", "");
+                const auto sparkAgg = sparkResult.value("aggregate", json::object());
+                sparkAnn = sparkAgg.value("annotation", "");
+                sparkReply = sparkAgg.value("reply", "");
               } catch (...) {}
+            }
+            /* v8.3: the SYNTHESIS text (peer-exchange result) is injected
+               first, then the clean annotation record. */
+            if (!sparkReply.empty()) {
+              if (graphContext.empty())
+                graphContext = sparkReply;
+              else
+                graphContext = graphContext + "\n" + sparkReply;
             }
             if (!sparkAnn.empty()) {
               if (graphContext.empty())
@@ -2503,6 +2517,7 @@
               hint = harmonizeHintWithGnn(hint, gnnHint.align);
             }
             std::string sparkAnn;
+            std::string sparkReply; /* v8.3 synthesis text from the peer exchange */
             bool sparkGnnScheduler = false;
             try {
               sparkGnnScheduler = phoenix::cfgOr<bool>("spark.gnnScheduler.enabled", false);
@@ -2518,9 +2533,22 @@
                 json sparkOptions;
                 sparkOptions["perturbations"] = phoenix::cfgOr<int>("spark.gnnScheduler.perturbations", 2);
                 sparkOptions["multiLayer"] = phoenix::cfgOr<bool>("spark.gnnScheduler.useHistory", false);
+                /* v8.3 agent exchange: peers share views, then each agent
+                   synthesizes; the aggregate now carries a real reply. */
+                sparkOptions["exchangeRounds"] = phoenix::cfgOr<int>("spark.gnnScheduler.exchangeRounds", 2);
                 auto sparkResult = spark_->dispatch(sparkPayload, sparkOptions);
-                sparkAnn = sparkResult.value("aggregate", json::object()).value("annotation", "");
+                const auto sparkAgg = sparkResult.value("aggregate", json::object());
+                sparkAnn = sparkAgg.value("annotation", "");
+                sparkReply = sparkAgg.value("reply", "");
               } catch (...) {}
+            }
+            /* v8.3: the SYNTHESIS text (peer-exchange result) is injected
+               first, then the clean annotation record. */
+            if (!sparkReply.empty()) {
+              if (graphContext.empty())
+                graphContext = sparkReply;
+              else
+                graphContext = graphContext + "\n" + sparkReply;
             }
             if (!sparkAnn.empty()) {
               if (graphContext.empty())
@@ -6846,6 +6874,108 @@
                 drogon::k400BadRequest);
   }
 };
+
+/* v8.3: out-of-line so GatewayServer's constructor lambda can call a prior
+   declaration without a duplicate in-class definition (C++ forbids both). */
+inline std::string GatewayServer::buildMissionOutline(const std::string &goal) {
+  {
+    std::lock_guard<std::mutex> lock(outlineMu_);
+    auto it = missionOutlineCache_.find(goal);
+    if (it != missionOutlineCache_.end())
+      return it->second;
+  }
+  std::string outline;
+  try {
+    auto runtime = activeRuntime();
+    auto rtState =
+        runtime ? std::dynamic_pointer_cast<RuntimeState>(runtime) : nullptr;
+    if (rtState) {
+      nlohmann::json snap = rtState->graph().exportSnapshot();
+      struct OS {
+        std::string id;
+        double score;
+      };
+      std::vector<OS> scored;
+      std::unordered_map<std::string, std::vector<std::string>> nb;
+      if (snap.contains("nodes") && snap["nodes"].is_array()) {
+        for (auto &n : snap["nodes"]) {
+          std::string id = n.value("id", std::string());
+          if (id.empty())
+            continue;
+          double wsum = 0.0;
+          std::vector<std::string> nbs;
+          for (auto &e : n.value("neighbors", nlohmann::json::array())) {
+            wsum += e.value("weight", 0.0);
+            std::string to = e.value("to", std::string());
+            if (!to.empty())
+              nbs.push_back(to);
+          }
+          scored.push_back({id, wsum + 1.0 * (double)nbs.size()});
+          nb[id] = std::move(nbs);
+        }
+      }
+      std::sort(scored.begin(), scored.end(),
+                [](const OS &a, const OS &b) { return a.score > b.score; });
+      std::unordered_set<std::string> seen;
+      std::vector<std::string> ordered;
+      for (const auto &s : scored) {
+        if (seen.count(s.id))
+          continue;
+        std::vector<std::string> queue{s.id};
+        seen.insert(s.id);
+        size_t qi = 0;
+        while (qi < queue.size() && ordered.size() < 64) {
+          const std::string cur = queue[qi++];
+          ordered.push_back(cur);
+          auto it = nb.find(cur);
+          if (it == nb.end())
+            continue;
+          for (const auto &nx : it->second) {
+            if (!seen.count(nx)) {
+              seen.insert(nx);
+              queue.push_back(nx);
+            }
+          }
+        }
+      }
+      int outlineSize = phoenix::cfgOr<int>("mission.outlineSize", 12);
+      outlineSize = std::max(4, std::min(24, outlineSize));
+      std::ostringstream oss;
+      oss << "[OUTLINE - stable key-meme skeleton from long-term memory]\n";
+      int cnt = 0;
+      for (const auto &id : ordered) {
+        if (cnt >= outlineSize)
+          break;
+        auto ws = runtime->getMemeWords(id);
+        std::string kws;
+        int kc = 0;
+        for (auto &w : ws) {
+          if (w.empty())
+            continue;
+          if (kc++)
+            kws += ",";
+          kws += w;
+          if (kc >= 3)
+            break;
+        }
+        oss << (cnt + 1) << ". " << (kws.empty() ? id : kws)
+            << " (meme:" << id << ")\n";
+        ++cnt;
+      }
+      oss << "[OUTLINE END]";
+      outline = oss.str();
+      if (outline.size() > 2048)
+        outline.resize(2048);
+    }
+  } catch (...) {
+    outline.clear();
+  }
+  {
+    std::lock_guard<std::mutex> lock(outlineMu_);
+    missionOutlineCache_[goal] = outline;
+  }
+  return outline;
+}
 
 thread_local GatewayServer::AuthError GatewayServer::lastAuthError_{};
 thread_local bool GatewayServer::hasAuthError_ = false;
