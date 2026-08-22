@@ -1914,6 +1914,30 @@
               }
             }
 
+            /* v8.x cross-context memory: recall what any context (other
+               missions / past chat) already learned and inject it as part of
+               the long-term memory channel.  Per-context LIVE state is never
+               mixed - only deposited summaries cross the boundary. */
+            try {
+              const std::string ccmPath = phoenix::resolveConfig<std::string>(
+                  "crossContextMemory.path",
+                  std::string("./runtime_store/cross_context_memory.json"));
+              const auto ccms = phoenix::memory::ccmRecall(ccmPath, text, 3);
+              if (!ccms.empty()) {
+                std::string ccmBlock = "[cross-context memory]";
+                for (const auto &e : ccms) {
+                  std::string s = e.text;
+                  if (s.size() > 200) s = s.substr(0, 200);
+                  ccmBlock += "\n- [" + e.sourceTag + "] " + s;
+                }
+                if (graphContext.empty())
+                  graphContext = ccmBlock;
+                else
+                  graphContext = graphContext + "\n" + ccmBlock;
+              }
+            } catch (...) {
+            }
+
             // Preserve the original user message for the emotion system.
             std::string userText = text;
 
@@ -2235,6 +2259,22 @@
                   reply = routed.textForBackend;
               } catch (...) {
               }
+            }
+            /* v8.x cross-context memory: deposit this chat turn's summary
+               (user text + final reply, bounded) so other contexts recall
+               it.  Live session state stays local; only the deposit crosses. */
+            try {
+              const std::string ccmPath = phoenix::resolveConfig<std::string>(
+                  "crossContextMemory.path",
+                  std::string("./runtime_store/cross_context_memory.json"));
+              std::string deposit = userText;
+              if (deposit.size() > 120) deposit = deposit.substr(0, 120);
+              deposit += " => ";
+              deposit += reply.empty() ? "(no reply)" : reply;
+              if (deposit.size() > 400) deposit = deposit.substr(0, 400);
+              phoenix::memory::ccmRemember(
+                  ccmPath, "chat:" + sessionId, deposit);
+            } catch (...) {
             }
             json result = graphResult;
             result["graph"] = graphResult;
@@ -4270,6 +4310,50 @@
         },
         {drogon::Post});
 
+    /* v8.x C3 evolution lineage: full audit (GET) + human reset (POST). */
+    drogon::app().registerHandler(
+        "/api/mission/lineage",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          respondJson(cb, cognitionManager_.missionLineage());
+        },
+        {drogon::Get});
+
+    drogon::app().registerHandler(
+        "/api/mission/lineage/reset",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          respondJson(cb, cognitionManager_.resetMissionLineage());
+        },
+        {drogon::Post});
+
+    /* v8.x B3 GNN outline view: the stable key-meme skeleton a mission
+       would be given (transparency + debugging of the outline feature). */
+    drogon::app().registerHandler(
+        "/api/gnn/outline",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          const std::string goal = req->getParameter("goal");
+          if (goal.empty())
+            return badRequest(cb, "goal query parameter required");
+          std::string outline;
+          try {
+            outline = buildMissionOutline(goal);
+          } catch (...) {
+            outline.clear();
+          }
+          respondJson(cb, json{{"ok", true},
+                               {"result", json{{"goal", goal},
+                                                {"outline", outline}}}});
+        },
+        {drogon::Get});
+
     /* v8.0 mission file-IO channel: the agent (and the console) get a
        sandboxed workspace.  Iterative refinement protocol: the worker can
        draft a minimal version, read it back and rewrite/expand it instead of
@@ -4287,14 +4371,76 @@
             return badRequest(cb, "invalid json");
           const std::string workspaceRoot = phoenix::cfgOr<std::string>(
               "mission.workspaceDir", "./runtime_store/mission_workspace");
-          std::string missionId;
-          try {
-            auto ms = cognitionManager_.missionStatus();
-            const auto &m = ms.value("result", nlohmann::json::object())
-                                 .value("stats", nlohmann::json::object())
-                                 .value("mission", nlohmann::json::object());
-            missionId = m.value("id", std::string());
-          } catch (...) {
+          /* v8.x concurrent missions: explicit body/query missionId wins,
+             else the default (most recently assigned) mission. */
+          std::string missionId =
+              payload.value("missionId", req->getParameter("missionId"));
+          if (missionId.empty()) {
+            try {
+              missionId = cognitionManager_.defaultMissionId();
+            } catch (...) {
+              missionId.clear();
+            }
+          }
+          /* v8.x B1 multimodal: attach an image, encode it through the CPU
+             concept bridge (the RDK has no external LLaVA server), and
+             record a compact [image-context] note in attachments.json that
+             the deliberator injects into its prompt next tick. */
+          if (payload.value("action", std::string()) == "attachImage") {
+            const std::string contentB64 = payload.value("content", std::string());
+            const std::string mime =
+                payload.value("mimeType", std::string("image/png"));
+            if (contentB64.empty())
+              return badRequest(cb, "content (base64) required");
+            try {
+              std::vector<uint8_t> bytes =
+                  phoenix::deployment::RemoteModelClient::base64Decode(contentB64);
+              phoenix::io::MixedModalPacket pkt;
+              pkt.modality = phoenix::io::MixedModalModality::Image;
+              pkt.payload = std::move(bytes);
+              pkt.mimeType = mime;
+              const auto unit =
+                  phoenix::io::MixedModalConceptBridge::encode(pkt, 64, "");
+              std::string note;
+              const size_t dims =
+                  std::min<size_t>(16, unit.semanticVector.size());
+              for (size_t d = 0; d < dims; ++d) {
+                if (d) note += ",";
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%.3f",
+                              unit.semanticVector[d]);
+                note += buf;
+              }
+              const std::string fileName =
+                  payload.value("path", std::string("image.bin"));
+              nlohmann::json att = nlohmann::json::object();
+              const auto existing = phoenix::mission::workspaceExecute(
+                  workspaceRoot, missionId,
+                  nlohmann::json{{"action", "read"},
+                                 {"path", "attachments.json"}});
+              if (existing.value("ok", false)) {
+                att = nlohmann::json::parse(
+                    existing.value("content", std::string("{}")), nullptr,
+                    false);
+                if (att.is_discarded() || !att.is_object())
+                  att = nlohmann::json::object();
+              }
+              if (!att.contains("images") || !att["images"].is_array())
+                att["images"] = nlohmann::json::array();
+              if (att["images"].size() >= 8)
+                att["images"].erase(att["images"].begin());
+              att["images"].push_back(nlohmann::json{{"file", fileName},
+                                                      {"concept", note}});
+              respondJson(cb, phoenix::mission::workspaceExecute(
+                                   workspaceRoot, missionId,
+                                   nlohmann::json{{"action", "write"},
+                                                  {"path", "attachments.json"},
+                                                  {"content", att.dump()}}));
+              return;
+            } catch (const std::exception &e) {
+              return badRequest(cb, std::string("image encode failed: ") +
+                                        e.what());
+            }
           }
           respondJson(cb, phoenix::mission::workspaceExecute(
                                workspaceRoot, missionId, payload));

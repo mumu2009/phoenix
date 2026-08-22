@@ -36,3 +36,15 @@
 ## 5. 当时的实现记录（可追溯）
 
 - 2026-08 修订前，文档声称"选择 = 完成时间、构成 (1+λ)-ES"，但代码仅有 `spawnChild`（变异）、`markComplete`（计数器）与 `completeCount_`；选择与 fitness 从未实现。审计结论：该表述属设计意图，非运行时事实。本文与 `mission_layer.md` §4 的修订即由此审计触发。
+---
+
+## 重开记录（v8.x，2026-08，用户批准）
+
+- **触发**：用户明确要求『实现自主进化』（不再满足于 pressure 驱动的固定循环与无进化的复制）。
+- **重开范围（受控子集）**：本文原始设想中的进程内 (1+λ)-ES 适应度竞赛**仍保持封存**；
+  重开的只是**历史选择环**：变异（MissionGenome 白名单）+ 完成记录（lineage 审计）
+  + softmax 加权变异步长（不淘汰个体）。设计见 doc/v8.3/autonomous_evolution.md。
+- **新护栏**：白名单硬编码、全审计 + 人工 reset、默认关闭（mission.evolution.enabled=false）、
+  E-stop 不受影响、人类 interject 永远优先。
+- **再次封存条件**：若观察到不受控行为（lineage 被用于在线淘汰/权限扩张/绕过 E-stop），
+  立即将 mission.evolution.enabled 设回 false 并重新封存本文。

@@ -230,6 +230,36 @@ aggregate 现在返回真实综合文本（`spark-exchange`），注入 `graphCo
 配置（`config/phoenix.json`）：`mission.minDeliverableChars`、`mission.childMinDeliverableChars`、
 `mission.outlineEnabled/outlineSize`；`spark.scopes` 默认 `["all"]`、
 `spark.gnnScheduler.exchangeRounds`（默认 2）。
+## 5.8 性能与自主性（v8.x）
+
+实测 780 token/24min（A55 上 8B 解码 ~2s/token 的硬件现实）。v8.x 三层治理：
+
+1. **prompt 静态前缀前置 + 瘦身**：deliberator prompt 的静态部分（角色/goal/工具自描述/
+   OUTLINE/回复契约）放最前，动态部分（workspace 列表/交付物增量/章节/子盒列表）放最后——
+   llama-server slot 前缀缓存复用 KV，每 tick 只 prefill 增量；
+2. **L1 输出缓存 + 循环守卫**（`mission.cacheSim` 默认 0.95）：动态后缀与上轮几乎相同 →
+   直接跳过 LLM；连续 3 次命中 → 注入推进提示 + 升温 0.7 打破循环；
+3. **多 token 批量解码（协议）**：`n_parallel` 把 N 次 GEMV 合并为 GEMM（llama-server 侧
+   由测试者实现，规格书 doc/v8.3/parallel_decode_spec.md；gateway 已透传，默认关）。
+
+**自主性三层**（全部独立开关，关=退化 v8.3）：
+- **C1 自主推理**：第 5 形态 `{"plan":...}` 写 plan.md，每 tick 先执行计划再动笔；
+- **C2 自主循环**：第 6 形态 `{"loop":{action:pause|replicate|continue}}` 让 AI 决定节奏；
+- **C3 自主进化**：完成记录进 lineage（全审计）+ softmax 加权变异步长（历史选择环，
+  不淘汰个体），`mission.evolution.enabled` 默认 false。设计：doc/v8.3/autonomous_evolution.md。
+
+**配套**：工具友好化（自然语言意图解析 `resolveToolIntent` + 工具自描述注入——
+『让工具理解 AI』；失败反馈环：工具失败/坏回复写 `tool-feedback.md`，下一 tick 注入并删除，
+坏输出不污染交付物）；图像附件（`attachImage` → CPU 概念编码 → `[image-context]` 注入）；
+经验沉淀（`mission_experience.json`，完成即存、相似任务检索注入）；**图进化回灌**：完成时经
+`learnFromDialog` 把 `(goal, 摘要)` 喂入既有学习管线——GNN 图真实进化，相似任务的 outline 越做越强；
+**优先级排队**：chat 永远优先于 mission tick（`lowPriority` 让路，`llamaCallCv_` 条件变量）。
+**context 隔离**：每个任务/对话的即时感知与评估按 `contextTag`（mission:<id> / chat:<session>）
+过滤（`PrimalSensationEngine::activeFor`），活状态永不互渗；**跨 context 记忆**（GNN 图 + 经验库 +
+新 `cross_context_memory.hpp` 会话级记忆）是唯一的交流点——设计见 doc/v8.3/context_isolation.md。
+**多任务并发（已实现）**：MissionLifecycle 容器化（`missions_` map 按 id 独立生命周期），assign 同 id 重启、
+新 id 并行互不干扰；心跳每 tick 轮转全部 Running missions（`autonomyLoop.maxMissionsPerTick` 限流）；
+压力/自暂停/交付物/子盒均按 missionId 隔离，共享层仅 AGI 学习器/genome 基线/GNN 图/经验库/lineage。
 
 **工作区大小（截断修复）**：`mission_workspace` 单文件上限与内存交付物对齐为 **4 MiB**
 （旧值 256 KiB 会在长教程中阻断 append，造成磁盘/内存/模型所见不一致的“截断”观感）。
