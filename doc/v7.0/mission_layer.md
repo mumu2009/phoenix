@@ -261,6 +261,27 @@ aggregate 现在返回真实综合文本（`spark-exchange`），注入 `graphCo
 新 id 并行互不干扰；心跳每 tick 轮转全部 Running missions（`autonomyLoop.maxMissionsPerTick` 限流）；
 压力/自暂停/交付物/子盒均按 missionId 隔离，共享层仅 AGI 学习器/genome 基线/GNN 图/经验库/lineage。
 
+**统一工作流（用户定义，每个实例 = 完整管线循环）**：
+
+```
+用户输入(mission 默认 text, 其他模态经 attachImage/概念桥同理)
+  -> tokenizer（llama-server 内部）
+  -> 前处理: 记忆模块（mission_experience + cross_context_memory 检索注入）
+            + 情绪/情感评估（evaluateInstinctsFor, 按 contextTag 隔离, 输出
+              emotionTensor + inferenceOptions 调制）
+  -> GNN（buildMissionOutline 长期图大纲注入静态前缀）
+  -> 主推理（llama-server /v1/chat/completions）
+  -> detokenizer 输出（回复追加进 deliverable.md）
+  -> 最后一层矩阵保留: llama-server slot KV 前缀缓存（静态前缀前置使其跨 tick
+     命中复用 = hidden state 延续）-> 回到前处理，重复
+```
+
+- **pressure 驱动**：每 tick 动态后缀注入 `Urgency p=...`（missionPressureFor），压力单调增长
+  直到任务完成——模型在达成任务前有条理地持续输出；完成仅由自验收（done 形态）或人工
+  report 终结。
+- **整个系统是工具**：实例可经 `replicate` 把整个系统作为工具召唤（子盒 = 同一管线的轻量
+  实例，父代不得全权甩包，见 §5.6）——这就是『繁殖』的语义。
+
 **工作区大小（截断修复）**：`mission_workspace` 单文件上限与内存交付物对齐为 **4 MiB**
 （旧值 256 KiB 会在长教程中阻断 append，造成磁盘/内存/模型所见不一致的“截断”观感）。
 超出时保留最新尾部（与 `MissionLifecycle::appendDeliverable` 同策略）。

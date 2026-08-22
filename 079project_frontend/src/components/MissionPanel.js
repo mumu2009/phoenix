@@ -100,6 +100,7 @@ export default function MissionPanel({ onError }) {
   // 6. E-stop card
   const [estopReason, setEstopReason] = useState('');
   const [estopBusy, setEstopBusy] = useState(false);
+  const [missionTab, setMissionTab] = useState('assign');
 
   const refreshStatuses = useCallback(async () => {
     let anyOk = false;
@@ -255,9 +256,23 @@ export default function MissionPanel({ onError }) {
   const agi = autonomyStatus?.result?.agi || {};
   const agiGoals = Array.isArray(autonomyStatus?.result?.agiGoals) ? autonomyStatus.result.agiGoals : [];
   const agiGoalsRecent = agiGoals.slice(-5);
+  const deliverableText =
+    display(mission.deliverable) === '-'
+      ? ''
+      : String(mission.deliverable || '');
+  const deliverablePreview =
+    deliverableText.length > 12000
+      ? deliverableText.slice(-12000)
+      : deliverableText;
+
+  const tabs = [
+    { id: 'assign', label: '设立任务' },
+    { id: 'monitor', label: '监控产出' },
+    { id: 'control', label: '干预控制' }
+  ];
 
   return (
-    <div className="cfg">
+    <div className="cfg mission-panel">
       <div className="cfg-head">
         <div>
           <div className="cfg-title">Mission</div>
@@ -265,12 +280,28 @@ export default function MissionPanel({ onError }) {
         </div>
       </div>
 
+      <div className="subnav mission-subnav" role="tablist" aria-label="Mission sections">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={missionTab === t.id}
+            className={`subnav-item ${missionTab === t.id ? 'active' : ''}`}
+            onClick={() => setMissionTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       {backendDown ? (
         <div className="mission-banner">后端不可达：无法获取任务或自主状态，请确认后端服务已启动。</div>
       ) : null}
 
-      <div className="cfg-grid">
-        <section className="card">
+      <div className="cfg-grid mission-grid">
+        {missionTab === 'assign' ? (
+        <section className="card mission-card-full">
           <div className="card-title">生命周期启动</div>
           <div className="muted">在模型生命周期开始时设立目标；提交后模型将自主求解直至完成或失败。</div>
 
@@ -339,8 +370,10 @@ export default function MissionPanel({ onError }) {
             </div>
           ) : null}
         </section>
+        ) : null}
 
-        <section className="card mission-wide">
+        {missionTab === 'monitor' ? (
+        <section className="card mission-card-full mission-monitor">
           <div className="card-title">实时监控</div>
           <div className="muted">每 4 秒轮询一次任务与自主智能体状态。</div>
 
@@ -359,12 +392,23 @@ export default function MissionPanel({ onError }) {
             ]}
           />
 
-          <div className="card-subtitle">deliverable（交付物，模型实际产出）</div>
-          <pre className="deliverable-box">{display(mission.deliverable) === '-' ? '（尚无产出：自主循环启动后，模型每 tick 写一段交付物）' : mission.deliverable}</pre>
+          <div className="card-subtitle">deliverable（交付物）</div>
+          <div className="deliverable-shell">
+            {deliverableText ? (
+              <>
+                {deliverableText.length > 12000 ? (
+                  <div className="muted deliverable-note">仅显示最近 12k 字符（完整内容见工作区文件）</div>
+                ) : null}
+                <pre className="deliverable-box deliverable-readable">{deliverablePreview}</pre>
+              </>
+            ) : (
+              <div className="deliverable-empty">尚无产出：自主循环启动后，模型每 tick 写一段交付物</div>
+            )}
+          </div>
 
-          <div className="card-subtitle">children（帮手盒子，父代可同时召唤多个）</div>
+          <div className="card-subtitle">children（帮手盒子）</div>
           {children.length ? (
-            <div className="world-list">
+            <div className="world-list mission-children">
               {children.map((c) => (
                 <div key={c.id || c.bornMs} className="world-list-item">
                   <strong>{display(c.id)}</strong>
@@ -376,7 +420,7 @@ export default function MissionPanel({ onError }) {
               ))}
             </div>
           ) : (
-            <div className="muted">暂无 children（父代可通过 replicate 召唤多个帮手盒子）</div>
+            <div className="muted">暂无 children</div>
           )}
 
           <div className="card-subtitle">agiGoals（最近 5 条）</div>
@@ -392,7 +436,10 @@ export default function MissionPanel({ onError }) {
             <div className="muted">暂无 agiGoals</div>
           )}
         </section>
+        ) : null}
 
+        {missionTab === 'control' ? (
+        <>
         <section className="card">
           <div className="card-title">人工判定</div>
           <div className="muted">由人工确认任务完成或失败，写入报告并刷新状态。</div>
@@ -483,6 +530,8 @@ export default function MissionPanel({ onError }) {
             <span className="pill">{estopStatus?.latched ? '已锁存 (latched)' : '未锁存'}</span>
           </div>
         </section>
+        </>
+        ) : null}
       </div>
     </div>
   );

@@ -268,15 +268,34 @@ public:
               std::string listClip = listRes.dump();
               if (listClip.size() > 300) listClip = listClip.substr(0, 300) + "...";
 
+              /* inference options built FIRST - the emotion pre-processing
+                 stage (inside the static prefix) modulates them. */
+              nlohmann::json opts = nlohmann::json{
+                  {"temperature", 0.3},
+                  {"lowPriority", true}, /* chat outranks mission ticks */
+                  {"timeoutMs", phoenix::cfgOr<int>("mission.llmTimeoutMs", 900000)}};
+              /* v8.x A5: multi-token batch decode (server-side Jacobi/parallel
+                 window); off by default until the RDK acceptance data is in. */
+              if (phoenix::cfgOr<bool>("llama.parallelDecode.enabled", false)) {
+                opts["n_parallel"] =
+                    phoenix::cfgOr<int>("llama.parallelDecode.N", 4);
+                opts["parallel_mode"] =
+                    phoenix::cfgOr<std::string>("llama.parallelDecode.mode", "jacobi");
+              }
               /* v8.x perf: STATIC prefix first (role+goal+tools+outline+
                  reply contract) so llama-server's slot prefix cache reuses
                  KV across ticks; DYNAMIC suffix (workspace list, tail,
                  sections, helper boxes) goes last so each tick only
                  prefills the increment. */
+              /* v8.x unified pipeline (user-defined workflow): goal ->
+                 MEMORY (past missions + cross-context) -> EMOTION appraisal
+                 -> GNN OUTLINE -> TOOLS -> main inference -> detokenizer ->
+                 keep the final-layer state (llama-server slot KV reuse) ->
+                 repeat.  All pre-processing stages live in the STATIC prefix
+                 so the slot prefix cache reuses their KV across ticks. */
               std::string prompt =
                   std::string("You are an autonomous agent working toward this goal:\n") +
                   goalClip + "\n\n";
-              prompt += "Tools (name only): " + toolHint + "\n\n";
               /* v8.x B2: past similar missions shape the static prefix so
                  repeated task kinds start faster and better. */
               {
@@ -316,14 +335,51 @@ public:
                  only - a box's sub-task is too small for a 2K outline) plus
                  the section headers already present, so chapters neither
                  duplicate nor get lost. */
+              /* v8.x EMOTION pre-processing: the same appraisal stage the
+                 chat path runs, scoped to THIS mission context (its pressure
+                 and its novelty only - never another context's).  The
+                 appraisal feeds BOTH the prompt (internal state line) and
+                 the inference options (emotion-modulated sampling). */
+              {
+                std::string msnId = scope;
+                const auto sp0 = msnId.find("/children/");
+                if (sp0 != std::string::npos) msnId = msnId.substr(0, sp0);
+                const auto emo = cognitionManager_.evaluateInstinctsFor(
+                    "mission:" + msnId);
+                const auto &emoRes =
+                    emo.value("result", nlohmann::json::object());
+                const auto &et =
+                    emoRes.value("emotionTensor", nlohmann::json::object());
+                if (!et.empty()) {
+                  prompt += "Current internal state: " +
+                            phoenix::mission::summarizeEmotionForPrompt(et) +
+                            "\n\n";
+                }
+                const auto &eio =
+                    emoRes.value("inferenceOptions", nlohmann::json::object());
+                if (eio.is_object()) {
+                  for (const auto &kv : eio.items()) {
+                    /* keep the deliberator's own sampling defaults except for
+                       the emotion-driven modulation keys */
+                    if (kv.key() != "temperature" && kv.key() != "timeoutMs")
+                      opts[kv.key()] = kv.value();
+                  }
+                }
+              }
               if (!isChildBox) {
-                std::string outline = buildMissionOutline(goal);
+                std::string outline =
+                    phoenix::mission::outlineFromGoalChapters(goal);
+                if (outline.empty())
+                  outline = buildMissionOutline(goal);
                 if (outline.size() > 700) outline.resize(700);
                 if (!outline.empty())
                   prompt += outline + "\n\n";
               }
+              prompt += "Tools (name only): " + toolHint + "\n\n";
               prompt +=
-                  "Reply with exactly ONE of these four forms:\n"
+                  "Reply with exactly ONE of these four forms (ONE per turn - "
+                  "never multiple JSON objects, never prefix with the word "
+                  "JSON, never copy internal-state JSON into deliverable.md):\n"
                   "1) Plain text - APPENDED to deliverable.md (use for the first minimal draft).\n"
                   "2) JSON {\"action\":\"write\"|\"append\"|\"read\"|\"list\",\"path\":\"...\",\"content\":\"...\"} - file operation in your sandboxed workspace (relative paths, no \"..\").\n"
                   "3) JSON {\"tool\":\"<tool-name>\",\"arguments\":{\"userPrompt\":\"...\"}} - invoke a tool; its result comes back to you next turn.\n"
@@ -337,6 +393,26 @@ public:
                     "Helper boxes you spawned are listed at the END of this prompt (read and merge their files; you remain responsible for the final deliverable). ";
               }
               /* ---- DYNAMIC suffix: everything below changes every tick ---- */
+              /* v8.x pressure loop: the growing mission pressure is the
+                 steady-output driver - it is shown to the model every tick
+                 so it keeps producing until done (the loop ends only when
+                 the self-verdict fires or a human reports the outcome). */
+              {
+                std::string msnId = scope;
+                const auto sp0 = msnId.find("/children/");
+                if (sp0 != std::string::npos) msnId = msnId.substr(0, sp0);
+                const float pNow =
+                    cognitionManager_.missionPressureFor(msnId);
+                if (pNow > 0.0f) {
+                  char pbuf[48];
+                  std::snprintf(pbuf, sizeof(pbuf), "%.3f",
+                                static_cast<double>(pNow));
+                  prompt += "Urgency (mission pressure, grows until the task "
+                            "is complete): p=" +
+                            std::string(pbuf) +
+                            " - keep working steadily toward the goal.\n\n";
+                }
+              }
               prompt += "Workspace files:\n" + listClip + "\n\n";
               if (!packClip.empty()) {
                 prompt += "Context pack (tail, approxTokens=" +
@@ -376,6 +452,24 @@ public:
                         workspaceRoot, scope,
                         nlohmann::json{{"action", "delete"},
                                        {"path", "tool-feedback.md"}});
+                  }
+                }
+              }
+              /* Successful tool output from the previous tick (one-shot). */
+              {
+                const auto trRes = phoenix::mission::workspaceExecute(
+                    workspaceRoot, scope,
+                    nlohmann::json{{"action", "read"},
+                                   {"path", "tool-last-result.md"}});
+                if (trRes.value("ok", false)) {
+                  std::string trb = trRes.value("content", std::string());
+                  if (trb.size() > 400) trb = trb.substr(trb.size() - 400);
+                  if (!trb.empty()) {
+                    prompt += "[tool-result from last tick]\n" + trb + "\n\n";
+                    phoenix::mission::workspaceExecute(
+                        workspaceRoot, scope,
+                        nlohmann::json{{"action", "delete"},
+                                       {"path", "tool-last-result.md"}});
                   }
                 }
               }
@@ -460,18 +554,7 @@ public:
 
               /* Mission ticks need a longer socket timeout than interactive
                  chat: even a slim prompt is slow on RDK CPU (~2s/token). */
-              nlohmann::json opts = nlohmann::json{
-                  {"temperature", 0.3},
-                  {"lowPriority", true}, /* chat outranks mission ticks */
-                  {"timeoutMs", phoenix::cfgOr<int>("mission.llmTimeoutMs", 900000)}};
-              /* v8.x A5: multi-token batch decode (server-side Jacobi/parallel
-                 window); off by default until the RDK acceptance data is in. */
-              if (phoenix::cfgOr<bool>("llama.parallelDecode.enabled", false)) {
-                opts["n_parallel"] =
-                    phoenix::cfgOr<int>("llama.parallelDecode.N", 4);
-                opts["parallel_mode"] =
-                    phoenix::cfgOr<std::string>("llama.parallelDecode.mode", "jacobi");
-              }
+
               if (prompt.size() > 3500)
                 prompt = prompt.substr(0, 3500);
               /* v8.x L1 lookup: if the dynamic prompt is (near-)identical to
@@ -597,13 +680,42 @@ public:
                                      {"path", "tool-feedback.md"},
                                      {"content", fb}});
                 };
-                const auto trim = [](const std::string &s) -> std::string {
-                  const auto b = s.find_first_not_of(" \t\r\n");
-                  if (b == std::string::npos) return std::string();
-                  const auto e = s.find_last_not_of(" \t\r\n");
-                  return s.substr(b, e - b + 1);
+                auto writeToolLastResult = [&](const std::string &msg) {
+                  std::string body = msg;
+                  if (body.size() > 400) body = body.substr(0, 400);
+                  phoenix::mission::workspaceExecute(
+                      workspaceRoot, scope,
+                      nlohmann::json{{"action", "write"},
+                                     {"path", "tool-last-result.md"},
+                                     {"content", body}});
                 };
-                const std::string trimmed = trim(reply);
+                const auto trim = [](const std::string &s) -> std::string {
+                  return phoenix::mission::trimCopy(s);
+                };
+                std::vector<nlohmann::json> embedded =
+                    phoenix::mission::extractJsonObjects(reply);
+                if (embedded.size() > 1) {
+                  for (const auto &act : embedded) {
+                    if (act.is_object() && act.contains("action") &&
+                        act["action"].is_string()) {
+                      phoenix::mission::workspaceExecute(workspaceRoot, scope,
+                                                           act);
+                    }
+                  }
+                  writeToolFeedback(
+                      "multiple JSON objects in one reply - send exactly ONE "
+                      "form per tick (plain text OR one JSON object).");
+                  return std::string();
+                }
+                std::string trimmed = trim(reply);
+                if (!embedded.empty())
+                  trimmed = embedded.front().dump();
+                else {
+                  const size_t brace =
+                      phoenix::mission::firstJsonBrace(reply);
+                  if (brace < reply.size())
+                    trimmed = trim(reply.substr(brace));
+                }
                 if (!trimmed.empty() && trimmed.front() == '{') {
                   try {
                     nlohmann::json act = nlohmann::json::parse(trimmed);
@@ -612,9 +724,9 @@ public:
                       nlohmann::json args = act.value("arguments", nlohmann::json::object());
                       if (!args.is_object()) args = nlohmann::json::object();
                       std::string up = args.value("userPrompt", std::string());
-                      if (up.empty()) up = args.value("query", std::string());
                       if (up.empty()) up = args.value("input", std::string());
-                      if (up.empty()) up = args.dump();
+                      if (!up.empty() && up.front() == '{') up.clear();
+                      if (up.empty()) up = args.value("query", std::string());
                       nlohmann::json ctx = args;
                       ctx["userPrompt"] = up;
                       /* task-tree lineage: a helper box that spawns records
@@ -632,11 +744,13 @@ public:
                       }
                       const auto tr = cognitionManager_.executeAgiActionByName(
                           act["tool"].get<std::string>(), ctx);
-                      std::string note = "[tool:" + act["tool"].get<std::string>();
-                      if (tr.value("ok", false))
-                        note += " ok " + tr.value("reply", std::string()).substr(0, 400);
-                      else {
-                        note += " FAILED " + tr.value("error", std::string());
+                      if (tr.value("ok", false)) {
+                        const std::string toolReply =
+                            phoenix::mission::agiActionReply(tr);
+                        if (!toolReply.empty())
+                          writeToolLastResult(act["tool"].get<std::string>() +
+                                              ": " + toolReply);
+                      } else {
                         writeToolFeedback(
                             "tool \"" + act["tool"].get<std::string>() +
                             "\" failed: " + tr.value("error", std::string()) +
@@ -644,18 +758,18 @@ public:
                             "\"arguments\":{\"userPrompt\":\"...\"}}, or just"
                             " state your intent in plain words.");
                       }
-                      note += "]";
-                      return note;
+                      return std::string();
                     }
                     if (act.contains("action") && act["action"].is_string()) {
                       const auto opRes = phoenix::mission::workspaceExecute(
                           workspaceRoot, scope, act);
-                      if (opRes.value("ok", false))
-                        return "[file:" + act.value("action", std::string()) + " ok " +
-                               std::to_string(opRes.value("bytes", 0)) + "B " +
-                               act.value("path", std::string()) + "]";
-                      return "[file:" + act.value("action", std::string()) + " FAILED " +
-                             opRes.value("error", std::string()) + "]";
+                      if (!opRes.value("ok", false)) {
+                        writeToolFeedback(
+                            "file " + act.value("action", std::string()) +
+                            " on " + act.value("path", std::string()) +
+                            " failed: " + opRes.value("error", std::string()));
+                      }
+                      return std::string();
                     }
                     /* v8.x C1 self-planning: {"plan":"<next steps>"} writes
                        plan.md; the next tick reads it back and follows it.
@@ -861,12 +975,12 @@ public:
                       }
                       const auto tr =
                           cognitionManager_.executeAgiActionByName(tName, tCtx);
-                      std::string note = "[tool:" + tName;
-                      if (tr.value("ok", false))
-                        note += " ok " +
-                                tr.value("reply", std::string()).substr(0, 400);
-                      else {
-                        note += " FAILED " + tr.value("error", std::string());
+                      if (tr.value("ok", false)) {
+                        const std::string toolReply =
+                            phoenix::mission::agiActionReply(tr);
+                        if (!toolReply.empty())
+                          writeToolLastResult(tName + ": " + toolReply);
+                      } else {
                         writeToolFeedback(
                             "tool \"" + tName + "\" failed: " +
                             tr.value("error", std::string()) +
@@ -874,8 +988,7 @@ public:
                             "\"arguments\":{\"userPrompt\":\"...\"}}, or just"
                             " state your intent in plain words.");
                       }
-                      note += "]";
-                      return note;
+                      return std::string();
                     }
                     /* a reply that LOOKS like JSON but parses to nothing and
                        matches no tool intent would pollute the deliverable -
@@ -886,11 +999,7 @@ public:
                           "matched; retry with {\"tool\":...}, "
                           "{\"action\":...}, {\"done\":...}, "
                           "{\"plan\":...}, {\"loop\":...} or plain text.");
-                      return "[parse-fail] reply was not valid JSON and no "
-                             "tool intent matched - retry with a valid form "
-                             "({\"tool\":...}, {\"action\":...}, "
-                             "{\"done\":...}, {\"plan\":...}, "
-                             "{\"loop\":...}) or plain text.";
+                      return std::string();
                     }
                   }
                 } else {
@@ -913,12 +1022,12 @@ public:
                   }
                   const auto tr =
                       cognitionManager_.executeAgiActionByName(tName, tCtx);
-                  std::string note = "[tool:" + tName;
-                  if (tr.value("ok", false))
-                    note += " ok " +
-                            tr.value("reply", std::string()).substr(0, 400);
-                  else {
-                    note += " FAILED " + tr.value("error", std::string());
+                  if (tr.value("ok", false)) {
+                    const std::string toolReply =
+                        phoenix::mission::agiActionReply(tr);
+                    if (!toolReply.empty())
+                      writeToolLastResult(tName + ": " + toolReply);
+                  } else {
                     writeToolFeedback(
                         "tool \"" + tName + "\" failed: " +
                         tr.value("error", std::string()) +
@@ -926,8 +1035,16 @@ public:
                         "\"arguments\":{\"userPrompt\":\"...\"}}, or just"
                         " state your intent in plain words.");
                   }
-                  note += "]";
-                  return note;
+                  return std::string();
+                }
+                if (!phoenix::mission::extractJsonObjects(reply).empty() ||
+                    reply.find("\"action\"") != std::string::npos ||
+                    reply.find("\"tool\"") != std::string::npos) {
+                  writeToolFeedback(
+                      "reply looked like structured JSON but was not handled; "
+                      "send exactly ONE valid JSON object or plain markdown "
+                      "text.");
+                  return std::string();
                 }
               }
 

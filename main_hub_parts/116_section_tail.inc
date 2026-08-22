@@ -7104,8 +7104,8 @@ inline std::string GatewayServer::buildMissionOutline(const std::string &goal) {
           if (kc >= 3)
             break;
         }
-        oss << (cnt + 1) << ". " << (kws.empty() ? id : kws)
-            << " (meme:" << id << ")\n";
+        oss << (cnt + 1) << ". " << (kws.empty() ? ("topic-" + std::to_string(cnt + 1)) : kws)
+            << "\n";
         ++cnt;
       }
       oss << "[OUTLINE END]";
