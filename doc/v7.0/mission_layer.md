@@ -197,6 +197,49 @@ HTTP API（v8.0 起，人工监督控制台——"生命周期开始时设立问
 `executeAgiAction` replicate 分支读取 `context.userPrompt`（子任务）+ `context.parentId`（血统）、
 `loopRun` 子代轮转、deliberator 在子代模式向工具上下文注入 `parentId`、`mission_workspace.hpp`
 `sanitizeScope`（按 `/` 分段沙箱化）、`spawnMissionChild` 接受 `subgoal/userPrompt/parentId`。
+
+## 5.7 自验收 + GNN 大纲（v8.3，治理"无逻辑输出"）
+
+实测暴露的长文档问题：章节丢失/重复（Step 1/2 缺失、Step 6 重复四次）、叙事断裂、
+正确的废话、示例空洞。v8.3 用三层机制治理：
+
+**1. 自我判定完成（第 4 种回复形态）**——模型回复 `{"done":true,"summary":"..."}`：
+
+- 门槛：父代要求 `deliverable.md` ≥ `mission.minDeliverableChars`（默认 1200），
+  子盒要求 ≥ `mission.childMinDeliverableChars`（默认 200）；不满足则返回
+  `[auto-verify] REFUSED...` 并追加进交付物，模型继续写（防"写两行就交卷"）；
+- 通过：父代把 `[DONE] <summary>` 写入工作区并自动
+  `reportMissionOutcome({goalAchieved:true})`——**任务自行判定完成**，压力归零，
+  心跳停止调用（mission 不再 Running）；子盒把自己 `markMissionChildDone`，
+  `loopRun` 不再轮转它，父代读取合并其文件；
+- 人类监督仍保留：`POST /api/mission/report` 依然可随时人工判定。
+
+**2. 稳定大纲（GNN 图的长期不变性）**——`GatewayServer::buildMissionOutline(goal)`：
+
+- GNN meme 图只在学习/手动修改时变化，因此是**重点 meme 集合**（"大纲"）的天然载体；
+- 从 `exportSnapshot` 计算节点得分（degree + 边权重和），从最强节点 BFS 保持图拓扑顺序，
+  取前 `mission.outlineSize`（默认 12）项，每项带关键词（`getMemeWords` 前 3）；
+- 注入父代 prompt（`[OUTLINE ...]` 块，按 goal 缓存，每 tick 复用），并同时注入
+  **已有章节标题列表**（deliverable 中 `#` 开头的行），prompt 明令"按大纲逐项推进、
+  不跳项、不重写已有章节"——直接杜绝 Step 6 重复与 Step 1/2 缺失；
+- 新实例无长期记忆时大纲为空，自动降级为无大纲模式（诚实降级）。
+
+**3. 主体交流（SparkArray，见 sparkarray_scopes.md）**——综合输出取代"删词投票"：
+aggregate 现在返回真实综合文本（`spark-exchange`），注入 `graphContext` 参与生成。
+
+配置（`config/phoenix.json`）：`mission.minDeliverableChars`、`mission.childMinDeliverableChars`、
+`mission.outlineEnabled/outlineSize`；`spark.scopes` 默认 `["all"]`、
+`spark.gnnScheduler.exchangeRounds`（默认 2）。
+
+**工作区大小（截断修复）**：`mission_workspace` 单文件上限与内存交付物对齐为 **4 MiB**
+（旧值 256 KiB 会在长教程中阻断 append，造成磁盘/内存/模型所见不一致的“截断”观感）。
+超出时保留最新尾部（与 `MissionLifecycle::appendDeliverable` 同策略）。
+
+**RDK 空交付物（LLM cancel）**：板端 prompt 评估约 1.5–2s/token。旧 deliberator 把
+全部 AGI tool 的 name+description JSON 打进 prompt（~780 tokens ≈ 24 分钟），超过
+HTTP 超时后 llama `cancel_tasks`，`deliverable` 一直为空。现改为 names-only 工具提示、
+裁剪 pack/outline，并用 `mission.llmTimeoutMs`（默认 900000）覆盖单次 mission 调用超时。
+
 ## 6. 参考文献
 
 - Sterling, P. (1988). Allostasis: a model of predictive regulation. *Physiology & Behavior*.

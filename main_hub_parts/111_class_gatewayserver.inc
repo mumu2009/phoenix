@@ -4,6 +4,10 @@
 
 class GatewayServer : public IGatewayServer {
 public:
+  /* Forward decl only - definition is out-of-line after GatewayServer closes
+     (see 116_section_tail.inc).  A second in-class definition would collide. */
+  std::string buildMissionOutline(const std::string &goal);
+
   // v7.4 world model / tinyllama integration
   void setWorldModelDatabase(std::shared_ptr<Database079> db) {
     if (!db || worldModel_)
@@ -159,6 +163,8 @@ public:
            2) {"action":write|append|read|list,"path","content"} -> workspace file op
            3) {"tool":"<action-name>","arguments":{...}}          -> registered AGI action
               (math/search/research/web/replicate/mcp.*) executed via the executor
+           4) {"done":true,"summary":"..."} -> SELF-VERDICT: the task is complete
+              (v8.3; the gate refuses it until deliverable.md is long enough)
          Tool/action results are appended to the deliverable so the NEXT tick
          sees them - the agent iteratively refines instead of looping. */
       cognitionManager_.setMissionDeliberator(
@@ -182,6 +188,11 @@ public:
                                             : std::string();
               if (currentFile.empty() && !deliverable.empty())
                 currentFile = deliverable; /* before the first write */
+              /* If the in-memory prior grew past a stale/shorter workspace
+                 snapshot, prefer the longer body so the model is not stuck
+                 rewriting only the first 256KB forever. */
+              if (deliverable.size() > currentFile.size())
+                currentFile = deliverable;
 
               /* Sliding-window pack: pinned summary (+ optional GNN) + recent
                  full text, sized to the user-selected ctx (4k/16k). */
@@ -205,34 +216,84 @@ public:
               const auto packed = phoenix::context::packContext(currentFile, gnnText, packOpt);
               const std::string packedBody = packed.packed;
 
-              nlohmann::json tools = nlohmann::json::array();
+              /* RDK llama prompt eval is ~1.5-2s/token.  Dumping every AGI
+                 action (name+category+description) pushed the deliberator
+                 prompt to ~780 tokens (~24 min) and exceeded the HTTP
+                 timeout → llama cancel_tasks → empty deliverable.  Keep the
+                 prompt tiny: names-only tool hint, capped pack/outline. */
+              std::string toolHint = "math,search,research,web,replicate";
               try {
                 const auto la = cognitionManager_.listAgiActions();
                 const auto &arr = la.value("result", nlohmann::json::array());
+                std::string names;
+                int n = 0;
                 for (const auto &spec : arr) {
                   if (!spec.is_object()) continue;
-
-                  tools.push_back(nlohmann::json{
-                      {"name", spec.value("name", std::string())},
-                      {"category", spec.value("category", std::string())},
-                      {"description", spec.value("description", std::string())}});
+                  const std::string nm = spec.value("name", std::string());
+                  if (nm.empty()) continue;
+                  if (n++) names += ",";
+                  names += nm;
+                  if (n >= 16) break;
                 }
+                if (!names.empty()) toolHint = names;
               } catch (...) {
               }
 
+              auto clip = [](std::string s, size_t maxChars) {
+                if (s.size() <= maxChars) return s;
+                return s.substr(s.size() - maxChars);
+              };
+              std::string goalClip = goal;
+              if (goalClip.size() > 400) goalClip = goalClip.substr(0, 400);
+              std::string packClip = clip(packedBody, 900);
+              std::string listClip = listRes.dump();
+              if (listClip.size() > 300) listClip = listClip.substr(0, 300) + "...";
+
               std::string prompt =
                   std::string("You are an autonomous agent working toward this goal:\n") +
-                  goal + "\n\n";
-              prompt += "Workspace files:\n" + listRes.dump(2) + "\n\n";
-              if (!packedBody.empty()) {
-                prompt += "Context pack (pinned summary + sliding recent window"
-                          "; approxTokens=" +
+                  goalClip + "\n\n";
+              prompt += "Workspace files:\n" + listClip + "\n\n";
+              if (!packClip.empty()) {
+                prompt += "Context pack (tail, approxTokens=" +
                           std::to_string(packed.estimatedTokens) + "):\n" +
-                          packedBody + "\n\n";
+                          packClip + "\n\n";
               } else {
                 prompt += "deliverable.md does not exist yet - first write a MINIMAL draft.\n\n";
               }
-              prompt += "Available tools:\n" + tools.dump() + "\n\n";
+              prompt += "Tools (name only): " + toolHint + "\n\n";
+              /* v8.3: stable OUTLINE from the long-lived GNN graph (parent
+                 only - a box's sub-task is too small for a 2K outline) plus
+                 the section headers already present, so chapters neither
+                 duplicate nor get lost. */
+              if (!isChildBox) {
+                std::string outline = buildMissionOutline(goal);
+                if (outline.size() > 700) outline.resize(700);
+                if (!outline.empty())
+                  prompt += outline + "\n\n";
+              }
+              {
+                std::string sections;
+                size_t pos = 0;
+                while (pos < currentFile.size()) {
+                  const auto eol = currentFile.find('\n', pos);
+                  const std::string line = currentFile.substr(
+                      pos, eol == std::string::npos ? std::string::npos
+                                                    : eol - pos);
+                  const auto b = line.find_first_not_of(" \t\r");
+                  if (b != std::string::npos && line[b] == '#') {
+                    if (sections.empty())
+                      sections =
+                          "Existing sections in deliverable.md (never rewrite "
+                          "these - continue with the NEXT one):\n";
+                    sections += line.substr(b) + "\n";
+                  }
+                  if (eol == std::string::npos)
+                    break;
+                  pos = eol + 1;
+                }
+                if (!sections.empty())
+                  prompt += sections + "\n";
+              }
               if (isChildBox) {
                 prompt +=
                     "You are a HELPER BOX working on the sub-task above. You may summon your OWN helper boxes for bounded sub-parts (tool: replicate, arguments.userPrompt = the specific sub-task); keep every sub-task bounded and concrete. ";
@@ -258,17 +319,28 @@ public:
                 }
               }
               prompt +=
-                  "Reply with exactly ONE of these three forms:\n"
+                  "Reply with exactly ONE of these four forms:\n"
                   "1) Plain text - APPENDED to deliverable.md (use for the first minimal draft).\n"
                   "2) JSON {\"action\":\"write\"|\"append\"|\"read\"|\"list\",\"path\":\"...\",\"content\":\"...\"} - file operation in your sandboxed workspace (relative paths, no \"..\").\n"
                   "3) JSON {\"tool\":\"<tool-name>\",\"arguments\":{\"userPrompt\":\"...\"}} - invoke a tool; its result comes back to you next turn.\n"
-                  "Iterate: minimal correct version first, then expand section by section; use tools (search, math, replicate) when they help; never repeat text already in the file.";
+                  "4) JSON {\"done\":true,\"summary\":\"...\"} - declare the task COMPLETE (ONLY after every outline item and section is actually written; a premature declaration is refused).\n"
+                  "Iterate: minimal correct version first, then expand section by section following the OUTLINE strictly - advance item by item, never skip ahead, never repeat a finished section; use tools (search, math, replicate) when they help; never repeat text already in the file.";
 
-              nlohmann::json opts = nlohmann::json{{"temperature", 0.3}};
+              /* Mission ticks need a longer socket timeout than interactive
+                 chat: even a slim prompt is slow on RDK CPU (~2s/token). */
+              nlohmann::json opts = nlohmann::json{
+                  {"temperature", 0.3},
+                  {"timeoutMs", phoenix::cfgOr<int>("mission.llmTimeoutMs", 900000)}};
+              if (prompt.size() > 3500)
+                prompt = prompt.substr(0, 3500);
               const auto r = chatWithLlamaCpp(prompt, "", std::max(64, maxTokens), opts);
-              if (!r.value("ok", false))
-                return std::string();
+              if (!r.value("ok", false)) {
+                const std::string err = r.value("error", std::string("llm failed"));
+                return "[llm-error] " + err.substr(0, 240);
+              }
               std::string reply = r.value("reply", std::string());
+              if (reply.empty())
+                return "[llm-error] empty reply (possible cancel/timeout)";
 
               /* structured reply: tool call or file action */
               {
@@ -318,6 +390,52 @@ public:
                                act.value("path", std::string()) + "]";
                       return "[file:" + act.value("action", std::string()) + " FAILED " +
                              opRes.value("error", std::string()) + "]";
+                    }
+                    /* v8.3 SELF-VERDICT: {"done":true,"summary":"..."}.
+                       The agent judges its own task complete; the gate only
+                       refuses declarations on empty/micro deliverables.  A
+                       parent verdict completes the mission (pressure ends);
+                       a box verdict marks the box done (loop skips it, the
+                       parent merges its file). */
+                    if (act.contains("done") && act["done"].is_boolean() &&
+                        act["done"].get<bool>()) {
+                      std::string summary = act.value("summary", std::string());
+                      if (summary.size() > 400)
+                        summary.resize(400);
+                      const int minChars = isChildBox
+                          ? phoenix::resolveConfig<int>("mission.childMinDeliverableChars", 200)
+                          : phoenix::resolveConfig<int>("mission.minDeliverableChars", 1200);
+                      /* Prefer the longer of workspace file vs in-memory prior so
+                         a stale/truncated file cannot gate-keep a real body. */
+                      const size_t bodyChars =
+                          std::max(currentFile.size(), deliverable.size());
+                      if (static_cast<int>(bodyChars) < minChars) {
+                        return "[auto-verify] REFUSED: completion declared too "
+                               "early - deliverable.md is only " +
+                               std::to_string(bodyChars) + " chars (need >= " +
+                               std::to_string(minChars) +
+                               "). Keep writing section by section; never "
+                               "declare done before the work actually exists.";
+                      }
+                      phoenix::mission::workspaceExecute(
+                          workspaceRoot, scope,
+                          nlohmann::json{{"action", "append"},
+                                         {"path", deliverablePath},
+                                         {"content", "\n\n[DONE] " + summary}});
+                      if (isChildBox) {
+                        const auto slash = scope.rfind('/');
+                        if (slash != std::string::npos && slash + 1 < scope.size()) {
+                          const std::string childId = scope.substr(slash + 1);
+                          cognitionManager_.markMissionChildDone(
+                              nlohmann::json{{"childId", childId}});
+                        }
+                        return "[box-done] sub-task declared complete by the "
+                               "box itself; parent will read and merge.";
+                      }
+                      cognitionManager_.reportMissionOutcome(
+                          nlohmann::json{{"goalAchieved", true}});
+                      return "[auto-complete] mission self-verdict: task "
+                             "complete. " + summary;
                     }
                   } catch (...) {
                   }
@@ -738,6 +856,10 @@ private:
   std::shared_ptr<HotMatrixCache> matrixCache_;
   std::shared_ptr<ShardManager> shards_;
   std::shared_ptr<ISparkArray> spark_;
+  /* v8.3 mission outline cache: the GNN graph is long-lived, so the outline
+     for a goal is built once and reused every deliberator tick. */
+  mutable std::mutex outlineMu_;
+  mutable std::unordered_map<std::string, std::string> missionOutlineCache_;
   std::shared_ptr<IReinforcementLearner> rl_;
   std::shared_ptr<IAdversarialLearner> adv_;
   std::shared_ptr<IGnnGaLearner> gnnGa_;

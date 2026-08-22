@@ -260,7 +260,8 @@ TEST_F(AutonomyMissionFixture, NullPayloadForSpawnWorks) {
   auto child = mgr_->spawnMissionChild(json{});
   EXPECT_TRUE(child.value("ok", false));
   EXPECT_TRUE(child["result"].is_object());
-  EXPECT_TRUE(child["result"].contains("profile"));
+  ASSERT_TRUE(child["result"].contains("genome")) << child.dump();
+  EXPECT_TRUE(child["result"]["genome"].contains("profile"));
 }
 
 TEST_F(AutonomyMissionFixture, SpawnWithCustomGenomeAndRate) {
@@ -275,7 +276,8 @@ TEST_F(AutonomyMissionFixture, SpawnWithCustomGenomeAndRate) {
 
   auto child = mgr_->spawnMissionChild(json{{"mutationRate", 0.0}, {"genome", genomeIn}});
   EXPECT_TRUE(child.value("ok", false));
-  float lr = child["result"].value("learningRate", -1.0f);
+  ASSERT_TRUE(child["result"].contains("genome")) << child.dump();
+  float lr = child["result"]["genome"].value("learningRate", -1.0f);
   EXPECT_FLOAT_EQ(lr, 0.1f) << "zero mutation should preserve custom parent";
 }
 

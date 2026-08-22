@@ -131,3 +131,8 @@
     return out;
   }
 
+  /* v8.3 mission outline: implementation is OUT-OF-LINE after the
+     GatewayServer class closes (116_section_tail.inc) so the constructor
+     lambda can see a prior declaration without a duplicate in-class body. */
+
+
