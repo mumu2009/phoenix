@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <vector>
 
 namespace phoenix {
 namespace mission {
@@ -26,6 +28,20 @@ float mutateScalar(float x, float rate, float lo, float hi, std::mt19937 &rng) {
   if (rate <= 0.0f) return clampF(x, lo, hi);
   std::normal_distribution<float> d(0.0f, rate);
   return clampF(x + d(rng), lo, hi);
+}
+
+/* v8.x C3 lineage: FNV-1a fingerprint of the genome JSON (16 hex chars). */
+std::string genomeFingerprint(const MissionGenome &g) {
+  const std::string raw = g.toJson().dump();
+  uint64_t h = 1469598103934665603ULL;
+  for (const unsigned char c : raw) {
+    h ^= c;
+    h *= 1099511628211ULL;
+  }
+  char buf[24];
+  std::snprintf(buf, sizeof(buf), "%016llx",
+                static_cast<unsigned long long>(h));
+  return std::string(buf);
 }
 }  // namespace
 
@@ -185,6 +201,14 @@ void MissionLifecycle::markComplete() {
   mission_.state = MissionState::Completed;
   mission_.endMs = sysNowMs();
   ++completeCount_;
+  /* v8.x C3: the outcome feeds the lineage (auditable history).  Locked
+     variant - recordLineage() is the public entry for unlocked callers. */
+  const uint64_t elapsed =
+      mission_.endMs > mission_.startMs ? mission_.endMs - mission_.startMs : 0;
+  const double coverage = std::min(
+      1.0, static_cast<double>(mission_.deliverable.size()) / 5000.0);
+  lineage_.push_back({genomeFingerprint(genome_), elapsed, coverage});
+  if (lineage_.size() > 1000) lineage_.erase(lineage_.begin());
 }
 
 void MissionLifecycle::markFailed() {
@@ -234,7 +258,12 @@ MissionChild MissionLifecycle::recordChild(const MissionGenome &parent,
                                "); recursion is capped by config");
     }
   }
-  const MissionGenome child = parent.mutate(mutationRate, rng_);
+  /* v8.x C3: the lineage shapes the mutation step (when enabled).
+     mu_ is ALREADY held here - use the Locked variant (the locking one
+     would self-deadlock on this same mutex). */
+  const float effRate =
+      evolutionEnabled_ ? effectiveMutationRateLocked(mutationRate) : mutationRate;
+  const MissionGenome child = parent.mutate(effRate, rng_);
   ++spawnCount_;
   MissionChild rec;
   rec.id = "child-" + std::to_string(generation_) + "-" + std::to_string(children_.size());
@@ -305,6 +334,68 @@ bool MissionLifecycle::markChildDone(const std::string &childId) {
     }
   }
   return false;
+}
+
+void MissionLifecycle::recordLineage(uint64_t completionMs, double coverage) {
+  std::lock_guard<std::mutex> lock(mu_);
+  lineage_.push_back({genomeFingerprint(genome_), completionMs, coverage});
+  if (lineage_.size() > 1000) lineage_.erase(lineage_.begin());
+}
+
+nlohmann::json MissionLifecycle::lineage() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  nlohmann::json arr = nlohmann::json::array();
+  for (const auto &e : lineage_) {
+    arr.push_back(nlohmann::json{{"fingerprint", e.fingerprint},
+                                 {"completionMs", e.completionMs},
+                                 {"coverage", e.coverage}});
+  }
+  return nlohmann::json{{"ok", true},
+                        {"result", nlohmann::json{{"enabled", evolutionEnabled_},
+                                                  {"entries", arr},
+                                                  {"count", lineage_.size()}}}};
+}
+
+void MissionLifecycle::resetLineage() {
+  std::lock_guard<std::mutex> lock(mu_);
+  lineage_.clear();
+}
+
+void MissionLifecycle::setEvolutionEnabled(bool enabled) {
+  std::lock_guard<std::mutex> lock(mu_);
+  evolutionEnabled_ = enabled;
+}
+
+bool MissionLifecycle::evolutionEnabled() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return evolutionEnabled_;
+}
+
+/* Softmax-weighted step factor: faster completions with higher coverage
+   shrink the mutation step (1 -> 0.5), slow/poor ones widen it (-> 2.0).
+   No history -> 1.0 (unchanged).  Used only when evolution is enabled. */
+float MissionLifecycle::effectiveMutationRateLocked(float baseRate) const {
+  if (lineage_.empty()) return baseRate;
+  double sumW = 0.0, sumS = 0.0;
+  for (const auto &e : lineage_) {
+    const double speed =
+        e.completionMs > 0 ? 1.0 / (1.0 + static_cast<double>(e.completionMs) / 1000.0) : 0.0;
+    const double s = std::max(0.0, 0.6 * speed + 0.4 * e.coverage);
+    sumW += s;
+    sumS += s * s;
+  }
+  if (sumW <= 0.0) return baseRate;
+  const double avg = sumS / sumW;
+  /* avg in [0,1]; 1 = great history -> shrink step; 0 = poor -> widen */
+  const double factor = 2.0 - 1.5 * avg;
+  const float clamped =
+      static_cast<float>(std::max(0.5, std::min(2.0, factor)));
+  return baseRate * clamped;
+}
+
+float MissionLifecycle::effectiveMutationRate(float baseRate) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return effectiveMutationRateLocked(baseRate);
 }
 
 nlohmann::json MissionLifecycle::statsLocked() const {

@@ -347,7 +347,30 @@
   json chatWithLlamaCpp(const std::string &text,
                         const std::string &graphContext, int maxTokens,
                         const json &inferenceOptions = json::object()) {
-    std::lock_guard<std::mutex> llmLock(llamaCallMu_);
+    /* v8.x A2-4 priority: interactive chat outranks mission ticks.  A
+       mission request sets lowPriority and waits while chat callers are
+       queued; chat callers always take the mutex directly.  Worst case for
+       chat is the CURRENTLY running mission call (a single HTTP round-trip
+       cannot be preempted on --parallel 1). */
+    const bool lowPriority =
+        inferenceOptions.is_object() &&
+        inferenceOptions.value("lowPriority", false);
+    if (!lowPriority)
+      llamaChatWaiters_.fetch_add(1, std::memory_order_relaxed);
+    /* notify AFTER the mutex is released: declared BEFORE llmLock so it
+       destructs after llmLock (reverse order) -> unlock, then notify. */
+    struct NotifyOnExit {
+      std::condition_variable &cv;
+      ~NotifyOnExit() { cv.notify_all(); }
+    } notify{llamaCallCv_};
+    std::unique_lock<std::mutex> llmLock(llamaCallMu_);
+    if (!lowPriority)
+      llamaChatWaiters_.fetch_sub(1, std::memory_order_relaxed);
+    if (lowPriority) {
+      llamaCallCv_.wait(llmLock, [this] {
+        return llamaChatWaiters_.load(std::memory_order_relaxed) == 0;
+      });
+    }
     bool voterEnabled = false;
     int numPasses = 5;
     double maskRate = 0.05;

@@ -501,6 +501,15 @@ textCompletionFallback(const std::string &host, int port,
       if (options.contains(key) && options[key].is_number())
         payload[key] = options[key];
     }
+    /* v8.x A5 multi-token batch decode (GEMV -> GEMM on the server side):
+       n_parallel>1 asks llama-server to decode a window of N token positions
+       in one pass (Jacobi/parallel mode); the server validates candidates
+       against the causal mask and commits accepted tokens before answering,
+       so the response shape stays a plain message. */
+    if (options.contains("n_parallel") && options["n_parallel"].is_number_integer())
+      payload["n_parallel"] = options["n_parallel"];
+    if (options.contains("parallel_mode") && options["parallel_mode"].is_string())
+      payload["parallel_mode"] = options["parallel_mode"];
     if (options.contains("logit_bias") && options["logit_bias"].is_object() &&
         !options["logit_bias"].empty()) {
       /* word -> token-id mapping via /phx/enc (emotion layer produces

@@ -9,10 +9,14 @@
 */
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -179,6 +183,86 @@ inline nlohmann::json workspaceExecute(const std::string &workspaceRoot,
     }
 
     return nlohmann::json{{"ok", false}, {"error", "unknown action: " + action}};
+}
+
+
+/* ======================= v8.x L1 lookup cache =======================
+ * Response memoization + repetition guard for the mission deliberator.
+ * On RDK CPU one tick costs minutes; when the dynamic part of the prompt
+ * is (near-)identical to the previous tick the model would repeat itself,
+ * so we skip the LLM entirely and replay nothing (the workspace text is
+ * already there).  Similarity is a lightweight 4-gram Jaccard over the
+ * dynamic prompt key - no external embedding dependency, safe to compile
+ * standalone (gtests include this header without main.cpp parts). */
+
+namespace ws_cache_detail {
+inline uint64_t wsHash4(const std::string &s, size_t start, size_t end) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = start; i < end; ++i) {
+        h ^= static_cast<unsigned char>(s[i]);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+}  // namespace ws_cache_detail
+
+inline double workspaceJaccard(const std::string &a, const std::string &b) {
+    if (a == b) return 1.0;
+    if (a.size() < 4 || b.size() < 4) return a == b ? 1.0 : 0.0;
+    std::vector<uint64_t> ga, gb;
+    ga.reserve(a.size());
+    gb.reserve(b.size());
+    for (size_t i = 0; i + 4 <= a.size(); ++i)
+        ga.push_back(ws_cache_detail::wsHash4(a, i, i + 4));
+    for (size_t i = 0; i + 4 <= b.size(); ++i)
+        gb.push_back(ws_cache_detail::wsHash4(b, i, i + 4));
+    std::sort(ga.begin(), ga.end());
+    std::sort(gb.begin(), gb.end());
+    size_t inter = 0, i = 0, j = 0;
+    while (i < ga.size() && j < gb.size()) {
+        if (ga[i] == gb[j]) { ++inter; ++i; ++j; }
+        else if (ga[i] < gb[j]) ++i;
+        else ++j;
+    }
+    const size_t un = ga.size() + gb.size() - inter;
+    return un == 0 ? 1.0 : static_cast<double>(inter) / static_cast<double>(un);
+}
+
+/* Shared cache state: C++17 inline variables so EVERY translation unit
+ * (main.cpp + gtests) shares ONE table - a function-local static here
+ * would split Get and Put into two unrelated tables and silently disable
+ * the whole L1 cache. */
+namespace ws_cache_detail {
+struct WsCacheEntry {
+    std::string key;
+    std::string reply;
+};
+inline std::mutex gWsCacheMu;
+inline std::unordered_map<std::string, std::vector<WsCacheEntry>> gWsCacheTable;
+}  // namespace ws_cache_detail
+
+/* Get a cached response for (scope, key).  Returns false when nothing is
+ * similar enough (>= simThreshold, default 0.95). */
+inline bool workspaceCacheGet(const std::string &scope, const std::string &key,
+                              double simThreshold) {
+    using namespace ws_cache_detail;
+    std::lock_guard<std::mutex> lock(gWsCacheMu);
+    const auto it = gWsCacheTable.find(scope);
+    if (it == gWsCacheTable.end()) return false;
+    for (const auto &e : it->second) {
+        if (workspaceJaccard(e.key, key) >= simThreshold) return true;
+    }
+    return false;
+}
+
+/* Store/refresh the newest (key, reply) for a scope; LRU cap 64 entries. */
+inline void workspaceCachePut(const std::string &scope, const std::string &key,
+                              const std::string &reply) {
+    using namespace ws_cache_detail;
+    std::lock_guard<std::mutex> lock(gWsCacheMu);
+    auto &v = gWsCacheTable[scope];
+    v.push_back({key, reply});
+    if (v.size() > 64) v.erase(v.begin());
 }
 
 }  // namespace mission

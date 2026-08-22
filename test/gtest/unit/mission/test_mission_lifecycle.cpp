@@ -26,6 +26,12 @@ using json = nlohmann::json;
 
 namespace {
 
+bool isMissionPressureSource(const std::string &src) {
+  if (src == "mission-pressure") return true;
+  return src.size() > 9 && src.compare(0, 8, "mission:") == 0 &&
+         src.compare(src.size() - 9, 9, ":pressure") == 0;
+}
+
 // System-clock millisecond accessor (mirrors mission_lifecycle.cpp).
 uint64_t sysNowMs() {
   return static_cast<uint64_t>(
@@ -164,6 +170,7 @@ TEST(MissionPressureTest, MonotoneAndSaturated) {
     Mission m;
     m.painGainPerSec = gain;
     m.maxPain = maxPain;
+    m.pressureMode = "linear";
     m.state = static_cast<MissionState>(stateVal);
     m.startMs = startMs;
 
@@ -571,7 +578,7 @@ class AutonomyMissionTest : public ::testing::Test {
     uint64_t latestTs = 0;
     for (const auto &s : st["result"]["sensations"]) {
       if (s.value("type", std::string()) == "pain" &&
-          s.value("source", std::string()) == "mission-pressure") {
+          isMissionPressureSource(s.value("source", std::string()))) {
         const uint64_t ts = s.value("timestampMs", 0ull);
         if (ts >= latestTs) {
           latestTs = ts;
@@ -608,7 +615,7 @@ TEST_F(AutonomyMissionTest, IterateInjectsMissionPressurePain) {
   json pain = findLatestMissionPain();
   ASSERT_FALSE(pain.empty()) << "status() should report a mission-pressure Pain";
   EXPECT_EQ(pain.value("type", std::string()), "pain");
-  EXPECT_EQ(pain.value("source", std::string()), "mission-pressure");
+  EXPECT_TRUE(isMissionPressureSource(pain.value("source", std::string())));
   EXPECT_FLOAT_EQ(pain.value("valence", 0.0f), -1.0f);
   EXPECT_GT(pain.value("intensity", 0.0f), 0.0f);
   EXPECT_LE(pain.value("intensity", 0.0f), 1.0f);
@@ -629,7 +636,7 @@ TEST_F(AutonomyMissionTest, PressureIsSingleSignalNotStacked) {
     size_t count = 0;
     for (const auto &s : st["result"]["sensations"]) {
         if (s.value("type", std::string()) == "pain" &&
-            s.value("source", std::string()) == "mission-pressure") {
+            isMissionPressureSource(s.value("source", std::string()))) {
             ++count;
         }
     }
@@ -910,7 +917,7 @@ TEST_F(AutonomyMissionTest, ReEnableMissionResumesPressureAndPain) {
 
   auto pain = findLatestMissionPain();
   ASSERT_FALSE(pain.empty());
-  EXPECT_EQ(pain.value("source", std::string()), "mission-pressure");
+  EXPECT_TRUE(isMissionPressureSource(pain.value("source", std::string())));
 }
 
 TEST_F(AutonomyMissionTest, MarkChildDoneSkipsCompletedBoxes) {

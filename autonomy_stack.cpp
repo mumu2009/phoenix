@@ -770,7 +770,13 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
            from context.userPrompt; empty/identical requests degrade to
            "assist with: <parent goal>" inside recordChild, so the parent
            can never hand its whole job to a child. */
-        if (!missionEnabled_ || !mission_.active()) {
+        /* v8.x concurrent missions: replicate targets the mission from
+           context.missionId (the gateway deliberator injects it), else the
+           default (most recently assigned) mission. */
+        const json ctx0 = context.is_object() ? context : json::object();
+        phoenix::mission::MissionLifecycle *msn =
+            missionByIdLocked(ctx0.value("missionId", std::string()));
+        if (!missionEnabled_ || !msn || !msn->active()) {
             return json{{"ok", false}, {"error", "no active mission to replicate for"}};
         }
         try {
@@ -782,11 +788,11 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
                empty = spawned by the root mission.  Depth is capped only if
                the user configured mission.maxReplicaDepth > 0. */
             const std::string parentId = ctx.value("parentId", std::string());
-            const auto childRec = mission_.recordChild(missionGenome_,
-                                                       missionMutationRate_, subgoal, parentId);
-            const phoenix::mission::Mission snap = mission_.mission();
+            const auto childRec = msn->recordChild(missionGenome_,
+                                                   missionMutationRate_, subgoal, parentId);
+            const phoenix::mission::Mission snap = msn->mission();
             const std::string childId =
-                "child-" + snap.id + "-" + std::to_string(mission_.children().size());
+                "child-" + snap.id + "-" + std::to_string(msn->children().size());
             nlohmann::json childSession;
             childSession["sessionId"] = childId;
             childSession["observations"] = 1;
@@ -805,7 +811,7 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
                                         {"goal", childRec.goal},
                                         {"parentGoal", snap.goal},
                                         {"genome", childRec.genome.toJson()},
-                                        {"childrenCount", mission_.children().size()},
+                                        {"childrenCount", msn->children().size()},
                                         {"reply", "summoned helper box " + childRec.id +
                                                   " for: " + childRec.goal}}}};
         } catch (const std::runtime_error &e) {
@@ -897,7 +903,9 @@ json CognitionAutonomyManager::observe(const json &payload, const json &worldSta
         nov.type = phoenix::primal::SensationType::Novelty;
         nov.intensity = std::clamp(payload["worldUncertainty"].get<float>(), 0.0f, 1.0f);
         nov.valence = 0.2f;  // novelty is mildly attractive (exploration drive)
-        nov.source = "world-uncertainty";
+        /* v8.x context isolation: tag the epistemic signal with the
+           observing context (chat session / mission id). */
+        nov.source = payload.value("contextTag", std::string("chat")) + ":novelty";
         nov.timestampMs = static_cast<uint64_t>(nowMs());
         sensationEngine_.add(nov);
     }
@@ -1440,13 +1448,17 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
        allostatic cost IS p(t).  Pain ends when the mission is judged
        complete; decayAuto above then releases it along the half-life. */
     if (missionEnabled_) {
-        const float pressure = mission_.pressureNow();
-        if (pressure > 0.0f) {
+        /* v8.x concurrent missions: EVERY running task injects its own
+           pressure, tagged with its mission id so contexts never mix
+           (activeFor filters by the context prefix; no ':' = global). */
+        for (const auto &kv : missions_) {
+            const float pressure = kv.second.pressureNow();
+            if (pressure <= 0.0f) continue;
             phoenix::primal::PrimalSensation pain;
             pain.type = phoenix::primal::SensationType::Pain;
             pain.intensity = std::clamp(pressure, 0.0f, 1.0f);
             pain.valence = -1.0f;  // maximal harm valence
-            pain.source = "mission-pressure";
+            pain.source = "mission:" + kv.first + ":pressure";
             pain.timestampMs = static_cast<uint64_t>(nowMs());
             sensationEngine_.add(pain);
         }
@@ -1458,9 +1470,15 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
            completes, pressure only grows and this instance keeps going. */
     }
 
+    /* v8.x context isolation: each context evaluates ONLY its own
+       sensations (plus globals).  Mission pain stays out of chat mood and
+       chat signals stay out of mission appraisal; the shared cross-context
+       layers (AGI learner / graph / experience) are unaffected. */
+    const std::string ctxTag = payload.value("contextTag", std::string());
+    const auto activeSens = sensationEngine_.activeFor(ctxTag);
     /* v7.0 instinct / benefit-harm evaluation and prompt split update */
-    instinctEngine_.update(sensationEngine_.active(), dtSec);
-    auto bh = instinctEngine_.evaluate(sensationEngine_.active());
+    instinctEngine_.update(activeSens, dtSec);
+    auto bh = instinctEngine_.evaluate(activeSens);
 
     /* v7.0 affect signal: export the emotion operation weight vector as a
        numeric matrix rather than an explicit action word or emotional label. */
@@ -1508,7 +1526,9 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
                 nov.type = phoenix::primal::SensationType::Novelty;
                 nov.intensity = std::clamp(static_cast<float>(std::min(1.0, agiSurprise * feedGain)), 0.0f, 1.0f);
                 nov.valence = 0.2f;  // novelty is mildly attractive (exploration drive)
-                nov.source = "agi-forward-model-surprise";
+                nov.source = ctxTag.empty()
+                                 ? "agi-forward-model-surprise"
+                                 : ctxTag + ":surprise";
                 nov.timestampMs = static_cast<uint64_t>(nowMs());
                 sensationEngine_.add(nov);
             }
@@ -1597,13 +1617,38 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
     lastIterAtMs_ = nowMs();
     nlohmann::json missionInfo = nlohmann::json::object();
     if (missionEnabled_) {
+        /* v8.x concurrent missions: the iterate status carries EVERY mission
+           (each with its own pressure/state/goal/children). */
+        nlohmann::json list = nlohmann::json::array();
+        for (const auto &kv : missions_) {
+            list.push_back(
+                json{{"id", kv.first},
+                     {"active", kv.second.active()},
+                     {"pressure", kv.second.pressureNow()},
+                     {"state", static_cast<int>(kv.second.mission().state)},
+                     {"goal", kv.second.mission().goal},
+                     {"children", kv.second.stats().value("children", json::array())}});
+        }
         missionInfo = json{{"enabled", true},
-                           {"active", mission_.active()},
-                           {"pressure", mission_.pressureNow()},
-                           {"state", static_cast<int>(mission_.mission().state)},
-                           {"goal", mission_.mission().goal},
-                           {"children", mission_.stats().value("children", json::array())}};
-
+                           {"missions", list},
+                           {"defaultMissionId", defaultMissionId_}};
+        /* legacy single-mission fields for default task (old readers/tests) */
+        if (!defaultMissionId_.empty()) {
+            auto dit = missions_.find(defaultMissionId_);
+            if (dit != missions_.end()) {
+                missionInfo["active"] = dit->second.active();
+                missionInfo["pressure"] = dit->second.pressureNow();
+                missionInfo["goal"] = dit->second.mission().goal;
+            } else {
+                missionInfo["active"] = false;
+                missionInfo["pressure"] = 0.0;
+                missionInfo["goal"] = std::string();
+            }
+        } else {
+            missionInfo["active"] = false;
+            missionInfo["pressure"] = 0.0;
+            missionInfo["goal"] = std::string();
+        }
     }
     return json{{"ok", true},
                 {"result", json{{"iteration", iteration_},
@@ -1650,7 +1695,22 @@ json CognitionAutonomyManager::exportState() const {
                 {"agiLatentState", agiLatentState_},
                 {"lastAgiAction", lastAgiAction_},
                 {"sensations", sensationEngine_.toJson()},
-                {"mission", mission_.toJson()},
+                {"defaultMissionId", defaultMissionId_},
+                {"missions", [&]() {
+                    nlohmann::json arr = nlohmann::json::array();
+                    for (const auto &kv : missions_) {
+                        arr.push_back(nlohmann::json{{"id", kv.first},
+                                                     {"state", kv.second.toJson()}});
+                    }
+                    return arr;
+                }()},
+                /* legacy single-mission key: default mission for old readers */
+                {"mission", [&]() {
+                    if (defaultMissionId_.empty()) return nlohmann::json::object();
+                    auto mit = missions_.find(defaultMissionId_);
+                    return mit == missions_.end() ? nlohmann::json::object()
+                                                  : mit->second.toJson();
+                }()},
                 {"missionEnabled", missionEnabled_},
                 {"missionGenome", missionGenome_.toJson()},
                 {"goals", goals_},
@@ -1685,8 +1745,26 @@ json CognitionAutonomyManager::importState(const json &state) {
     if (state.contains("sensations") && state["sensations"].is_object()) {
         sensationEngine_ = phoenix::primal::PrimalSensationEngine::fromJson(state["sensations"]);
     }
-    if (state.contains("mission") && state["mission"].is_object()) {
-        mission_.fromJson(state["mission"]);
+    /* v8.x concurrent missions: restore the map.  New format = "missions"
+       array [{id, state}]; legacy "mission" object migrates as the default. */
+    if (state.contains("missions") && state["missions"].is_array()) {
+        for (const auto &m : state["missions"]) {
+            if (!m.is_object()) continue;
+            const std::string id = m.value("id", std::string());
+            if (id.empty()) continue;
+            auto it = missions_.find(id);
+            if (it == missions_.end()) it = missions_.try_emplace(id).first;
+            if (m.contains("state") && m["state"].is_object()) it->second.fromJson(m["state"]);
+        }
+        defaultMissionId_ = state.value("defaultMissionId", defaultMissionId_);
+    } else if (state.contains("mission") && state["mission"].is_object()) {
+        const auto &mj = state["mission"];
+        std::string id = mj.value("id", std::string());
+        if (id.empty()) id = "mission-restored";
+        auto it = missions_.find(id);
+        if (it == missions_.end()) it = missions_.try_emplace(id).first;
+        it->second.fromJson(mj);
+        defaultMissionId_ = id;
     }
     missionEnabled_ = state.value("missionEnabled", missionEnabled_);
     if (state.contains("missionGenome") && state["missionGenome"].is_object()) {
@@ -1929,9 +2007,13 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
     missionMutationRate_ = static_cast<float>(clampDouble(p.value("mutationRate", missionMutationRate_), 0.0, 10.0));
     missionMaxReplicas_ = static_cast<size_t>(
         clampInt(p.value("maxReplicas", static_cast<int>(missionMaxReplicas_)), 0, 64));
-    mission_.setMaxReplicas(missionMaxReplicas_);
-    mission_.setMaxReplicaDepth(static_cast<size_t>(
-        clampInt(p.value("maxReplicaDepth", static_cast<int>(mission_.maxReplicaDepth())), 0, 16)));
+    missionMaxReplicaDepth_ = static_cast<size_t>(
+        clampInt(p.value("maxReplicaDepth", static_cast<int>(missionMaxReplicaDepth_)), 0, 16));
+    /* v8.x C3: evolution gate (default OFF).  The lineage is recorded either
+       way (audit); the softmax step factor only applies when enabled. */
+    if (p.contains("evolutionEnabled")) {
+        missionEvolutionEnabled_ = p.value("evolutionEnabled", false);
+    }
     /* Context packing: user chooses summary vs full+summary, optional GNN,
        and ctx size (4096 / 16384). */
     if (p.contains("contextPack") && p["contextPack"].is_string()) {
@@ -1972,17 +2054,44 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
     }
     /* A mission without a goal is a no-op (config-only enable). */
     if (m.goal.empty()) {
-        return json{{"ok", true}, {"result", mission_.stats()}};
+        return json{{"ok", true}, {"result", missionsStatusLocked()}};
     }
-    mission_.assign(m, missionGenome_);
-    return json{{"ok", true}, {"result", mission_.stats()}};
+    /* v8.x concurrent missions: id = key.  Re-assigning an existing id
+       restarts THAT task (its deliverable/children reset); a new id runs
+       alongside the others without touching them. */
+    defaultMissionId_ = m.id;
+    auto it = missions_.find(m.id);
+    if (it == missions_.end()) it = missions_.try_emplace(m.id).first;
+    it->second.setMaxReplicas(missionMaxReplicas_);
+    it->second.setMaxReplicaDepth(missionMaxReplicaDepth_);
+    it->second.setEvolutionEnabled(missionEvolutionEnabled_);
+    it->second.assign(m, missionGenome_);
+    return json{{"ok", true}, {"result", it->second.stats()}};
 }
 
 json CognitionAutonomyManager::missionStatus() const {
     std::lock_guard<std::mutex> lock(mu_);
+    /* v8.x concurrent missions: full multi-mission view. */
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto &kv : missions_) {
+        arr.push_back(nlohmann::json{{"id", kv.first},
+                                     {"stats", kv.second.stats()}});
+    }
+    nlohmann::json legacyStats =
+        nlohmann::json{{"mission", nlohmann::json{{"state", 0}}},
+                       {"pressure", 0.0},
+                       {"completions", 0},
+                       {"children", nlohmann::json::array()}};
+    if (!defaultMissionId_.empty()) {
+        auto dit = missions_.find(defaultMissionId_);
+        if (dit != missions_.end()) legacyStats = dit->second.stats();
+    }
     return json{{"ok", true},
                 {"result", json{{"enabled", missionEnabled_},
-                                {"stats", mission_.stats()},
+                                {"missions", arr},
+                                {"defaultMissionId", defaultMissionId_},
+                                /* legacy single-mission view */
+                                {"stats", legacyStats},
                                 {"genome", missionGenome_.toJson()},
                                 {"contextPack", missionContextPack_},
                                 {"includeGnnSummary", missionIncludeGnnSummary_},
@@ -2009,15 +2118,21 @@ json CognitionAutonomyManager::reportMissionOutcome(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
     const json &p = payload.is_null() ? json::object() : payload;
     const bool achieved = p.value("goalAchieved", false);
+    /* v8.x concurrent missions: outcome applies to the payload missionId
+       (default = last assigned).  Other running tasks are untouched. */
+    phoenix::mission::MissionLifecycle *msn =
+        missionByIdLocked(p.value("missionId", std::string()));
+    if (!msn)
+        return json{{"ok", false}, {"error", "no such mission"}};
     /* No hand-off: before the goal completes, pressure only grows and this
        instance keeps going.  Successors replicated by this instance stay in
        the children list (observability); judgement stays with the caller. */
     if (achieved) {
-        mission_.markComplete();
+        msn->markComplete();
     } else {
-        mission_.markFailed();
+        msn->markFailed();
     }
-    return json{{"ok", true}, {"result", mission_.stats()}};
+    return json{{"ok", true}, {"result", msn->stats()}};
 }
 
 void CognitionAutonomyManager::setMissionDeliberator(MissionDeliberator fn) {
@@ -2027,16 +2142,31 @@ void CognitionAutonomyManager::setMissionDeliberator(MissionDeliberator fn) {
 
 json CognitionAutonomyManager::appendMissionDeliverable(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
-    const std::string text = trimLocal(payload.value("text", std::string()));
+    const json &p = payload.is_null() ? json::object() : payload;
+    const std::string text = trimLocal(p.value("text", std::string()));
     if (text.empty())
         return json{{"ok", false}, {"error", "deliverable text required"}};
-    mission_.appendDeliverable(text);
-    return json{{"ok", true}, {"result", mission_.stats()}};
+    phoenix::mission::MissionLifecycle *msn =
+        missionByIdLocked(p.value("missionId", std::string()));
+    if (!msn)
+        return json{{"ok", false}, {"error", "no such mission"}};
+    msn->appendDeliverable(text);
+    return json{{"ok", true}, {"result", msn->stats()}};
 }
 
 json CognitionAutonomyManager::spawnMissionChild(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
     const json &p = payload.is_null() ? json::object() : payload;
+    phoenix::mission::MissionLifecycle *msn =
+        missionByIdLocked(p.value("missionId", std::string()));
+    if (!msn) {
+        const std::string id = defaultMissionId_.empty()
+                                   ? std::string("mission-default")
+                                   : defaultMissionId_;
+        auto it = missions_.try_emplace(id).first;
+        if (defaultMissionId_.empty()) defaultMissionId_ = id;
+        msn = &it->second;
+    }
     const float rate = static_cast<float>(clampDouble(p.value("mutationRate", missionMutationRate_), 0.0, 10.0));
     const auto parent = (p.contains("genome") && p["genome"].is_object())
                             ? phoenix::mission::MissionGenome::fromJson(p["genome"])
@@ -2044,7 +2174,7 @@ json CognitionAutonomyManager::spawnMissionChild(const json &payload) {
     /* v8.2: subgoal = the bounded request this box must fulfil. */
     const std::string subgoal = p.value("subgoal", p.value("userPrompt", std::string()));
     const std::string parentId = p.value("parentId", std::string());
-    const auto child = mission_.recordChild(parent, rate, subgoal, parentId);
+    const auto child = msn->recordChild(parent, rate, subgoal, parentId);
     return json{{"ok", true}, {"result", child.toJson()}};
 }
 
@@ -2054,9 +2184,89 @@ json CognitionAutonomyManager::markMissionChildDone(const json &payload) {
     const std::string childId = p.value("childId", std::string());
     if (childId.empty())
         return json{{"ok", false}, {"error", "childId required"}};
-    if (!mission_.markChildDone(childId))
+    phoenix::mission::MissionLifecycle *msn =
+        missionByIdLocked(p.value("missionId", std::string()));
+    if (!msn)
+        return json{{"ok", false}, {"error", "no such mission"}};
+    if (!msn->markChildDone(childId))
         return json{{"ok", false}, {"error", "unknown child: " + childId}};
-    return json{{"ok", true}, {"result", mission_.stats()}};
+    return json{{"ok", true}, {"result", msn->stats()}};
+}
+
+/* ============== v8.x concurrent missions ============== */
+
+phoenix::mission::MissionLifecycle *CognitionAutonomyManager::missionByIdLocked(
+    const std::string &id) {
+    const std::string key = id.empty() ? defaultMissionId_ : id;
+    if (key.empty()) return nullptr;
+    auto it = missions_.find(key);
+    return it == missions_.end() ? nullptr : &it->second;
+}
+
+std::string CognitionAutonomyManager::defaultMissionId() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return defaultMissionId_;
+}
+
+nlohmann::json CognitionAutonomyManager::missionsStatusLocked() const {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto &kv : missions_) {
+        arr.push_back(kv.second.stats());
+    }
+    return nlohmann::json{{"ok", true},
+                          {"result",
+                           nlohmann::json{{"enabled", missionEnabled_},
+                                          {"missions", arr},
+                                          {"count", missions_.size()},
+                                          {"defaultMissionId", defaultMissionId_},
+                                          /* legacy single-mission view */
+                                          {"stats",
+                                           [&]() {
+                                               nlohmann::json legacy =
+                                                   nlohmann::json{
+                                                       {"mission",
+                                                        nlohmann::json{{"state", 0}}},
+                                                       {"pressure", 0.0},
+                                                       {"completions", 0},
+                                                       {"children",
+                                                        nlohmann::json::array()}};
+                                               if (!defaultMissionId_.empty()) {
+                                                   auto dit =
+                                                       missions_.find(defaultMissionId_);
+                                                   if (dit != missions_.end())
+                                                       legacy = dit->second.stats();
+                                               }
+                                               return legacy;
+                                           }()},
+                                          {"genome", missionGenome_.toJson()},
+                                          {"contextPack", missionContextPack_}}}};
+}
+
+json CognitionAutonomyManager::missionLineage() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    nlohmann::json all = nlohmann::json::array();
+    for (const auto &kv : missions_) {
+        const auto one = kv.second.lineage();
+        all.push_back(nlohmann::json{{"missionId", kv.first},
+                                     {"lineage", one}});
+    }
+    return nlohmann::json{{"ok", true},
+                          {"result", nlohmann::json{{"missions", all},
+                                                    {"count", missions_.size()}}}};
+}
+
+json CognitionAutonomyManager::resetMissionLineage() {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto &kv : missions_) kv.second.resetLineage();
+    /* aggregate inline - missionLineage() re-locks mu_ and would deadlock */
+    nlohmann::json all = nlohmann::json::array();
+    for (const auto &kv : missions_) {
+        all.push_back(nlohmann::json{{"missionId", kv.first},
+                                     {"lineage", kv.second.lineage()}});
+    }
+    return nlohmann::json{{"ok", true},
+                          {"result", nlohmann::json{{"missions", all},
+                                                    {"count", missions_.size()}}}};
 }
 
 json CognitionAutonomyManager::configureMcp(const json &payload) {
@@ -2148,12 +2358,17 @@ json CognitionAutonomyManager::interject(const json &payload) {
     if (interjections_.size() > 64) interjections_.erase(interjections_.begin());
     nlohmann::json out = json{{"ok", true}, {"queued", interjections_.size()}};
     /* optional mid-flight goal amendment: the mission is REDIRECTED, not
-       restarted (start time and pressure are preserved). */
+       restarted (start time and pressure are preserved).  v8.x concurrent:
+       targets payload.missionId (default = last assigned). */
     const std::string amend = trimLocal(p.value("amendGoal", std::string()));
     if (!amend.empty()) {
-        out["goalAmended"] = mission_.amendGoal(amend);
-        out["goal"] = mission_.mission().goal;
-        if (!out["goalAmended"].get<bool>()) {
+        phoenix::mission::MissionLifecycle *msn =
+            missionByIdLocked(p.value("missionId", std::string()));
+        if (msn && msn->amendGoal(amend)) {
+            out["goalAmended"] = true;
+            out["goal"] = msn->mission().goal;
+        } else {
+            out["goalAmended"] = false;
             out["warning"] = "no running mission; goal not amended";
         }
     }
@@ -2166,6 +2381,11 @@ json CognitionAutonomyManager::configureAutonomyLoop(const json &payload) {
     loopEnabled_ = p.value("enabled", loopEnabled_);
     loopIntervalSec_ = clampInt(p.value("intervalSec", loopIntervalSec_), 1, 3600);
     loopMaxStepsPerTick_ = clampInt(p.value("maxStepsPerTick", loopMaxStepsPerTick_), 1, 64);
+    loopMaxChildrenPerTick_ = clampInt(
+        p.value("maxChildrenPerTick", static_cast<int>(loopMaxChildrenPerTick_)), 0, 64);
+    /* v8.x concurrent missions: 0 = advance ALL running missions each tick. */
+    loopMaxMissionsPerTick_ = clampInt(
+        p.value("maxMissionsPerTick", static_cast<int>(loopMaxMissionsPerTick_)), 0, 64);
     loopPersistEveryTicks_ = clampInt(p.value("persistEveryTicks", loopPersistEveryTicks_), 1, 10000);
     if (p.contains("persistPath") && p["persistPath"].is_string()) {
         loopPersistPath_ = p["persistPath"].get<std::string>();
@@ -2174,6 +2394,8 @@ json CognitionAutonomyManager::configureAutonomyLoop(const json &payload) {
                 {"result", json{{"enabled", loopEnabled_},
                                 {"intervalSec", loopIntervalSec_},
                                 {"maxStepsPerTick", loopMaxStepsPerTick_},
+                                {"maxChildrenPerTick", loopMaxChildrenPerTick_},
+                                {"maxMissionsPerTick", loopMaxMissionsPerTick_},
                                 {"persistEveryTicks", loopPersistEveryTicks_},
                                 {"persistPath", loopPersistPath_}}}};
 }
@@ -2250,7 +2472,10 @@ void CognitionAutonomyManager::ensureHeartbeatSession() {
     nlohmann::json rec;
     rec["sessionId"] = id;
     rec["observations"] = 1;
-    const std::string goal = mission_.mission().goal;
+    /* v8.x concurrent: seed with the default mission's goal when present */
+    const std::string goal =
+        missionByIdLocked("") ? missionByIdLocked("")->mission().goal
+                              : std::string();
     rec["seedMission"] = goal.empty() ? "autonomous loop" : goal;
     rec["lastObservedAtMs"] = nowMs();
     rec["shouldIterate"] = true;
@@ -2276,71 +2501,116 @@ void CognitionAutonomyManager::loopRun() {
                LLM without holding mu_ - do NOT parse missionStatus() JSON
                through dangling temporary references. */
             if (missionDeliberator_) {
-                std::string goal;
-                std::string prior;
-                std::string missionId;
-                bool running = false;
-                std::vector<phoenix::mission::MissionChild> helpers;
+                /* v8.x concurrent missions: snapshot EVERY running mission,
+                   then advance each independently (parent first, then its
+                   own helper boxes).  Missions share only the serialized
+                   LLM channel - their state, workspaces and pauses are
+                   per-mission. */
+                struct MissionSnap {
+                    std::string goal;
+                    std::string prior;
+                    std::string id;
+                    std::vector<phoenix::mission::MissionChild> helpers;
+                };
+                std::vector<MissionSnap> snaps;
                 {
                     std::lock_guard<std::mutex> lock(mu_);
-                    running = missionEnabled_ && mission_.active();
-                    if (running) {
-                        const auto snap = mission_.mission();
-                        goal = snap.goal;
-                        prior = snap.deliverable;
-                        missionId = snap.id;
-                        helpers = mission_.children();
-                    }
-                }
-                /* Prior packing happens inside the deliberator (sliding window
-                   + pinned summary).  Pass a modest tail here only as a
-                   fallback when the workspace file is still empty. */
-                if (prior.size() > 6000)
-                    prior = prior.substr(prior.size() - 6000);
-
-                /* the PARENT always works first - it can use helper boxes
-                   but it never hands its whole job to them */
-                if (running && !goal.empty()) {
-                    std::string work;
-                    try {
-                        work = missionDeliberator_(goal, prior, loopDeliberateMaxTokens_, missionId);
-                    } catch (...) {
-                        work.clear();
-                    }
-                    if (!work.empty()) {
-                        appendMissionDeliverable(nlohmann::json{{"text", work}});
-                    }
-                }
-                /* helper boxes (children): ALL active boxes work each tick
-                   (sequential LLM calls under llamaCallMu_; --parallel may be
-                   >1 so a cancelled peer is less likely). Cap with
-                   loopMaxChildrenPerTick_ (0 = no cap = all children).
-                   v8.3: boxes that declared their sub-task done (self-verdict)
-                   are skipped - the parent merges their files and judges. */
-                if (running && !helpers.empty()) {
-                    helpers.erase(std::remove_if(helpers.begin(), helpers.end(),
-                                                 [](const phoenix::mission::MissionChild &b) {
-                                                     return b.done;
-                                                 }),
-                                  helpers.end());
-                    size_t budget = helpers.size();
-                    if (loopMaxChildrenPerTick_ > 0)
-                        budget = std::min(budget, loopMaxChildrenPerTick_);
-                    for (size_t n = 0; n < budget; ++n) {
-                        const size_t idx = (childRoundRobin_ + n) % helpers.size();
-                        const auto &box = helpers[idx];
-                        std::string childGoal = box.goal;
-                        if (childGoal.empty()) childGoal = goal;
-                        const std::string childScope =
-                            missionId + "/children/" + box.id;
-                        try {
-                            const std::string boxWork = missionDeliberator_(
-                                childGoal, "", loopChildDeliberateMaxTokens_, childScope);
-                            (void)boxWork; /* output lives in the box workspace file */
-                        } catch (...) {
+                    if (missionEnabled_) {
+                        for (const auto &kv : missions_) {
+                            if (!kv.second.active()) continue;
+                            const auto snap = kv.second.mission();
+                            if (snap.goal.empty()) continue;
+                            MissionSnap ms;
+                            ms.goal = snap.goal;
+                            ms.prior = snap.deliverable;
+                            ms.id = snap.id;
+                            ms.helpers = kv.second.children();
+                            snaps.push_back(std::move(ms));
+                            if (loopMaxMissionsPerTick_ > 0 &&
+                                snaps.size() >=
+                                    static_cast<size_t>(loopMaxMissionsPerTick_))
+                                break;
                         }
                     }
-                    childRoundRobin_ += budget;
+                }
+                for (auto &sn : snaps) {
+                    if (sn.prior.size() > 6000)
+                        sn.prior = sn.prior.substr(sn.prior.size() - 6000);
+
+                    /* the PARENT always works first - it can use helper boxes
+                       but it never hands its whole job to them */
+                    bool paused = false;
+                    {
+                        std::lock_guard<std::mutex> lock(mu_);
+                        auto pit = missionPauseTicks_.find(sn.id);
+                        if (pit != missionPauseTicks_.end() &&
+                            pit->second > 0) {
+                            --pit->second;
+                            paused = true;
+                        }
+                    }
+                    if (!paused) {
+                        std::string work;
+                        try {
+                            work = missionDeliberator_(
+                                sn.goal, sn.prior, loopDeliberateMaxTokens_,
+                                sn.id);
+                        } catch (...) {
+                            work.clear();
+                        }
+                        if (!work.empty()) {
+                            if (work.rfind("[loop-pause:", 0) == 0) {
+                                const auto close = work.find(']', 12);
+                                int n = 0;
+                                try {
+                                    n = std::stoi(
+                                        work.substr(12, close - 12));
+                                } catch (...) {
+                                    n = 0;
+                                }
+                                std::lock_guard<std::mutex> lock(mu_);
+                                missionPauseTicks_[sn.id] = std::max(0, n);
+                            } else {
+                                appendMissionDeliverable(
+                                    nlohmann::json{{"text", work},
+                                                   {"missionId", sn.id}});
+                            }
+                        }
+                    }
+                    /* helper boxes of THIS mission (done boxes skipped) */
+                    if (!sn.helpers.empty()) {
+                        sn.helpers.erase(
+                            std::remove_if(
+                                sn.helpers.begin(), sn.helpers.end(),
+                                [](const phoenix::mission::MissionChild &b) {
+                                    return b.done;
+                                }),
+                            sn.helpers.end());
+                        size_t budget = sn.helpers.size();
+                        if (loopMaxChildrenPerTick_ > 0)
+                            budget = std::min(
+                                budget,
+                                static_cast<size_t>(loopMaxChildrenPerTick_));
+                        for (size_t n = 0; n < budget; ++n) {
+                            const size_t idx =
+                                (childRoundRobin_ + n) % sn.helpers.size();
+                            const auto &box = sn.helpers[idx];
+                            std::string childGoal = box.goal;
+                            if (childGoal.empty()) childGoal = sn.goal;
+                            const std::string childScope =
+                                sn.id + "/children/" + box.id;
+                            try {
+                                const std::string boxWork =
+                                    missionDeliberator_(
+                                        childGoal, "",
+                                        loopChildDeliberateMaxTokens_,
+                                        childScope);
+                                (void)boxWork; /* box workspace file */
+                            } catch (...) {
+                            }
+                        }
+                        childRoundRobin_ += budget;
+                    }
                 }
             }
             ensureHeartbeatSession();
@@ -2350,11 +2620,23 @@ void CognitionAutonomyManager::loopRun() {
             int steps = loopMaxStepsPerTick_;
             {
                 std::lock_guard<std::mutex> lock(mu_);
-                if (missionEnabled_ && mission_.active()) steps = std::min(steps, 1);
+                if (missionEnabled_) {
+                    for (const auto &kv : missions_) {
+                        if (kv.second.active()) {
+                            steps = std::min(steps, 1);
+                            break;
+                        }
+                    }
+                }
             }
             for (int step = 0; step < steps; ++step) {
                 if (loopStop_.load(std::memory_order_acquire)) break;
-                iterate(nlohmann::json::object(), nlohmann::json::object());
+                /* v8.x context isolation: the meta heartbeat carries an empty
+                   context tag - it evaluates ALL mission pressures at once as
+                   the cross-task scheduling signal (per-mission appraisal
+                   happens inside each mission's own deliberation). */
+                iterate(nlohmann::json::object(),
+                        nlohmann::json::object());
             }
         } catch (...) {
             /* the loop must never die from one bad tick */

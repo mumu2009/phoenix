@@ -58,6 +58,13 @@
     "parallel": 2,
     "ctx_size": 4096
   },
+  "llama": {
+    "parallelDecode": {
+      "enabled": false,
+      "N": 4,
+      "mode": "jacobi"
+    }
+  },
   "memebarrier": {
     "scanIntervalMs": 10000,
     "maliciousThreshold": 0.7,
@@ -416,7 +423,19 @@
     "childMinDeliverableChars": 200,
     "outlineEnabled": true,
     "outlineSize": 12,
-    "llmTimeoutMs": 900000
+    "llmTimeoutMs": 900000,
+    "cacheSim": 0.95,
+    "maxSelfPauseTicks": 6,
+    "experiencePath": "./runtime_store/mission_experience.json",
+    "multimodal": {
+      "enabled": false
+    },
+    "evolution": {
+      "enabled": false
+    }
+  },
+  "crossContextMemory": {
+    "path": "./runtime_store/cross_context_memory.json"
   },
   "mcp": {
     "enabled": false,
@@ -431,6 +450,8 @@
     "enabled": false,
     "intervalSec": 10,
     "maxStepsPerTick": 8,
+    "maxChildrenPerTick": 0,
+    "maxMissionsPerTick": 0,
     "persistEveryTicks": 5,
     "persistPath": "runtime_store/autonomy_state.json"
   },

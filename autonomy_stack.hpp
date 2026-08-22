@@ -27,6 +27,8 @@
 #include "agi_action_registry.hpp"
 #include "mission_lifecycle.hpp"
 #include "mission_workspace.hpp"
+#include "mission_experience.hpp"
+#include "cross_context_memory.hpp"
 #include "mcp_client.hpp"
 #include "emergency_stop.hpp"
 #include "instance_registry.hpp"
@@ -36,6 +38,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -161,13 +164,18 @@ public:
     /* v7.0 mission layer (optional, config mission.*): Meeseeks-style goal
        pressure + instance reproduction.  In-process lifecycle state machine;
        no separate runtime layer. */
-    json assignMission(const json &payload);     /* Spawn THIS instance on one goal. */
-    json missionStatus() const;                  /* Current mission + pressure. */
-    json reportMissionOutcome(const json &payload); /* {goalAchieved:bool} ends pain. */
-    json spawnMissionChild(const json &payload); /* Mutated child genome (heredity). */
+    json assignMission(const json &payload);     /* Spawn/refresh ONE concurrent mission (id = key). */
+    json missionStatus() const;                  /* ALL missions + pressure (multi-mission view). */
+    json reportMissionOutcome(const json &payload); /* {goalAchieved, missionId?} ends pain. */
+    json spawnMissionChild(const json &payload); /* Mutated child genome ({missionId?}). */
     /* v8.3 self-verdict: a helper box declared its sub-task done; the loop
        stops rotating it (its workspace stays readable for the parent). */
     json markMissionChildDone(const json &payload); /* {childId} */
+    /* v8.x C3 evolution lineage: auditable history + human reset. */
+    json missionLineage() const;      /* all missions (audit) */
+    json resetMissionLineage();          /* clears every mission's lineage */
+    /* default mission id for legacy single-mission callers (files route etc.) */
+    std::string defaultMissionId() const;
 
     /* v8.0 mission worker: the gateway registers an LLM-backed deliberator.
        While a mission is Running the heartbeat calls it OUTSIDE the manager
@@ -248,7 +256,9 @@ private:
     /* v7.0 mission layer (optional) */
     bool missionEnabled_{false};
     float missionMutationRate_{0.05f};
-    size_t missionMaxReplicas_{4};            /* guardrail on free replication */
+    size_t missionMaxReplicaDepth_{0};       /* v8.x config default for new missions */
+bool missionEvolutionEnabled_{false};      /* v8.x C3 gate (applied on assign) */
+size_t missionMaxReplicas_{4};            /* guardrail on free replication */
 
     /* v7.0 human interjection queue (插话) */
     std::vector<std::pair<uint64_t, std::string>> interjections_;
@@ -269,12 +279,27 @@ private:
     void ensureHeartbeatSession();
     void registerWithSafetyRegistry();
     void unregisterFromSafetyRegistry();
-    phoenix::mission::MissionLifecycle mission_;
+    /* v8.x concurrent missions: independent lifecycles keyed by mission id.
+       Each task owns its state machine / deliverable / children / lineage;
+       the ONLY shared layers are cross-context ones (AGI learner, genome
+       baseline, GNN graph, experience stores) - see context_isolation.md.
+       defaultMissionId_ = most recently assigned (legacy single-mission
+       callers keep working unmodified). */
+    std::map<std::string, phoenix::mission::MissionLifecycle> missions_;
+    std::string defaultMissionId_;
+    /* resolve payload missionId: explicit id -> that mission, else the
+       default (last assigned).  Caller must hold mu_. */
+    phoenix::mission::MissionLifecycle *missionByIdLocked(const std::string &id);
+    /* aggregate status of every mission (multi-mission view). */
+    nlohmann::json missionsStatusLocked() const;
   MissionDeliberator missionDeliberator_;
   int loopDeliberateMaxTokens_{128}; /* smaller chunks = higher success rate on RDK */
   int loopChildDeliberateMaxTokens_{128}; /* helper boxes: same budget each */
   size_t loopMaxChildrenPerTick_{0}; /* 0 = run ALL helper boxes each tick */
   size_t childRoundRobin_{0};        /* rotates start index when budget < N */
+  /* v8.x C2 self-pause, per mission (concurrent missions pause independently). */
+  std::map<std::string, int> missionPauseTicks_;
+  int loopMaxMissionsPerTick_{0};      /* 0 = advance ALL running missions each tick */
   /* Context packing (sliding window + pinned summary / optional GNN). */
   int missionCtxTokens_{4096};                 /* 4096 or 16384 typical */
   std::string missionContextPack_{"full_and_summary"}; /* summary | full_and_summary */

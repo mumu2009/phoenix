@@ -111,6 +111,29 @@ public:
 
     std::vector<PrimalSensation> active() const { return sensations_; }
 
+    /* v8.x context isolation: return only the sensations visible to one
+       context.  A source WITHOUT a ':' is GLOBAL (visible everywhere, e.g.
+       externally ingested signals); a source WITH a prefix is visible only
+       when the prefix matches contextTag.  This keeps mission pressure out
+       of chat mood and chat noise out of mission appraisal while the shared
+       engines (AGI learner, graph, experience store) stay cross-context.
+       Empty contextTag -> all (legacy callers unchanged). */
+    std::vector<PrimalSensation> activeFor(const std::string &contextTag) const {
+        if (contextTag.empty()) return sensations_;
+        const std::string prefix = contextTag + ":";
+        std::vector<PrimalSensation> out;
+        out.reserve(sensations_.size());
+        for (const auto &s : sensations_) {
+            const auto pos = s.source.find(':');
+            if (pos == std::string::npos)
+                out.push_back(s);
+            else if (s.source.size() >= prefix.size() &&
+                     s.source.compare(0, prefix.size(), prefix) == 0)
+                out.push_back(s);
+        }
+        return out;
+    }
+
     /** Net valence across all sensations, range [-1, 1]. */
     float netValence() const;
 

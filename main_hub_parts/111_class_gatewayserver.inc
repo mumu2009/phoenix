@@ -45,11 +45,20 @@ public:
       /* v8.0 audit B: tag the running mission so prediction docs aggregate
          per goal (world evidence becomes goal-scoped observability). */
       try {
+        /* v8.x concurrent missions: tag with the DEFAULT mission (the one a
+           chat session most likely talks about); per-session tagging stays a
+           caller decision via sessionId. */
         auto ms = cognitionManager_.missionStatus();
-        const auto &stats = ms.value("result", nlohmann::json::object()).value("stats", nlohmann::json::object());
-        const auto &mission = stats.value("mission", nlohmann::json::object());
-        if (mission.value("state", 0) == 1 && !mission.value("id", std::string()).empty())
-          evidence["metadata"]["missionId"] = mission.value("id", std::string());
+        const auto &res = ms.value("result", nlohmann::json::object());
+        const std::string defId = res.value("defaultMissionId", std::string());
+        const auto &arr = res.value("missions", nlohmann::json::array());
+        for (const auto &mm : arr) {
+          if (mm.value("id", std::string()) != defId) continue;
+          const auto &st = mm.value("stats", nlohmann::json::object());
+          if (st.value("state", 0) == 1)
+            evidence["metadata"]["missionId"] = defId;
+          break;
+        }
       } catch (...)
       {
       }
@@ -221,7 +230,15 @@ public:
                  prompt to ~780 tokens (~24 min) and exceeded the HTTP
                  timeout → llama cancel_tasks → empty deliverable.  Keep the
                  prompt tiny: names-only tool hint, capped pack/outline. */
-              std::string toolHint = "math,search,research,web,replicate";
+              /* v8.x tool-friendly: the model says its INTENT in natural
+                 language and the gateway resolves it (the tool understands
+                 the AI, not the other way round).  The static prefix lists
+                 name + one-line purpose per tool - it is prefilled once and
+                 then reused by the slot cache, so the one-time cost is
+                 amortized across ticks. */
+              std::string toolHint =
+                  "math: exact arithmetic/computation; search: web search; "
+                  "replicate: summon a helper box for a sub-part";
               try {
                 const auto la = cognitionManager_.listAgiActions();
                 const auto &arr = la.value("result", nlohmann::json::array());
@@ -231,8 +248,10 @@ public:
                   if (!spec.is_object()) continue;
                   const std::string nm = spec.value("name", std::string());
                   if (nm.empty()) continue;
-                  if (n++) names += ",";
-                  names += nm;
+                  std::string desc = spec.value("description", std::string());
+                  if (desc.size() > 60) desc = desc.substr(0, 60);
+                  if (n++) names += "\n";
+                  names += nm + (desc.empty() ? std::string() : ": " + desc);
                   if (n >= 16) break;
                 }
                 if (!names.empty()) toolHint = names;
@@ -249,18 +268,50 @@ public:
               std::string listClip = listRes.dump();
               if (listClip.size() > 300) listClip = listClip.substr(0, 300) + "...";
 
+              /* v8.x perf: STATIC prefix first (role+goal+tools+outline+
+                 reply contract) so llama-server's slot prefix cache reuses
+                 KV across ticks; DYNAMIC suffix (workspace list, tail,
+                 sections, helper boxes) goes last so each tick only
+                 prefills the increment. */
               std::string prompt =
                   std::string("You are an autonomous agent working toward this goal:\n") +
                   goalClip + "\n\n";
-              prompt += "Workspace files:\n" + listClip + "\n\n";
-              if (!packClip.empty()) {
-                prompt += "Context pack (tail, approxTokens=" +
-                          std::to_string(packed.estimatedTokens) + "):\n" +
-                          packClip + "\n\n";
-              } else {
-                prompt += "deliverable.md does not exist yet - first write a MINIMAL draft.\n\n";
-              }
               prompt += "Tools (name only): " + toolHint + "\n\n";
+              /* v8.x B2: past similar missions shape the static prefix so
+                 repeated task kinds start faster and better. */
+              {
+                const std::string expPath = phoenix::resolveConfig<std::string>(
+                    "mission.experiencePath",
+                    std::string("./runtime_store/mission_experience.json"));
+                const auto exps =
+                    phoenix::mission::experienceTop(expPath, goal, 3);
+                if (!exps.empty()) {
+                  prompt += "Past similar missions (reuse what worked):\n";
+                  for (const auto &e : exps) {
+                    std::string s = e.summary;
+                    if (s.size() > 200) s = s.substr(0, 200);
+                    prompt += "- " + s + "\n";
+                  }
+                  prompt += "\n";
+                }
+                /* v8.x cross-context memory: recall what ANY context
+                   (other missions, chat sessions) already learned. */
+                const std::string ccmPath = phoenix::resolveConfig<std::string>(
+                    "crossContextMemory.path",
+                    std::string("./runtime_store/cross_context_memory.json"));
+                const auto ccms =
+                    phoenix::memory::ccmRecall(ccmPath, goal, 2);
+                if (!ccms.empty()) {
+                  prompt += "Cross-context memory (what the system already "
+                            "learned elsewhere):\n";
+                  for (const auto &e : ccms) {
+                    std::string s = e.text;
+                    if (s.size() > 200) s = s.substr(0, 200);
+                    prompt += "- [" + e.sourceTag + "] " + s + "\n";
+                  }
+                  prompt += "\n";
+                }
+              }
               /* v8.3: stable OUTLINE from the long-lived GNN graph (parent
                  only - a box's sub-task is too small for a 2K outline) plus
                  the section headers already present, so chapters neither
@@ -270,6 +321,86 @@ public:
                 if (outline.size() > 700) outline.resize(700);
                 if (!outline.empty())
                   prompt += outline + "\n\n";
+              }
+              prompt +=
+                  "Reply with exactly ONE of these four forms:\n"
+                  "1) Plain text - APPENDED to deliverable.md (use for the first minimal draft).\n"
+                  "2) JSON {\"action\":\"write\"|\"append\"|\"read\"|\"list\",\"path\":\"...\",\"content\":\"...\"} - file operation in your sandboxed workspace (relative paths, no \"..\").\n"
+                  "3) JSON {\"tool\":\"<tool-name>\",\"arguments\":{\"userPrompt\":\"...\"}} - invoke a tool; its result comes back to you next turn.\n"
+                  "4) JSON {\"done\":true,\"summary\":\"...\"} - declare the task COMPLETE (ONLY after every outline item and section is actually written; a premature declaration is refused).\n"
+                  "Iterate: minimal correct version first, then expand section by section following the OUTLINE strictly - advance item by item, never skip ahead, never repeat a finished section; use tools (search, math, replicate) when they help; never repeat text already in the file.";
+              if (isChildBox) {
+                prompt +=
+                    "You are a HELPER BOX working on the sub-task above. You may summon your OWN helper boxes for bounded sub-parts (tool: replicate, arguments.userPrompt = the specific sub-task); keep every sub-task bounded and concrete. ";
+              } else {
+                prompt +=
+                    "Helper boxes you spawned are listed at the END of this prompt (read and merge their files; you remain responsible for the final deliverable). ";
+              }
+              /* ---- DYNAMIC suffix: everything below changes every tick ---- */
+              prompt += "Workspace files:\n" + listClip + "\n\n";
+              if (!packClip.empty()) {
+                prompt += "Context pack (tail, approxTokens=" +
+                          std::to_string(packed.estimatedTokens) + "):\n" +
+                          packClip + "\n\n";
+              } else {
+                prompt += "deliverable.md does not exist yet - first write a MINIMAL draft.\n\n";
+              }
+              /* v8.x C1: follow the self-written plan when one exists */
+              {
+                const auto planRes = phoenix::mission::workspaceExecute(
+                    workspaceRoot, scope,
+                    nlohmann::json{{"action", "read"}, {"path", "plan.md"}});
+                if (planRes.value("ok", false)) {
+                  std::string planText = planRes.value("content", std::string());
+                  if (planText.size() > 500)
+                    planText = planText.substr(planText.size() - 500);
+                  if (!planText.empty())
+                    prompt += "Your current plan (plan.md):\n" + planText +
+                              "\n\n";
+                }
+              }
+              /* v8.x D feedback: read the one-shot hint from the last
+                 failed tool call, then consume it (delete). */
+              {
+                const auto fbRes = phoenix::mission::workspaceExecute(
+                    workspaceRoot, scope,
+                    nlohmann::json{{"action", "read"},
+                                   {"path", "tool-feedback.md"}});
+                if (fbRes.value("ok", false)) {
+                  std::string fb = fbRes.value("content", std::string());
+                  if (fb.size() > 300) fb = fb.substr(fb.size() - 300);
+                  if (!fb.empty()) {
+                    prompt += "[tool-feedback from last tick]\n" + fb +
+                              "\n\n";
+                    phoenix::mission::workspaceExecute(
+                        workspaceRoot, scope,
+                        nlohmann::json{{"action", "delete"},
+                                       {"path", "tool-feedback.md"}});
+                  }
+                }
+              }
+              /* v8.x B1: attached images (encoded to concept notes) */
+              {
+                const auto attRes = phoenix::mission::workspaceExecute(
+                    workspaceRoot, scope,
+                    nlohmann::json{{"action", "read"},
+                                   {"path", "attachments.json"}});
+                if (attRes.value("ok", false)) {
+                  const auto att = nlohmann::json::parse(
+                      attRes.value("content", std::string("{}")), nullptr,
+                      false);
+                  if (!att.is_discarded() && att.is_object() &&
+                      att.contains("images") && att["images"].is_array() &&
+                      !att["images"].empty()) {
+                    prompt += "[image-context] attached images (concept):\n";
+                    for (const auto &img : att["images"]) {
+                      prompt += "- " + img.value("file", std::string()) +
+                                ": " + img.value("concept", std::string()) +
+                                "\n";
+                    }
+                    prompt += "\n";
+                  }
+                }
               }
               {
                 std::string sections;
@@ -294,18 +425,26 @@ public:
                 if (!sections.empty())
                   prompt += sections + "\n";
               }
-              if (isChildBox) {
-                prompt +=
-                    "You are a HELPER BOX working on the sub-task above. You may summon your OWN helper boxes for bounded sub-parts (tool: replicate, arguments.userPrompt = the specific sub-task); keep every sub-task bounded and concrete. ";
-              } else {
-                /* the parent knows about its helper boxes and can READ + MERGE
-                   their drafts - but it remains fully responsible for the
-                   final deliverable and keeps working itself */
+              if (!isChildBox) {
+                /* DYNAMIC suffix: the parent's helper boxes (their files stay
+                   readable; the parent remains fully responsible for the
+                   final deliverable and keeps working itself). */
                 try {
+                  /* v8.x concurrent: the mission id lives in the scope */
+                  std::string msnId = scope;
+                  const auto slashPos = msnId.find("/children/");
+                  if (slashPos != std::string::npos)
+                    msnId = msnId.substr(0, slashPos);
                   auto ms2 = cognitionManager_.missionStatus();
-                  const auto &stats2 = ms2.value("result", nlohmann::json::object())
-                                               .value("stats", nlohmann::json::object());
-                  const auto &children2 = stats2.value("children", nlohmann::json::array());
+                  nlohmann::json children2 = nlohmann::json::array();
+                  for (const auto &mm : ms2.value("result", nlohmann::json::object())
+                                             .value("missions", nlohmann::json::array())) {
+                    if (mm.value("id", std::string()) == msnId) {
+                      children2 = mm.value("stats", nlohmann::json::object())
+                                     .value("children", nlohmann::json::array());
+                      break;
+                    }
+                  }
                   if (children2.is_array() && !children2.empty()) {
                     prompt += "Helper boxes you spawned (read their files with the file tool and merge the best parts; you remain responsible for the final deliverable):\n";
                     for (const auto &box : children2) {
@@ -318,21 +457,55 @@ public:
                 } catch (...) {
                 }
               }
-              prompt +=
-                  "Reply with exactly ONE of these four forms:\n"
-                  "1) Plain text - APPENDED to deliverable.md (use for the first minimal draft).\n"
-                  "2) JSON {\"action\":\"write\"|\"append\"|\"read\"|\"list\",\"path\":\"...\",\"content\":\"...\"} - file operation in your sandboxed workspace (relative paths, no \"..\").\n"
-                  "3) JSON {\"tool\":\"<tool-name>\",\"arguments\":{\"userPrompt\":\"...\"}} - invoke a tool; its result comes back to you next turn.\n"
-                  "4) JSON {\"done\":true,\"summary\":\"...\"} - declare the task COMPLETE (ONLY after every outline item and section is actually written; a premature declaration is refused).\n"
-                  "Iterate: minimal correct version first, then expand section by section following the OUTLINE strictly - advance item by item, never skip ahead, never repeat a finished section; use tools (search, math, replicate) when they help; never repeat text already in the file.";
 
               /* Mission ticks need a longer socket timeout than interactive
                  chat: even a slim prompt is slow on RDK CPU (~2s/token). */
               nlohmann::json opts = nlohmann::json{
                   {"temperature", 0.3},
+                  {"lowPriority", true}, /* chat outranks mission ticks */
                   {"timeoutMs", phoenix::cfgOr<int>("mission.llmTimeoutMs", 900000)}};
+              /* v8.x A5: multi-token batch decode (server-side Jacobi/parallel
+                 window); off by default until the RDK acceptance data is in. */
+              if (phoenix::cfgOr<bool>("llama.parallelDecode.enabled", false)) {
+                opts["n_parallel"] =
+                    phoenix::cfgOr<int>("llama.parallelDecode.N", 4);
+                opts["parallel_mode"] =
+                    phoenix::cfgOr<std::string>("llama.parallelDecode.mode", "jacobi");
+              }
               if (prompt.size() > 3500)
                 prompt = prompt.substr(0, 3500);
+              /* v8.x L1 lookup: if the dynamic prompt is (near-)identical to
+                 the previous tick the model would repeat itself - skip the
+                 LLM entirely (saves minutes/tick on RDK).  After 3
+                 consecutive skips, force an advance hint + hotter sampling
+                 on the next real call to break the cycle. */
+              {
+                const double cacheSim =
+                    phoenix::cfgOr<double>("mission.cacheSim", 0.95);
+                if (phoenix::mission::workspaceCacheGet(scope, prompt, cacheSim)) {
+                  static std::mutex skipMu;
+                  static std::unordered_map<std::string, int> skipCount;
+                  int cnt = 0;
+                  {
+                    std::lock_guard<std::mutex> lk(skipMu);
+                    cnt = ++skipCount[scope];
+                  }
+                  if (cnt >= 3) {
+                    {
+                      std::lock_guard<std::mutex> lk(skipMu);
+                      skipCount[scope] = 0;
+                    }
+                    opts["temperature"] = 0.7;
+                    prompt +=
+                        "\n[loop-break] You repeated yourself. ADVANCE to the next "
+                        "unfinished section; do NOT rewrite existing text.\n";
+                    /* fall through: a real call with the loop-break hint */
+                  } else {
+                    return "[cache] prompt unchanged; skipped identical "
+                           "re-generation (cycle guard)";
+                  }
+                }
+              }
               const auto r = chatWithLlamaCpp(prompt, "", std::max(64, maxTokens), opts);
               if (!r.value("ok", false)) {
                 const std::string err = r.value("error", std::string("llm failed"));
@@ -344,6 +517,86 @@ public:
 
               /* structured reply: tool call or file action */
               {
+                /* v8.x tool-friendly intent resolver: natural language
+                   ("calculate 3*9", "summon a box for the examples section")
+                   or malformed JSON maps onto the registered tools so the
+                   model does not need to emit perfect schemas. */
+                auto resolveToolIntent = [&](const std::string &text,
+                                             std::string &toolName,
+                                             nlohmann::json &ctx) -> bool {
+                  std::string lower = text;
+                  std::transform(lower.begin(), lower.end(), lower.begin(),
+                                 [](unsigned char c) {
+                                   return static_cast<char>(::tolower(c));
+                                 });
+                  nlohmann::json toolList = nlohmann::json::array();
+                  try {
+                    const auto la = cognitionManager_.listAgiActions();
+                    toolList = la.value("result", nlohmann::json::array());
+                  } catch (...) {
+                  }
+                  /* 1) exact tool-name mention */
+                  for (const auto &t : toolList) {
+                    const std::string nm = t.value("name", std::string());
+                    if (nm.empty()) continue;
+                    std::string nmLower = nm;
+                    std::transform(nmLower.begin(), nmLower.end(),
+                                   nmLower.begin(),
+                                   [](unsigned char c) {
+                                     return static_cast<char>(::tolower(c));
+                                   });
+                    if (lower.find(nmLower) != std::string::npos) {
+                      toolName = nm;
+                      break;
+                    }
+                  }
+                  /* 2) intent keywords for the built-in verbs */
+                  if (toolName.empty()) {
+                    if (lower.find("calculate") != std::string::npos ||
+                        lower.find("compute") != std::string::npos ||
+                        lower.find("math") != std::string::npos)
+                      toolName = "math";
+                    else if (lower.find("search") != std::string::npos ||
+                             lower.find("look up") != std::string::npos ||
+                             lower.find("find") != std::string::npos)
+                      toolName = "search";
+                    else if (lower.find("summon") != std::string::npos ||
+                             lower.find("spawn") != std::string::npos ||
+                             lower.find("replicate") != std::string::npos ||
+                             lower.find("helper") != std::string::npos ||
+                             lower.find("box") != std::string::npos)
+                      toolName = "replicate";
+                    else if (lower.find("research") != std::string::npos)
+                      toolName = "research";
+                  }
+                  if (toolName.empty()) return false;
+                  /* 3) argument: longest quoted span, else the text itself */
+                  std::string arg;
+                  const auto q1 = text.find('"');
+                  if (q1 != std::string::npos) {
+                    const auto q2 = text.find('"', q1 + 1);
+                    arg = q2 == std::string::npos
+                              ? text.substr(q1 + 1)
+                              : text.substr(q1 + 1, q2 - q1 - 1);
+                  }
+                  if (arg.empty()) arg = text;
+                  if (arg.size() > 400) arg = arg.substr(0, 400);
+                  ctx = nlohmann::json{{"userPrompt", arg}};
+                  return true;
+                };
+                /* v8.x D feedback loop: a failed tool call (or a broken
+                   reply) writes ONE hint file; the next tick reads it and
+                   deletes it - the model learns the expected form once.
+                   Written as a whole file so it never accumulates. */
+                auto writeToolFeedback = [&](const std::string &msg) {
+                  std::string fb = msg;
+                  if (fb.size() > 300) fb = fb.substr(0, 300);
+                  phoenix::mission::workspaceExecute(
+                      workspaceRoot, scope,
+                      nlohmann::json{{"action", "write"},
+                                     {"path", "tool-feedback.md"},
+                                     {"content", fb}});
+                };
                 const auto trim = [](const std::string &s) -> std::string {
                   const auto b = s.find_first_not_of(" \t\r\n");
                   if (b == std::string::npos) return std::string();
@@ -370,14 +623,27 @@ public:
                         const auto slash = scope.rfind('/');
                         if (slash != std::string::npos && slash + 1 < scope.size())
                           ctx["parentId"] = scope.substr(slash + 1);
+                          {
+                            std::string mn = scope.substr(0, slash);
+                            const auto sp = mn.find("/children/");
+                            if (sp != std::string::npos) mn = mn.substr(0, sp);
+                            ctx["missionId"] = mn;
+                          }
                       }
                       const auto tr = cognitionManager_.executeAgiActionByName(
                           act["tool"].get<std::string>(), ctx);
                       std::string note = "[tool:" + act["tool"].get<std::string>();
                       if (tr.value("ok", false))
                         note += " ok " + tr.value("reply", std::string()).substr(0, 400);
-                      else
+                      else {
                         note += " FAILED " + tr.value("error", std::string());
+                        writeToolFeedback(
+                            "tool \"" + act["tool"].get<std::string>() +
+                            "\" failed: " + tr.value("error", std::string()) +
+                            " - expected form {\"tool\":\"<name>\","
+                            "\"arguments\":{\"userPrompt\":\"...\"}}, or just"
+                            " state your intent in plain words.");
+                      }
                       note += "]";
                       return note;
                     }
@@ -390,6 +656,77 @@ public:
                                act.value("path", std::string()) + "]";
                       return "[file:" + act.value("action", std::string()) + " FAILED " +
                              opRes.value("error", std::string()) + "]";
+                    }
+                    /* v8.x C1 self-planning: {"plan":"<next steps>"} writes
+                       plan.md; the next tick reads it back and follows it.
+                       Gate: a minimal draft must exist first (no planning
+                       in the void).  Humans can read/rewrite plan.md via
+                       /api/mission/file (human veto). */
+                    if (act.contains("plan") && act["plan"].is_string()) {
+                      std::string planText = act["plan"].get<std::string>();
+                      if (planText.size() > 500)
+                        planText = planText.substr(0, 500);
+                      const int planMinChars = isChildBox
+                          ? phoenix::resolveConfig<int>("mission.childMinDeliverableChars", 200)
+                          : phoenix::resolveConfig<int>("mission.minDeliverableChars", 1200);
+                      const size_t bodyChars =
+                          std::max(currentFile.size(), deliverable.size());
+                      if (static_cast<int>(bodyChars) < planMinChars / 3) {
+                        return "[plan-refused] deliverable too small to plan; "
+                               "keep drafting a minimal version first.";
+                      }
+                      phoenix::mission::workspaceExecute(
+                          workspaceRoot, scope,
+                          nlohmann::json{{"action", "write"},
+                                         {"path", "plan.md"},
+                                         {"content", planText}});
+                      return "[plan] saved to plan.md; the next tick follows "
+                             "it before acting.";
+                    }
+                    /* v8.x C2 self-directed loop:
+                       {"loop":{"action":"pause|replicate|continue",
+                        "reason":"...", "ticks":N}}.  The AI decides what
+                       the loop does next; humans always outrank it
+                       (interject/amendGoal/E-stop unchanged). */
+                    if (act.contains("loop") && act["loop"].is_object()) {
+                      const std::string loopAction =
+                          act["loop"].value("action", std::string());
+                      if (loopAction == "pause") {
+                        const int cap = phoenix::cfgOr<int>(
+                            "mission.maxSelfPauseTicks", 6);
+                        int n = act["loop"].value("ticks", 3);
+                        n = std::max(1, std::min(cap, n));
+                        return "[loop-pause:" + std::to_string(n) + "] " +
+                               act["loop"].value("reason", std::string());
+                      }
+                      if (loopAction == "replicate") {
+                        std::string sub = act["loop"].value("reason", std::string());
+                        if (sub.empty())
+                          sub = act["loop"].value("subgoal", std::string());
+                        nlohmann::json spawnCtx = nlohmann::json{{"subgoal", sub}};
+                        if (isChildBox) {
+                          const auto slash = scope.rfind('/');
+                          if (slash != std::string::npos &&
+                              slash + 1 < scope.size())
+                            spawnCtx["parentId"] = scope.substr(slash + 1);
+                        {
+                          std::string mn = scope.substr(0, slash);
+                          const auto sp = mn.find("/children/");
+                          if (sp != std::string::npos) mn = mn.substr(0, sp);
+                          spawnCtx["missionId"] = mn;
+                        }
+                        }
+                        const auto cr =
+                            cognitionManager_.spawnMissionChild(spawnCtx);
+                        if (cr.value("ok", false))
+                          return "[box] summoned " +
+                                 cr.value("result", nlohmann::json::object())
+                                     .value("id", std::string());
+                        return "[box] FAILED " +
+                               cr.value("error", std::string());
+                      }
+                      return "[loop] continue acknowledged (" +
+                             act["loop"].value("reason", std::string()) + ")";
                     }
                     /* v8.3 SELF-VERDICT: {"done":true,"summary":"..."}.
                        The agent judges its own task complete; the gate only
@@ -432,13 +769,165 @@ public:
                         return "[box-done] sub-task declared complete by the "
                                "box itself; parent will read and merge.";
                       }
-                      cognitionManager_.reportMissionOutcome(
-                          nlohmann::json{{"goalAchieved", true}});
+                      /* v8.x B2: deposit this mission as experience (section
+                         titles + excerpt) so similar future tasks start
+                         better.  Bounded: 200 entries, summary <= 400 chars. */
+                      try {
+                        std::string expSum;
+                        size_t sp = 0;
+                        int secs = 0;
+                        while (sp < currentFile.size() && secs < 4) {
+                          const auto eol = currentFile.find('\n', sp);
+                          const std::string line = currentFile.substr(
+                              sp, eol == std::string::npos
+                                      ? std::string::npos
+                                      : eol - sp);
+                          const auto b = line.find_first_not_of(" \t\r");
+                          if (b != std::string::npos && line[b] == '#') {
+                            expSum += line.substr(b) + "; ";
+                            ++secs;
+                          }
+                          if (eol == std::string::npos) break;
+                          sp = eol + 1;
+                        }
+                        expSum += currentFile.substr(0, 200);
+                        if (expSum.size() > 400)
+                          expSum = expSum.substr(0, 400);
+                        phoenix::mission::experienceAdd(
+                            phoenix::resolveConfig<std::string>(
+                                "mission.experiencePath",
+                                "./runtime_store/mission_experience.json"),
+                            goal, expSum);
+                        /* v8.x cross-context memory: the finished mission
+                           deposits its summary so OTHER contexts (chat,
+                           future missions) can recall it. */
+                        phoenix::memory::ccmRemember(
+                            phoenix::resolveConfig<std::string>(
+                                "crossContextMemory.path",
+                                "./runtime_store/cross_context_memory.json"),
+                            "mission:" + scope, expSum);
+                        /* v8.x B3 GNN graph evolution: feed the finished
+                           mission back through the EXISTING learning
+                           pipeline (learnFromDialog extracts memes and
+                           builds/strengthens edges) - the long-lived graph
+                           genuinely evolves, and future outlines for similar
+                           goals get better.  Bounded: summary <= 600 chars,
+                           best-effort, never blocks completion. */
+                        try {
+                          auto lr = activeRuntime();
+                          if (lr) {
+                            std::string learnText = expSum;
+                            if (learnText.size() > 600)
+                              learnText = learnText.substr(0, 600);
+                            lr->learnFromDialog(
+                                nlohmann::json{{"text", goal}},
+                                nlohmann::json{{"reply", learnText}});
+                          }
+                        } catch (...) {
+                          /* graph learning is best-effort */
+                        }
+                      } catch (...) {
+                        /* experience deposit is best-effort */
+                      }
+                      /* v8.x concurrent: target THIS mission (scope id) */
+                      {
+                        std::string msnId = scope;
+                        const auto sp = msnId.find("/children/");
+                        if (sp != std::string::npos) msnId = msnId.substr(0, sp);
+                        cognitionManager_.reportMissionOutcome(
+                            nlohmann::json{{"goalAchieved", true},
+                                           {"missionId", msnId}});
+                      }
                       return "[auto-complete] mission self-verdict: task "
                              "complete. " + summary;
                     }
                   } catch (...) {
+                    /* malformed JSON: try the natural-language intent
+                       resolver before falling back to plain text */
+                    std::string tName;
+                    nlohmann::json tCtx;
+                    if (resolveToolIntent(reply, tName, tCtx)) {
+                      if (isChildBox) {
+                        const auto slash = scope.rfind('/');
+                        if (slash != std::string::npos &&
+                            slash + 1 < scope.size())
+                          tCtx["parentId"] = scope.substr(slash + 1);
+                        {
+                          std::string mn = scope.substr(0, slash);
+                          const auto sp = mn.find("/children/");
+                          if (sp != std::string::npos) mn = mn.substr(0, sp);
+                          tCtx["missionId"] = mn;
+                        }
+                      }
+                      const auto tr =
+                          cognitionManager_.executeAgiActionByName(tName, tCtx);
+                      std::string note = "[tool:" + tName;
+                      if (tr.value("ok", false))
+                        note += " ok " +
+                                tr.value("reply", std::string()).substr(0, 400);
+                      else {
+                        note += " FAILED " + tr.value("error", std::string());
+                        writeToolFeedback(
+                            "tool \"" + tName + "\" failed: " +
+                            tr.value("error", std::string()) +
+                            " - expected form {\"tool\":\"<name>\","
+                            "\"arguments\":{\"userPrompt\":\"...\"}}, or just"
+                            " state your intent in plain words.");
+                      }
+                      note += "]";
+                      return note;
+                    }
+                    /* a reply that LOOKS like JSON but parses to nothing and
+                       matches no tool intent would pollute the deliverable -
+                       ask for a retry instead of appending the broken text */
+                    if (!trimmed.empty() && trimmed.front() == '{') {
+                      writeToolFeedback(
+                          "last reply was not valid JSON and no tool intent "
+                          "matched; retry with {\"tool\":...}, "
+                          "{\"action\":...}, {\"done\":...}, "
+                          "{\"plan\":...}, {\"loop\":...} or plain text.");
+                      return "[parse-fail] reply was not valid JSON and no "
+                             "tool intent matched - retry with a valid form "
+                             "({\"tool\":...}, {\"action\":...}, "
+                             "{\"done\":...}, {\"plan\":...}, "
+                             "{\"loop\":...}) or plain text.";
+                    }
                   }
+                } else {
+                /* non-JSON reply: natural-language tool intent wins, else
+                   the text is appended as the next deliverable chunk */
+                std::string tName;
+                nlohmann::json tCtx;
+                if (resolveToolIntent(reply, tName, tCtx)) {
+                  if (isChildBox) {
+                    const auto slash = scope.rfind('/');
+                    if (slash != std::string::npos &&
+                        slash + 1 < scope.size())
+                      tCtx["parentId"] = scope.substr(slash + 1);
+                      {
+                        std::string mn = scope.substr(0, slash);
+                        const auto sp = mn.find("/children/");
+                        if (sp != std::string::npos) mn = mn.substr(0, sp);
+                        tCtx["missionId"] = mn;
+                      }
+                  }
+                  const auto tr =
+                      cognitionManager_.executeAgiActionByName(tName, tCtx);
+                  std::string note = "[tool:" + tName;
+                  if (tr.value("ok", false))
+                    note += " ok " +
+                            tr.value("reply", std::string()).substr(0, 400);
+                  else {
+                    note += " FAILED " + tr.value("error", std::string());
+                    writeToolFeedback(
+                        "tool \"" + tName + "\" failed: " +
+                        tr.value("error", std::string()) +
+                        " - expected form {\"tool\":\"<name>\","
+                        "\"arguments\":{\"userPrompt\":\"...\"}}, or just"
+                        " state your intent in plain words.");
+                  }
+                  note += "]";
+                  return note;
                 }
               }
 
@@ -449,7 +938,11 @@ public:
                   nlohmann::json{{"action", "append"},
                                  {"path", deliverablePath},
                                  {"content", reply}});
+              /* v8.x L1: memoize this tick so an unchanged next tick is
+                 skipped (cycle guard) instead of regenerated. */
+              phoenix::mission::workspaceCachePut(scope, prompt, reply);
               return reply;
+              }
             } catch (...) {
             }
             return std::string();
@@ -472,6 +965,9 @@ public:
       loopCfg["enabled"] = phoenix::cfgOr<bool>("autonomyLoop.enabled", false);
       loopCfg["intervalSec"] = phoenix::cfgOr<int>("autonomyLoop.intervalSec", 10);
       loopCfg["maxStepsPerTick"] = phoenix::cfgOr<int>("autonomyLoop.maxStepsPerTick", 8);
+      loopCfg["maxChildrenPerTick"] = phoenix::cfgOr<int>("autonomyLoop.maxChildrenPerTick", 0);
+      /* v8.x concurrent missions: 0 = advance ALL running missions each tick */
+      loopCfg["maxMissionsPerTick"] = phoenix::cfgOr<int>("autonomyLoop.maxMissionsPerTick", 0);
       loopCfg["persistEveryTicks"] = phoenix::cfgOr<int>("autonomyLoop.persistEveryTicks", 5);
       loopCfg["persistPath"] = phoenix::cfgOr<std::string>(
           "autonomyLoop.persistPath", "runtime_store/autonomy_state.json");
@@ -875,6 +1371,11 @@ private:
      --parallel 1 on the RDK, concurrent clients cancel each other and the
      deliberator returns empty forever. */
   mutable std::mutex llamaCallMu_;
+  /* v8.x A2-4: chat outranks mission ticks.  A mission call marks itself
+     lowPriority and yields while any chat caller is waiting, so a human
+     question is never starved behind minutes of mission deliberation. */
+  mutable std::condition_variable llamaCallCv_;
+  std::atomic<int> llamaChatWaiters_{0};
   std::mutex transformerMu_;
   std::mutex chatMu_;
   Config config_;
@@ -989,6 +1490,8 @@ private:
 
       nlohmann::json iterPayload;
       iterPayload["sessionId"] = body.value("sessionId", "");
+      iterPayload["contextTag"] =
+          "chat:" + std::string(body.value("sessionId", "anonymous"));
       iterPayload["userPrompt"] = userText;
       iterPayload["graphContext"] = baseContext;
       iterPayload["body"] = body;

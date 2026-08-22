@@ -208,6 +208,26 @@ class MissionLifecycle {
      false when the id is unknown. */
   bool markChildDone(const std::string &childId);
 
+  /* ===================== v8.x C3 autonomous evolution =====================
+   * Historical selection loop (NOT online culling): every completed mission
+   * records (genome fingerprint, completion time, structural coverage) into
+   * an auditable lineage; the NEXT replication uses the lineage to adjust
+   * its mutation step (softmax-weighted - good history shrinks the step,
+   * bad history widens it).  Humans can inspect/reset the lineage; the
+   * whitelist of mutable genome fields is fixed in MissionGenome::mutate and
+   * cannot be extended via config.  Disabled by default (mission.evolution
+   * .enabled); when disabled the lineage is still recorded for audit. */
+  void recordLineage(uint64_t completionMs, double coverage);
+  nlohmann::json lineage() const;
+  void resetLineage();
+  void setEvolutionEnabled(bool enabled);
+  bool evolutionEnabled() const;
+  /* softmax-weighted mutation-step factor (1.0 = unchanged).  The Locked
+     variant assumes mu_ is already held (recordChild calls it under the
+     lock - calling the locking version there would self-deadlock). */
+  float effectiveMutationRate(float baseRate) const;
+  float effectiveMutationRateLocked(float baseRate) const;
+
   void markComplete();
   void markFailed();
 
@@ -233,6 +253,14 @@ class MissionLifecycle {
   /* 0 = UNLIMITED task-tree depth (user-decided via mission.maxReplicaDepth);
      >0 = hard cap on how deep boxes may summon their own boxes. */
   size_t maxReplicaDepth_{0};
+  /* v8.x C3 lineage (auditable history) */
+  struct LineageEntry {
+    std::string fingerprint;
+    uint64_t completionMs{0};
+    double coverage{0.0};
+  };
+  std::vector<LineageEntry> lineage_;
+  bool evolutionEnabled_{false};
   std::mt19937 rng_;
   size_t spawnCount_{0};
   size_t completeCount_{0};
