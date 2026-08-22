@@ -17,6 +17,7 @@
    along with 079 Project.  If not, see <http://www.gnu.org/licenses/>. */
 
 #include "autonomy_stack.hpp"
+#include "mission_reply_parse.hpp"
 
 #include "addons/builtin_registry.hpp"
 #include "phoenix_config.hpp"
@@ -853,6 +854,11 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
 
     std::string userPrompt = context.value("userPrompt", std::string());
     std::string text = userPrompt;
+    if (spec.addonType == "search" && !text.empty() &&
+        (text.front() == '{' || text.find("\"action\"") != std::string::npos)) {
+        /* malformed tool routing: never send raw JSON to the search addon */
+        text.clear();
+    }
     if (spec.addonType == "math" && !text.empty() && text.find("math:") != 0 && text.find("calc:") != 0) {
         text = "math: " + text;
     } else if (spec.addonType == "search" && !text.empty() && text.find("search:") != 0) {
@@ -871,6 +877,7 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
     }
 
     json out = json{{"ok", true},
+                    {"reply", res.reply},
                     {"result",
                      json{{"addon", res.meta.value("addon", spec.addonType)},
                           {"name", spec.name},
@@ -1818,6 +1825,35 @@ json CognitionAutonomyManager::evaluateInstincts() {
     return json{{"ok", true}, {"result", bh.toJson()}};
 }
 
+/* v8.x unified pipeline: the SAME pre-processing stage the chat path runs,
+   but scoped to one context (mission:<id> / chat:<session>).  The mission
+   deliberator uses this BEFORE building the GNN outline and calling the
+   main inference, so every instance follows the user-defined workflow:
+   tokenizer -> memory/emotion pre-processing -> GNN -> inference ->
+   detokenizer -> keep the final layer state -> repeat. */
+json CognitionAutonomyManager::evaluateInstinctsFor(const std::string &contextTag) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto activeSens = sensationEngine_.activeFor(contextTag);
+    instinctEngine_.update(activeSens, 1.0f);
+    auto bh = instinctEngine_.evaluate(activeSens);
+    auto emotionTensor = phoenix::instinct::InstinctEngine::driveToEmotion(bh);
+    if (subconsciousEnabled_)
+        emotionTensor = subProfile_.applyTemperament(emotionTensor);
+    return json{{"ok", true},
+                {"result", json{{"benefitHarm", bh.toJson()},
+                                {"emotionTensor", emotionTensor.toJson()},
+                                {"inferenceOptions",
+                                 emotionTensor.inferenceOptions()},
+                                {"modulationHint",
+                                 emotionTensor.modulationHint()}}}};
+}
+
+float CognitionAutonomyManager::missionPressureFor(const std::string &missionId) {
+    std::lock_guard<std::mutex> lock(mu_);
+    phoenix::mission::MissionLifecycle *msn = missionByIdLocked(missionId);
+    return msn ? msn->pressureNow() : 0.0f;
+}
+
 json CognitionAutonomyManager::configureAgi(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
     auto asInt = [](const json &j, int dflt) -> int {
@@ -2570,7 +2606,7 @@ void CognitionAutonomyManager::loopRun() {
                                 }
                                 std::lock_guard<std::mutex> lock(mu_);
                                 missionPauseTicks_[sn.id] = std::max(0, n);
-                            } else {
+                            } else if (!phoenix::mission::isMissionMetaReply(work)) {
                                 appendMissionDeliverable(
                                     nlohmann::json{{"text", work},
                                                    {"missionId", sn.id}});

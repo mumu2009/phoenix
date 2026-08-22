@@ -179,6 +179,16 @@ inline PackOptions optionsFromJson(const nlohmann::json &j, const PackOptions &d
     if (c > 32768) c = 32768;
     o.ctxTokens = c;
   }
+  /* Scale pinned/sliding budgets with ctx: 16k keeps summary + recent full. */
+  if (o.ctxTokens >= 12000) {
+    o.summaryBudgetTokens = std::max(o.summaryBudgetTokens, 1536);
+    o.gnnBudgetTokens = std::max(o.gnnBudgetTokens, 384);
+    o.replyReserveTokens = std::max(o.replyReserveTokens, 768);
+    o.overheadTokens = std::max(o.overheadTokens, 384);
+  } else if (o.ctxTokens >= 6000) {
+    o.summaryBudgetTokens = std::max(o.summaryBudgetTokens, 768);
+    o.gnnBudgetTokens = std::max(o.gnnBudgetTokens, 320);
+  }
   return o;
 }
 

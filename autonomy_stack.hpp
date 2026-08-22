@@ -176,6 +176,12 @@ public:
     json resetMissionLineage();          /* clears every mission's lineage */
     /* default mission id for legacy single-mission callers (files route etc.) */
     std::string defaultMissionId() const;
+    /* v8.x unified pipeline: per-context emotion appraisal (the pre-processing
+       stage the mission deliberator runs before the GNN outline + main
+       inference), returning {emotionTensor, inferenceOptions, benefitHarm}. */
+    json evaluateInstinctsFor(const std::string &contextTag);
+    /* current pressure of one mission (drives the steady-output loop). */
+    float missionPressureFor(const std::string &missionId);
 
     /* v8.0 mission worker: the gateway registers an LLM-backed deliberator.
        While a mission is Running the heartbeat calls it OUTSIDE the manager

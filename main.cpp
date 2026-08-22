@@ -49,6 +49,7 @@ using ioctl_arg_t = unsigned long;
 #include "ahead_module.hpp"
 #include "async_task_system.hpp"
 #include "module_overrides/llama_split_backend_client.hpp"
+#include "mission_reply_parse.hpp"
 
 #include "main_hub_parts/000_section_before_config.inc"
 #include "main_hub_parts/001_struct_config.inc"

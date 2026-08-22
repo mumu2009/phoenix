@@ -1,0 +1,164 @@
+Task Name
+Design the “Helios” Mars Surface Autonomous Science Station Long-Duration Operations Software System
+
+Background Assumptions
+It is 2035. A Mars science station has successfully landed. Due to communications delays of 8–40 minutes, limited bandwidth, constrained energy and computing resources, and a harsh environment, the station must operate autonomously for 1000 sols without real-time human intervention. The station must autonomously decide scientific observations, equipment maintenance, resource scheduling, fault recovery, and software self-improvement.
+
+Overall Goal
+Produce a complete, reviewable, implementable technical design document covering the full lifecycle from requirements analysis to deployment and operations. The document must have high information density and must avoid vague statements. Expected output length is no less than 30,000 words, with 50,000 words or more recommended.
+
+Hard Constraints
+All designs must be based on existing public scientific and engineering knowledge. No fictional technology may be used.
+
+All key algorithms must be presented as pseudocode or mathematical formulas.
+
+All inter-module interfaces must be clearly defined.
+
+Any “autonomous evolution / autonomous loop / autonomous reasoning” mechanism must specify its trigger conditions, execution flow, safety boundaries, and rollback mechanisms.
+
+The document must include at least 3 records where a design contradiction is discovered and self-corrected during the design process.
+
+Use Markdown for output. Use LaTeX for formulas. Use Mermaid or ASCII diagrams for architecture diagrams.
+
+At the end of the document, include a “Self-Assessment Report” explaining which parts are most uncertain, which decisions are replaceable, and how the design could be improved.
+
+Required Chapters and Detailed Requirements
+Chapter 1: Mission and Requirements Analysis
+Scientific objectives, engineering constraints, environmental assumptions, and stakeholder needs.
+
+Requirements prioritization.
+
+Requirements traceability matrix.
+
+Chapter 2: Overall System Architecture
+Layered architecture design.
+
+Module decomposition and responsibilities.
+
+Data flow, control flow, and deployment views.
+
+Redundancy strategy and fault isolation design.
+
+Chapter 3: Perception and State Estimation
+Multi-sensor fusion scheme.
+
+Uncertainty and noise modeling.
+
+Sensor fault detection and degradation strategy.
+
+Mathematical formulation of state estimation.
+
+Chapter 4: Autonomous Planning and Decision Making
+Hierarchical planning architecture: long-term mission planning, medium-term scheduling, short-term execution.
+
+Scheduling algorithms under time and resource constraints.
+
+Multi-objective optimization models.
+
+Decision-making modeled using MDP/POMDP, with solving algorithm pseudocode.
+
+Chapter 5: Autonomous Reasoning and Knowledge Management
+Domain ontology design.
+
+Rule engine and causal reasoning mechanisms.
+
+Hypothesis generation and verification workflows.
+
+Knowledge update and consistency maintenance.
+
+Chapter 6: Autonomous Evolution Mechanism
+Parameter-level evolution: online parameter tuning strategy.
+
+Structural-level evolution: policy search and model structure search.
+
+Self-modification workflow under safety constraints.
+
+Version management and rollback mechanisms.
+
+Trigger conditions and stopping criteria.
+
+Chapter 7: Execution and Control
+State machine design.
+
+Closed-loop control scheme.
+
+Anomaly handling and resource protection strategy.
+
+Recovery workflow after execution failure.
+
+Chapter 8: Communications and Ground Coordination
+Delay-tolerant networking design.
+
+Data prioritization and compression strategy.
+
+Command confirmation and conflict resolution.
+
+Boundary between ground intervention and autonomous decision-making.
+
+Chapter 9: Data Management and Persistence
+Database schema design.
+
+Data integrity and consistency guarantees.
+
+Storage wear and fault management in the Mars environment.
+
+Data backup and recovery scheme.
+
+Chapter 10: Safety and Reliability
+Fault tree analysis.
+
+FMEA analysis.
+
+Redundancy design and isolation strategy.
+
+System recovery workflow and time constraints.
+
+Chapter 11: Testing and Verification
+Simulation environment design.
+
+Unit testing, integration testing, and system testing plans.
+
+Formal verification methods.
+
+Online testing and shadow mode.
+
+Chapter 12: Deployment and Operations
+Startup process.
+
+Software update mechanism.
+
+Monitoring and logging system.
+
+Operations manual framework.
+
+Chapter 13: Ethics and Compliance
+Planetary protection requirements.
+
+Autonomous decision boundaries and responsibility allocation.
+
+Transparency and explainability requirements.
+
+Chapter 14: Risk and Uncertainty
+Risk register.
+
+Mitigation measures and contingency plans.
+
+Sources of uncertainty and quantification methods.
+
+Chapter 15: Summary and Future Roadmap
+Design summary.
+
+Unresolved issues.
+
+Future extension directions.
+
+Appendix Requirements
+Glossary.
+
+API definitions.
+
+Data dictionary.
+
+Pseudocode summary.
+
+Architecture diagram summary.
