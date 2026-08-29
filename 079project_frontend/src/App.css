@@ -960,6 +960,27 @@
   color: #fff;
 }
 
+.mission-param-intro {
+  margin: 0 0 4px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.mission-panel .mission-param-input {
+  width: 100%;
+  max-width: 420px;
+}
+
+.mission-panel .cfg-row + .card-subtitle {
+  margin-top: 16px;
+}
+
+@media (max-width: 720px) {
+  .mission-panel .mission-param-input {
+    max-width: none;
+  }
+}
+
 .mission-card-full,
 .mission-grid .mission-monitor {
   grid-column: span 12;

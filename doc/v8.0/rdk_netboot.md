@@ -5,6 +5,25 @@
 GGUF，CPU 推理）、phoenix_main 网关、前端子进程。模型只传输一次到 RDK USB，之后
 推理完全离线于宿主机。
 
+## 1.5 宿主机交叉编译（推荐，RDK 上不再编 phoenix/llama）
+
+Windows 宿主机安装 `aarch64-linux-gnu-g++`（MSYS2: `mingw-w64-cross-aarch64-linux-gnu-gcc`）后：
+
+```powershell
+# 一次性拉取 RDK sysroot
+bash tools/rdk_sysroot_fetch.sh sunrise@192.168.0.107
+
+# 交叉编译 split 版 phoenix_main + llama-server -> build/rdk-aarch64/
+tools\build_rdk_x5_cross.bat
+# 或在 compile.bat 后: set PHOENIX_CROSS_BUILD_RDK=1 && compile.bat
+
+python tools\rdk_netboot_manifest.py > build\rdk_netboot_manifest.txt
+python tools\rdk_netboot_serve.py
+```
+
+RDK 上 `bash /tmp/rdk_netboot_v8.sh` 会优先使用 `build/rdk-aarch64/phoenix_main` 与
+`build/rdk-aarch64/llama-server`（split patch 已编入），**不再在设备上 g++ 编译**。
+
 ## 1. 组件分工
 
 | 端口 | 位置 | 内容 |

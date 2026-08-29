@@ -2,6 +2,7 @@
    Copyright (C) 2026 079 Project */
 
 #include "mission_lifecycle.hpp"
+#include "mission_reply_parse.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -184,12 +185,22 @@ float MissionLifecycle::pressureNow() const {
   return mission_.pressure(sysNowMs());
 }
 
+void MissionLifecycle::setDeliverable(const std::string &text) {
+  std::lock_guard<std::mutex> lock(mu_);
+  constexpr size_t kMaxDeliverableBytes = 4u * 1024u * 1024u;
+  mission_.deliverable = text;
+  if (mission_.deliverable.size() > kMaxDeliverableBytes)
+    mission_.deliverable = mission_.deliverable.substr(
+        mission_.deliverable.size() - kMaxDeliverableBytes);
+}
+
 void MissionLifecycle::appendDeliverable(const std::string &text) {
-  if (text.empty()) return;
+  const std::string chunk = sanitizeDeliverableActionContent(text);
+  if (chunk.empty()) return;
   std::lock_guard<std::mutex> lock(mu_);
   if (mission_.state != MissionState::Running) return;
   constexpr size_t kMaxDeliverableBytes = 4u * 1024u * 1024u; /* 4 MiB: long tutorials */
-  mission_.deliverable += text;
+  mission_.deliverable = joinDeliverableText(mission_.deliverable, chunk);
   if (mission_.deliverable.size() > kMaxDeliverableBytes)
     mission_.deliverable = mission_.deliverable.substr(
         mission_.deliverable.size() - kMaxDeliverableBytes);

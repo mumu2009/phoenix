@@ -7,6 +7,13 @@ public:
   /* Forward decl only - definition is out-of-line after GatewayServer closes
      (see 116_section_tail.inc).  A second in-class definition would collide. */
   std::string buildMissionOutline(const std::string &goal);
+  /** Pretrain meme graph + memory/emotion from robots/wikitext (unit-sequence
+   *  ingest, not text into infer).  Returns documents ingested this call. */
+  int seedGnnGraphFromRobotsCorpus(int maxDocs, const char *sourceTag);
+  void attachEmotionSystem(
+      std::shared_ptr<phoenix::emotion::EmotionSystem> emo) {
+    emotionSystem_ = std::move(emo);
+  }
 
   // v7.4 world model / tinyllama integration
   void setWorldModelDatabase(std::shared_ptr<Database079> db) {
@@ -32,7 +39,8 @@ public:
 
   void ingestWorldEvidence(const std::string &sessionId,
                            const std::string &text,
-                           const std::string &graphSummary) {
+                           const std::string &graphSummary,
+                           const std::string &source = "gateway-chat") {
     if (!worldModel_)
       return;
     try {
@@ -41,7 +49,7 @@ public:
       evidence["modality"] = "text";
       evidence["text"] = text;
       evidence["graphSummary"] = graphSummary;
-      evidence["metadata"] = nlohmann::json{{"source", "gateway-chat"}};
+      evidence["metadata"] = nlohmann::json{{"source", source}};
       /* v8.0 audit B: tag the running mission so prediction docs aggregate
          per goal (world evidence becomes goal-scoped observability). */
       try {
@@ -71,11 +79,20 @@ public:
                          const std::string &graphContext,
                          int maxTokens,
                          const json &options = json::object()) {
-    int summaryTimeoutMs =
-        phoenix::cfgOr<int>("tinyllama.summaryTimeoutMs", 5000);
-    return chatWithExternalAdapter(
-        "tinyllama", config_.tinyllamaBaseUrl, config_.tinyllamaModel,
-        summaryTimeoutMs, text, graphContext, maxTokens, options);
+    int summaryTimeoutMs = std::max(1000, config_.tinyllamaRequestTimeoutMs);
+    if (config_.tinyllamaBaseUrl.empty()) {
+      return json{{"ok", false}, {"error", "tinyllamaBaseUrl not configured"},
+                  {"provider", "tinyllama"}};
+    }
+    // Split llama-server exposes /phx/*, not Ollama /api/chat.
+    json r = phoenix::v7::llamaSplitChat(
+        config_.tinyllamaBaseUrl, summaryTimeoutMs, config_.tinyllamaModel,
+        text, graphContext, maxTokens, options);
+    if (config_.httpLog)
+      std::cout << "[chat] tinyllama(split) ok=" << r.value("ok", false)
+                << " replyLen=" << r.value("reply", std::string()).size()
+                << std::endl;
+    return r;
   }
 
   GatewayServer(std::shared_ptr<ControllerPoolBase> pool,
@@ -155,7 +172,7 @@ public:
       missionCfg["maxPain"] = phoenix::cfgOr<double>("mission.maxPain", 1.0);
       missionCfg["pressureMode"] = phoenix::resolveConfig<std::string>("mission.pressureMode", std::string("asymptotic"), "AI_MISSION_PRESSURE_MODE");
       missionCfg["pressureHorizonSec"] = phoenix::resolveConfig<double>("mission.pressureHorizonSec", 3600.0, "AI_MISSION_PRESSURE_HORIZON_SEC");
-      missionCfg["pressureTauSec"] = phoenix::resolveConfig<double>("mission.pressureTauSec", 1800.0, "AI_MISSION_PRESSURE_TAU_SEC");
+      missionCfg["pressureTauSec"] = phoenix::resolveConfig<double>("mission.pressureTauSec", 86400.0, "AI_MISSION_PRESSURE_TAU_SEC");
       missionCfg["pressureExpr"] = phoenix::resolveConfig<std::string>("mission.pressureExpr", std::string("Pmax*tanh(t/tau)"), "AI_MISSION_PRESSURE_EXPR");
       missionCfg["mutationRate"] = phoenix::cfgOr<double>("mission.mutationRate", 0.05);
       missionCfg["maxReplicas"] = phoenix::cfgOr<int>("mission.maxReplicas", 4);
@@ -168,24 +185,30 @@ public:
          layer can be armed at runtime via /api/mission/assign, and a later
          assign must not spin with an empty deliverable.
          Reply forms the model may use:
-           1) plain text            -> appended to deliverable.md (first minimal draft)
-           2) {"action":write|append|read|list,"path","content"} -> workspace file op
-           3) {"tool":"<action-name>","arguments":{...}}          -> registered AGI action
-              (math/search/research/web/replicate/mcp.*) executed via the executor
-           4) {"done":true,"summary":"..."} -> SELF-VERDICT: the task is complete
-              (v8.3; the gate refuses it until deliverable.md is long enough)
-         Tool/action results are appended to the deliverable so the NEXT tick
-         sees them - the agent iteratively refines instead of looping. */
-      cognitionManager_.setMissionDeliberator(
-          [this](const std::string &goal, const std::string &deliverable,
+           1) plain markdown the model chose (including its own headings)
+           2) {"action":write|replace|read|list|run,"path","content","find"}
+           3) {"tool":"script"|"math"|...,"arguments":{...}}
+           4) {"done":true,"summary":"..."} -> SELF-VERDICT */
+        cognitionManager_.setMissionDeliberator(
+            [this](const std::string &goal, const std::string &deliverable,
                  int maxTokens, const std::string &scope) -> std::string {
             try {
+              static std::mutex gDelibSkipMu;
+              static std::unordered_map<std::string, int> gDelibSkipCount;
+              static std::unordered_map<std::string, size_t> gDelibLastDelivAtLlm;
+              static std::unordered_map<std::string, int> gDelibCacheSkipsNoGrowth;
               const std::string workspaceRoot = phoenix::resolveConfig<std::string>(
                   "mission.workspaceDir", std::string("./runtime_store/mission_workspace"),
                   "AI_MISSION_WORKSPACE");
               /* scope = workspace sub-path: missionId for the parent,
                  missionId/children/<childId> for a helper box. */
               const bool isChildBox = scope.find("/children/") != std::string::npos;
+              const int configuredMinChars = isChildBox
+                  ? phoenix::resolveConfig<int>("mission.childMinDeliverableChars", 200)
+                  : phoenix::resolveConfig<int>("mission.minDeliverableChars", 1200);
+              const int minDeliverableChars = isChildBox
+                  ? configuredMinChars
+                  : phoenix::mission::inferMinDeliverableChars(goal, configuredMinChars);
               const std::string deliverablePath = "deliverable.md";
               const auto listRes = phoenix::mission::workspaceExecute(
                   workspaceRoot, scope, nlohmann::json{{"action", "list"}});
@@ -203,27 +226,113 @@ public:
               if (deliverable.size() > currentFile.size())
                 currentFile = deliverable;
 
-              /* Sliding-window pack: pinned summary (+ optional GNN) + recent
-                 full text, sized to the user-selected ctx (4k/16k). */
+              /* Seed before pack. Packing an empty file made
+                 recentChars=0 and dropped the short-term window from
+                 the causal stream (2868973). No ChatML roles here —
+                 this is the document opening, not a user/assistant
+                 turn. */
+              bool seededEmpty = false;
+              if (currentFile.empty()) {
+                const std::string seed =
+                    phoenix::mission::formatEmptyFileSeed(goal);
+                if (!seed.empty()) {
+                  const auto wr = phoenix::mission::workspaceExecute(
+                      workspaceRoot, scope,
+                      nlohmann::json{{"action", "write"},
+                                     {"path", deliverablePath},
+                                     {"content", seed}});
+                  if (wr.value("ok", false)) {
+                    currentFile = seed;
+                    seededEmpty = true;
+                  }
+                }
+              }
+
+              /* Two infer streams: causal = pin + working brief + draft
+                 tail (resume); RAG = memory/GNN unit-query sequences as
+                 residual emphasis. They are not concatenated onto the
+                 causal tail. */
+              std::vector<phoenix::inference::UnitQueryIO> missionMemorySnippets;
+              std::vector<phoenix::inference::UnitQueryIO> missionGnnPkts;
+              const bool unitPipelineEnabled =
+                  phoenix::cfgOr<bool>("main.inference.unitPipeline", true);
               phoenix::context::PackOptions packOpt;
               packOpt.mode = "full_and_summary";
-              packOpt.includeGnnSummary = false;
-              packOpt.ctxTokens = phoenix::cfgOr<int>("llama_server.ctx_size", 4096);
+              packOpt.includeGnnSummary =
+                  phoenix::cfgOr<bool>("mission.includeGnnSummary", true);
+              packOpt.ctxTokens =
+                  phoenix::cfgOr<int>("mission.ctxSize", 4096);
+              packOpt.ngramMerge =
+                  phoenix::cfgOr<int>("main.inference.ngramMerge", 2);
               std::string gnnText;
+              nlohmann::json missionGraphResult = nlohmann::json::object();
               try {
                 const auto copts = cognitionManager_.missionContextOptions();
                 const auto &cr = copts.value("result", nlohmann::json::object());
                 packOpt = phoenix::context::optionsFromJson(cr, packOpt);
-                gnnText = cr.value("gnnSummary", std::string());
               } catch (...) {
               }
-              if (packOpt.includeGnnSummary && gnnText.empty()) {
-                /* lightweight stand-in: keyword-ish extractive of the goal
-                   when no graph diffusion summary has been pushed yet */
-                gnnText = "goal focus: " + goal;
-              }
-              const auto packed = phoenix::context::packContext(currentFile, gnnText, packOpt);
+              const auto packed =
+                  phoenix::context::packContext(currentFile, gnnText, packOpt);
               const std::string packedBody = packed.packed;
+              const std::string recallDraft = packed.recentFull.empty()
+                  ? currentFile : packed.recentFull;
+              const bool pinOnly =
+                  phoenix::mission::deliverableIsOnlyPin(currentFile, goal) ||
+                  seededEmpty;
+              /* GNN pretrain gap: empty meme graph => empty diffusion prior.
+                 Graph the same recent window infer sees, not a 2k tail and
+                 not the human assignment. Pin-only is not a draft to graph. */
+              if (!pinOnly &&
+                  (packOpt.includeGnnSummary || unitPipelineEnabled)) {
+                try {
+                  const int lim =
+                      phoenix::cfgOr<int>("mission.gnnPretrainDocs", 48);
+                  seedGnnGraphFromRobotsCorpus(lim, "gnn-pretrain");
+                  if (unitPipelineEnabled) {
+                    std::string gnnSrc = packed.recentFull.empty()
+                                             ? currentFile
+                                             : packed.recentFull;
+                    const size_t gnnCap = std::max(
+                        static_cast<size_t>(phoenix::cfgOr<int>(
+                            "mission.gnnSourceChars", 2000)),
+                        packed.recentFull.size());
+                    if (gnnSrc.size() > gnnCap)
+                      gnnSrc = gnnSrc.substr(gnnSrc.size() - gnnCap);
+                    if (!pinOnly && currentFile.size() >= 2500 &&
+                        !gnnSrc.empty() &&
+                        !phoenix::mission::draftTailLooksCollapsed(gnnSrc)) {
+                      auto rt = activeRuntime();
+                      auto st = rt ? std::dynamic_pointer_cast<RuntimeState>(rt)
+                                   : nullptr;
+                      if (st)
+                        st->ingestDocument(
+                            nlohmann::json{{"text", gnnSrc},
+                                           {"source", "mission-draft"}});
+                      missionGraphResult = buildMissionGraphResult(gnnSrc);
+                      const int llamaDim = phoenix::cfgOr<int>(
+                          "main.inference.llamaEmbDim", 4096);
+                      auto gnnRows =
+                          buildGraphEmbeddings(missionGraphResult, llamaDim);
+                      gnnRows = phoenix::mission::projectRowsToLlamaDim(
+                          gnnRows, llamaDim);
+                      if (gnnRows.size() > 32)
+                        gnnRows.resize(32);
+                      if (!gnnRows.empty())
+                        phoenix::inference::appendUnitQuery(
+                            missionGnnPkts,
+                            phoenix::inference::unitQueryFromRows(
+                                std::move(gnnRows), "unit"));
+                    }
+                  }
+                  /* Do not invent a document outline from GNN memes.
+                     The model writes plan.md after it has a draft. */
+                } catch (const std::exception &ex) {
+                  std::cout << "[mission] GNN pretrain/diffuse failed: "
+                            << ex.what() << std::endl;
+                } catch (...) {
+                }
+              }
 
               /* RDK llama prompt eval is ~1.5-2s/token.  Dumping every AGI
                  action (name+category+description) pushed the deliberator
@@ -236,9 +345,7 @@ public:
                  name + one-line purpose per tool - it is prefilled once and
                  then reused by the slot cache, so the one-time cost is
                  amortized across ticks. */
-              std::string toolHint =
-                  "math: exact arithmetic/computation; search: web search; "
-                  "replicate: summon a helper box for a sub-part";
+              std::string toolHint = "math, search, replicate";
               try {
                 const auto la = cognitionManager_.listAgiActions();
                 const auto &arr = la.value("result", nlohmann::json::array());
@@ -248,192 +355,310 @@ public:
                   if (!spec.is_object()) continue;
                   const std::string nm = spec.value("name", std::string());
                   if (nm.empty()) continue;
-                  std::string desc = spec.value("description", std::string());
-                  if (desc.size() > 60) desc = desc.substr(0, 60);
-                  if (n++) names += "\n";
-                  names += nm + (desc.empty() ? std::string() : ": " + desc);
+                  if (n++) names += ", ";
+                  names += nm;
                   if (n >= 16) break;
                 }
                 if (!names.empty()) toolHint = names;
               } catch (...) {
               }
 
-              auto clip = [](std::string s, size_t maxChars) {
-                if (s.size() <= maxChars) return s;
-                return s.substr(s.size() - maxChars);
-              };
               std::string goalClip = goal;
-              if (goalClip.size() > 400) goalClip = goalClip.substr(0, 400);
-              std::string packClip = clip(packedBody, 900);
+              {
+                const size_t goalMax =
+                    phoenix::cfgOr<size_t>("mission.goalClipChars", 8000);
+                if (goalClip.size() > goalMax)
+                  goalClip = phoenix::mission::clipGoalKeepRequiredStructure(
+                      goalClip, goalMax);
+              }
               std::string listClip = listRes.dump();
               if (listClip.size() > 300) listClip = listClip.substr(0, 300) + "...";
+              /* packed.recentFull is the causal short-term window.
+                 pinnedSummary / gnnPinned are RAG, not causal text. */
+              if (!packed.pinnedSummary.empty())
+                phoenix::inference::appendUnitQueriesFromParagraphs(
+                    missionMemorySnippets, packed.pinnedSummary, "text");
+              if (!packed.gnnPinned.empty())
+                phoenix::inference::appendUnitQueriesFromParagraphs(
+                    missionMemorySnippets, packed.gnnPinned, "text");
+              (void)packedBody;
 
-              /* inference options built FIRST - the emotion pre-processing
-                 stage (inside the static prefix) modulates them. */
+              /* Do not dump the human assignment (Required Chapters / SRS
+                 headings) into the chat system turn. That framed each tick
+                 as "answer the brief" and the 8B recopied Background
+                 Assumptions / Testing and Validation. Facts live in the
+                 seed + pin; the file tail is the continuation. */
+              std::string staticPrompt;
+              {
+                const std::string expPath = phoenix::resolveConfig<std::string>(
+                    "mission.experiencePath",
+                    std::string("./runtime_store/mission_experience.json"));
+                /* Pin-only / empty draft: do not recall prior missions.
+                   Assign writes the seed before tick 1; treating that
+                   as a real window pulled tutorial/game-review RAG. */
+                if (!pinOnly && !recallDraft.empty())
+                  phoenix::mission::appendRecalledMemory(
+                      missionMemorySnippets, phoenix::instance::ccmStorePath(),
+                      expPath, goal, recallDraft, 3, 3);
+                /* Pretrain wrote HierarchicalMemory under corpus:* and
+                   never read it back on mission ticks. Same recall query
+                   as CCM — not a second causal stream. */
+                if (!pinOnly) {
+                try {
+                  const std::string q = phoenix::mission::buildMemoryRecallQuery(
+                      goalClip, recallDraft);
+                  const auto hits = cognitionMemory_.query("corpus:", 12);
+                  int kept = 0;
+                  for (const auto &kv : hits) {
+                    if (!kv.second.is_object()) continue;
+                    std::string t = kv.second.value("text", std::string());
+                    if (t.empty() ||
+                        phoenix::mission::looksLikeCollapsedProse(t))
+                      continue;
+                    if (phoenix::memory::ccmOverlap(q, t) < 0.04)
+                      continue;
+                    if (t.size() > 800) t.resize(800);
+                    phoenix::inference::appendUnitQueriesFromParagraphs(
+                        missionMemorySnippets, t, "text");
+                    if (++kept >= 3) break;
+                  }
+                } catch (...) {
+                }
+                }
+                /* Assignment is RAG emphasis after a real draft exists.
+                   On a pin-only first tick the working brief is already
+                   in the causal prefix; dumping Required Chapters as RAG
+                   framed the tick as "answer the exam". */
+                if (!pinOnly) {
+                const size_t memBefore = missionMemorySnippets.size();
+                phoenix::inference::appendUnitQueriesFromParagraphs(
+                    missionMemorySnippets, goalClip, "text");
+                const size_t goalCap = 24;
+                if (missionMemorySnippets.size() > memBefore + goalCap)
+                  missionMemorySnippets.resize(memBefore + goalCap);
+                if (phoenix::cfgOr<bool>("mission.outlineEnabled", true)) {
+                  try {
+                    const std::string outline = buildMissionOutline(goalClip);
+                    if (outline.find("\n1. ") != std::string::npos)
+                      phoenix::inference::appendUnitQuery(
+                          missionMemorySnippets,
+                          phoenix::inference::unitQueryFromText(outline,
+                                                                "text"));
+                  } catch (...) {
+                  }
+                }
+                }
+                /* Observe step: draft defects go to RAG, not the causal
+                   prefix and not a refuse gate. The causal stream can
+                   still append; the model is shown what to revise. */
+                if (!pinOnly && !currentFile.empty()) {
+                  const std::string health =
+                      phoenix::mission::inspectDeliverableHealth(currentFile,
+                                                                 goal);
+                  if (!health.empty())
+                    phoenix::inference::appendUnitQueriesFromParagraphs(
+                        missionMemorySnippets, health, "text");
+                }
+                /* C1: the model's own plan.md is RAG emphasis, not a
+                   [NEXT] block on the causal stream. Resume stays the
+                   file tail. Skip on pin-only — there is no draft yet. */
+                if (!pinOnly) {
+                  const auto planRes = phoenix::mission::workspaceExecute(
+                      workspaceRoot, scope,
+                      nlohmann::json{{"action", "read"},
+                                     {"path", "plan.md"}});
+                  if (planRes.value("ok", false)) {
+                    std::string plan = planRes.value("content", std::string());
+                    if (plan.size() > 800)
+                      plan = plan.substr(plan.size() - 800);
+                    if (!plan.empty())
+                      phoenix::inference::appendUnitQuery(
+                          missionMemorySnippets,
+                          phoenix::inference::unitQueryFromText(
+                              "[plan] " + plan, "text"));
+                  }
+                }
+              }
               nlohmann::json opts = nlohmann::json{
-                  {"temperature", 0.3},
-                  {"lowPriority", true}, /* chat outranks mission ticks */
-                  {"timeoutMs", phoenix::cfgOr<int>("mission.llmTimeoutMs", 900000)}};
-              /* v8.x A5: multi-token batch decode (server-side Jacobi/parallel
-                 window); off by default until the RDK acceptance data is in. */
-              if (phoenix::cfgOr<bool>("llama.parallelDecode.enabled", false)) {
+                  {"temperature", phoenix::cfgOr<double>("mission.temperature", 0.35)},
+                  {"top_p", phoenix::cfgOr<double>("mission.topP", 0.9)},
+                  {"frequency_penalty",
+                   phoenix::cfgOr<double>("mission.frequencyPenalty", 0.35)},
+                  {"repeat_penalty",
+                   phoenix::cfgOr<double>("mission.repeatPenalty", 1.18)},
+                  {"repeat_last_n",
+                   phoenix::cfgOr<int>("mission.repeatLastN", 512)},
+                  {"presence_penalty",
+                   phoenix::cfgOr<double>("mission.presencePenalty", 0.15)},
+                  {"max_side_tokens",
+                   phoenix::cfgOr<int>("mission.maxSideTokens", 512)},
+                  {"timeoutMs", phoenix::cfgOr<int>("mission.llmTimeoutMs", 5400000)},
+                  {"ctxTokenBudget", packOpt.ctxTokens},
+                  {"stop", nlohmann::json::array({
+                       "Is there anything else",
+                       "Would you like me to",
+                       "How can I help",
+                       "Please let me know if",
+                       "<|eom_id|>",
+                       "<|eot_id|>",
+                       "<|im_end|>",
+                       "<|start_header_id|>",
+                       "<|end_of_text|>"})}};
+              /* GNN text reply stays off the causal stream. Rows (if
+                 any) are already in missionGnnPkts from the graph step. */
+              (void)gnnText;
+              opts = buildUnitPipelineOptions(nlohmann::json::object(),
+                                              missionMemorySnippets,
+                                              missionGnnPkts, scope, true, opts);
+              if (!phoenix::cfgOr<bool>("mission.disableParallelDecode", true) &&
+                  phoenix::cfgOr<bool>("llama.parallelDecode.enabled", false)) {
                 opts["n_parallel"] =
                     phoenix::cfgOr<int>("llama.parallelDecode.N", 4);
                 opts["parallel_mode"] =
                     phoenix::cfgOr<std::string>("llama.parallelDecode.mode", "jacobi");
               }
-              /* v8.x perf: STATIC prefix first (role+goal+tools+outline+
-                 reply contract) so llama-server's slot prefix cache reuses
-                 KV across ticks; DYNAMIC suffix (workspace list, tail,
-                 sections, helper boxes) goes last so each tick only
-                 prefills the increment. */
-              /* v8.x unified pipeline (user-defined workflow): goal ->
-                 MEMORY (past missions + cross-context) -> EMOTION appraisal
-                 -> GNN OUTLINE -> TOOLS -> main inference -> detokenizer ->
-                 keep the final-layer state (llama-server slot KV reuse) ->
-                 repeat.  All pre-processing stages live in the STATIC prefix
-                 so the slot prefix cache reuses their KV across ticks. */
-              std::string prompt =
-                  std::string("You are an autonomous agent working toward this goal:\n") +
-                  goalClip + "\n\n";
-              /* v8.x B2: past similar missions shape the static prefix so
-                 repeated task kinds start faster and better. */
-              {
-                const std::string expPath = phoenix::resolveConfig<std::string>(
-                    "mission.experiencePath",
-                    std::string("./runtime_store/mission_experience.json"));
-                const auto exps =
-                    phoenix::mission::experienceTop(expPath, goal, 3);
-                if (!exps.empty()) {
-                  prompt += "Past similar missions (reuse what worked):\n";
-                  for (const auto &e : exps) {
-                    std::string s = e.summary;
-                    if (s.size() > 200) s = s.substr(0, 200);
-                    prompt += "- " + s + "\n";
-                  }
-                  prompt += "\n";
-                }
-                /* v8.x cross-context memory: recall what ANY context
-                   (other missions, chat sessions) already learned. */
-                const std::string ccmPath = phoenix::resolveConfig<std::string>(
-                    "crossContextMemory.path",
-                    std::string("./runtime_store/cross_context_memory.json"));
-                const auto ccms =
-                    phoenix::memory::ccmRecall(ccmPath, goal, 2);
-                if (!ccms.empty()) {
-                  prompt += "Cross-context memory (what the system already "
-                            "learned elsewhere):\n";
-                  for (const auto &e : ccms) {
-                    std::string s = e.text;
-                    if (s.size() > 200) s = s.substr(0, 200);
-                    prompt += "- [" + e.sourceTag + "] " + s + "\n";
-                  }
-                  prompt += "\n";
-                }
-              }
-              /* v8.3: stable OUTLINE from the long-lived GNN graph (parent
-                 only - a box's sub-task is too small for a 2K outline) plus
-                 the section headers already present, so chapters neither
-                 duplicate nor get lost. */
-              /* v8.x EMOTION pre-processing: the same appraisal stage the
-                 chat path runs, scoped to THIS mission context (its pressure
-                 and its novelty only - never another context's).  The
-                 appraisal feeds BOTH the prompt (internal state line) and
-                 the inference options (emotion-modulated sampling). */
+              /* Emotion + pressure modulate sampling and unit weights.
+                 Never dump the tensor into the prompt. Instincts only
+                 see this contextTag; corpus pretrain used "corpus".
+                 Feed the same recent window infer sees. */
               {
                 std::string msnId = scope;
                 const auto sp0 = msnId.find("/children/");
                 if (sp0 != std::string::npos) msnId = msnId.substr(0, sp0);
-                const auto emo = cognitionManager_.evaluateInstinctsFor(
-                    "mission:" + msnId);
+                const std::string tag = "mission:" + msnId;
+                const std::string emoSrc =
+                    recallDraft.size() > 4000
+                        ? recallDraft.substr(recallDraft.size() - 4000)
+                        : recallDraft;
+                nlohmann::json esOpts = nlohmann::json::object();
+                nlohmann::json esTensor = nlohmann::json::object();
+                if (!pinOnly && !emoSrc.empty()) {
+                  try {
+                    cognitionManager_.ingestSensation(nlohmann::json{
+                        {"type", "novelty"},
+                        {"intensity", 0.28},
+                        {"valence", 0.0},
+                        {"source", tag + ":draft"}});
+                  } catch (...) {
+                  }
+                  if (emotionSystem_) {
+                    try {
+                      const auto st = emotionSystem_->processMessage(
+                          tag, emoSrc,
+                          static_cast<int64_t>(currentFile.size()));
+                      esOpts = st.current.inferenceOptions(
+                          static_cast<float>(opts.value("temperature", 0.35)),
+                          static_cast<float>(opts.value("top_p", 0.9)));
+                      esTensor = st.current.toJson();
+                      const auto toks =
+                          phoenix::mission::splitEmotionVocabTokens(emoSrc);
+                      emotionSystem_->observeVocab(
+                          tag, toks,
+                          static_cast<int>(currentFile.size()));
+                      const auto bias = emotionSystem_->getVocabLogitBias(
+                          tag, toks,
+                          static_cast<int>(currentFile.size()));
+                      if (bias.is_object() && !bias.empty())
+                        opts["logit_bias"] = bias;
+                    } catch (...) {
+                    }
+                  }
+                  try {
+                    ingestWorldEvidence(tag, emoSrc, packed.pinnedSummary,
+                                        "mission-draft");
+                  } catch (...) {
+                  }
+                }
+                const auto emo = cognitionManager_.evaluateInstinctsFor(tag);
                 const auto &emoRes =
                     emo.value("result", nlohmann::json::object());
-                const auto &et =
-                    emoRes.value("emotionTensor", nlohmann::json::object());
-                if (!et.empty()) {
-                  prompt += "Current internal state: " +
-                            phoenix::mission::summarizeEmotionForPrompt(et) +
-                            "\n\n";
-                }
-                const auto &eio =
-                    emoRes.value("inferenceOptions", nlohmann::json::object());
-                if (eio.is_object()) {
-                  for (const auto &kv : eio.items()) {
-                    /* keep the deliberator's own sampling defaults except for
-                       the emotion-driven modulation keys */
-                    if (kv.key() != "temperature" && kv.key() != "timeoutMs")
-                      opts[kv.key()] = kv.value();
-                  }
-                }
-              }
-              if (!isChildBox) {
-                std::string outline =
-                    phoenix::mission::outlineFromGoalChapters(goal);
-                if (outline.empty())
-                  outline = buildMissionOutline(goal);
-                if (outline.size() > 700) outline.resize(700);
-                if (!outline.empty())
-                  prompt += outline + "\n\n";
-              }
-              prompt += "Tools (name only): " + toolHint + "\n\n";
-              prompt +=
-                  "Reply with exactly ONE of these four forms (ONE per turn - "
-                  "never multiple JSON objects, never prefix with the word "
-                  "JSON, never copy internal-state JSON into deliverable.md):\n"
-                  "1) Plain text - APPENDED to deliverable.md (use for the first minimal draft).\n"
-                  "2) JSON {\"action\":\"write\"|\"append\"|\"read\"|\"list\",\"path\":\"...\",\"content\":\"...\"} - file operation in your sandboxed workspace (relative paths, no \"..\").\n"
-                  "3) JSON {\"tool\":\"<tool-name>\",\"arguments\":{\"userPrompt\":\"...\"}} - invoke a tool; its result comes back to you next turn.\n"
-                  "4) JSON {\"done\":true,\"summary\":\"...\"} - declare the task COMPLETE (ONLY after every outline item and section is actually written; a premature declaration is refused).\n"
-                  "Iterate: minimal correct version first, then expand section by section following the OUTLINE strictly - advance item by item, never skip ahead, never repeat a finished section; use tools (search, math, replicate) when they help; never repeat text already in the file.";
-              if (isChildBox) {
-                prompt +=
-                    "You are a HELPER BOX working on the sub-task above. You may summon your OWN helper boxes for bounded sub-parts (tool: replicate, arguments.userPrompt = the specific sub-task); keep every sub-task bounded and concrete. ";
-              } else {
-                prompt +=
-                    "Helper boxes you spawned are listed at the END of this prompt (read and merge their files; you remain responsible for the final deliverable). ";
-              }
-              /* ---- DYNAMIC suffix: everything below changes every tick ---- */
-              /* v8.x pressure loop: the growing mission pressure is the
-                 steady-output driver - it is shown to the model every tick
-                 so it keeps producing until done (the loop ends only when
-                 the self-verdict fires or a human reports the outcome). */
-              {
-                std::string msnId = scope;
-                const auto sp0 = msnId.find("/children/");
-                if (sp0 != std::string::npos) msnId = msnId.substr(0, sp0);
-                const float pNow =
+                const float pressure =
                     cognitionManager_.missionPressureFor(msnId);
-                if (pNow > 0.0f) {
-                  char pbuf[48];
-                  std::snprintf(pbuf, sizeof(pbuf), "%.3f",
-                                static_cast<double>(pNow));
-                  prompt += "Urgency (mission pressure, grows until the task "
-                            "is complete): p=" +
-                            std::string(pbuf) +
-                            " - keep working steadily toward the goal.\n\n";
-                }
+                phoenix::mission::applyEmotionSampling(
+                    opts, emoRes.value("inferenceOptions", nlohmann::json::object()),
+                    emoRes.value("emotionTensor", nlohmann::json::object()),
+                    pressure);
+                if (!esOpts.empty())
+                  phoenix::mission::applyEmotionSampling(
+                      opts, esOpts, esTensor, pressure * 0.5f);
               }
-              prompt += "Workspace files:\n" + listClip + "\n\n";
-              if (!packClip.empty()) {
-                prompt += "Context pack (tail, approxTokens=" +
-                          std::to_string(packed.estimatedTokens) + "):\n" +
-                          packClip + "\n\n";
+              /* Names only. "Output is deliverable.md" + helper-box
+                 copy made the 8B wrap ```markdown and invent
+                 "Helper boxes spawned / please merge". The file tail
+                 is the continuation; this prefix is operating facts. */
+              if (phoenix::cfgOr<bool>("mission.compactDeliberatorPrompt", true)) {
+                /* Facts only. A JSON tool schema in this prefix taught
+                   every tick that the output *is* write/run/script, and
+                   the 8B wrote a station-ops manual instead of the
+                   design document. Bare JSON still hits the tool path;
+                   do not advertise the schema on the causal stream. */
+                (void)toolHint;
+                staticPrompt +=
+                    phoenix::mission::formatGoalConstraintPin(goalClip);
+                staticPrompt +=
+                    phoenix::mission::extractGoalWorkingContext(goalClip);
+                if (pinOnly)
+                  staticPrompt +=
+                      phoenix::mission::extractGoalOpeningHeading(goalClip);
               } else {
-                prompt += "deliverable.md does not exist yet - first write a MINIMAL draft.\n\n";
+                (void)toolHint;
+                staticPrompt +=
+                    phoenix::mission::formatGoalConstraintPin(goalClip);
+                staticPrompt +=
+                    phoenix::mission::extractGoalWorkingContext(goalClip);
+                if (pinOnly)
+                  staticPrompt +=
+                      phoenix::mission::extractGoalOpeningHeading(goalClip);
+                (void)isChildBox;
               }
-              /* v8.x C1: follow the self-written plan when one exists */
-              {
-                const auto planRes = phoenix::mission::workspaceExecute(
-                    workspaceRoot, scope,
-                    nlohmann::json{{"action", "read"}, {"path", "plan.md"}});
-                if (planRes.value("ok", false)) {
-                  std::string planText = planRes.value("content", std::string());
-                  if (planText.size() > 500)
-                    planText = planText.substr(planText.size() - 500);
-                  if (!planText.empty())
-                    prompt += "Your current plan (plan.md):\n" + planText +
-                              "\n\n";
-                }
+              if (pinOnly)
+                opts["repeat_penalty"] = 1.0;
+              /* Pressure stays on the sampling / loop side. Putting
+                 "p=0.xxx" in the prefix made the 8B write
+                 "probability of failure (p) is 0.000". */
+              /* Llama body is empty (no user turn). Draft tail is
+                 resume_suffix so n_resume is real. Pin-only has no tail. */
+              std::string dynamicPrompt;
+              (void)listClip;
+              std::string resumeSuffix;
+              if (pinOnly || seededEmpty || currentFile.empty()) {
+                opts.erase("gnn_units");
+                opts.erase("gnn_content");
+                resumeSuffix = phoenix::mission::formatMissionResumeSuffix(
+                    currentFile, goalClip);
+              } else {
+                /* Do not put the model's own headings into llama stop.
+                   ### / ## already written then blocked every later tick
+                   (7159339: heading-cut kept=0 after tick 2). */
+                const std::string resumeSrc = packed.recentFull.empty()
+                    ? currentFile : packed.recentFull;
+                const size_t resumeN = std::max(
+                    resumeSrc.size(),
+                    static_cast<size_t>(std::max(
+                        200, phoenix::cfgOr<int>("mission.resumeChars", 720))));
+                resumeSuffix = phoenix::mission::formatMissionResumeSuffix(
+                    resumeSrc, goalClip, resumeN);
+              }
+              if (!resumeSuffix.empty())
+                opts["resume_suffix"] = resumeSuffix;
+              if (config_.httpLog) {
+                std::string msnId = scope;
+                const auto spP = msnId.find("/children/");
+                if (spP != std::string::npos) msnId = msnId.substr(0, spP);
+                const float pressure =
+                    cognitionManager_.missionPressureFor(msnId);
+                std::cout << "[mission-deliberate] resumeSuffixLen="
+                          << resumeSuffix.size()
+                          << " recentChars=" << packed.fullCharsUsed
+                          << " droppedChars=" << packed.droppedChars
+                          << " causalTokBudget=" << packed.causalTokenBudget
+                          << " ngram=" << packOpt.ngramMerge
+                          << " memUnits=" << missionMemorySnippets.size()
+                          << " gnnUnits=" << missionGnnPkts.size()
+                          << " pressure=" << pressure
+                          << " top_p=" << opts.value("top_p", 0.0)
+                          << " freqP=" << opts.value("frequency_penalty", 0.0)
+                          << std::endl;
               }
               /* v8.x D feedback: read the one-shot hint from the last
                  failed tool call, then consume it (delete). */
@@ -446,8 +671,14 @@ public:
                   std::string fb = fbRes.value("content", std::string());
                   if (fb.size() > 300) fb = fb.substr(fb.size() - 300);
                   if (!fb.empty()) {
-                    prompt += "[tool-feedback from last tick]\n" + fb +
-                              "\n\n";
+                    /* RAG, not causal. Compact mode used to swallow this. */
+                    const auto pkt = phoenix::inference::unitQueryIOToJson(
+                        phoenix::inference::unitQueryFromText(
+                            "[tool-feedback] " + fb, "text"));
+                    if (!opts.contains("context_units") ||
+                        !opts["context_units"].is_array())
+                      opts["context_units"] = nlohmann::json::array();
+                    opts["context_units"].push_back(pkt);
                     phoenix::mission::workspaceExecute(
                         workspaceRoot, scope,
                         nlohmann::json{{"action", "delete"},
@@ -465,7 +696,13 @@ public:
                   std::string trb = trRes.value("content", std::string());
                   if (trb.size() > 400) trb = trb.substr(trb.size() - 400);
                   if (!trb.empty()) {
-                    prompt += "[tool-result from last tick]\n" + trb + "\n\n";
+                    const auto pkt = phoenix::inference::unitQueryIOToJson(
+                        phoenix::inference::unitQueryFromText(
+                            "[tool-result] " + trb, "text"));
+                    if (!opts.contains("context_units") ||
+                        !opts["context_units"].is_array())
+                      opts["context_units"] = nlohmann::json::array();
+                    opts["context_units"].push_back(pkt);
                     phoenix::mission::workspaceExecute(
                         workspaceRoot, scope,
                         nlohmann::json{{"action", "delete"},
@@ -486,39 +723,18 @@ public:
                   if (!att.is_discarded() && att.is_object() &&
                       att.contains("images") && att["images"].is_array() &&
                       !att["images"].empty()) {
-                    prompt += "[image-context] attached images (concept):\n";
+                    staticPrompt += "[image-context] attached images (concept):\n";
                     for (const auto &img : att["images"]) {
-                      prompt += "- " + img.value("file", std::string()) +
+                      staticPrompt += "- " + img.value("file", std::string()) +
                                 ": " + img.value("concept", std::string()) +
                                 "\n";
                     }
-                    prompt += "\n";
+                    staticPrompt += "\n";
                   }
                 }
               }
-              {
-                std::string sections;
-                size_t pos = 0;
-                while (pos < currentFile.size()) {
-                  const auto eol = currentFile.find('\n', pos);
-                  const std::string line = currentFile.substr(
-                      pos, eol == std::string::npos ? std::string::npos
-                                                    : eol - pos);
-                  const auto b = line.find_first_not_of(" \t\r");
-                  if (b != std::string::npos && line[b] == '#') {
-                    if (sections.empty())
-                      sections =
-                          "Existing sections in deliverable.md (never rewrite "
-                          "these - continue with the NEXT one):\n";
-                    sections += line.substr(b) + "\n";
-                  }
-                  if (eol == std::string::npos)
-                    break;
-                  pos = eol + 1;
-                }
-                if (!sections.empty())
-                  prompt += sections + "\n";
-              }
+              /* Resume is the file tail only. Headings / plan / outline
+                 stay in context_units, not in this suffix. */
               if (!isChildBox) {
                 /* DYNAMIC suffix: the parent's helper boxes (their files stay
                    readable; the parent remains fully responsible for the
@@ -540,48 +756,97 @@ public:
                     }
                   }
                   if (children2.is_array() && !children2.empty()) {
-                    prompt += "Helper boxes you spawned (read their files with the file tool and merge the best parts; you remain responsible for the final deliverable):\n";
+                    staticPrompt += "boxes:";
                     for (const auto &box : children2) {
-                      prompt += "- " + box.value("id", std::string()) + ": " +
-                                box.value("goal", std::string()) +
-                                " (file: children/" + box.value("id", std::string()) + "/deliverable.md)\n";
+                      staticPrompt += " " + box.value("id", std::string());
                     }
-                    prompt += "\n";
+                    staticPrompt += "\n";
                   }
-                } catch (...) {
-                }
+              } catch (...) {
+              }
               }
 
+              const int genReserve = std::max(
+                  16, phoenix::cfgOr<int>("mission.deliberateMaxTokens", 48));
+              const int tmplReserve =
+                  phoenix::cfgOr<int>("mission.templateOverheadTokens", 64);
+              const int safePromptTokens = std::max(
+                  512, packOpt.ctxTokens - genReserve - tmplReserve -
+                           packOpt.overheadTokens);
+              const int ngramFac =
+                  phoenix::inference::ngramMergeFactor(packOpt.ngramMerge);
+              const size_t maxPromptChars =
+                  static_cast<size_t>(safePromptTokens) * 3 *
+                  static_cast<size_t>(ngramFac);
+              /* Split path: staticPrompt is pin + working brief.
+                 Recent window is resume_suffix, not dynamicPrompt. */
+              {
+                const auto fitted = phoenix::mission::fitMissionPromptSplit(
+                    staticPrompt, dynamicPrompt, maxPromptChars);
+                staticPrompt = fitted.first;
+                dynamicPrompt = fitted.second;
+              }
               /* Mission ticks need a longer socket timeout than interactive
                  chat: even a slim prompt is slow on RDK CPU (~2s/token). */
-
-              if (prompt.size() > 3500)
-                prompt = prompt.substr(0, 3500);
-              /* v8.x L1 lookup: if the dynamic prompt is (near-)identical to
+              /* v8.x L1 lookup: if the dynamic turn is (near-)identical to
                  the previous tick the model would repeat itself - skip the
                  LLM entirely (saves minutes/tick on RDK).  After 3
                  consecutive skips, force an advance hint + hotter sampling
-                 on the next real call to break the cycle. */
+                 on the next real call to break the cycle.
+                 Never skip while deliverable is still below minDeliverableChars. */
               {
+                const bool stillDrafting =
+                    static_cast<int>(currentFile.size()) < minDeliverableChars;
+                const bool cacheEnabled =
+                    phoenix::cfgOr<bool>("mission.cacheEnabled", false);
                 const double cacheSim =
                     phoenix::cfgOr<double>("mission.cacheSim", 0.95);
-                if (phoenix::mission::workspaceCacheGet(scope, prompt, cacheSim)) {
-                  static std::mutex skipMu;
-                  static std::unordered_map<std::string, int> skipCount;
+                const size_t delivSize = currentFile.size();
+                /* L1 cache is OFF by default: skipping the LLM while the prompt
+                   is similar caused llama idle + zero/stalled deliverable on
+                   RDK.  When enabled, never skip unless deliverable grew since
+                   the last real generation. */
+                bool allowCacheSkip = false;
+                if (cacheEnabled && !stillDrafting && !currentFile.empty() &&
+                    phoenix::mission::workspaceCacheGet(scope, dynamicPrompt,
+                                                        cacheSim)) {
+                  size_t lastSz = 0;
+                  int noGrowth = 0;
+                  {
+                    std::lock_guard<std::mutex> lk(gDelibSkipMu);
+                    lastSz = gDelibLastDelivAtLlm[scope];
+                    noGrowth = gDelibCacheSkipsNoGrowth[scope];
+                  }
+                  if (delivSize > lastSz) {
+                    allowCacheSkip = true;
+                  } else if (noGrowth < 2) {
+                    {
+                      std::lock_guard<std::mutex> lk(gDelibSkipMu);
+                      gDelibCacheSkipsNoGrowth[scope] = noGrowth + 1;
+                    }
+                    allowCacheSkip = true;
+                  }
+                }
+                if (allowCacheSkip) {
                   int cnt = 0;
                   {
-                    std::lock_guard<std::mutex> lk(skipMu);
-                    cnt = ++skipCount[scope];
+                    std::lock_guard<std::mutex> lk(gDelibSkipMu);
+                    cnt = ++gDelibSkipCount[scope];
                   }
                   if (cnt >= 3) {
                     {
-                      std::lock_guard<std::mutex> lk(skipMu);
-                      skipCount[scope] = 0;
+                      std::lock_guard<std::mutex> lk(gDelibSkipMu);
+                      gDelibSkipCount[scope] = 0;
                     }
                     opts["temperature"] = 0.7;
-                    prompt +=
-                        "\n[loop-break] You repeated yourself. ADVANCE to the next "
-                        "unfinished section; do NOT rewrite existing text.\n";
+                    dynamicPrompt += "\n[loop-break] You repeated yourself. ADVANCE to the next "
+                                       "unfinished section; do NOT rewrite existing text.\n";
+                    {
+                      const auto fitted = phoenix::mission::fitMissionPromptSplit(
+                          staticPrompt, dynamicPrompt, maxPromptChars);
+                      staticPrompt = fitted.first;
+                      dynamicPrompt = fitted.second;
+                    }
                     /* fall through: a real call with the loop-break hint */
                   } else {
                     return "[cache] prompt unchanged; skipped identical "
@@ -589,7 +854,26 @@ public:
                   }
                 }
               }
-              const auto r = chatWithLlamaCpp(prompt, "", std::max(64, maxTokens), opts);
+              int tokBudget = std::max(16, maxTokens > 0 ? maxTokens : 48);
+              {
+                const int deliberateTok = phoenix::cfgOr<int>(
+                    "mission.deliberateMaxTokens", tokBudget);
+                tokBudget = std::max(tokBudget, std::max(16, deliberateTok));
+                opts["num_predict"] = tokBudget;
+                /* Split /phx/generate does not preserve prefix-cache across
+                   requests (KV is cleared per call); forcing cache_prompt only
+                   adds unused fields. */
+                opts["cache_prompt"] = false;
+              }
+              const auto r =
+                  chatWithLlamaCpp(dynamicPrompt, staticPrompt, tokBudget, opts);
+              if (config_.httpLog && !r.value("ok", false)) {
+                std::cout << "[mission-deliberate] llamacpp FAIL err="
+                          << r.value("error", std::string()).substr(0, 320)
+                          << " staticLen=" << staticPrompt.size()
+                          << " dynLen=" << dynamicPrompt.size()
+                          << std::endl;
+              }
               if (!r.value("ok", false)) {
                 const std::string err = r.value("error", std::string("llm failed"));
                 return "[llm-error] " + err.substr(0, 240);
@@ -597,6 +881,19 @@ public:
               std::string reply = r.value("reply", std::string());
               if (reply.empty())
                 return "[llm-error] empty reply (possible cancel/timeout)";
+              if (config_.httpLog) {
+                std::cout << "[mission-deliberate] replyLen=" << reply.size()
+                          << " head=" << reply.substr(0, 160);
+                if (reply.size() < 8) {
+                  std::cout << " hex=";
+                  for (unsigned char c : reply) {
+                    char b[4];
+                    std::snprintf(b, sizeof(b), "%02x", c);
+                    std::cout << b;
+                  }
+                }
+                std::cout << std::endl;
+              }
 
               /* structured reply: tool call or file action */
               {
@@ -618,39 +915,48 @@ public:
                     toolList = la.value("result", nlohmann::json::array());
                   } catch (...) {
                   }
-                  /* 1) exact tool-name mention */
-                  for (const auto &t : toolList) {
-                    const std::string nm = t.value("name", std::string());
-                    if (nm.empty()) continue;
-                    std::string nmLower = nm;
-                    std::transform(nmLower.begin(), nmLower.end(),
-                                   nmLower.begin(),
-                                   [](unsigned char c) {
-                                     return static_cast<char>(::tolower(c));
-                                   });
-                    if (lower.find(nmLower) != std::string::npos) {
-                      toolName = nm;
-                      break;
+                  /* 1) exact tool-name mention - skip for long document drafts
+                     (a Helios chapter can casually mention a tool name). */
+                  const bool looksLikeDocument =
+                      text.size() > 180 ||
+                      lower.rfind("**", 0) == 0 ||
+                      lower.rfind("#", 0) == 0 ||
+                      lower.rfind("chapter ", 0) == 0 ||
+                      lower.find("\n**") != std::string::npos ||
+                      lower.find("\n#") != std::string::npos;
+                  if (!looksLikeDocument) {
+                    for (const auto &t : toolList) {
+                      const std::string nm = t.value("name", std::string());
+                      if (nm.empty()) continue;
+                      std::string nmLower = nm;
+                      std::transform(nmLower.begin(), nmLower.end(),
+                                     nmLower.begin(),
+                                     [](unsigned char c) {
+                                       return static_cast<char>(::tolower(c));
+                                     });
+                      if (lower.find(nmLower) != std::string::npos) {
+                        toolName = nm;
+                        break;
+                      }
                     }
                   }
-                  /* 2) intent keywords for the built-in verbs */
-                  if (toolName.empty()) {
+                  /* 2) intent keywords - ONLY for short imperative turns.
+                     Long markdown prose (mission deliverable drafts) often
+                     contains words like "research" / "box" / "helper"; treating
+                     those as tool calls swallowed every tick (deliv stayed 0). */
+                  if (toolName.empty() && !looksLikeDocument) {
                     if (lower.find("calculate") != std::string::npos ||
                         lower.find("compute") != std::string::npos ||
                         lower.find("math") != std::string::npos)
                       toolName = "math";
-                    else if (lower.find("search") != std::string::npos ||
-                             lower.find("look up") != std::string::npos ||
-                             lower.find("find") != std::string::npos)
+                    else if (lower.find("search for") != std::string::npos ||
+                             lower.find("web search") != std::string::npos ||
+                             lower.find("look up") != std::string::npos)
                       toolName = "search";
                     else if (lower.find("summon") != std::string::npos ||
-                             lower.find("spawn") != std::string::npos ||
-                             lower.find("replicate") != std::string::npos ||
-                             lower.find("helper") != std::string::npos ||
-                             lower.find("box") != std::string::npos)
+                             lower.find("spawn a") != std::string::npos ||
+                             lower.find("replicate") != std::string::npos)
                       toolName = "replicate";
-                    else if (lower.find("research") != std::string::npos)
-                      toolName = "research";
                   }
                   if (toolName.empty()) return false;
                   /* 3) argument: longest quoted span, else the text itself */
@@ -689,32 +995,137 @@ public:
                                      {"path", "tool-last-result.md"},
                                      {"content", body}});
                 };
+                auto missionIdFromScope = [&]() -> std::string {
+                  std::string msnId = scope;
+                  const auto sp = msnId.find("/children/");
+                  if (sp != std::string::npos) msnId = msnId.substr(0, sp);
+                  return msnId;
+                };
+                auto syncDeliverableFromWorkspace = [&]() {
+                  const auto rd = phoenix::mission::workspaceExecute(
+                      workspaceRoot, scope,
+                      nlohmann::json{{"action", "read"},
+                                     {"path", deliverablePath}});
+                  if (!rd.value("ok", false)) return;
+                  cognitionManager_.setMissionDeliverable(
+                      nlohmann::json{{"text", rd.value("content", std::string())},
+                                     {"missionId", missionIdFromScope()}});
+                };
                 const auto trim = [](const std::string &s) -> std::string {
                   return phoenix::mission::trimCopy(s);
                 };
                 std::vector<nlohmann::json> embedded =
                     phoenix::mission::extractJsonObjects(reply);
-                if (embedded.size() > 1) {
-                  for (const auto &act : embedded) {
-                    if (act.is_object() && act.contains("action") &&
-                        act["action"].is_string()) {
-                      phoenix::mission::workspaceExecute(workspaceRoot, scope,
-                                                           act);
+                auto execWorkspaceAction =
+                    [&](nlohmann::json act) -> nlohmann::json {
+                  if (act.contains("action") && act["action"].is_string()) {
+                    const std::string actName = act["action"].get<std::string>();
+                    const std::string path = act.value("path", std::string());
+                    if ((actName == "write" || actName == "append" ||
+                         actName == "replace") &&
+                        phoenix::mission::isDeliverablePath(path) &&
+                        act.contains("content") && act["content"].is_string()) {
+                      const std::string safe =
+                          phoenix::mission::sanitizeDeliverableActionContent(
+                              act["content"].get<std::string>());
+                      if (safe.empty()) {
+                        return nlohmann::json{
+                            {"ok", false},
+                            {"error",
+                             "deliverable content looked like JSON/internal "
+                             "state; write markdown prose only"}};
+                      }
+                      act["content"] = safe;
                     }
                   }
-                  writeToolFeedback(
-                      "multiple JSON objects in one reply - send exactly ONE "
-                      "form per tick (plain text OR one JSON object).");
-                  return std::string();
+                  return phoenix::mission::workspaceExecute(workspaceRoot, scope,
+                                                            act);
+                };
+                if (!embedded.empty() &&
+                    !phoenix::mission::replyLeadsWithJson(reply)) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] ignore-buried-json n="
+                              << embedded.size() << std::endl;
+                  embedded.clear();
+                }
+                if (!embedded.empty()) {
+                  for (const auto &act : embedded) {
+                    if (!act.is_object() || !act.contains("plan") ||
+                        !act["plan"].is_string())
+                      continue;
+                    std::string planText = act["plan"].get<std::string>();
+                    if (planText.size() > 800)
+                      planText = planText.substr(0, 800);
+                    const int planMinChars = isChildBox
+                        ? configuredMinChars
+                        : minDeliverableChars;
+                    const size_t bodyChars =
+                        std::max(currentFile.size(), deliverable.size());
+                    const int planFloor =
+                        std::max(600, std::min(planMinChars / 8, 1500));
+                    if (static_cast<int>(bodyChars) < planFloor) {
+                      return "[plan-refused] deliverable too small to plan; "
+                             "keep drafting a minimal version first.";
+                    }
+                    phoenix::mission::workspaceExecute(
+                        workspaceRoot, scope,
+                        nlohmann::json{{"action", "write"},
+                                       {"path", "plan.md"},
+                                       {"content", planText}});
+                    return "[plan] saved to plan.md; the next tick follows "
+                           "it before acting.";
+                  }
+                  bool touchedDeliverable = false;
+                  bool ranWorkspaceAction = false;
+                  for (const auto &act : embedded) {
+                    if (!act.is_object() || !act.contains("action") ||
+                        !act["action"].is_string())
+                      continue;
+                    ranWorkspaceAction = true;
+                    const std::string path = act.value("path", std::string());
+                    const auto opRes = execWorkspaceAction(act);
+                    if (!opRes.value("ok", false) &&
+                        (phoenix::mission::isDeliverablePath(path) ||
+                         path.empty())) {
+                      writeToolFeedback(
+                          "deliverable " + act.value("action", std::string()) +
+                          " rejected: " + opRes.value("error", std::string()));
+                    }
+                    if (opRes.value("refusedShrink", false) && config_.httpLog)
+                      std::cout << "[mission-deliberate] keep-file refused-shrink "
+                                << opRes.value("bytes", 0) << std::endl;
+                    if (path == deliverablePath || path == "deliverable.md" ||
+                        path.empty())
+                      touchedDeliverable = true;
+                  }
+                  if (ranWorkspaceAction) {
+                    if (touchedDeliverable) syncDeliverableFromWorkspace();
+                    if (embedded.size() > 1) {
+                      writeToolFeedback(
+                          "multiple JSON objects in one reply - send exactly ONE "
+                          "form per tick (plain markdown OR one JSON object).");
+                    }
+                    return std::string();
+                  }
+                  /* Braces that are not a workspace action (plan/done/tool, or
+                     prose with `{...}`) must fall through. Swallowing them
+                     left tick-2 Helios replies on the floor. */
                 }
                 std::string trimmed = trim(reply);
-                if (!embedded.empty())
-                  trimmed = embedded.front().dump();
-                else {
-                  const size_t brace =
-                      phoenix::mission::firstJsonBrace(reply);
-                  if (brace < reply.size())
-                    trimmed = trim(reply.substr(brace));
+                /* Only treat as JSON when the reply itself is a JSON
+                   object. Scanning for the first `{` ate LaTeX
+                   $\boxed{8-40}$ and wrote tool-feedback.md, which the
+                   next tick copied into deliverable.md. */
+                {
+                  /* Only a real control object. Fenced ```json / ```python
+                     / ```bash drafts used to match and get executed as
+                     workspace JSON, which swallowed the tick. */
+                  if (phoenix::mission::replyLeadsWithJson(trimmed)) {
+                    const size_t brace =
+                        phoenix::mission::firstJsonBrace(reply);
+                    if (brace < reply.size())
+                      trimmed = trim(reply.substr(brace));
+                  }
                 }
                 if (!trimmed.empty() && trimmed.front() == '{') {
                   try {
@@ -723,6 +1134,28 @@ public:
                     if (act.contains("tool") && act["tool"].is_string()) {
                       nlohmann::json args = act.value("arguments", nlohmann::json::object());
                       if (!args.is_object()) args = nlohmann::json::object();
+                      const std::string toolName =
+                          act["tool"].get<std::string>();
+                      if (toolName == "script" || toolName == "python" ||
+                          toolName == "python3") {
+                        std::string sp = args.value("path", std::string());
+                        if (sp.empty())
+                          sp = args.value("userPrompt", std::string());
+                        const auto opRes = execWorkspaceAction(
+                            nlohmann::json{{"action", "run"},
+                                           {"path", sp},
+                                           {"timeoutMs",
+                                            args.value("timeoutMs", 30000)}});
+                        if (opRes.value("ok", false))
+                          writeToolLastResult(
+                              "script " + sp + ": " +
+                              opRes.value("stdout", std::string()));
+                        else
+                          writeToolFeedback(
+                              "script " + sp + " failed: " +
+                              opRes.value("error", std::string()));
+                        return std::string();
+                      }
                       std::string up = args.value("userPrompt", std::string());
                       if (up.empty()) up = args.value("input", std::string());
                       if (!up.empty() && up.front() == '{') up.clear();
@@ -761,13 +1194,21 @@ public:
                       return std::string();
                     }
                     if (act.contains("action") && act["action"].is_string()) {
-                      const auto opRes = phoenix::mission::workspaceExecute(
-                          workspaceRoot, scope, act);
+                      const auto opRes = execWorkspaceAction(act);
                       if (!opRes.value("ok", false)) {
                         writeToolFeedback(
                             "file " + act.value("action", std::string()) +
                             " on " + act.value("path", std::string()) +
                             " failed: " + opRes.value("error", std::string()));
+                      } else if (phoenix::mission::isDeliverablePath(
+                                     act.value("path", std::string())) ||
+                                 act.value("path", std::string()).empty()) {
+                        if (opRes.value("refusedShrink", false) &&
+                            config_.httpLog)
+                          std::cout
+                              << "[mission-deliberate] keep-file refused-shrink "
+                              << opRes.value("bytes", 0) << std::endl;
+                        syncDeliverableFromWorkspace();
                       }
                       return std::string();
                     }
@@ -781,11 +1222,15 @@ public:
                       if (planText.size() > 500)
                         planText = planText.substr(0, 500);
                       const int planMinChars = isChildBox
-                          ? phoenix::resolveConfig<int>("mission.childMinDeliverableChars", 200)
-                          : phoenix::resolveConfig<int>("mission.minDeliverableChars", 1200);
+                          ? configuredMinChars
+                          : minDeliverableChars;
                       const size_t bodyChars =
                           std::max(currentFile.size(), deliverable.size());
-                      if (static_cast<int>(bodyChars) < planMinChars / 3) {
+                      /* Allow self-outline once a real draft exists. Do not
+                         wait for 1/3 of a 30k-word target. */
+                      const int planFloor =
+                          std::max(600, std::min(planMinChars / 8, 1500));
+                      if (static_cast<int>(bodyChars) < planFloor) {
                         return "[plan-refused] deliverable too small to plan; "
                                "keep drafting a minimal version first.";
                       }
@@ -853,18 +1298,15 @@ public:
                       std::string summary = act.value("summary", std::string());
                       if (summary.size() > 400)
                         summary.resize(400);
-                      const int minChars = isChildBox
-                          ? phoenix::resolveConfig<int>("mission.childMinDeliverableChars", 200)
-                          : phoenix::resolveConfig<int>("mission.minDeliverableChars", 1200);
                       /* Prefer the longer of workspace file vs in-memory prior so
                          a stale/truncated file cannot gate-keep a real body. */
                       const size_t bodyChars =
                           std::max(currentFile.size(), deliverable.size());
-                      if (static_cast<int>(bodyChars) < minChars) {
+                      if (static_cast<int>(bodyChars) < minDeliverableChars) {
                         return "[auto-verify] REFUSED: completion declared too "
                                "early - deliverable.md is only " +
                                std::to_string(bodyChars) + " chars (need >= " +
-                               std::to_string(minChars) +
+                               std::to_string(minDeliverableChars) +
                                "). Keep writing section by section; never "
                                "declare done before the work actually exists.";
                       }
@@ -955,6 +1397,12 @@ public:
                       return "[auto-complete] mission self-verdict: task "
                              "complete. " + summary;
                     }
+                    writeToolFeedback(
+                        "unrecognized JSON shape; reply with plain markdown "
+                        "text OR exactly one of {\"action\":...}, "
+                        "{\"tool\":...}, {\"plan\":...}, {\"loop\":...}, "
+                        "{\"done\":...}.");
+                    return std::string();
                   } catch (...) {
                     /* malformed JSON: try the natural-language intent
                        resolver before falling back to plain text */
@@ -1037,28 +1485,207 @@ public:
                   }
                   return std::string();
                 }
-                if (!phoenix::mission::extractJsonObjects(reply).empty() ||
-                    reply.find("\"action\"") != std::string::npos ||
-                    reply.find("\"tool\"") != std::string::npos) {
+              }
+
+              /* plain text: edit the first open assigned section. */
+              if (phoenix::mission::looksLikeStructuredMissionReply(reply)) {
+                if (config_.httpLog)
+                  std::cout << "[mission-deliberate] drop structured len="
+                            << reply.size() << std::endl;
+                writeToolFeedback(
+                    "structured JSON replies must be a SINGLE valid object per "
+                    "tick, or use plain markdown text without a JSON prefix.");
+                return std::string();
+              }
+              const auto fenceTick =
+                  phoenix::mission::applyMarkdownFenceProtocol(
+                      phoenix::mission::cutAtChatMarkup(reply), currentFile);
+              if (!fenceTick.write) {
+                if (config_.httpLog)
+                  std::cout << "[mission-deliberate] " << fenceTick.reason
+                            << std::endl;
+                return std::string();
+              }
+              std::string chunk = fenceTick.chunk;
+              const bool closingOddFence = fenceTick.closingOddFence;
+              if (closingOddFence && config_.httpLog)
+                std::cout << "[mission-deliberate] close odd fence"
+                          << std::endl;
+              if (barrier_) {
+                const auto insp = barrier_->inspectText(chunk);
+                if (insp.blocked) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] memebarrier block "
+                              << insp.reason << std::endl;
                   writeToolFeedback(
-                      "reply looked like structured JSON but was not handled; "
-                      "send exactly ONE valid JSON object or plain markdown "
-                      "text.");
+                      "blocked by safety module; continue the document "
+                      "without that material.");
                   return std::string();
                 }
               }
-
-              /* plain text: mirror into the workspace file AND return for
-                 the in-memory deliverable (both stay in sync) */
-              phoenix::mission::workspaceExecute(
-                  workspaceRoot, scope,
-                  nlohmann::json{{"action", "append"},
-                                 {"path", deliverablePath},
-                                 {"content", reply}});
-              /* v8.x L1: memoize this tick so an unchanged next tick is
-                 skipped (cycle guard) instead of regenerated. */
-              phoenix::mission::workspaceCachePut(scope, prompt, reply);
-              return reply;
+              if (phoenix::mission::isMissionMetaReply(chunk) || chunk.empty()) {
+                if (config_.httpLog)
+                  std::cout << "[mission-deliberate] drop meta/empty len="
+                            << chunk.size() << " head="
+                            << chunk.substr(0, 120) << std::endl;
+                if (chunk.empty() || chunk.size() < 8)
+                  writeToolFeedback(
+                      "empty-reply; continue after the last sentence.");
+                return std::string();
+              }
+              /* Quality/repeat gates are archived. Exact already-written
+                 spans are stripped as I/O hygiene; a leftover under the
+                 old 80-char reject is still written. Reliability was
+                 supposed to come from memory/GNN units — those are 0
+                 today, so do not invent another title/content judge. */
+              {
+                const std::string cut =
+                    phoenix::mission::prefixBeforeForbiddenCloser(chunk);
+                if (cut != chunk) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] closer-cut kept="
+                              << cut.size() << " from=" << chunk.size()
+                              << std::endl;
+                  chunk = cut;
+                }
+              }
+              {
+                const bool exam =
+                    phoenix::mission::replyLooksLikeExamDump(chunk);
+                const bool leftover =
+                    phoenix::mission::replyLooksLikeLeftoverLoop(chunk);
+                const bool homework =
+                    phoenix::mission::replyLooksLikeHomeworkCodeDump(chunk);
+                if (chunk.empty() || exam || leftover || homework) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] drop "
+                              << (exam ? "exam-dump"
+                                       : leftover ? "leftover-loop"
+                                                  : homework ? "homework-code"
+                                                             : "empty")
+                              << " len=" << chunk.size() << " head="
+                              << chunk.substr(0, 120) << std::endl;
+                  return std::string();
+                }
+              }
+              {
+                std::string kept =
+                    phoenix::mission::keepUniqueContinuation(chunk,
+                                                             currentFile);
+                if (kept != chunk) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] unique-cut kept="
+                              << kept.size() << " from=" << chunk.size()
+                              << std::endl;
+                  if (!kept.empty())
+                    chunk = std::move(kept);
+                }
+              }
+              if (!closingOddFence) {
+                const std::string raw = chunk;
+                const std::string kept =
+                    phoenix::mission::keepCompleteParagraphIo(chunk);
+                if (kept != chunk) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] paragraph-io kept="
+                              << kept.size() << " from=" << chunk.size()
+                              << std::endl;
+                  chunk = kept;
+                }
+                if (chunk.size() < 20 && raw.size() >= 20) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] keep raw-after-io "
+                              << raw.size() << std::endl;
+                  chunk = phoenix::mission::trimCopy(raw);
+                }
+              }
+              if (chunk.size() < 20 && !closingOddFence) {
+                if (config_.httpLog)
+                  std::cout << "[mission-deliberate] drop short-after-io"
+                            << std::endl;
+                return std::string();
+              }
+              {
+                const auto fresh = phoenix::mission::workspaceExecute(
+                    workspaceRoot, scope,
+                    nlohmann::json{{"action", "read"},
+                                   {"path", deliverablePath}});
+                if (fresh.value("ok", false)) {
+                  const std::string onDisk =
+                      fresh.value("content", std::string());
+                  if (onDisk.size() > currentFile.size())
+                    currentFile = onDisk;
+                }
+                const std::string edited = currentFile.empty()
+                    ? chunk
+                    : phoenix::mission::joinDeliverableText(currentFile,
+                                                            chunk);
+                if (edited == currentFile) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] drop no-file-edit"
+                              << std::endl;
+                  return std::string();
+                }
+                if (config_.httpLog)
+                  std::cout << "[mission-deliberate] file-edit "
+                            << currentFile.size() << "->" << edited.size()
+                            << std::endl;
+                phoenix::mission::workspaceExecute(
+                    workspaceRoot, scope,
+                    nlohmann::json{{"action", "write"},
+                                   {"path", deliverablePath},
+                                   {"content", edited}});
+                try {
+                  phoenix::mission::depositMissionProgress(
+                      phoenix::instance::ccmStorePath(),
+                      phoenix::resolveConfig<std::string>(
+                          "mission.experiencePath",
+                          "./runtime_store/mission_experience.json"),
+                      "mission:" + scope, goal, edited, chunk);
+                } catch (...) {
+                }
+                if (emotionSystem_) {
+                  try {
+                    std::string msnId = scope;
+                    const auto spE = msnId.find("/children/");
+                    if (spE != std::string::npos)
+                      msnId = msnId.substr(0, spE);
+                    const std::string tag = "mission:" + msnId;
+                    const auto promptToks =
+                        phoenix::mission::splitEmotionVocabTokens(
+                            recallDraft);
+                    const auto replyToks =
+                        phoenix::mission::splitEmotionVocabTokens(chunk);
+                    float reward = 0.15f;
+                    if (!phoenix::mission::inspectDeliverableHealth(edited,
+                                                                    goal)
+                             .empty())
+                      reward = 0.05f;
+                    if (phoenix::mission::contradictedOperationalFact(edited,
+                                                                      goal))
+                      reward = 0.0f;
+                    emotionSystem_->updateVocabFromResponse(
+                        tag, promptToks, replyToks, reward,
+                        static_cast<int>(edited.size()));
+                  } catch (...) {
+                  }
+                }
+              }
+              syncDeliverableFromWorkspace();
+              {
+                std::lock_guard<std::mutex> lk(gDelibSkipMu);
+                const auto rd = phoenix::mission::workspaceExecute(
+                    workspaceRoot, scope,
+                    nlohmann::json{{"action", "read"}, {"path", deliverablePath}});
+                const size_t sz =
+                    rd.value("ok", false)
+                        ? rd.value("content", std::string()).size()
+                        : currentFile.size();
+                gDelibLastDelivAtLlm[scope] = sz;
+                gDelibCacheSkipsNoGrowth[scope] = 0;
+              }
+              phoenix::mission::workspaceCachePut(scope, dynamicPrompt, chunk);
+              return std::string(); /* file + memory synced; loop must not re-append */
               }
             } catch (...) {
             }
@@ -1088,6 +1715,10 @@ public:
       loopCfg["persistEveryTicks"] = phoenix::cfgOr<int>("autonomyLoop.persistEveryTicks", 5);
       loopCfg["persistPath"] = phoenix::cfgOr<std::string>(
           "autonomyLoop.persistPath", "runtime_store/autonomy_state.json");
+      loopCfg["deliberateMaxTokens"] =
+          phoenix::cfgOr<int>("mission.deliberateMaxTokens", 192);
+      loopCfg["childDeliberateMaxTokens"] =
+          phoenix::cfgOr<int>("mission.childDeliberateMaxTokens", 96);
       cognitionManager_.configureAutonomyLoop(loopCfg);
       if (phoenix::cfgOr<bool>("autonomyLoop.enabled", false)) {
         cognitionManager_.startAutonomyLoop();
@@ -1243,188 +1874,25 @@ public:
       }
     }
 
-    if (!config_.disableLearning) {
-      try {
-        std::vector<transformer::TrainSample> samples;
-        samples.reserve(160);
-
-        auto isGoodText = [](const std::string &text) {
-          if (text.size() < 24)
-            return false;
-          int letters = 0;
-          int digits = 0;
-          int spaces = 0;
-          int punct = 0;
-          int controls = 0;
-          int cjk = 0;
-          for (unsigned char ch : text) {
-            if (ch < 0x20 || ch == 0x7F) {
-              controls++;
-              continue;
-            }
-            if (std::isspace(ch)) {
-              spaces++;
-              continue;
-            }
-            if (std::isalpha(ch)) {
-              letters++;
-              continue;
-            }
-            if (std::isdigit(ch)) {
-              digits++;
-              continue;
-            }
-            if (std::ispunct(ch)) {
-              punct++;
-              continue;
-            }
-            if (ch >= 0x80)
-              cjk++;
-          }
-          if (controls > 0)
-            return false;
-          int nonSpace = std::max(1, (int)text.size() - spaces);
-          double punctRatio = (double)punct / (double)nonSpace;
-          if (punctRatio > 0.45)
-            return false;
-          int semantic = letters + cjk;
-          if (semantic < std::max(10, (int)text.size() / 5))
-            return false;
-          return true;
-        };
-
-        auto addSample = [&](const std::string &raw) {
-          std::string text = trimCopy(raw);
-          if (!isGoodText(text))
-            return;
-          if (text.size() > 320)
-            text = text.substr(0, 320);
-          samples.push_back(transformer::TrainSample{text, text, ""});
-        };
-
-        try {
-          auto docs = pool_->getActive()->runtime()->collectRobotsDocuments(
-              json{{"limit", 120}, {"shuffle", true}});
-          for (auto &d : docs) {
-            addSample(d.text);
-            if (samples.size() >= 120)
-              break;
-          }
-        } catch (...) {
-        }
-
-        try {
-          if (fs::exists(config_.testsDir)) {
-            for (auto &e : fs::directory_iterator(config_.testsDir)) {
-              if (!e.is_regular_file())
-                continue;
-              auto ext = e.path().extension().string();
-              std::string lowerExt;
-              lowerExt.reserve(ext.size());
-              for (char c : ext)
-                lowerExt.push_back((char)std::tolower((unsigned char)c));
-              if (lowerExt != ".txt")
-                continue;
-              std::string text = readTextFile(e.path());
-              if (text.empty())
-                continue;
-              std::istringstream iss(text);
-              std::string line;
-              while (std::getline(iss, line)) {
-                addSample(line);
-                if (samples.size() >= 180)
-                  break;
-              }
-              if (samples.size() >= 180)
-                break;
-            }
-          }
-        } catch (...) {
-        }
-
-        if (!samples.empty()) {
-          int epochs =
-              std::max(1, std::min(3, (int)(samples.size() >= 120 ? 2 : 1)));
-          float lr = 0.0006f;
-          std::lock_guard<std::mutex> lock(transformerMu_);
-          transformer_.pretrain(samples, epochs, lr);
-        }
-      } catch (...) {
-      }
+    /* Corpus pretrain is not online RL. disableLearning still blocks
+       RL/ADV/GNN-GA above; wikitext -> GNN/memory/emotion always runs. */
+    try {
+      const int lim = phoenix::cfgOr<int>(
+          "mission.gnnPretrainDocs",
+          phoenix::cfgOr<int>("main.inference.gnnBootstrapDocs", 256));
+      seedGnnGraphFromRobotsCorpus(lim, "gnn-warmup-pretrain");
+    } catch (...) {
     }
   }
 
   void bootstrapTransformerFromCorpus(int maxDocs = 48) override {
-    if (config_.disableLearning)
-      return;
-    std::vector<transformer::TrainSample> samples;
-    samples.reserve((size_t)std::max(8, maxDocs));
-    auto isGoodText = [](const std::string &text) {
-      if (text.size() < 24)
-        return false;
-      int letters = 0;
-      int spaces = 0;
-      int punct = 0;
-      int controls = 0;
-      int cjk = 0;
-      for (unsigned char ch : text) {
-        if (ch < 0x20 || ch == 0x7F) {
-          controls++;
-          continue;
-        }
-        if (std::isspace(ch)) {
-          spaces++;
-          continue;
-        }
-        if (std::isalpha(ch)) {
-          letters++;
-          continue;
-        }
-        if (std::ispunct(ch)) {
-          punct++;
-          continue;
-        }
-        if (ch >= 0x80)
-          cjk++;
-      }
-      if (controls > 0)
-        return false;
-      int nonSpace = std::max(1, (int)text.size() - spaces);
-      double punctRatio = (double)punct / (double)nonSpace;
-      if (punctRatio > 0.45)
-        return false;
-      int semantic = letters + cjk;
-      return semantic >= std::max(10, (int)text.size() / 6);
-    };
-
-    auto addSample = [&](const std::string &raw) {
-      std::string text = trimCopy(raw);
-      if (!isGoodText(text))
-        return;
-      if (text.size() > 280)
-        text = text.substr(0, 280);
-      samples.push_back(transformer::TrainSample{text, text, ""});
-    };
-
-    try {
-      auto docs = pool_->getActive()->runtime()->collectRobotsDocuments(
-          json{{"limit", std::max(8, maxDocs)}, {"shuffle", true}});
-      for (auto &d : docs) {
-        addSample(d.text);
-        if ((int)samples.size() >= maxDocs)
-          break;
-      }
-    } catch (...) {
-    }
-
-    if (samples.size() < 8)
-      return;
-
-    try {
-      std::lock_guard<std::mutex> lock(transformerMu_);
-      transformer_.pretrain(samples, 1, 0.0008f);
-    } catch (...) {
-    }
+    /* Self-built transformer bootstrap is deprecated (infer = llama-server).
+       This is the startup GNN/memory/emotion corpus pass (workflow §8/§12).
+       disableLearning must not skip it. */
+    const int lim = maxDocs > 0
+                        ? maxDocs
+                        : phoenix::cfgOr<int>("mission.gnnPretrainDocs", 256);
+    seedGnnGraphFromRobotsCorpus(lim, "gnn-bootstrap-pretrain");
   }
 
 private:
@@ -1484,14 +1952,12 @@ private:
   autonomy::DatasetCatalogManager datasetCatalog_;
   autonomy::CognitionAutonomyManager cognitionManager_;
   phoenix::memory::HierarchicalMemory cognitionMemory_;
-  /* Serialize llama-server calls (chat + mission deliberator).  With
-     --parallel 1 on the RDK, concurrent clients cancel each other and the
-     deliberator returns empty forever. */
-  mutable std::mutex llamaCallMu_;
-  /* v8.x A2-4: chat outranks mission ticks.  A mission call marks itself
-     lowPriority and yields while any chat caller is waiting, so a human
-     question is never starved behind minutes of mission deliberation. */
-  mutable std::condition_variable llamaCallCv_;
+  std::shared_ptr<phoenix::emotion::EmotionSystem> emotionSystem_;
+  /* Exclusive llama lease: liveLlamaUsers() is 1 so instances queue, never
+     overlap one llama_context.  Chat waiters outrank mission ticks. */
+  mutable std::mutex llamaSlotMu_;
+  mutable std::condition_variable llamaSlotCv_;
+  std::atomic<int> llamaSlotsInUse_{0};
   std::atomic<int> llamaChatWaiters_{0};
   std::mutex transformerMu_;
   std::mutex chatMu_;
@@ -1542,6 +2008,7 @@ private:
 
   struct CognitionPack {
     std::string context;
+    std::string instanceMemoryText;
     nlohmann::json inferenceOptions;
     nlohmann::json emotionTensor;
     std::vector<nlohmann::json> mixedModalOutputs;
@@ -1577,6 +2044,10 @@ private:
               world_model::PromptContextOptions wmOpts;
               wmOpts.maxRecentEvidence = 3;
               wmOpts.maxSummaryChars = 220;
+              const std::string wmOnly =
+                  world_model::mergePromptContext("", wmState, wmOpts);
+              if (!wmOnly.empty())
+                pack.instanceMemoryText += wmOnly;
               pack.context = world_model::mergePromptContext(pack.context, wmState, wmOpts);
               worldState["graphContext"] = pack.context;
               /* v8.0 audit A: the epistemic signal now comes from the world
@@ -1646,8 +2117,11 @@ private:
             const std::string toolOut = exec.value("reply", std::string());
             const std::string toolAction = exec.value("action", std::string());
             if (!toolOut.empty()) {
-              pack.context += "\n[tool_result action=" + toolAction +
+              const std::string note =
+                  "\n[tool_result action=" + toolAction +
                               "] output=" + toolOut + " [/tool_result]";
+              pack.context += note;
+              pack.instanceMemoryText += note;
             }
           }
         }
@@ -1658,6 +2132,10 @@ private:
           pack.context = mod;
         else
           pack.context = mod + "\n" + pack.context;
+        if (pack.instanceMemoryText.empty())
+          pack.instanceMemoryText = mod;
+        else
+          pack.instanceMemoryText = mod + "\n" + pack.instanceMemoryText;
       }
 
       // Run graph-diffusion summarization over the provided graph result.
@@ -1903,7 +2381,10 @@ private:
     std::transform(typeLower.begin(), typeLower.end(), typeLower.begin(),
                    [](unsigned char c) { return (char)std::tolower(c); });
     if (!typeLower.empty() && typeLower != "math" && typeLower != "search" &&
-        typeLower != "research" && typeLower != "web")
+        typeLower != "research" && typeLower != "web" &&
+        typeLower != "computer" && typeLower != "shell" &&
+        typeLower != "cli-json" && typeLower != "cli" &&
+        typeLower != "script")
       return false;
     auto controller = pool_->getActive();
     if (!controller)
@@ -2062,8 +2543,11 @@ private:
 
       std::string prompt = text;
       if (!graphContext.empty()) {
-        prompt =
-            std::string("Context:\n") + graphContext + "\n\nUser:\n" + text;
+        prompt = graphContext;
+        if (!text.empty()) {
+          if (!prompt.empty() && prompt.back() != '\n') prompt.push_back('\n');
+          prompt += text;
+        }
       }
       json options = json{{"num_predict", std::max(16, maxTokens)}};
       if (inferenceOptions.is_object() && !inferenceOptions.empty()) {

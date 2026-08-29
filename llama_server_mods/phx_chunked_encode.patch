@@ -1,0 +1,86 @@
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -730,38 +730,52 @@ static int32_t llama_phx_run_stage(
+     ctx->phx_split.stage = stage;
+ 
+     const int32_t n_embd_batch = (stage == LLAMA_PHX_STAGE_ENC) ? 0 : n_embd;
+-    struct llama_batch batch = llama_batch_init(n_tokens, n_embd_batch, 1);
+-    batch.n_tokens = n_tokens;
+-
+-    for (int32_t i = 0; i < n_tokens; ++i) {
+-        if (stage == LLAMA_PHX_STAGE_ENC) {
+-            batch.token[i] = tokens[i];
+-        } else {
+-            std::memcpy(batch.embd + (size_t) i * n_embd, in_hidden + (size_t) i * n_embd, n_embd * sizeof(float));
++    const int32_t chunk_max = std::max(1, (int32_t) llama_n_ubatch(ctx));
++    int32_t last_ret = 0;
++
++    for (int32_t offset = 0; offset < n_tokens; offset += chunk_max) {
++        const int32_t chunk_n = std::min(chunk_max, n_tokens - offset);
++        struct llama_batch batch = llama_batch_init(chunk_n, n_embd_batch, 1);
++        batch.n_tokens = chunk_n;
++
++        for (int32_t i = 0; i < chunk_n; ++i) {
++            const int32_t gi = offset + i;
++            if (stage == LLAMA_PHX_STAGE_ENC) {
++                batch.token[i] = tokens[gi];
++            } else {
++                std::memcpy(batch.embd + (size_t) i * n_embd,
++                            in_hidden + (size_t) gi * n_embd,
++                            n_embd * sizeof(float));
++            }
++            batch.pos[i]      = positions ? positions[gi] : gi;
++            batch.n_seq_id[i] = 1;
++            batch.seq_id[i][0] = 0;
++            batch.logits[i]   = 1;
+         }
+-        batch.pos[i]      = positions ? positions[i] : i;
+-        batch.n_seq_id[i] = 1;
+-        batch.seq_id[i][0] = 0;
+-        batch.logits[i]   = 1; // we need output for every token, not just the last
+-    }
+ 
+-    const int32_t ret = llama_decode(ctx, batch);
++        last_ret = llama_decode(ctx, batch);
+ 
+-    if (ret == 0) {
+-        if (needs_hidden_output) {
+-            const float * embd = llama_get_embeddings(ctx);
+-            if (embd != nullptr) {
+-                std::memcpy(out_buf, embd, (size_t) n_tokens * n_embd * sizeof(float));
+-            }
+-        } else {
+-            const float * logits = llama_get_logits(ctx);
+-            if (logits != nullptr) {
+-                const int32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(&ctx->model));
+-                std::memcpy(out_buf, logits, (size_t) n_tokens * n_vocab * sizeof(float));
++        if (last_ret == 0) {
++            if (needs_hidden_output) {
++                const float * embd = llama_get_embeddings(ctx);
++                if (embd != nullptr) {
++                    std::memcpy(out_buf + (size_t) offset * n_embd, embd,
++                                (size_t) chunk_n * n_embd * sizeof(float));
++                }
++            } else {
++                const float * logits = llama_get_logits(ctx);
++                if (logits != nullptr) {
++                    const int32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(&ctx->model));
++                    std::memcpy(out_buf, logits,
++                                (size_t) chunk_n * n_vocab * sizeof(float));
++                }
+             }
+         }
+-    }
+ 
+-    llama_batch_free(batch);
++        llama_batch_free(batch);
++        if (last_ret != 0) break;
++    }
+ 
+     ctx->cparams.embeddings   = saved_embeddings;
+     ctx->cparams.pooling_type = saved_pooling;
+     ctx->phx_split.stage      = saved_stage;
+ 
+-    return ret;
++    return last_ret;
+ }

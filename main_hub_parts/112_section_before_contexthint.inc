@@ -52,8 +52,8 @@
       }
 
       if (contextHintText.empty() && !cappedGraphContext.empty())
-        prompt =
-            std::string("Context:\n") + cappedGraphContext + "\n\nUser:\n" + text;
+        prompt = cappedGraphContext + (text.empty() ? std::string()
+                                                    : std::string("\n") + text);
 
       // Ensure the prompt is valid UTF-8 so nlohmann::json can dump it without
       // throwing a type_error.316 in the middle of the request.
@@ -299,23 +299,10 @@
     }
   }
 
-  // Whether chatWithLlamaCpp() should drive the patched llama-server's
-  // split backend, now through the server-side /phx/generate endpoint
-  // (phoenix::v7::llamaSplitChat), instead of its native, unmodified
-  // /apply-template + /v1/chat/completions text endpoints
-  // (phoenix::v7::llamaTextOnlyChat). Controlled by
-  // main.inference.llamaUseSplitBackend in config/phoenix.json (defaults to
-  // false). The llama_server_mods/enc_dec_separation.patch has been updated
-  // to make the split endpoints stable for LLM_ARCH_LLAMA models; the
-  // llamaTextOnlyChat path remains the fallback when the split backend is
-  // disabled or fails.
-  bool useLlamaSplitBackend() const {
-    if (config_.llamaCppBaseUrl.empty()) return false;
-    bool enabled = false;
-    try {
-      enabled = phoenix::cfgOr<bool>("main.inference.llamaUseSplitBackend", false);
-    } catch (...) {}
-    return enabled;
+  // Split backend only (patched llama-server with /phx/*).  Stock
+  // /v1/chat/completions text path has been removed.
+  int llamaMaxParallelSlots() const {
+    return phoenix::instance::liveLlamaUsers();
   }
 
   json callLlamaCppBackend(const std::string &text,
@@ -327,18 +314,15 @@
         inferenceOptions["timeoutMs"].is_number_integer()) {
       timeoutMs = std::max(1000, inferenceOptions["timeoutMs"].get<int>());
     }
-    json r = useLlamaSplitBackend()
-                 ? phoenix::v7::llamaSplitChat(
-                       config_.llamaCppBaseUrl, timeoutMs,
-                       config_.llamaCppModel, text, graphContext, maxTokens,
-                       inferenceOptions)
-                 : phoenix::v7::llamaTextOnlyChat(
-                       config_.llamaCppBaseUrl, timeoutMs,
-                       config_.llamaCppModel, text, graphContext, maxTokens,
-                       inferenceOptions);
+    if (config_.llamaCppBaseUrl.empty()) {
+      return json{{"ok", false}, {"error", "llamaCppBaseUrl not configured"},
+                  {"provider", "llamacpp"}};
+    }
+    json r = phoenix::v7::llamaSplitChat(
+        config_.llamaCppBaseUrl, timeoutMs, config_.llamaCppModel, text,
+        graphContext, maxTokens, inferenceOptions);
     if (config_.httpLog)
-      std::cout << "[chat] llamacpp(" << (useLlamaSplitBackend() ? "split" : "text")
-                << ") ok=" << r.value("ok", false)
+      std::cout << "[chat] llamacpp(split) ok=" << r.value("ok", false)
                 << " replyLen=" << r.value("reply", std::string()).size()
                 << std::endl;
     return r;
@@ -349,28 +333,56 @@
                         const json &inferenceOptions = json::object()) {
     /* v8.x A2-4 priority: interactive chat outranks mission ticks.  A
        mission request sets lowPriority and waits while chat callers are
-       queued; chat callers always take the mutex directly.  Worst case for
-       chat is the CURRENTLY running mission call (a single HTTP round-trip
-       cannot be preempted on --parallel 1). */
+       queued; chat callers always take a slot directly. */
     const bool lowPriority =
         inferenceOptions.is_object() &&
         inferenceOptions.value("lowPriority", false);
+    const uint64_t llamaEpoch = phoenix::inference::currentAbortEpoch();
     if (!lowPriority)
       llamaChatWaiters_.fetch_add(1, std::memory_order_relaxed);
-    /* notify AFTER the mutex is released: declared BEFORE llmLock so it
-       destructs after llmLock (reverse order) -> unlock, then notify. */
     struct NotifyOnExit {
       std::condition_variable &cv;
       ~NotifyOnExit() { cv.notify_all(); }
-    } notify{llamaCallCv_};
-    std::unique_lock<std::mutex> llmLock(llamaCallMu_);
-    if (!lowPriority)
-      llamaChatWaiters_.fetch_sub(1, std::memory_order_relaxed);
-    if (lowPriority) {
-      llamaCallCv_.wait(llmLock, [this] {
-        return llamaChatWaiters_.load(std::memory_order_relaxed) == 0;
-      });
+    } notify{llamaSlotCv_};
+    {
+      std::unique_lock<std::mutex> slotLock(llamaSlotMu_);
+      if (!lowPriority)
+        llamaChatWaiters_.fetch_sub(1, std::memory_order_relaxed);
+      if (lowPriority) {
+        while (!llamaSlotCv_.wait_for(
+            slotLock, std::chrono::milliseconds(250), [this, llamaEpoch] {
+              return phoenix::inference::shouldAbort(llamaEpoch) ||
+                     llamaChatWaiters_.load(std::memory_order_relaxed) == 0;
+            })) {
+        }
+        if (phoenix::inference::shouldAbort(llamaEpoch)) {
+          return json{{"ok", false},
+                      {"error", "aborted"},
+                      {"provider", "llamacpp"}};
+        }
+      }
+      const int maxSlots = llamaMaxParallelSlots();
+      while (!llamaSlotCv_.wait_for(
+          slotLock, std::chrono::milliseconds(250),
+          [this, maxSlots, llamaEpoch] {
+            return phoenix::inference::shouldAbort(llamaEpoch) ||
+                   llamaSlotsInUse_.load(std::memory_order_relaxed) < maxSlots;
+          })) {
+      }
+      if (phoenix::inference::shouldAbort(llamaEpoch)) {
+        return json{{"ok", false},
+                    {"error", "aborted"},
+                    {"provider", "llamacpp"}};
+      }
+      llamaSlotsInUse_.fetch_add(1, std::memory_order_relaxed);
     }
+    struct ReleaseSlot {
+      GatewayServer *self;
+      ~ReleaseSlot() {
+        self->llamaSlotsInUse_.fetch_sub(1, std::memory_order_relaxed);
+        self->llamaSlotCv_.notify_all();
+      }
+    } releaseSlot{this};
     bool voterEnabled = false;
     int numPasses = 5;
     double maskRate = 0.05;

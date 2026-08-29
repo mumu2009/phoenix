@@ -447,6 +447,12 @@ static Config loadConfig(int argc, char **argv) {
       16, (int)numberOr(argOrEnv("transformer-bootstrap-docs",
                                  "AI_TRANSFORMER_BOOTSTRAP_DOCS", "256"),
                         256));
+  c.gnnBootstrap = boolFrom(
+      argOrEnv("gnn-bootstrap", "AI_GNN_BOOTSTRAP", "true"), true);
+  c.gnnBootstrapDocs = std::max(
+      16, (int)numberOr(
+              argOrEnv("gnn-bootstrap-docs", "AI_GNN_BOOTSTRAP_DOCS", "256"),
+              256));
 
   c.logMode = argOrEnv("log-mode", "AI_LOG_MODE", "release");
   c.exportDir =

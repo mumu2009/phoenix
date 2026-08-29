@@ -4,6 +4,7 @@
 #include "autonomy_stack.hpp"
 #include "instinct.hpp"
 #include "mission_lifecycle.hpp"
+#include "mission_workspace.hpp"
 #include "primal_sensation.hpp"
 #include "subconscious_profile.hpp"
 #include "test_hacktest_framework.hpp"
@@ -366,4 +367,80 @@ TEST_F(AutonomyMissionFixture, DisabledMissionDoesNotSpawns) {
   auto child = mgr_->spawnMissionChild(json{});
   EXPECT_TRUE(child.value("ok", false));
   EXPECT_TRUE(child["result"].is_object());
+}
+
+TEST(WorkspaceSandbox, ResetScopeClearsDeliverable) {
+  const std::string root = "./runtime_store/gtest_mission_workspace";
+  const std::string scope = "mission-reset-test";
+  const auto wr = phoenix::mission::workspaceExecute(
+      root, scope,
+      json{{"action", "write"},
+           {"path", "deliverable.md"},
+           {"content", "stale content from prior run"}});
+  ASSERT_TRUE(wr.value("ok", false));
+  EXPECT_TRUE(phoenix::mission::workspaceResetScope(root, scope));
+  const auto rd = phoenix::mission::workspaceExecute(
+      root, scope, json{{"action", "read"}, {"path", "deliverable.md"}});
+  EXPECT_FALSE(rd.value("ok", false));
+}
+
+TEST(WorkspaceSandbox, ReplaceEditsExistingSpan) {
+  const std::string root = "./runtime_store/gtest_mission_workspace";
+  const std::string scope = "mission-replace-test";
+  ASSERT_TRUE(phoenix::mission::workspaceResetScope(root, scope));
+  ASSERT_TRUE(phoenix::mission::workspaceExecute(
+                  root, scope,
+                  json{{"action", "write"},
+                       {"path", "deliverable.md"},
+                       {"content", "alpha OLD beta"}})
+                  .value("ok", false));
+  const auto rp = phoenix::mission::workspaceExecute(
+      root, scope,
+      json{{"action", "replace"},
+           {"path", "deliverable.md"},
+           {"find", "OLD"},
+           {"content", "NEW"}});
+  ASSERT_TRUE(rp.value("ok", false));
+  const auto rd = phoenix::mission::workspaceExecute(
+      root, scope, json{{"action", "read"}, {"path", "deliverable.md"}});
+  EXPECT_EQ(rd.value("content", std::string()), "alpha NEW beta");
+}
+
+TEST(WorkspaceSandbox, WriteRefusesToShrinkDeliverable) {
+  const std::string root = "./runtime_store/gtest_mission_workspace";
+  const std::string scope = "mission-shrink-test";
+  ASSERT_TRUE(phoenix::mission::workspaceResetScope(root, scope));
+  const std::string body(8000, 'A');
+  ASSERT_TRUE(phoenix::mission::workspaceExecute(
+                  root, scope,
+                  json{{"action", "write"},
+                       {"path", "deliverable.md"},
+                       {"content", body}})
+                  .value("ok", false));
+  const auto emptyWr = phoenix::mission::workspaceExecute(
+      root, scope,
+      json{{"action", "write"},
+           {"path", "deliverable.md"},
+           {"content", ""}});
+  EXPECT_FALSE(emptyWr.value("ok", false));
+  const auto shortWr = phoenix::mission::workspaceExecute(
+      root, scope,
+      json{{"action", "write"}, {"content", "fragment from json write"}});
+  ASSERT_TRUE(shortWr.value("ok", false));
+  EXPECT_TRUE(shortWr.value("refusedShrink", false));
+  const auto rd = phoenix::mission::workspaceExecute(
+      root, scope, json{{"action", "read"}, {"path", "deliverable.md"}});
+  const std::string got = rd.value("content", std::string());
+  EXPECT_GE(got.size(), body.size());
+  EXPECT_EQ(got.substr(0, body.size()), body);
+  EXPECT_NE(got.find("fragment from json write"), std::string::npos);
+}
+
+TEST(WorkspaceSandbox, RunRejectsNonPython) {
+  const std::string root = "./runtime_store/gtest_mission_workspace";
+  const std::string scope = "mission-run-test";
+  ASSERT_TRUE(phoenix::mission::workspaceResetScope(root, scope));
+  const auto ran = phoenix::mission::workspaceExecute(
+      root, scope, json{{"action", "run"}, {"path", "notes.md"}});
+  EXPECT_FALSE(ran.value("ok", false));
 }

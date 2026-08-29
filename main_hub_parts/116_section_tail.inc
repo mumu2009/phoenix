@@ -448,6 +448,190 @@
     return buildLexicalEmbeddings();
   }
 
+  static phoenix::inference::UnitQueryIO
+  ccmEntryToUnitQuery(const phoenix::memory::CcmEntry &e) {
+    if (!e.unitQuery.empty())
+      return phoenix::inference::unitQueryFromRows(
+          e.unitQuery, e.modality.empty() ? "unit" : e.modality);
+    return phoenix::inference::unitQueryFromText(
+        e.text, e.modality.empty() ? "text" : e.modality);
+  }
+
+  static void appendCcmEntryAsUnits(
+      std::vector<phoenix::inference::UnitQueryIO> &dst,
+      const phoenix::memory::CcmEntry &e) {
+    if (!e.unitQuery.empty()) {
+      phoenix::inference::appendUnitQuery(
+          dst, phoenix::inference::unitQueryFromRows(
+                   e.unitQuery, e.modality.empty() ? "unit" : e.modality));
+      return;
+    }
+    phoenix::inference::appendUnitQueriesFromParagraphs(
+        dst, e.text, e.modality.empty() ? "text" : e.modality);
+  }
+
+  static phoenix::inference::UnitQueryIO
+  semanticUnitToUnitQuery(const phoenix::multimodal::SemanticUnit &u) {
+    const std::string mod = phoenix::multimodal::modalityToString(u.modality);
+    if (!u.unitQuerySequence.empty())
+      return phoenix::inference::unitQueryFromRows(u.unitQuerySequence, mod);
+    if (!u.semanticVector.empty())
+      return phoenix::inference::unitQueryFromRows({u.semanticVector}, mod);
+    return phoenix::inference::unitQueryFromText(u.content, mod);
+  }
+
+  static void appendSemanticUnitAsUnits(
+      std::vector<phoenix::inference::UnitQueryIO> &dst,
+      const phoenix::multimodal::SemanticUnit &u) {
+    const std::string mod = phoenix::multimodal::modalityToString(u.modality);
+    if (!u.unitQuerySequence.empty()) {
+      phoenix::inference::appendUnitQuery(
+          dst, phoenix::inference::unitQueryFromRows(u.unitQuerySequence, mod));
+      return;
+    }
+    if (!u.semanticVector.empty()) {
+      phoenix::inference::appendUnitQuery(
+          dst, phoenix::inference::unitQueryFromRows({u.semanticVector}, mod));
+      return;
+    }
+    phoenix::inference::appendUnitQueriesFromParagraphs(dst, u.content, mod);
+  }
+
+  json buildUnitPipelineOptions(
+      const json &graphResult,
+      const std::vector<phoenix::inference::UnitQueryIO> &memoryPackets,
+      const std::vector<phoenix::inference::UnitQueryIO> &gnnPacketsIn,
+      const std::string &instanceKey, bool lowPriority, const json &baseOpts) {
+    json opts = baseOpts.is_object() ? baseOpts : json::object();
+    opts["unitPipeline"] =
+        phoenix::cfgOr<bool>("main.inference.unitPipeline", true);
+    opts["useNativeCompletion"] =
+        phoenix::cfgOr<bool>("llama.useNativeCompletion", false);
+    opts["loop_mode"] =
+        phoenix::cfgOr<std::string>("main.inference.loopMode", "unit");
+    opts["feedback_mode"] =
+        phoenix::cfgOr<std::string>("main.inference.feedbackMode", "dec_enc");
+    opts["autoFeedbackFallback"] =
+        phoenix::cfgOr<bool>("main.inference.autoFeedbackFallback", true);
+    const float memW = static_cast<float>(
+        phoenix::cfgOr<double>("main.inference.memoryWeight", 1.0));
+    const float gnnW = static_cast<float>(
+        phoenix::cfgOr<double>("main.inference.gnnWeight", 1.0));
+    const bool memArmed = phoenix::inference::moduleArmed(
+        phoenix::cfgOr<bool>("main.inference.memoryEnabled", true) &&
+            !config_.disableContextModule,
+        memW);
+    const bool gnnArmed = phoenix::inference::moduleArmed(
+        phoenix::cfgOr<bool>("main.inference.gnnEnabled", true) &&
+            !config_.disableGnnModule,
+        gnnW);
+    opts["memoryEnabled"] = memArmed;
+    opts["gnnEnabled"] = gnnArmed;
+    if (memArmed)
+      opts["memoryWeight"] = memW;
+    else
+      opts.erase("memoryWeight");
+    if (gnnArmed)
+      opts["gnnWeight"] = gnnW;
+    else
+      opts.erase("gnnWeight");
+    {
+      const int ngram = phoenix::cfgOr<int>("main.inference.ngramMerge", 2);
+      const int prot =
+          phoenix::cfgOr<int>("main.inference.ngramProtectLast", 16);
+      opts["ngram_merge"] = ngram;
+      opts["ngram_protect_last"] = prot;
+      const int ragCap = phoenix::cfgOr<int>("main.inference.ragMixCap", 256);
+      opts["rag_mix_cap"] = ragCap;
+      opts["leftover_beta"] =
+          phoenix::cfgOr<double>("main.inference.leftoverBeta", 0.08);
+      opts["leftover_k"] = phoenix::cfgOr<int>("main.inference.leftoverK", 8);
+    }
+    opts["lowPriority"] = lowPriority;
+    opts["id_slot"] = 0;
+    opts["skipGraphContext"] = true;
+    /* Memory/GNN stay off the causal stream. llama /phx/generate mixes
+       them as a second RAG stream (residual on embeddings). */
+    opts.erase("memory_units");
+    opts.erase("context_content");
+    opts.erase("gnn_content");
+    std::vector<phoenix::inference::UnitQueryIO> mem = memoryPackets;
+    std::vector<phoenix::inference::UnitQueryIO> gnn = gnnPacketsIn;
+    if (gnn.empty() && graphResult.is_object()) {
+      const std::string gr = graphResult.value("reply", std::string());
+      if (!gr.empty())
+        phoenix::inference::appendUnitQueriesFromParagraphs(gnn, gr, "text");
+    }
+    if (memArmed) {
+      const auto arr = phoenix::inference::unitQueryListToJson(mem);
+      if (!arr.empty())
+        opts["context_units"] = arr;
+      else
+        opts.erase("context_units");
+    } else {
+      opts.erase("context_units");
+    }
+    if (gnnArmed) {
+      const auto arr = phoenix::inference::unitQueryListToJson(gnn);
+      if (!arr.empty())
+        opts["gnn_units"] = arr;
+      else
+        opts.erase("gnn_units");
+    } else {
+      opts.erase("gnn_units");
+    }
+    (void)instanceKey;
+    return opts;
+  }
+
+  nlohmann::json buildMissionGraphResult(const std::string &goal) const {
+    nlohmann::json out = nlohmann::json::object();
+    if (goal.empty())
+      return out;
+    try {
+      auto controller = pool_ ? pool_->getActive() : nullptr;
+      if (!controller)
+        return out;
+      json body;
+      body["text"] = goal;
+      body["disableAddon"] = true;
+      out = controller->respond(body);
+    } catch (...) {
+    }
+    return out;
+  }
+
+  json dispatchLegacyTransformerChat(
+      const std::string &text, const std::string &graphContext,
+      const std::vector<std::vector<float>> &graphEmb, int maxTokens,
+      const json &inferenceOptions) {
+    const bool transformerEnabled =
+        phoenix::cfgOr<bool>("partial_cache.transformerEnabled", false);
+    const auto backend = phoenix::inference::resolveLegacyBackend(
+        config_.transformerBackend, transformerEnabled,
+        /* tinyllama not on main infer path */ false);
+    if (backend == phoenix::inference::LegacyBackend::DeprecatedNativeTransformer) {
+      std::lock_guard<std::mutex> lock(transformerMu_);
+      std::string memErr;
+      if (!preInferenceMemoryCheck(memErr))
+        return json{{"ok", false}, {"error", memErr}};
+      auto reply = transformer_.chat(text, graphContext, graphEmb, maxTokens);
+      postInferenceMemoryTrim();
+      return reply;
+    }
+    json opts = inferenceOptions.is_object() ? inferenceOptions : json::object();
+    json graphResult = json::object();
+    std::vector<phoenix::inference::UnitQueryIO> gnnPkts;
+    if (!graphEmb.empty())
+      phoenix::inference::appendUnitQuery(
+          gnnPkts, phoenix::inference::unitQueryFromRows(graphEmb, "unit"));
+    if (!graphContext.empty())
+      phoenix::inference::appendUnitQueriesFromParagraphs(gnnPkts, graphContext);
+    opts = buildUnitPipelineOptions(graphResult, {}, gnnPkts,
+                                    "legacy-transformer", false, opts);
+    return chatWithLlamaCpp(text, graphContext, maxTokens, opts);
+  }
+
   std::vector<transformer::TrainSample> parseTrainSamples(const json &payload) {
     std::vector<transformer::TrainSample> samples;
     if (!payload.contains("samples") || !payload["samples"].is_array())
@@ -1203,13 +1387,15 @@
             pool_->getActive()->runtime());
         if (!barrier_ && rt)
           barrier_ = std::make_shared<MemeBarrier>(rt);
-        if (barrier_)
+        if (barrier_) {
+          config_.disableBarrier = false;
           barrier_->start();
-        else
+        } else
           out["warnings"].push_back("memebarrier requires RuntimeState; "
                                     "current backend does not expose it");
       } else if (barrier_) {
         barrier_->stop();
+        config_.disableBarrier = true;
       }
       out["applied"]["memebarrierEnabled"] = on;
     }
@@ -1879,56 +2065,25 @@
                 graphContext = graphContext + "\n" + sparkAnn;
             }
 
-            // TinyLlama post-GNN summarization step: convert GNN tokens/outputs
-            // into a coherent sentence before the main LLM decodes the final reply.
-            std::string tinyllamaSummary;
-            if (!gnnModuleDisabled && config_.tinyllamaEnabled) {
-              auto tinyStart = std::chrono::steady_clock::now();
-              if (config_.httpLog)
-                std::cout << "[gateway] /api/chat stage=tinyllama_start" << std::endl;
-              try {
-                std::string tinyInput = graphReplyText;
-                if (tinyInput.empty())
-                  tinyInput = text;
-                json tinyOptions = json{{"num_predict", 128}, {"temperature", 0.3}};
-                json tinyReply = chatWithTinyllama(tinyInput, "", 128, tinyOptions);
-                if (tinyReply.value("ok", false)) {
-                  tinyllamaSummary = tinyReply.value("reply", "");
-                }
-              } catch (const std::exception &e) {
-                if (config_.httpLog)
-                  std::cout << "[gateway] /api/chat stage=tinyllama_exception error="
-                            << e.what() << std::endl;
-              }
-              if (!tinyllamaSummary.empty()) {
-                if (graphContext.empty())
-                  graphContext = tinyllamaSummary;
-                else
-                  graphContext = graphContext + "\n" + tinyllamaSummary;
-              }
-              if (config_.httpLog) {
-                auto tinyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                  std::chrono::steady_clock::now() - tinyStart).count();
-                std::cout << "[gateway] /api/chat stage=tinyllama_done summary_length="
-                          << tinyllamaSummary.size() << " elapsedMs=" << tinyMs << std::endl;
-              }
-            }
+            // TinyLlama is a standalone summary microservice (SummaryModel /
+            // frontend /api/summary only) — never inserted on enc→memory→gnn→
+            // infer→dec iteration path.
 
-            /* v8.x cross-context memory: recall what any context (other
-               missions / past chat) already learned and inject it as part of
-               the long-term memory channel.  Per-context LIVE state is never
-               mixed - only deposited summaries cross the boundary. */
+            /* Shared CCM + instance-local memory ride as paragraph units.
+               Do not also dump them onto the causal stream — infer never sees memory
+               as prompt text. */
+            std::vector<phoenix::inference::UnitQueryIO> instanceMemory;
+            std::vector<phoenix::inference::UnitQueryIO> instanceGnn;
             try {
-              const std::string ccmPath = phoenix::resolveConfig<std::string>(
-                  "crossContextMemory.path",
-                  std::string("./runtime_store/cross_context_memory.json"));
-              const auto ccms = phoenix::memory::ccmRecall(ccmPath, text, 3);
-              if (!ccms.empty()) {
+              const auto ccms = phoenix::memory::ccmRecall(
+                  phoenix::instance::ccmStorePath(), text, 3);
+              for (const auto &e : ccms)
+                appendCcmEntryAsUnits(instanceMemory, e);
+              if (!usingLlamaCpp && !instanceMemory.empty()) {
                 std::string ccmBlock = "[cross-context memory]";
                 for (const auto &e : ccms) {
-                  std::string s = e.text;
-                  if (s.size() > 200) s = s.substr(0, 200);
-                  ccmBlock += "\n- [" + e.sourceTag + "] " + s;
+                  if (!e.text.empty())
+                    ccmBlock += "\n- " + e.text.substr(0, 700);
                 }
                 if (graphContext.empty())
                   graphContext = ccmBlock;
@@ -1937,12 +2092,26 @@
               }
             } catch (...) {
             }
+            if (!graphReplyText.empty())
+              phoenix::inference::appendUnitQueriesFromParagraphs(
+                  instanceGnn, graphReplyText);
+            if (!sparkReply.empty())
+              phoenix::inference::appendUnitQueriesFromParagraphs(
+                  instanceGnn, sparkReply);
+            if (!sparkAnn.empty())
+              phoenix::inference::appendUnitQueriesFromParagraphs(
+                  instanceGnn, sparkAnn);
 
             // Preserve the original user message for the emotion system.
             std::string userText = text;
 
-            // Always apply session-level context hint; only mix graph context when context module is enabled.
-            if (!contextModuleDisabled) {
+            if (usingLlamaCpp) {
+              if (!hint.text.empty() && hint.weight > 0.0)
+                phoenix::inference::appendUnitQueriesFromParagraphs(
+                    instanceMemory, hint.text);
+              if (contextModuleDisabled)
+                graphContext.clear();
+            } else if (!contextModuleDisabled) {
               text = applyContextHintToText(text, hint);
               graphContext = applyContextHintToGraph(graphContext, hint);
             } else {
@@ -1983,9 +2152,14 @@
                 pkt.source = "gateway-chat";
                 auto ahead = aheadModule_->processBatch({pkt}, sessionId);
                 if (ahead.memoryReady) {
-                  if (!graphContext.empty())
-                    graphContext += "\n";
-                  graphContext += "[Ahead memory]\n" + ahead.memoryForBackend.content;
+                  appendSemanticUnitAsUnits(instanceMemory,
+                                            ahead.memoryForBackend);
+                  if (!usingLlamaCpp) {
+                    if (!graphContext.empty())
+                      graphContext += "\n";
+                    graphContext +=
+                        "[Ahead memory]\n" + ahead.memoryForBackend.content;
+                  }
                 }
                 emotionModulation = ahead.emotionInfluence.promptModulation;
                 aheadInferenceOptions = ahead.emotionInfluence.inferenceOptions;
@@ -2012,6 +2186,9 @@
             try {
               auto pack = runCognitionAutonomy(body, userText, graphContext);
               graphContext = pack.context;
+              if (!pack.instanceMemoryText.empty())
+                phoenix::inference::appendUnitQueriesFromParagraphs(
+                    instanceMemory, pack.instanceMemoryText);
               if (pack.inferenceOptions.is_object()) {
                 for (auto &el : pack.inferenceOptions.items())
                   inferenceOptions[el.key()] = el.value();
@@ -2096,8 +2273,24 @@
                   std::cout << "[gateway] /api/chat stage=model_start "
                                "provider=llamacpp maxTokens="
                             << maxTokens << std::endl;
+                const int dim =
+                    phoenix::cfgOr<int>("main.inference.llamaEmbDim", 4096);
+                json llamaOpts = inferenceOptions.is_object()
+                                     ? inferenceOptions
+                                     : json::object();
+                auto imageRows = extractImageEmbeddings(body, dim);
+                if (!imageRows.empty() && !imageRows.front().empty() &&
+                    static_cast<int>(imageRows.front().size()) == dim) {
+                  phoenix::inference::appendUnitQuery(
+                      instanceGnn, phoenix::inference::unitQueryFromRows(
+                                       std::move(imageRows), "image"));
+                }
+                llamaOpts = buildUnitPipelineOptions(
+                    graphResult, instanceMemory, instanceGnn,
+                    sessionId.empty() ? std::string("chat") : sessionId, false,
+                    llamaOpts);
                 tReply = chatWithLlamaCpp(text, modelGraphContext, maxTokens,
-                          inferenceOptions);
+                                          llamaOpts);
                 modelElapsedMs =
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0)
@@ -2128,42 +2321,30 @@
                   std::cout << "[gateway] /api/chat stage=model_start "
                                "provider=transformer maxTokens="
                             << maxTokens << std::endl;
-                std::lock_guard<std::mutex> lock(transformerMu_);
-                // Pre-inference memory check to avoid OOM kills
-                std::string memErr;
-                if (!preInferenceMemoryCheck(memErr)) {
-                  tReply = json{{"ok", false}, {"error", memErr}};
-                  modelElapsedMs = 0;
-                  if (config_.httpLog)
-                    std::cout << "[gateway] /api/chat stage=model_oom_prevented "
-                              << memErr << std::endl;
-                } else {
-                  int dim = transformer_.params().value("dModel", 128);
-                  int rounds = gnnHint.align >= 0.45 ? 2 : 1;
-                  std::vector<std::vector<float>> graphEmb;
-                  bool enableGraphEmbeddings =
-                      body.value("enableGraphEmbeddings", false);
-                  if (enableGraphEmbeddings) {
-                    graphEmb = buildGraphEmbeddings(graphResult, dim, rounds);
-                  }
-                  auto imageEmb = extractImageEmbeddings(body, dim);
-                  if (!imageEmb.empty()) {
-                    imageEmbCount = (int)imageEmb.size();
-                    graphEmb.insert(graphEmb.end(), imageEmb.begin(),
-                                    imageEmb.end());
-                  }
-                  tReply = transformer_.chat(text, modelGraphContext, graphEmb,
-                                             maxTokens);
-                  postInferenceMemoryTrim();
-                  modelElapsedMs =
-                      std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::steady_clock::now() - t0)
-                          .count();
-                  if (config_.httpLog)
-                    std::cout << "[gateway] /api/chat stage=model_done "
-                                 "provider=transformer elapsedMs="
-                              << modelElapsedMs << std::endl;
+                int dim = phoenix::cfgOr<int>("main.inference.llamaEmbDim", 4096);
+                int rounds = gnnHint.align >= 0.45 ? 2 : 1;
+                std::vector<std::vector<float>> graphEmb;
+                bool enableGraphEmbeddings =
+                    body.value("enableGraphEmbeddings", true);
+                if (enableGraphEmbeddings)
+                  graphEmb = buildGraphEmbeddings(graphResult, dim, rounds);
+                auto imageEmb = extractImageEmbeddings(body, dim);
+                if (!imageEmb.empty()) {
+                  imageEmbCount = (int)imageEmb.size();
+                  graphEmb.insert(graphEmb.end(), imageEmb.begin(),
+                                  imageEmb.end());
                 }
+                tReply = dispatchLegacyTransformerChat(
+                    text, modelGraphContext, graphEmb, maxTokens,
+                    inferenceOptions);
+                modelElapsedMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+                if (config_.httpLog)
+                  std::cout << "[gateway] /api/chat stage=model_done "
+                               "provider=transformer elapsedMs="
+                            << modelElapsedMs << std::endl;
               }
               std::string replyCandidate = tReply.value("reply", "");
               if (longQuerySafeMode) {
@@ -2226,10 +2407,9 @@
                     chatWithBitNet(text, followupGraphContext, maxTokens,
                    inferenceOptions);
               } else {
-                std::lock_guard<std::mutex> lock(transformerMu_);
-                tReplyAfterTool =
-                    transformer_.chat(text, followupGraphContext, maxTokens);
-                postInferenceMemoryTrim();
+                tReplyAfterTool = dispatchLegacyTransformerChat(
+                    text, followupGraphContext, {}, maxTokens,
+                    inferenceOptions);
               }
               std::string rewritten =
                   stripAddonToolDirective(tReplyAfterTool.value("reply", ""));
@@ -2255,7 +2435,14 @@
             if (aheadModule_ && !sessionId.empty() && !reply.empty()) {
               try {
                 auto routed = aheadModule_->routeSentence(reply, sessionId);
-                if (!routed.blockedByMemeBarrier)
+                if (barrier_) {
+                  const auto insp =
+                      barrier_->inspectText(routed.textForMemeBarrier);
+                  routed.blockedByMemeBarrier = insp.blocked;
+                }
+                if (routed.blockedByMemeBarrier)
+                  reply.clear();
+                else
                   reply = routed.textForBackend;
               } catch (...) {
               }
@@ -2596,15 +2783,48 @@
               else
                 graphContext = graphContext + "\n" + sparkAnn;
             }
-            if (!contextModuleDisabled) {
+            std::vector<phoenix::inference::UnitQueryIO> instanceMemory;
+            std::vector<phoenix::inference::UnitQueryIO> instanceGnn;
+            try {
+              const auto ccms = phoenix::memory::ccmRecall(
+                  phoenix::instance::ccmStorePath(), text, 3);
+              for (const auto &e : ccms)
+                appendCcmEntryAsUnits(instanceMemory, e);
+              if (!usingLlamaCpp && !instanceMemory.empty()) {
+                std::string ccmBlock = "[cross-context memory]";
+                for (const auto &e : ccms) {
+                  if (!e.text.empty())
+                    ccmBlock += "\n- " + e.text.substr(0, 700);
+                }
+                if (graphContext.empty())
+                  graphContext = ccmBlock;
+                else
+                  graphContext = graphContext + "\n" + ccmBlock;
+              }
+            } catch (...) {
+            }
+            if (!graphReplyText.empty())
+              phoenix::inference::appendUnitQueriesFromParagraphs(
+                  instanceGnn, graphReplyText);
+            if (!sparkReply.empty())
+              phoenix::inference::appendUnitQueriesFromParagraphs(
+                  instanceGnn, sparkReply);
+            if (!sparkAnn.empty())
+              phoenix::inference::appendUnitQueriesFromParagraphs(
+                  instanceGnn, sparkAnn);
+            if (usingLlamaCpp) {
+              if (!hint.text.empty() && hint.weight > 0.0)
+                phoenix::inference::appendUnitQueriesFromParagraphs(
+                    instanceMemory, hint.text);
+              if (contextModuleDisabled)
+                graphContext.clear();
+            } else if (!contextModuleDisabled) {
               text = applyContextHintToText(text, hint);
               graphContext = applyContextHintToGraph(graphContext, hint);
             } else {
               graphContext.clear();
-              // User-provided contextHint is still applied when context module is disabled
-              if (!hint.text.empty()) {
+              if (!hint.text.empty())
                 text = applyContextHintToText(text, hint);
-              }
             }
             bool cleanedGraph = false;
             graphContext = sanitizeInputText(graphContext, cleanedGraph);
@@ -2639,9 +2859,14 @@
                 pkt.source = "gateway-chat";
                 auto ahead = aheadModule_->processBatch({pkt}, sessionId);
                 if (ahead.memoryReady) {
-                  if (!graphContext.empty())
-                    graphContext += "\n";
-                  graphContext += "[Ahead memory]\n" + ahead.memoryForBackend.content;
+                  appendSemanticUnitAsUnits(instanceMemory,
+                                            ahead.memoryForBackend);
+                  if (!usingLlamaCpp) {
+                    if (!graphContext.empty())
+                      graphContext += "\n";
+                    graphContext +=
+                        "[Ahead memory]\n" + ahead.memoryForBackend.content;
+                  }
                 }
                 aheadInferenceOptions = ahead.emotionInfluence.inferenceOptions;
                 cognitionEmotionTensor = ahead.emotion.toJson();
@@ -2654,6 +2879,9 @@
             try {
               auto pack = runCognitionAutonomy(body, text, graphContext);
               graphContext = pack.context;
+              if (!pack.instanceMemoryText.empty())
+                phoenix::inference::appendUnitQueriesFromParagraphs(
+                    instanceMemory, pack.instanceMemoryText);
               if (pack.inferenceOptions.is_object()) {
                 for (auto &el : pack.inferenceOptions.items())
                   inferenceOptions[el.key()] = el.value();
@@ -2717,30 +2945,42 @@
                 tReply = chatWithOllama(text, modelGraphContext, maxTokens,
                         inferenceOptions);
               } else if (usingLlamaCpp) {
+                const int dim =
+                    phoenix::cfgOr<int>("main.inference.llamaEmbDim", 4096);
+                json llamaOpts = inferenceOptions.is_object()
+                                     ? inferenceOptions
+                                     : json::object();
+                auto imageRows = extractImageEmbeddings(body, dim);
+                if (!imageRows.empty() && !imageRows.front().empty() &&
+                    static_cast<int>(imageRows.front().size()) == dim) {
+                  phoenix::inference::appendUnitQuery(
+                      instanceGnn, phoenix::inference::unitQueryFromRows(
+                                       std::move(imageRows), "image"));
+                }
+                llamaOpts = buildUnitPipelineOptions(
+                    graphResult, instanceMemory, instanceGnn,
+                    sessionId.empty() ? std::string("chat") : sessionId, false,
+                    llamaOpts);
                 tReply = chatWithLlamaCpp(text, modelGraphContext, maxTokens,
-                          inferenceOptions);
+                                          llamaOpts);
               } else if (usingBitNet) {
                 tReply = chatWithBitNet(text, modelGraphContext, maxTokens,
                         inferenceOptions);
               } else {
-                std::lock_guard<std::mutex> lock(transformerMu_);
-                int dim = transformer_.params().value("dModel", 128);
+                int dim = phoenix::cfgOr<int>("main.inference.llamaEmbDim", 4096);
                 int rounds = gnnHint.align >= 0.45 ? 2 : 1;
                 std::vector<std::vector<float>> graphEmb;
-                bool enableGraphEmbeddings =
-                    body.value("enableGraphEmbeddings", false);
-                if (enableGraphEmbeddings) {
+                if (body.value("enableGraphEmbeddings", true))
                   graphEmb = buildGraphEmbeddings(graphResult, dim, rounds);
-                }
                 auto imageEmb = extractImageEmbeddings(body, dim);
                 if (!imageEmb.empty()) {
                   imageEmbCount = (int)imageEmb.size();
                   graphEmb.insert(graphEmb.end(), imageEmb.begin(),
                                   imageEmb.end());
                 }
-                tReply = transformer_.chat(text, modelGraphContext, graphEmb,
-                                           maxTokens);
-                postInferenceMemoryTrim();
+                tReply = dispatchLegacyTransformerChat(
+                    text, modelGraphContext, graphEmb, maxTokens,
+                    inferenceOptions);
               }
               if (!tReply.is_object()) {
                 finalizeMetric(false);
@@ -2798,10 +3038,9 @@
                     chatWithBitNet(text, followupGraphContext, maxTokens,
                    inferenceOptions);
               } else {
-                std::lock_guard<std::mutex> lock(transformerMu_);
-                tReplyAfterTool =
-                    transformer_.chat(text, followupGraphContext, maxTokens);
-                postInferenceMemoryTrim();
+                tReplyAfterTool = dispatchLegacyTransformerChat(
+                    text, followupGraphContext, {}, maxTokens,
+                    inferenceOptions);
               }
               std::string rewritten = stripAddonToolDirective(
                   jsonStringOrEmpty(tReplyAfterTool, "reply"));
@@ -2830,7 +3069,14 @@
             if (aheadModule_ && !sessionId.empty() && !finalReply.empty()) {
               try {
                 auto routed = aheadModule_->routeSentence(finalReply, sessionId);
-                if (!routed.blockedByMemeBarrier)
+                if (barrier_) {
+                  const auto insp =
+                      barrier_->inspectText(routed.textForMemeBarrier);
+                  routed.blockedByMemeBarrier = insp.blocked;
+                }
+                if (routed.blockedByMemeBarrier)
+                  finalReply.clear();
+                else
                   finalReply = routed.textForBackend;
               } catch (...) {
               }
@@ -3855,9 +4101,6 @@
               std::lock_guard<std::mutex> lock(transformerMu_);
               chatResult = transformer_.chat(text, graphContext, maxTokens);
               postInferenceMemoryTrim();
-            } else if (config_.tinyllamaEnabled &&
-                       !config_.tinyllamaBaseUrl.empty()) {
-              chatResult = chatWithTinyllama(text, graphContext, maxTokens);
             } else if (config_.inferenceEnabled &&
                        !config_.llamaCppBaseUrl.empty()) {
               chatResult = chatWithLlamaCpp(text, graphContext, maxTokens);
@@ -4272,12 +4515,13 @@
              on so iterate() injects pressure and the instance registers with
              the safety registry. */
           payload["enabled"] = true;
-          /* v8.0 order matters: START the heartbeat FIRST (its restore of
-             long-term state may bring back a PREVIOUS mission), THEN assign
-             the new goal so it WINS over any restored state. */
+          /* Assign FIRST (resets iteration, wipes workspace/cache), THEN start
+             the heartbeat WITHOUT restoring stale autonomy_state.json (which
+             caused iteration≈1007 freezes and ghost deliverables). */
           cognitionManager_.configureAutonomyLoop(nlohmann::json{{"enabled", true}});
-          cognitionManager_.startAutonomyLoop();
           json assigned = cognitionManager_.assignMission(payload);
+          cognitionManager_.startAutonomyLoop(
+              nlohmann::json{{"restoreState", false}});
           respondJson(cb, assigned);
         },
         {drogon::Post});
@@ -7023,6 +7267,144 @@
 
 /* v8.3: out-of-line so GatewayServer's constructor lambda can call a prior
    declaration without a duplicate in-class definition (C++ forbids both). */
+inline int GatewayServer::seedGnnGraphFromRobotsCorpus(int maxDocs,
+                                                       const char *sourceTag) {
+  if (maxDocs <= 0)
+    return 0;
+  static std::mutex gCorpusMu;
+  std::lock_guard<std::mutex> corpusLock(gCorpusMu);
+  auto rt = activeRuntime();
+  auto st = rt ? std::dynamic_pointer_cast<RuntimeState>(rt) : nullptr;
+  if (!st) {
+    std::cout << "[corpus-pretrain] skip: no RuntimeState" << std::endl;
+    return 0;
+  }
+  const std::string src = sourceTag ? sourceTag : "gnn-pretrain";
+  const std::string stampPath = phoenix::resolveConfig<std::string>(
+      "mission.corpusPretrainStamp",
+      std::string("./runtime_store/corpus_pretrain_stamp.json"));
+  auto stampOk = [&](const std::string &fileTag) {
+    try {
+      std::ifstream in(stampPath);
+      if (!in)
+        return false;
+      nlohmann::json j;
+      in >> j;
+      if (!j.is_object())
+        return false;
+      const int got = j.value("ingested", 0);
+      const std::string gotFile = j.value("file", std::string());
+      return got >= maxDocs &&
+             (fileTag.empty() || gotFile == fileTag ||
+              gotFile.rfind("wikitext", 0) == 0);
+    } catch (...) {
+      return false;
+    }
+  };
+  if (stampOk(std::string())) {
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true))
+      std::cout << "[corpus-pretrain] skip: stamp already has >= " << maxDocs
+                << " units (" << stampPath << ")" << std::endl;
+    return 0;
+  }
+
+  std::string srcFile;
+  auto docs = st->collectRobotsDocuments(nlohmann::json{
+      {"limit", maxDocs},
+      {"shuffle", false},
+      {"files", nlohmann::json::array({"wikitext-103-all.txt"})}});
+  if (!docs.empty())
+    srcFile = "wikitext-103-all.txt";
+  if (docs.empty()) {
+    docs = st->collectRobotsDocuments(nlohmann::json{
+        {"limit", maxDocs},
+        {"shuffle", false},
+        {"files", nlohmann::json::array({"wikitext-101-all.txt"})}});
+    if (!docs.empty())
+      srcFile = "wikitext-101-all.txt";
+  }
+  if (docs.empty()) {
+    docs = st->collectRobotsDocuments(nlohmann::json{
+        {"limit", maxDocs},
+        {"shuffle", false},
+        {"files", nlohmann::json::array({"wikitext-103-rdk.txt"})}});
+    if (!docs.empty())
+      srcFile = "wikitext-103-rdk.txt";
+  }
+  if (docs.empty()) {
+    docs = st->collectRobotsDocuments(
+        nlohmann::json{{"limit", maxDocs}, {"shuffle", false}});
+    srcFile = docs.empty() ? std::string() : docs.front().file;
+  }
+  if (docs.empty()) {
+    std::cout << "[corpus-pretrain] skip: no robots/wikitext units "
+              << "(looked for wikitext-103-all.txt / wikitext-101-all.txt / "
+                 "robots/*.txt) source="
+              << src << std::endl;
+    return 0;
+  }
+
+  const auto snap = st->graph().exportSnapshot();
+  const int nodeN = snap.contains("nodes") && snap["nodes"].is_array()
+                        ? static_cast<int>(snap["nodes"].size())
+                        : 0;
+  int ingested = 0;
+  int memN = 0;
+  int emoN = 0;
+  const std::string ccmPath = phoenix::instance::ccmStorePath();
+  for (auto &d : docs) {
+    if (d.text.empty())
+      continue;
+    st->ingestDocument(
+        nlohmann::json{{"text", d.text}, {"source", src + ":" + srcFile}});
+    if (memN < 48) {
+      try {
+        phoenix::memory::ccmRemember(ccmPath, "corpus:" + srcFile, d.text);
+        cognitionMemory_.put("corpus:" + srcFile + ":" + std::to_string(memN),
+                             nlohmann::json{{"text", d.text},
+                                            {"file", srcFile},
+                                            {"source", src}},
+                             0.35);
+      } catch (...) {
+      }
+      ++memN;
+    }
+    if (emotionSystem_ && emoN < 64) {
+      try {
+        emotionSystem_->processMessage("corpus:" + srcFile, d.text, emoN);
+        cognitionManager_.ingestSensation(nlohmann::json{
+            {"type", "novelty"},
+            {"intensity", 0.35},
+            {"valence", 0.0},
+            {"source", "corpus:" + srcFile},
+            {"contextTag", "corpus"}});
+      } catch (...) {
+      }
+      ++emoN;
+    }
+    if (++ingested >= maxDocs)
+      break;
+  }
+  try {
+    std::filesystem::create_directories(
+        std::filesystem::path(stampPath).parent_path());
+    std::ofstream out(stampPath);
+    out << nlohmann::json{{"file", srcFile},
+                          {"ingested", ingested},
+                          {"nodesWas", nodeN},
+                          {"memory", memN},
+                          {"emotion", emoN},
+                          {"source", src}}
+               .dump(2);
+  } catch (...) {
+  }
+  std::cout << "[corpus-pretrain] file=" << srcFile << " units=" << ingested
+            << " nodes_was=" << nodeN << " memory=" << memN
+            << " emotion=" << emoN << " source=" << src << std::endl;
+  return ingested;
+}
+
 inline std::string GatewayServer::buildMissionOutline(const std::string &goal) {
   {
     std::lock_guard<std::mutex> lock(outlineMu_);
@@ -7633,6 +8015,21 @@ int main(int argc, char **argv) {
       gDisableWatchdog = true;
       std::cout << "[startup] watchdog disabled (externally managed mode)" << std::endl;
     }
+#else
+    gForceExitMs.store(forceExitMs, std::memory_order_relaxed);
+    std::thread([] {
+      while (!gInterruptRequested.load(std::memory_order_acquire))
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      armForceExitWatchdog();
+      try {
+        phoenix::safety::EmergencyStop::instance().press("SIGINT");
+      } catch (...) {
+        try {
+          drogon::app().quit();
+        } catch (...) {
+        }
+      }
+    }).detach();
 #endif
 
     applyFrontendEnvFromArgs(args);
@@ -8026,6 +8423,11 @@ int main(int argc, char **argv) {
       concreteGateway->setWorldModelDatabase(worldModelDb);
   }
   {
+    auto concreteGateway = std::dynamic_pointer_cast<GatewayServer>(gateway);
+    if (concreteGateway && emotionSystem)
+      concreteGateway->attachEmotionSystem(emotionSystem);
+  }
+  {
     bool frontendEnabled =
         phoenix::resolveConfig<bool>("main.frontendEnabled", true, "AI_FRONTEND_ENABLED");
     bool isFrontendSubprocess =
@@ -8044,8 +8446,10 @@ int main(int argc, char **argv) {
       }
     }).detach();
   }
-  if (config.transformerBootstrap) {
-    int bootstrapDocs = std::max(16, config.transformerBootstrapDocs);
+  if (config.gnnBootstrap || config.transformerBootstrap) {
+    int bootstrapDocs = std::max(
+        16, config.gnnBootstrap ? config.gnnBootstrapDocs
+                                : config.transformerBootstrapDocs);
     std::thread([gateway, bootstrapDocs]() {
       try {
         gateway->bootstrapTransformerFromCorpus(bootstrapDocs);

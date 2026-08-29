@@ -195,6 +195,7 @@ public:
                                        or missionId/children/<childId>) */
     void setMissionDeliberator(MissionDeliberator fn);
     json appendMissionDeliverable(const json &payload); /* {text} appends. */
+    json setMissionDeliverable(const json &payload);    /* {text} replaces. */
     /** Snapshot of mission context-packing options (ctx / summary mode / GNN). */
     json missionContextOptions() const;
     void setMissionGnnSummary(const std::string &summary);
@@ -218,7 +219,7 @@ public:
        WITHOUT external messages, and persists the evolved state to disk so
        evolution survives restarts. */
     json configureAutonomyLoop(const json &payload); /* {enabled, intervalSec, ...} */
-    json startAutonomyLoop();                       /* spawn the heartbeat thread */
+    json startAutonomyLoop(const json &opts = json::object()); /* spawn heartbeat */
     json stopAutonomyLoop();                        /* stop and join */
     json autonomyLoopStatus() const;
 
@@ -273,6 +274,10 @@ size_t missionMaxReplicas_{4};            /* guardrail on free replication */
     bool loopEnabled_{false};
     std::thread loopThread_;
     std::atomic<bool> loopStop_{true};
+    /* True only while loopRun() is executing on loopThread_.  joinable()
+       stays true after the thread exits until join(); never use joinable()
+       alone as "running". */
+    std::atomic<bool> loopRunning_{false};
     int loopIntervalSec_{10};
     int loopMaxStepsPerTick_{8};
     int loopPersistEveryTicks_{5};
@@ -299,8 +304,8 @@ size_t missionMaxReplicas_{4};            /* guardrail on free replication */
     /* aggregate status of every mission (multi-mission view). */
     nlohmann::json missionsStatusLocked() const;
   MissionDeliberator missionDeliberator_;
-  int loopDeliberateMaxTokens_{128}; /* smaller chunks = higher success rate on RDK */
-  int loopChildDeliberateMaxTokens_{128}; /* helper boxes: same budget each */
+  int loopDeliberateMaxTokens_{48}; /* CPU: ~300ms/tok -> 48 tok ~15s decode */
+  int loopChildDeliberateMaxTokens_{48}; /* helper boxes: same budget each */
   size_t loopMaxChildrenPerTick_{0}; /* 0 = run ALL helper boxes each tick */
   size_t childRoundRobin_{0};        /* rotates start index when budget < N */
   /* v8.x C2 self-pause, per mission (concurrent missions pause independently). */

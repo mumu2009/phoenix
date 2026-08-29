@@ -95,6 +95,7 @@ export default function MissionPanel({ onError }) {
   const [loopBusy, setLoopBusy] = useState(false);
   const [loopIntervalSec, setLoopIntervalSec] = useState('');
   const [loopMaxSteps, setLoopMaxSteps] = useState('');
+  const [loopDeliberateMaxTokens, setLoopDeliberateMaxTokens] = useState('');
   const [loopPersistEvery, setLoopPersistEvery] = useState('');
 
   // 6. E-stop card
@@ -227,6 +228,7 @@ export default function MissionPanel({ onError }) {
     const extra = {};
     const iv = asNum(loopIntervalSec); if (iv !== undefined) extra.intervalSec = iv;
     const ms = asNum(loopMaxSteps); if (ms !== undefined) extra.maxStepsPerTick = ms;
+    const dt = asNum(loopDeliberateMaxTokens); if (dt !== undefined) extra.deliberateMaxTokens = dt;
     const pe = asNum(loopPersistEvery); if (pe !== undefined) extra.persistEveryTicks = pe;
     await runLoopAction('configure', extra);
   };
@@ -305,36 +307,150 @@ export default function MissionPanel({ onError }) {
           <div className="card-title">生命周期启动</div>
           <div className="muted">在模型生命周期开始时设立目标；提交后模型将自主求解直至完成或失败。</div>
 
-          <FieldRow label="目标 (goal)" hint="必填，描述本次生命周期要完成的任务">
+          <FieldRow label="目标 (goal)" hint="必填。描述本次生命周期要完成的交付物与约束（章节、字数、时限等写清楚）。">
             <textarea
               aria-label="目标"
               className="textarea"
               value={goal}
               onChange={(e) => setGoal(e.target.value)}
-              placeholder="例如：分析并总结最近一周的日志异常"
+              placeholder="例如：设计 Helios 火星站 1000 sol 自主运维软件，15 章技术文档，≥30000 字"
             />
           </FieldRow>
 
-          <FieldRow label="高级参数" hint="数值字段留空则使用后端默认值">
-            <div className="cfg-inline">
-              <input aria-label="deadlineSec" className="input" value={deadlineSec} onChange={(e) => setDeadlineSec(e.target.value)} placeholder="deadlineSec 300" />
-              <input aria-label="painGainPerSec" className="input" value={painGainPerSec} onChange={(e) => setPainGainPerSec(e.target.value)} placeholder="painGainPerSec 0.01 (linear)" />
-              <select aria-label="pressureMode" className="input" value={pressureMode} onChange={(e) => setPressureMode(e.target.value)} title="压力增长模式">
-                <option value="asymptotic">压力: 渐近 tanh (默认, 永不到顶)</option>
-                <option value="logarithmic">压力: 对数增长</option>
-                <option value="linear">压力: 线性增长</option>
-                <option value="expression">压力: 自定义表达式</option>
-              </select>
-              <input aria-label="pressureHorizonSec" className="input" value={pressureHorizonSec} onChange={(e) => setPressureHorizonSec(e.target.value)} placeholder="pressureHorizonSec 3600 (对数)" />
-              <input aria-label="pressureTauSec" className="input" value={pressureTauSec} onChange={(e) => setPressureTauSec(e.target.value)} placeholder="pressureTauSec 1800 (渐近)" />
-              <input aria-label="pressureExpr" className="input" value={pressureExpr} onChange={(e) => setPressureExpr(e.target.value)} placeholder="pressureExpr Pmax*tanh(t/tau)" />
-              <input aria-label="maxPain" className="input" value={maxPain} onChange={(e) => setMaxPain(e.target.value)} placeholder="maxPain 1.0" />
-              <input aria-label="mutationRate" className="input" value={mutationRate} onChange={(e) => setMutationRate(e.target.value)} placeholder="mutationRate 0.05" />
-              <input aria-label="maxReplicas" className="input" value={maxReplicas} onChange={(e) => setMaxReplicas(e.target.value)} placeholder="maxReplicas 4" />
-            </div>
+          <div className="card-subtitle">时间与截止</div>
+          <FieldRow
+            label="截止时限 (deadlineSec)"
+            hint="软截止参考（秒），用于统计与 UI 展示；不直接停止任务。留空则用后端默认 300。"
+          >
+            <input
+              aria-label="deadlineSec"
+              className="input mission-param-input"
+              value={deadlineSec}
+              onChange={(e) => setDeadlineSec(e.target.value)}
+              placeholder="300"
+            />
           </FieldRow>
 
-          <FieldRow label="上下文打包" hint="滑动窗口：摘要固定占预算，近期全文滑动；整体卡在所选 ctx 内">
+          <div className="card-subtitle">任务压力（驱策持续产出）</div>
+          <div className="muted mission-param-intro">
+            压力随运行时间上升，注入本能/采样调制，促使模型每 tick 继续写 deliverable。长任务请调大 tau，避免数小时内饱和。
+          </div>
+
+          <FieldRow
+            label="增长模式 (pressureMode)"
+            hint="渐近 tanh（默认）：缓慢趋近上限、永不到顶；对数：前期快后期慢；线性：匀速；表达式：自定义公式。"
+          >
+            <select
+              aria-label="pressureMode"
+              className="input mission-param-input"
+              value={pressureMode}
+              onChange={(e) => setPressureMode(e.target.value)}
+            >
+              <option value="asymptotic">渐近 tanh（推荐长任务）</option>
+              <option value="logarithmic">对数增长</option>
+              <option value="linear">线性增长</option>
+              <option value="expression">自定义表达式</option>
+            </select>
+          </FieldRow>
+
+          <FieldRow
+            label="时间常数 (pressureTauSec)"
+            hint="仅渐近/表达式模式。压力到达 ~76% 上限约需 tau 秒。默认 86400（24h）；含「1000 sol」等长目标时后端可自动放大到数天。Helios 类建议 1209600（14 天）或留空走自动推断。"
+          >
+            <input
+              aria-label="pressureTauSec"
+              className="input mission-param-input"
+              value={pressureTauSec}
+              onChange={(e) => setPressureTauSec(e.target.value)}
+              placeholder="86400"
+            />
+          </FieldRow>
+
+          <FieldRow
+            label="对数视界 (pressureHorizonSec)"
+            hint="仅 logarithmic 模式：t=H 时压力≈maxPain。默认 3600。其他模式可留空。"
+          >
+            <input
+              aria-label="pressureHorizonSec"
+              className="input mission-param-input"
+              value={pressureHorizonSec}
+              onChange={(e) => setPressureHorizonSec(e.target.value)}
+              placeholder="3600"
+            />
+          </FieldRow>
+
+          <FieldRow
+            label="自定义公式 (pressureExpr)"
+            hint="仅 expression 模式。变量：t=已运行秒数，Pmax=maxPain，tau，H，g=painGainPerSec。例：Pmax*tanh(t/tau)"
+          >
+            <input
+              aria-label="pressureExpr"
+              className="input mission-param-input"
+              value={pressureExpr}
+              onChange={(e) => setPressureExpr(e.target.value)}
+              placeholder="Pmax*tanh(t/tau)"
+            />
+          </FieldRow>
+
+          <FieldRow
+            label="线性增速 (painGainPerSec)"
+            hint="仅 linear 模式：每秒压力增量。默认 0.01。其他模式可留空。"
+          >
+            <input
+              aria-label="painGainPerSec"
+              className="input mission-param-input"
+              value={painGainPerSec}
+              onChange={(e) => setPainGainPerSec(e.target.value)}
+              placeholder="0.01"
+            />
+          </FieldRow>
+
+          <FieldRow
+            label="压力上限 (maxPain)"
+            hint="压力封顶值，范围 [0,1]。默认 1.0。渐近模式在有限时间内达不到此值。"
+          >
+            <input
+              aria-label="maxPain"
+              className="input mission-param-input"
+              value={maxPain}
+              onChange={(e) => setMaxPain(e.target.value)}
+              placeholder="1.0"
+            />
+          </FieldRow>
+
+          <div className="card-subtitle">演化与帮手盒子</div>
+
+          <FieldRow
+            label="变异率 (mutationRate)"
+            hint="spawn 子盒时基因组高斯扰动强度，0–10。默认 0.05。越大子任务行为差异越大。"
+          >
+            <input
+              aria-label="mutationRate"
+              className="input mission-param-input"
+              value={mutationRate}
+              onChange={(e) => setMutationRate(e.target.value)}
+              placeholder="0.05"
+            />
+          </FieldRow>
+
+          <FieldRow
+            label="子盒上限 (maxReplicas)"
+            hint="同一任务可并行的 helper box 数量上限。默认 4。0 表示禁止复制。"
+          >
+            <input
+              aria-label="maxReplicas"
+              className="input mission-param-input"
+              value={maxReplicas}
+              onChange={(e) => setMaxReplicas(e.target.value)}
+              placeholder="4"
+            />
+          </FieldRow>
+
+          <div className="card-subtitle">上下文打包（deliberator 滑动窗口）</div>
+          <FieldRow
+            label="窗口与打包"
+            hint="ctx 为 llama 总上下文；full_and_summary 保留摘要+近期全文；summary 以摘要为主。GNN 摘要钉在窗口前部（需图已预热）。"
+          >
             <div className="cfg-inline">
               <select aria-label="ctxSize" className="input" value={ctxSize} onChange={(e) => setCtxSize(e.target.value)} title="llama ctx">
                 <option value="4096">ctx ≈ 4k（推荐 RDK）</option>
@@ -381,14 +497,14 @@ export default function MissionPanel({ onError }) {
             items={[
               { label: '任务状态', value: stateLabel(mission.state) },
               { label: '已运行时长', value: fmtDuration(elapsedMs) },
-              { label: 'pressure', value: display(stats.pressure) },
-              { label: 'generations', value: display(stats.generations) },
-              { label: 'spawns', value: display(stats.spawns) },
-              { label: 'completions', value: display(stats.completions) },
-              { label: 'completionTimeMs', value: completionDisplay },
-              { label: 'agi.enabled', value: display(agi.enabled) },
-              { label: 'iteration', value: display(autonomyStatus?.result?.iteration) },
-              { label: 'mission.enabled', value: display(missionStatus?.result?.enabled) }
+              { label: '任务压力 (pressure)', value: display(stats.pressure) },
+              { label: '世代 (generations)', value: display(stats.generations) },
+              { label: '子盒生成 (spawns)', value: display(stats.spawns) },
+              { label: '完成次数 (completions)', value: display(stats.completions) },
+              { label: '完成耗时 (completionTimeMs)', value: completionDisplay },
+              { label: 'AGI 已启用', value: display(agi.enabled) },
+              { label: '认知迭代 (iteration)', value: display(autonomyStatus?.result?.iteration) },
+              { label: 'Mission 已启用', value: display(missionStatus?.result?.enabled) }
             ]}
           />
 
@@ -491,14 +607,53 @@ export default function MissionPanel({ onError }) {
           <div className="card-title">自主循环</div>
           <div className="muted">控制自主心跳循环：查询状态、配置参数、启动、停止。</div>
 
-          <FieldRow label="intervalSec" hint="心跳间隔秒数">
-            <input aria-label="intervalSec" className="input" value={loopIntervalSec} onChange={(e) => setLoopIntervalSec(e.target.value)} placeholder="intervalSec" />
+          <FieldRow
+            label="心跳间隔 (intervalSec)"
+            hint="自主循环两次 tick 之间的秒数。越短越频繁调 deliberator，但 CPU/LLM 负载更高。留空不改后端当前值。"
+          >
+            <input
+              aria-label="intervalSec"
+              className="input mission-param-input"
+              value={loopIntervalSec}
+              onChange={(e) => setLoopIntervalSec(e.target.value)}
+              placeholder="10"
+            />
           </FieldRow>
-          <FieldRow label="maxStepsPerTick" hint="每 tick 最大迭代步数">
-            <input aria-label="maxStepsPerTick" className="input" value={loopMaxSteps} onChange={(e) => setLoopMaxSteps(e.target.value)} placeholder="maxStepsPerTick" />
+          <FieldRow
+            label="每 tick 步数 (maxStepsPerTick)"
+            hint="单次心跳内最多执行多少步 iterate/plan 循环。默认 8。Mission deliberator 每 tick 对每个 Running 任务各调一次。"
+          >
+            <input
+              aria-label="maxStepsPerTick"
+              className="input mission-param-input"
+              value={loopMaxSteps}
+              onChange={(e) => setLoopMaxSteps(e.target.value)}
+              placeholder="8"
+            />
           </FieldRow>
-          <FieldRow label="persistEveryTicks" hint="每 N tick 持久化一次">
-            <input aria-label="persistEveryTicks" className="input" value={loopPersistEvery} onChange={(e) => setLoopPersistEvery(e.target.value)} placeholder="persistEveryTicks" />
+          <FieldRow
+            label="每 tick 生成上限 (deliberateMaxTokens)"
+            hint="单次 mission LLM 最多生成 token 数。CPU 约 300ms/token：48≈15s，128≈38s。留空用 phoenix.json 默认 48。"
+          >
+            <input
+              aria-label="deliberateMaxTokens"
+              className="input mission-param-input"
+              value={loopDeliberateMaxTokens}
+              onChange={(e) => setLoopDeliberateMaxTokens(e.target.value)}
+              placeholder="48"
+            />
+          </FieldRow>
+          <FieldRow
+            label="持久化间隔 (persistEveryTicks)"
+            hint="每 N 个 tick 将自主状态写入磁盘（autonomy_state.json）。留空不改当前值。"
+          >
+            <input
+              aria-label="persistEveryTicks"
+              className="input mission-param-input"
+              value={loopPersistEvery}
+              onChange={(e) => setLoopPersistEvery(e.target.value)}
+              placeholder="5"
+            />
           </FieldRow>
 
           <div className="cfg-inline">

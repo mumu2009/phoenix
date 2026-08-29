@@ -1,6 +1,7 @@
 /* emergency_stop.cpp - Implementation, see header. */
 #include "emergency_stop.hpp"
 
+#include "inference_abort.hpp"
 #include "instance_registry.hpp"
 
 #include <chrono>
@@ -23,6 +24,9 @@ EmergencyStop &EmergencyStop::instance() {
 }
 
 nlohmann::json EmergencyStop::press(const std::string &reason) {
+  /* Drop in-flight llama HTTP first.  stopAll() joins the autonomy thread,
+     which used to sit in a 90-minute blocking recv and made e-stop hang. */
+  phoenix::inference::requestShutdownAbort();
   /* Fail-safe ordering: latch FIRST (so concurrent workers see it before
      anything else happens), then stop everything, then self-shutdown. */
   const bool already = latched_.exchange(true, std::memory_order_acq_rel);
@@ -92,6 +96,7 @@ bool EmergencyStop::hasShutdownHandler() const {
 
 void EmergencyStop::resetForTesting() {
   latched_.store(false, std::memory_order_release);
+  phoenix::inference::clearShutdownAbortForTesting();
   std::lock_guard<std::mutex> lock(mu_);
   reason_.clear();
   pressedAtMs_ = 0;

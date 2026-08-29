@@ -151,9 +151,10 @@ HTTP API（v8.0 起，人工监督控制台——"生命周期开始时设立问
 `{action: list|read|write|append|delete, path, content?}`（控制台与外部测试亦可直接使用）。
 
 **每 tick 的协议**（任务 worker 的 deliberator，`111_class_gatewayserver.inc`）：
-   prompt 携带 目标 + 工作区文件列表 + **滑动窗口上下文包**（钉住的摘要 / 可选
-   GNN 摘要 + 近期全文，总预算对齐 `mission.ctxSize` 或 `llama_server.ctx_size`，
-   默认 4096，可选 16384）+ 工具清单；
+   双流，不把知识拼进因果末尾。**因果** = 约束钉 + `packContext` 近期全文
+   （滑动窗，预算对齐 `mission.ctxSize` × N-gram 合并因子；enc 后 2–3 个
+   token 行合成一个 unit，4096 slot ≈ 8k token 近期稿）。**RAG** = 作业全文 /
+   被滑出的摘要 / GNN / plan / 自检 / 工具反馈，残差强调，不占 sequence 位置。
    用户在 Mission 面板选择 `contextPack=summary|full_and_summary` 与
    `includeGnnSummary`。
 模型回复必须是以下三选一：
@@ -219,9 +220,9 @@ HTTP API（v8.0 起，人工监督控制台——"生命周期开始时设立问
 - GNN meme 图只在学习/手动修改时变化，因此是**重点 meme 集合**（"大纲"）的天然载体；
 - 从 `exportSnapshot` 计算节点得分（degree + 边权重和），从最强节点 BFS 保持图拓扑顺序，
   取前 `mission.outlineSize`（默认 12）项，每项带关键词（`getMemeWords` 前 3）；
-- 注入父代 prompt（`[OUTLINE ...]` 块，按 goal 缓存，每 tick 复用），并同时注入
-  **已有章节标题列表**（deliverable 中 `#` 开头的行），prompt 明令"按大纲逐项推进、
-  不跳项、不重写已有章节"——直接杜绝 Step 6 重复与 Step 1/2 缺失；
+- `[OUTLINE ...]` 按 goal 缓存，作为 **RAG `context_units` 强调**注入（不进 ChatML
+  因果末尾）。把大纲写进系统前缀曾导致 8B 每拍重抄章节表；已有标题列表也不再进
+  resume。空图时大纲为空，自动降级。
 - 新实例无长期记忆时大纲为空，自动降级为无大纲模式（诚实降级）。
 
 **3. 主体交流（SparkArray，见 sparkarray_scopes.md）**——综合输出取代"删词投票"：
@@ -234,9 +235,12 @@ aggregate 现在返回真实综合文本（`spark-exchange`），注入 `graphCo
 
 实测 780 token/24min（A55 上 8B 解码 ~2s/token 的硬件现实）。v8.x 三层治理：
 
-1. **prompt 静态前缀前置 + 瘦身**：deliberator prompt 的静态部分（角色/goal/工具自描述/
-   OUTLINE/回复契约）放最前，动态部分（workspace 列表/交付物增量/章节/子盒列表）放最后——
-   llama-server slot 前缀缓存复用 KV，每 tick 只 prefill 增量；
+1. **prompt 静态前缀前置 + 瘦身**：因果前缀只留作业约束钉（年限 / 时延 / 时长 /
+   无人值守）。作业全文、滑出段落的摘要、GNN 大纲、plan.md、草稿自检、
+   tool-feedback 进 RAG `context_units`，不进 ChatML 末尾。resume 是
+   `packContext` 近期全文（偶数围栏）。enc 之后 N-gram 合并对因果与 RAG
+   文本同一套 unit 协议生效。llama-server slot 前缀缓存复用 KV，每 tick
+   只 prefill 增量；
 2. **L1 输出缓存 + 循环守卫**（`mission.cacheSim` 默认 0.95）：动态后缀与上轮几乎相同 →
    直接跳过 LLM；连续 3 次命中 → 注入推进提示 + 升温 0.7 打破循环；
 3. **多 token 批量解码（协议）**：`n_parallel` 把 N 次 GEMV 合并为 GEMM（llama-server 侧
@@ -248,8 +252,9 @@ aggregate 现在返回真实综合文本（`spark-exchange`），注入 `graphCo
 - **C3 自主进化**：完成记录进 lineage（全审计）+ softmax 加权变异步长（历史选择环，
   不淘汰个体），`mission.evolution.enabled` 默认 false。设计：doc/v8.3/autonomous_evolution.md。
 
-**配套**：工具友好化（自然语言意图解析 `resolveToolIntent` + 工具自描述注入——
-『让工具理解 AI』；失败反馈环：工具失败/坏回复写 `tool-feedback.md`，下一 tick 注入并删除，
+**配套**：工具友好化（自然语言意图解析 `resolveToolIntent`；chat 路径放行
+math/search/research/web/computer/cli-json/script。失败反馈环：工具失败/坏回复写
+`tool-feedback.md`，下一 tick 作为 RAG unit 注入并删除，不进因果前缀，
 坏输出不污染交付物）；图像附件（`attachImage` → CPU 概念编码 → `[image-context]` 注入）；
 经验沉淀（`mission_experience.json`，完成即存、相似任务检索注入）；**图进化回灌**：完成时经
 `learnFromDialog` 把 `(goal, 摘要)` 喂入既有学习管线——GNN 图真实进化，相似任务的 outline 越做越强；
@@ -266,18 +271,26 @@ aggregate 现在返回真实综合文本（`spark-exchange`），注入 `graphCo
 ```
 用户输入(mission 默认 text, 其他模态经 attachImage/概念桥同理)
   -> tokenizer（llama-server 内部）
-  -> 前处理: 记忆模块（mission_experience + cross_context_memory 检索注入）
-            + 情绪/情感评估（evaluateInstinctsFor, 按 contextTag 隔离, 输出
-              emotionTensor + inferenceOptions 调制）
-  -> GNN（buildMissionOutline 长期图大纲注入静态前缀）
+  -> 前处理: 记忆模块（启动时 wikitext 写入 CCM/HierarchicalMemory；
+              运行时与 infer 同一段 packContext.recentFull 做
+              CCM + experience + HierarchicalMemory corpus:* 检索，
+              进 RAG 不进因果末尾）
+            + 情绪/情感评估（启动时 EmotionSystem.processMessage 吃语料；
+              运行时对 mission:<id> 喂近期稿：processMessage +
+              observeVocab + getVocabLogitBias（进采样，不进 ChatML）+
+              ingestSensation，再 evaluateInstinctsFor；写回后
+              updateVocabFromResponse。按 contextTag 隔离）
+  -> GNN（启动时 wikitext unit 进 MemeGraph；运行时 buildMissionOutline
+          进 RAG context_units，不进因果前缀）
   -> 主推理（llama-server /v1/chat/completions）
   -> detokenizer 输出（回复追加进 deliverable.md）
   -> 最后一层矩阵保留: llama-server slot KV 前缀缓存（静态前缀前置使其跨 tick
      命中复用 = hidden state 延续）-> 回到前处理，重复
 ```
 
-- **pressure 驱动**：每 tick 动态后缀注入 `Urgency p=...`（missionPressureFor），压力单调增长
-  直到任务完成——模型在达成任务前有条理地持续输出；完成仅由自验收（done 形态）或人工
+- **pressure 驱动**：`missionPressureFor` 只调制采样（temperature / top_p /
+  penalties），不写进 prompt。把 `Urgency p=0.xxx` 写进系统轮次曾让 8B 输出
+  “probability of failure (p) is 0.000”。完成仅由自验收（done 形态）或人工
   report 终结。
 - **整个系统是工具**：实例可经 `replicate` 把整个系统作为工具召唤（子盒 = 同一管线的轻量
   实例，父代不得全权甩包，见 §5.6）——这就是『繁殖』的语义。

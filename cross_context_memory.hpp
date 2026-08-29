@@ -6,10 +6,9 @@
      is strictly separated by contextTag (mission:<id> / chat:<session>);
    - CROSS-CONTEXT memory (this module + GNN graph + mission experience)
      is the ONE place contexts may exchange knowledge.  Chat turns and
-     finished missions deposit summaries here; new contexts recall the
-     most similar entries and inject them into their prompts, so every
-     context starts with what the system already learned, without ever
-     leaking live context into another.
+     finished missions deposit captions + optional unit-query rows; new
+     contexts recall entries and inject them as unit-query I/O (not
+     prompt text). Live per-context state never leaks.
 
    Storage: one JSON file (default runtime_store/cross_context_memory.json),
    capped at 500 entries.  Retrieval: word-set overlap (cheap, no external
@@ -31,8 +30,10 @@ namespace memory {
 
 struct CcmEntry {
     std::string sourceTag;  /* "chat:<session>" or "mission:<id>" */
-    std::string text;       /* the deposited summary */
+    std::string text;       /* retrieval key / caption — not infer I/O */
     uint64_t atMs{0};
+    std::string modality{"text"}; /* text | audio | video | image | unit */
+    std::vector<std::vector<float>> unitQuery; /* E-space rows when already enc'd */
 };
 
 inline std::vector<CcmEntry> ccmLoad(const std::string &storePath) {
@@ -44,9 +45,23 @@ inline std::vector<CcmEntry> ccmLoad(const std::string &storePath) {
     if (!j.is_array()) return out;
     for (const auto &e : j) {
         if (!e.is_object()) continue;
-        out.push_back({e.value("sourceTag", std::string()),
-                       e.value("text", std::string()),
-                       e.value("atMs", 0ull)});
+        CcmEntry ce{e.value("sourceTag", std::string()),
+                    e.value("text", std::string()),
+                    e.value("atMs", 0ull),
+                    e.value("modality", std::string("text")),
+                    {}};
+        if (e.contains("unitQuery") && e["unitQuery"].is_array()) {
+            for (const auto &row : e["unitQuery"]) {
+                if (!row.is_array()) continue;
+                std::vector<float> v;
+                for (const auto &x : row) {
+                    if (x.is_number())
+                        v.push_back(static_cast<float>(x.get<double>()));
+                }
+                if (!v.empty()) ce.unitQuery.push_back(std::move(v));
+            }
+        }
+        out.push_back(std::move(ce));
     }
     return out;
 }
@@ -57,9 +72,13 @@ inline void ccmSave(const std::string &storePath,
         std::filesystem::path(storePath).parent_path());
     nlohmann::json arr = nlohmann::json::array();
     for (const auto &e : entries) {
-        arr.push_back(nlohmann::json{{"sourceTag", e.sourceTag},
-                                     {"text", e.text},
-                                     {"atMs", e.atMs}});
+        nlohmann::json item{{"sourceTag", e.sourceTag},
+                            {"text", e.text},
+                            {"atMs", e.atMs},
+                            {"modality", e.modality.empty() ? "text" : e.modality}};
+        if (!e.unitQuery.empty())
+            item["unitQuery"] = e.unitQuery;
+        arr.push_back(std::move(item));
     }
     std::ofstream out(storePath);
     out << arr.dump(2);
@@ -102,15 +121,24 @@ inline double ccmOverlap(const std::string &a, const std::string &b) {
 
 /* Deposit one cross-context memory entry (cap 500, newest kept).  Callers:
    chat pipeline after each turn, mission done branch after completion. */
-inline void ccmRemember(const std::string &storePath,
-                        const std::string &sourceTag,
-                        const std::string &text) {
+inline void ccmRememberUnit(const std::string &storePath,
+                            const std::string &sourceTag,
+                            const std::string &text,
+                            const std::string &modality,
+                            const std::vector<std::vector<float>> &unitQuery) {
     static std::mutex mu;
     std::lock_guard<std::mutex> lock(mu);
     auto entries = ccmLoad(storePath);
-    entries.push_back({sourceTag, text, 0});
+    entries.push_back({sourceTag, text, 0,
+                       modality.empty() ? "text" : modality, unitQuery});
     if (entries.size() > 500) entries.erase(entries.begin());
     ccmSave(storePath, entries);
+}
+
+inline void ccmRemember(const std::string &storePath,
+                        const std::string &sourceTag,
+                        const std::string &text) {
+    ccmRememberUnit(storePath, sourceTag, text, "text", {});
 }
 
 /* Recall the top-k most similar entries for a query (excludes nothing -
