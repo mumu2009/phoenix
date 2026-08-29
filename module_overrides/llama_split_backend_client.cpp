@@ -2,20 +2,21 @@
    llama-server's split backend.  See llama_split_backend_client.hpp for
    the public API.
 
-   The split backend now exposes /phx/generate which runs the whole
-   autoregressive token loop server-side.  The client pipeline is:
-     apply-template -> /phx/enc (tokenizer) -> /phx/generate (inference)
-     -> returned text (detokenizer)
-   This matches the standard token-in-token-out multimodal design where the
-   tokenizer and detokenizer live at the boundary and the model consumes and
-   emits tokens/unit queries.  /phx/enc, /phx/infer and /phx/dec remain
-   available for debugging and for modality-specific decoders that work on
-   the unit-query stream returned by /phx/generate.
+   Single-instance path (every stage except infer is optional):
+     I/O enc (paragraph in, unit-query sequence out) -> preprocess -> gnn
+     -> infer -> I/O dec (sequence in, paragraph text out)
+   Two infer streams: causal prefix+resume (raw text); memory/GNN as RAG mix.
+   Internal pair: infer -> dec -> enc -> infer.
  */
 
 #include "llama_split_backend_client.hpp"
 
+#include "inference_abort.hpp"
+#include "inference_unit_pipeline.hpp"
+
 #include <algorithm>
+#include <cctype>
+#include <iostream>
 #include <cmath>
 #include <cstdlib>
 #include <map>
@@ -109,6 +110,30 @@ HttpResult httpRequest(const std::string &host, int port,
 
   std::string rawResponse;
   {
+    const uint64_t epoch = phoenix::inference::currentAbortEpoch();
+    auto wouldBlock = []() {
+#ifdef _WIN32
+      return WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+      return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+#endif
+    };
+    auto sliceSelect = [&](SOCKET s, bool wantRead, bool wantWrite,
+                           int sliceMs) -> int {
+      fd_set rfds, wfds;
+      FD_ZERO(&rfds);
+      FD_ZERO(&wfds);
+      if (wantRead)
+        FD_SET(s, &rfds);
+      if (wantWrite)
+        FD_SET(s, &wfds);
+      struct timeval tv;
+      tv.tv_sec = sliceMs / 1000;
+      tv.tv_usec = (sliceMs % 1000) * 1000;
+      return select((int)s + 1, wantRead ? &rfds : nullptr,
+                    wantWrite ? &wfds : nullptr, nullptr, &tv);
+    };
+
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -130,22 +155,30 @@ HttpResult httpRequest(const std::string &host, int port,
     bool connected = false;
     // On Windows non-blocking connect returns WSAEWOULDBLOCK; on Linux it
     // returns EINPROGRESS.  Both mean "connection in progress, use select()".
-    if (cr == SOCKET_ERROR &&
-        (WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == EINPROGRESS)) {
-      fd_set wfds;
-      FD_ZERO(&wfds);
-      FD_SET(sock, &wfds);
-      struct timeval tv;
-      tv.tv_sec = timeoutVal / 1000;
-      tv.tv_usec = (timeoutVal % 1000) * 1000;
-      if (select((int)sock + 1, nullptr, &wfds, nullptr, &tv) == 1) {
-        int err = 0;
-        sockopt_len_t errlen = sizeof(err);
-        getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&err, &errlen);
-        connected = (err == 0);
-      }
-    } else if (cr == 0) {
+    if (cr == 0) {
       connected = true;
+    } else if (cr == SOCKET_ERROR &&
+               (WSAGetLastError() == WSAEWOULDBLOCK ||
+                WSAGetLastError() == EINPROGRESS)) {
+      int waited = 0;
+      while (waited < timeoutVal) {
+        if (phoenix::inference::shouldAbort(epoch)) {
+          closesocket(sock);
+          result.error = "aborted";
+          return result;
+        }
+        int sel = sliceSelect(sock, false, true, 500);
+        if (sel == 1) {
+          int err = 0;
+          sockopt_len_t errlen = sizeof(err);
+          getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&err, &errlen);
+          connected = (err == 0);
+          break;
+        }
+        if (sel < 0)
+          break;
+        waited += 500;
+      }
     }
     if (!connected) {
       closesocket(sock);
@@ -155,36 +188,53 @@ HttpResult httpRequest(const std::string &host, int port,
       return result;
     }
 
-    ioctl_arg_t blk = 0;
-    ioctlsocket(sock, FIONBIO, &blk);
-#ifndef _WIN32
-    {
-      struct timeval tv;
-      tv.tv_sec = timeoutVal / 1000;
-      tv.tv_usec = (timeoutVal % 1000) * 1000;
-      setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-      setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    }
-#else
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeoutVal,
-               sizeof(timeoutVal));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeoutVal,
-               sizeof(timeoutVal));
-#endif
-
     int sent = 0;
-    while (sent < (int)reqStr.size()) {
+    int sendWaited = 0;
+    while (sent < (int)reqStr.size() && sendWaited < timeoutVal) {
+      if (phoenix::inference::shouldAbort(epoch)) {
+        closesocket(sock);
+        result.error = "aborted";
+        return result;
+      }
       int n = send(sock, reqStr.c_str() + sent, (int)reqStr.size() - sent, 0);
-      if (n <= 0) break;
-      sent += n;
+      if (n > 0) {
+        sent += n;
+        continue;
+      }
+      if (n < 0 && wouldBlock()) {
+        if (sliceSelect(sock, false, true, 500) < 0)
+          break;
+        sendWaited += 500;
+        continue;
+      }
+      break;
     }
     char buf[8192];
-    while (true) {
+    int recvWaited = 0;
+    while (recvWaited < timeoutVal) {
+      if (phoenix::inference::shouldAbort(epoch)) {
+        result.error = "aborted";
+        break;
+      }
       int n = recv(sock, buf, sizeof(buf), 0);
-      if (n <= 0) break;
-      rawResponse.append(buf, n);
+      if (n > 0) {
+        rawResponse.append(buf, n);
+        continue;
+      }
+      if (n == 0)
+        break;
+      if (n < 0 && wouldBlock()) {
+        int sel = sliceSelect(sock, true, false, 500);
+        if (sel < 0)
+          break;
+        recvWaited += 500;
+        continue;
+      }
+      break;
     }
     closesocket(sock);
+    if (result.error == "aborted")
+      return result;
   }
 
   auto hdrEnd = rawResponse.find("\r\n\r\n");
@@ -320,62 +370,8 @@ std::string sanitizeUtf8(const std::string &s) {
 // does: strip an already-injected "[Context hint ...]" wrapper (if present)
 // and re-inject the (possibly truncated) graph context as a "Context:\n"
 // block ahead of the user text.
-std::string buildPrompt(const std::string &text, const std::string &graphContext) {
-  std::string contextHintText;
-  std::string prompt = text;
-  if (!text.empty()) {
-    const std::string prefix = "[Context hint ";
-    if (text.compare(0, prefix.size(), prefix) == 0) {
-      auto wrapperEnd = text.find(']', prefix.size());
-      if (wrapperEnd != std::string::npos) {
-        auto summaryEnd = text.find("]\n", wrapperEnd);
-        if (summaryEnd != std::string::npos) {
-          contextHintText = text.substr(wrapperEnd + 1, summaryEnd - wrapperEnd);
-          prompt = text.substr(summaryEnd + 2);
-        }
-      }
-    }
-  }
+// (legacy buildPrompt removed — split path uses system+user messages only)
 
-  size_t maxContextChars = 65536;
-  std::string cappedGraphContext = graphContext;
-  if (cappedGraphContext.size() > maxContextChars) {
-    size_t start = cappedGraphContext.size() - (maxContextChars - 25);
-    auto nl = cappedGraphContext.find('\n', start);
-    if (nl != std::string::npos) start = nl + 1;
-    while (start < cappedGraphContext.size() &&
-           (static_cast<unsigned char>(cappedGraphContext[start]) & 0xC0) == 0x80) {
-      ++start;
-    }
-    cappedGraphContext =
-        std::string("... [context truncated]\n") + cappedGraphContext.substr(start);
-  }
-
-  if (contextHintText.empty() && !cappedGraphContext.empty()) {
-    prompt = std::string("Context:\n") + cappedGraphContext + "\n\nUser:\n" + text;
-  } else if (!contextHintText.empty()) {
-    prompt = sanitizeUtf8(contextHintText) + "\n\n" + prompt;
-  }
-
-  return sanitizeUtf8(prompt);
-}
-
-// --- Native text-completion fallback ---------------------------------------
-//
-// The /phx/enc and /phx/infer endpoints added by
-// llama_server_mods/enc_dec_separation.patch reuse llama.cpp's embeddings
-// output path (they set `cparams.embeddings = true` around the call) so
-// that their hidden-state results can be extracted through the existing
-// embeddings-extraction code in llama_decode_impl(). For LLM_ARCH_LLAMA
-// models that code path unconditionally runs `append_pooling()` afterwards
-// (see llama.cpp's `if (lctx.cparams.embeddings) result =
-// llm.append_pooling(result);`). The original patch named the phx enc/infer
-// output tensor "result_embd_pooled", which `append_pooling()` did not
-// recognize, causing a GGML_ASSERT failure. That has been fixed in
-// llama_server_mods/enc_dec_separation.patch by accepting "result_embd_pooled"
-// as an input and by guarding `llama_decode_impl()` against single-node
-// graphs. This fallback remains as a safety net so a single request never
-// leaves chatWithLlamaCpp() completely unable to produce a reply.
 // The gateway's Ahead-memory context block ends with the CURRENT user text.
 // Feeding the question twice (context + actual message) drives instruct
 // models into degenerate loops; strip the trailing echo and any now-empty
@@ -417,26 +413,157 @@ std::string cleanGraphContextForSystem(const std::string &graphContext,
   return ctx;
 }
 
-// Maps one word to its token ids via the patched server's /phx/enc.
-// Returns the ids (usually 1; more when the word splits into subwords).
-// Empty on failure (caller then drops the entry instead of sending garbage).
+// Extract token ids from /phx/enc or /tokenize response shapes.
+std::vector<int> tokensFromJson(const json &resp) {
+  std::vector<int> out;
+  const json *arr = nullptr;
+  if (resp.is_array()) {
+    arr = &resp;
+  } else if (resp.is_object()) {
+    if (resp.contains("tokens") && resp["tokens"].is_array())
+      arr = &resp["tokens"];
+    else if (resp.contains("ids") && resp["ids"].is_array())
+      arr = &resp["ids"];
+  }
+  if (!arr) return out;
+  for (const auto &t : *arr) {
+    if (t.is_number_integer()) out.push_back(t.get<int>());
+  }
+  return out;
+}
+
+// Maps one word to token ids via the patched server's /phx/enc only.
 std::vector<int> tokenizeWord(const std::string &host, int port,
                               const std::string &word, int timeoutMs) {
-  std::vector<int> out;
   json resp;
   std::string err;
   if (!postJson(host, port, "/phx/enc", json{{"content", word}}, timeoutMs, resp,
                 err)) {
-    return out;
+    return {};
   }
-  if (!resp.is_object() || !resp.contains("tokens") ||
-      !resp["tokens"].is_array()) {
-    return out;
+  return tokensFromJson(resp);
+}
+
+json normalizeLogitBias(const std::string &host, int port, const json &rawBias,
+                        int timeoutMs);
+
+// Forward sampling / slot / bias keys onto a /phx/generate payload.
+void applyGenerateInferenceOptions(json &payload, const std::string &host,
+                                   int port, int timeoutMs,
+                                   const json &options) {
+  if (!options.is_object()) return;
+  if (options.contains("temperature") && options["temperature"].is_number())
+    payload["temperature"] = options["temperature"];
+  if (options.contains("top_p") && options["top_p"].is_number())
+    payload["top_p"] = options["top_p"];
+  for (const char *key : {"top_k", "min_p", "presence_penalty",
+                          "frequency_penalty", "repeat_penalty", "seed"}) {
+    if (options.contains(key) && options[key].is_number())
+      payload[key] = options[key];
   }
-  for (const auto &t : resp["tokens"]) {
-    if (t.is_number_integer()) out.push_back(t.get<int>());
+  if (options.contains("n_parallel") && options["n_parallel"].is_number_integer())
+    payload["n_parallel"] = options["n_parallel"];
+  if (options.contains("parallel_mode") && options["parallel_mode"].is_string())
+    payload["parallel_mode"] = options["parallel_mode"];
+  if (options.contains("cache_prompt") && options["cache_prompt"].is_boolean())
+    payload["cache_prompt"] = options["cache_prompt"].get<bool>();
+  if (options.contains("id_slot") && options["id_slot"].is_number_integer())
+    payload["id_slot"] = options["id_slot"].get<int>();
+  if (options.contains("repeat_last_n") &&
+      options["repeat_last_n"].is_number_integer())
+    payload["repeat_last_n"] = options["repeat_last_n"].get<int>();
+  if (options.contains("max_side_tokens") &&
+      options["max_side_tokens"].is_number_integer())
+    payload["max_side_tokens"] = options["max_side_tokens"].get<int>();
+  if (options.contains("memoryWeight") && options["memoryWeight"].is_number())
+    payload["memoryWeight"] = options["memoryWeight"];
+  if (options.contains("gnnWeight") && options["gnnWeight"].is_number())
+    payload["gnnWeight"] = options["gnnWeight"];
+  if (options.contains("rag_beta") && options["rag_beta"].is_number())
+    payload["rag_beta"] = options["rag_beta"];
+  if (options.contains("leftover_beta") && options["leftover_beta"].is_number())
+    payload["leftover_beta"] = options["leftover_beta"];
+  if (options.contains("leftover_k") && options["leftover_k"].is_number_integer())
+    payload["leftover_k"] = options["leftover_k"].get<int>();
+  if (options.contains("ngram_merge") && options["ngram_merge"].is_number_integer())
+    payload["ngram_merge"] = options["ngram_merge"].get<int>();
+  if (options.contains("ngram_protect_last") &&
+      options["ngram_protect_last"].is_number_integer())
+    payload["ngram_protect_last"] = options["ngram_protect_last"].get<int>();
+  if (options.contains("rag_mix_cap") && options["rag_mix_cap"].is_number_integer())
+    payload["rag_mix_cap"] = options["rag_mix_cap"].get<int>();
+  if (options.contains("num_predict") && options["num_predict"].is_number_integer())
+    payload["max_tokens"] =
+        std::max(1, options["num_predict"].get<int>());
+  if (options.contains("logit_bias") && options["logit_bias"].is_object() &&
+      !options["logit_bias"].empty()) {
+    json mapped = normalizeLogitBias(host, port, options["logit_bias"], timeoutMs);
+    if (!mapped.empty()) payload["logit_bias"] = mapped;
   }
-  return out;
+  if (options.contains("loop_mode") && options["loop_mode"].is_string())
+    payload["loop_mode"] = options["loop_mode"].get<std::string>();
+  if (options.contains("feedback_mode") && options["feedback_mode"].is_string())
+    payload["feedback_mode"] = options["feedback_mode"].get<std::string>();
+  if (options.contains("prefix_hidden") && options["prefix_hidden"].is_array())
+    payload["prefix_hidden"] = options["prefix_hidden"];
+  if (options.contains("context_content") && options["context_content"].is_string())
+    payload["context_content"] = options["context_content"];
+  if (options.contains("gnn_content") && options["gnn_content"].is_string())
+    payload["gnn_content"] = options["gnn_content"];
+  if (options.contains("context_units") && options["context_units"].is_array())
+    payload["context_units"] = options["context_units"];
+  if (options.contains("gnn_units") && options["gnn_units"].is_array())
+    payload["gnn_units"] = options["gnn_units"];
+  if (options.contains("resume_suffix") && options["resume_suffix"].is_string())
+    payload["resume_suffix"] = options["resume_suffix"];
+  if (options.contains("stop") && options["stop"].is_array())
+    payload["stop"] = options["stop"];
+  if (options.contains("return_hidden") && options["return_hidden"].is_boolean())
+    payload["return_hidden"] = options["return_hidden"].get<bool>();
+  if (options.contains("decode_text") && options["decode_text"].is_boolean())
+    payload["decode_text"] = options["decode_text"].get<bool>();
+}
+
+std::vector<std::vector<float>> extractHiddenRows(const json &resp) {
+  std::vector<std::vector<float>> rows;
+  if (!resp.is_object() || !resp.contains("hidden") ||
+      !resp["hidden"].is_array())
+    return rows;
+  return inference::jsonToUnitRows(resp["hidden"]);
+}
+
+bool phxEncodePrompt(const std::string &host, int port,
+                     const std::string &formattedPrompt, int timeoutMs,
+                     std::vector<std::vector<float>> &outHidden,
+                     std::string &error) {
+  json resp;
+  if (!postJson(host, port, "/phx/enc",
+                json{{"content", formattedPrompt},
+                     {"add_special", true},
+                     {"granularity", "token"}},
+                timeoutMs, resp, error))
+    return false;
+  outHidden = extractHiddenRows(resp);
+  if (outHidden.empty()) {
+    error = "phx/enc: empty hidden";
+    return false;
+  }
+  return true;
+}
+
+json runPhxGenerate(const std::string &host, int port, json payload,
+                    int timeoutMs, std::string &error) {
+  json genResp;
+  if (!postJson(host, port, "/phx/generate", payload, timeoutMs, genResp,
+                error))
+    return json{{"ok", false}, {"error", error}};
+  if (!genResp.is_object() || !genResp.contains("text") ||
+      !genResp["text"].is_string()) {
+    error = "phx/generate: missing text";
+    return json{{"ok", false}, {"error", error}};
+  }
+  return json{{"ok", true}, {"reply", genResp["text"].get<std::string>()},
+              {"raw", genResp}};
 }
 
 // Rewrites a string-keyed logit_bias map into the integer-token-id map that
@@ -465,124 +592,358 @@ json normalizeLogitBias(const std::string &host, int port,
   return out;
 }
 
-bool
-textCompletionFallback(const std::string &host, int port,
-                             const std::string &text,
-                             const std::string &graphContext, int timeoutMs,
-                             int maxTokens, const json &options,
-                             std::string &reply, std::string &error) {
-  /* v8.0: the graph context goes out as a SYSTEM message (RAG-style memory),
-     never folded into the user message - the old "Context:/User:" wrapper
-     confused instruct models.  Default sampling is GREEDY (temperature 0),
-     matching the split-path contract; the observed llama.cpp snapshot leaks
-     raw template tokens at temperature > 0, and greedy is deterministic. */
-  const std::string cleanCtx = cleanGraphContextForSystem(graphContext, text);
-  json messages = json::array();
-  if (!cleanCtx.empty())
-    messages.push_back(json{{"role", "system"}, {"content", cleanCtx}});
-  messages.push_back(json{{"role", "user"}, {"content", text}});
-  json payload = {
-      {"messages", messages},
-      {"stream", false},
-      {"temperature", 0.0},
-      {"top_p", 0.9},
-      {"max_tokens", std::max(1, maxTokens)}};
-  /* v8.0 sampling passthrough: llama-server's OpenAI-compatible endpoint
-     accepts the full sampling surface; only forward keys that are actually
-     provided so the payload never drifts from the server schema. */
-  if (options.is_object()) {
-    if (options.contains("temperature") && options["temperature"].is_number())
-      payload["temperature"] = options["temperature"];
-    if (options.contains("top_p") && options["top_p"].is_number())
-      payload["top_p"] = options["top_p"];
-    for (const char *key : {"top_k", "min_p", "presence_penalty",
-                            "frequency_penalty", "seed"}) {
-      if (options.contains(key) && options[key].is_number())
-        payload[key] = options[key];
-    }
-    /* v8.x A5 multi-token batch decode (GEMV -> GEMM on the server side):
-       n_parallel>1 asks llama-server to decode a window of N token positions
-       in one pass (Jacobi/parallel mode); the server validates candidates
-       against the causal mask and commits accepted tokens before answering,
-       so the response shape stays a plain message. */
-    if (options.contains("n_parallel") && options["n_parallel"].is_number_integer())
-      payload["n_parallel"] = options["n_parallel"];
-    if (options.contains("parallel_mode") && options["parallel_mode"].is_string())
-      payload["parallel_mode"] = options["parallel_mode"];
-    if (options.contains("logit_bias") && options["logit_bias"].is_object() &&
-        !options["logit_bias"].empty()) {
-      /* word -> token-id mapping via /phx/enc (emotion layer produces
-         STRING-keyed biases; llama-server wants integer token ids) */
-      json mapped = normalizeLogitBias(host, port, options["logit_bias"], timeoutMs);
-      if (!mapped.empty()) payload["logit_bias"] = mapped;
-    }
+// Only cache a successful probe. A 4s miss while llama is in /phx/generate
+// (--parallel 1 + phx_mutex) used to lock the whole mission on "unavailable".
+// The unit path encodes inside /phx/generate; this probe is optional.
+bool splitBackendReachable(const std::string &host, int port) {
+  static std::mutex mu;
+  static std::map<std::string, bool> cache;
+  const std::string key = host + ":" + std::to_string(port);
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    const auto it = cache.find(key);
+    if (it != cache.end() && it->second) return true;
   }
   json resp;
-  if (!postJson(host, port, "/v1/chat/completions", payload, timeoutMs, resp,
-                error)) {
-    return false;
+  std::string err;
+  const bool ok =
+      postJson(host, port, "/phx/enc", json{{"content", "probe"}}, 8000, resp,
+               err) &&
+      resp.is_object() && (resp.contains("tokens") || resp.contains("hidden") ||
+                           resp.contains("n_tokens"));
+  if (ok) {
+    std::lock_guard<std::mutex> lk(mu);
+    cache[key] = true;
   }
-  if (resp.is_object() && resp.contains("choices") && resp["choices"].is_array() &&
-      !resp["choices"].empty() && resp["choices"][0].is_object() &&
-      resp["choices"][0].contains("message") &&
-      resp["choices"][0]["message"].is_object() &&
-      resp["choices"][0]["message"].contains("content") &&
-      resp["choices"][0]["message"]["content"].is_string()) {
-    reply = resp["choices"][0]["message"]["content"].get<std::string>();
-    return true;
-  }
-  error = "unexpected /v1/chat/completions response shape";
-  return false;
+  return ok;
 }
 
-// Runs the apply-template -> /phx/generate pipeline described in
-// llamaSplitChat()'s contract.  /phx/generate keeps the token-in-token-out
-// autoregressive loop inside llama-server, so the client only touches the
-// tokenizer (/phx/enc) and the text returned by the server-side detokenizer.
-// Returns a json object with "ok"/"reply" or "ok"=false/"error" -- never throws.
-json hiddenStatePipeline(const std::string &host, int port,
-                          const std::string &endpoint,
-                          const std::string &prompt, int effectiveMaxTokens,
-                          double temperature, double topP,
-                          int timeoutMs) {
+// Returns token count for content via /tokenize (falls back to chars/4).
+int countContentTokens(const std::string &host, int port,
+                       const std::string &content, int timeoutMs) {
+  json resp;
+  std::string err;
+  if (!postJson(host, port, "/tokenize", json{{"content", content}}, timeoutMs,
+                resp, err)) {
+    return static_cast<int>(content.size() / 4);
+  }
+  return static_cast<int>(tokensFromJson(resp).size());
+}
+
+/* Causal continuation keeps the tail. Head+ellipsis made the 8B
+   jump topics (game review after a 3-number pin). */
+std::string clipPromptTail(const std::string &s, size_t charBudget) {
+  if (s.size() <= charBudget) return s;
+  return s.substr(s.size() - charBudget);
+}
+
+// Truncate formatted prompt so prompt_tokens + genReserve fits ctx budget.
+std::string fitPromptToTokenBudget(const std::string &host, int port,
+                                   std::string prompt, int ctxTokens,
+                                   int genReserve, int timeoutMs,
+                                   int ngramMerge = 1) {
+  const int fac = ngramMerge >= 2 ? std::min(ngramMerge, 3) : 1;
+  const int budget =
+      std::max(256, (ctxTokens - genReserve - 64) * fac);
+  int nTok = countContentTokens(host, port, prompt, timeoutMs);
+  if (nTok <= budget) return prompt;
+  size_t lo = prompt.size() / 4;
+  size_t hi = prompt.size();
+  std::string best = clipPromptTail(prompt, lo);
+  while (lo + 1 < hi) {
+    const size_t mid = (lo + hi) / 2;
+    const std::string candidate = clipPromptTail(prompt, mid);
+    nTok = countContentTokens(host, port, candidate, timeoutMs);
+    if (nTok <= budget) {
+      best = candidate;
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return best;
+}
+
+// Native llama-server /completion (slot path + proper sampler).  Text-only;
+// keeps /phx/* for hidden-state multimodal unit queries.
+json textCompletionFallback(const std::string &host, int port,
+                            const std::string &formattedPrompt,
+                            int effectiveMaxTokens, int timeoutMs,
+                            const json &inferenceOptions) {
+  json out;
+  json payload = {{"prompt", formattedPrompt},
+                  {"n_predict", effectiveMaxTokens},
+                  {"stream", false},
+                  {"cache_prompt", false}};
+  if (inferenceOptions.is_object()) {
+    if (inferenceOptions.contains("temperature") &&
+        inferenceOptions["temperature"].is_number())
+      payload["temperature"] = inferenceOptions["temperature"];
+    if (inferenceOptions.contains("top_p") &&
+        inferenceOptions["top_p"].is_number())
+      payload["top_p"] = inferenceOptions["top_p"];
+    for (const char *key :
+         {"top_k", "min_p", "presence_penalty", "frequency_penalty", "seed"}) {
+      if (inferenceOptions.contains(key) &&
+          inferenceOptions[key].is_number())
+        payload[key] = inferenceOptions[key];
+    }
+    if (inferenceOptions.contains("num_predict") &&
+        inferenceOptions["num_predict"].is_number_integer())
+      payload["n_predict"] =
+          std::max(1, inferenceOptions["num_predict"].get<int>());
+  }
+  std::string error;
+  json resp;
+  if (!postJson(host, port, "/completion", payload, timeoutMs, resp, error)) {
+    out["ok"] = false;
+    out["error"] = "completion: " + error;
+    return out;
+  }
+  std::string text;
+  if (resp.is_object() && resp.contains("content") &&
+      resp["content"].is_string()) {
+    text = resp["content"].get<std::string>();
+  } else if (resp.is_array() && !resp.empty() && resp[0].is_object() &&
+             resp[0].contains("content") &&
+             resp[0]["content"].is_string()) {
+    text = resp[0]["content"].get<std::string>();
+  }
+  if (text.empty()) {
+    out["ok"] = false;
+    out["error"] = "completion: missing content in response";
+    return out;
+  }
+  out["ok"] = true;
+  out["reply"] = text;
+  return out;
+}
+
+// Unified unit iteration: I/O enc -> memory/gnn UQ -> infer -> I/O dec.
+json unitIterationPipeline(const std::string &host, int port,
+                           const std::string &formattedPrompt,
+                           int effectiveMaxTokens, int timeoutMs,
+                           const json &inferenceOptions) {
   json out;
   std::string error;
   try {
-
-    // 1. Apply chat template.
-    json templatePayload = {
-        {"messages", json::array({json{{"role", "user"}, {"content", prompt}}})},
-        {"add_generation_prompt", true}};
-    json templateResp;
-    if (!postJson(host, port, "/apply-template", templatePayload, timeoutMs,
-                  templateResp, error)) {
-      out["ok"] = false;
-      out["error"] = "apply-template: " + error;
-      return out;
-    }
-    std::string formattedPrompt;
-    if (templateResp.is_object() && templateResp.contains("prompt") &&
-        templateResp["prompt"].is_string()) {
-      formattedPrompt = templateResp["prompt"].get<std::string>();
-    } else if (templateResp.is_string()) {
-      formattedPrompt = templateResp.get<std::string>();
-    } else {
-      out["ok"] = false;
-      out["error"] = "apply-template: unexpected response shape";
-      return out;
+    const auto pipeCfg = inference::pipelineConfigFromJson(inferenceOptions);
+    // Encode on the server inside /phx/generate.  Shipping prompt hidden
+    // (n_tokens * n_embd floats) over HTTP corrupts long mission prompts.
+    double temperature = 0.0;
+    double topP = 0.9;
+    if (inferenceOptions.is_object()) {
+      if (inferenceOptions.contains("temperature") &&
+          inferenceOptions["temperature"].is_number())
+        temperature = inferenceOptions["temperature"].get<double>();
+      if (inferenceOptions.contains("top_p") && inferenceOptions["top_p"].is_number())
+        topP = inferenceOptions["top_p"].get<double>();
     }
 
-    // 2. Server-side /phx/generate encapsulates enc -> infer -> dec loop.
-    //    The client now only tokenizes the prompt boundary and receives the
-    //    final text; modality-specific decoders can later be applied to the
-    //    returned unit-query stream instead.
-    json generatePayload = {
-        {"content", formattedPrompt},
-        {"max_tokens", effectiveMaxTokens},
-        {"temperature", temperature},
-        {"top_p", topP},
-        {"decode_text", true},
-        {"return_hidden", false}};
+    auto buildPayload = [&](const std::string &feedbackMode) {
+      json payload = {{"content", formattedPrompt},
+                      {"max_tokens", effectiveMaxTokens},
+                      {"temperature", temperature},
+                      {"top_p", topP},
+                      {"decode_text", true},
+                      {"return_hidden", false},
+                      {"loop_mode", pipeCfg.loopMode.empty() ? "unit"
+                                                             : pipeCfg.loopMode},
+                      {"feedback_mode", feedbackMode}};
+      applyGenerateInferenceOptions(payload, host, port, timeoutMs,
+                                    inferenceOptions);
+      payload.erase("prefix_hidden");
+      payload.erase("memory_units");
+      if (!pipeCfg.memoryEnabled) {
+        payload.erase("context_content");
+        payload.erase("context_units");
+      }
+      if (!pipeCfg.gnnEnabled) {
+        payload.erase("gnn_content");
+        payload.erase("gnn_units");
+      }
+      return payload;
+    };
+
+    json attempt =
+        runPhxGenerate(host, port, buildPayload(pipeCfg.feedbackMode),
+                       timeoutMs, error);
+    if (!attempt.value("ok", false) && pipeCfg.autoFeedbackFallback &&
+        pipeCfg.feedbackMode != "dec_enc") {
+      attempt = runPhxGenerate(host, port, buildPayload("dec_enc"), timeoutMs,
+                               error);
+      if (attempt.value("ok", false))
+        attempt["feedbackFallback"] = "dec_enc";
+    }
+    if (!attempt.value("ok", false)) {
+      out["ok"] = false;
+      out["error"] = attempt.value("error", error);
+      return out;
+    }
+    out["ok"] = true;
+    out["reply"] = attempt.value("reply", std::string());
+    if (attempt.contains("feedbackFallback"))
+      out["feedbackFallback"] = attempt["feedbackFallback"];
+    return out;
+  } catch (const std::exception &e) {
+    out["ok"] = false;
+    out["error"] = std::string("unit pipeline exception: ") + e.what();
+    return out;
+  } catch (...) {
+    out["ok"] = false;
+    out["error"] = "unit pipeline unknown error";
+    return out;
+  }
+}
+
+std::string trimWsCopy(std::string s) {
+  size_t a = 0;
+  while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+  size_t b = s.size();
+  while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+  return s.substr(a, b - a);
+}
+
+/* Raw completion prefix. No ChatML, no system/user/assistant roles.
+   One agent cannot be two people; autonomy is a single text stream. */
+std::string assembleCausalText(const std::string &prefix,
+                               const std::string &body) {
+  const std::string a = trimWsCopy(prefix);
+  const std::string b = trimWsCopy(body);
+  if (a.empty()) return b;
+  if (b.empty()) return a;
+  if (b.size() >= a.size() && b.compare(0, a.size(), a) == 0) return b;
+  std::string out = a;
+  if (out.back() != '\n') out.push_back('\n');
+  out += b;
+  return out;
+}
+
+json hiddenStatePipeline(const std::string &host, int port,
+                          const std::string &text,
+                          const std::string &graphContext, int effectiveMaxTokens,
+                          int timeoutMs, const json &inferenceOptions) {
+  json out;
+  std::string error;
+  try {
+    const std::string cleanCtx = cleanGraphContextForSystem(graphContext, text);
+    std::string formattedPrompt =
+        assembleCausalText(cleanCtx, text);
+    std::string resume;
+    if (inferenceOptions.is_object() &&
+        inferenceOptions.contains("resume_suffix") &&
+        inferenceOptions["resume_suffix"].is_string())
+      resume = inferenceOptions["resume_suffix"].get<std::string>();
+    /* Do not fold resume into content. Server needs resume_tokens so
+       n_resume drives RAG protect. Empty content is illegal; if the
+       prefix is empty, use resume as content and drop the suffix. */
+    json genOpts =
+        inferenceOptions.is_object() ? inferenceOptions : json::object();
+    if (formattedPrompt.empty()) {
+      formattedPrompt = resume;
+      resume.clear();
+      genOpts.erase("resume_suffix");
+    }
+    if (formattedPrompt.empty()) {
+      out["ok"] = false;
+      out["error"] = "empty causal text";
+      return out;
+    }
+
+    const int ctxBudget =
+        inferenceOptions.is_object() &&
+                inferenceOptions.contains("ctxTokenBudget") &&
+                inferenceOptions["ctxTokenBudget"].is_number_integer()
+            ? std::max(512, inferenceOptions["ctxTokenBudget"].get<int>())
+            : 3584;
+    const int ngramFit =
+        inferenceOptions.is_object() &&
+                inferenceOptions.contains("ngram_merge") &&
+                inferenceOptions["ngram_merge"].is_number_integer()
+            ? inferenceOptions["ngram_merge"].get<int>()
+            : 2;
+    formattedPrompt = fitPromptToTokenBudget(
+        host, port, std::move(formattedPrompt), ctxBudget,
+        effectiveMaxTokens + 64, timeoutMs, ngramFit);
+
+    if (phoenix::inference::shutdownRequested()) {
+      out["ok"] = false;
+      out["error"] = "aborted";
+      return out;
+    }
+    const bool useNative = genOpts.value("useNativeCompletion", false);
+    const bool unitPipeline = genOpts.value("unitPipeline", true);
+
+    auto isAbortErr = [](const json &r) {
+      const std::string err = r.value("error", std::string());
+      return phoenix::inference::shutdownRequested() ||
+             err.find("aborted") != std::string::npos;
+    };
+    if (unitPipeline) {
+      json unit = unitIterationPipeline(host, port, formattedPrompt,
+                                        effectiveMaxTokens, timeoutMs,
+                                        genOpts);
+      if (unit.value("ok", false) &&
+          !unit.value("reply", std::string()).empty())
+        return unit;
+      if (isAbortErr(unit)) {
+        out["ok"] = false;
+        out["error"] = "aborted";
+        return out;
+      }
+      std::cerr << "[llama] unit /phx/generate failed; falling back to "
+                   "/completion: "
+                << unit.value("error", std::string("empty reply")) << std::endl;
+    }
+    if (phoenix::inference::shutdownRequested()) {
+      out["ok"] = false;
+      out["error"] = "aborted";
+      return out;
+    }
+    if (useNative || unitPipeline) {
+      json native = textCompletionFallback(host, port, formattedPrompt,
+                                           effectiveMaxTokens, timeoutMs,
+                                           genOpts);
+      const std::string nativeErr = native.value("error", std::string());
+      if (!native.value("ok", false) &&
+          nativeErr.find("status 0") != std::string::npos) {
+        native = textCompletionFallback(host, port, formattedPrompt,
+                                        effectiveMaxTokens, timeoutMs,
+                                        genOpts);
+      }
+      if (native.value("ok", false)) return native;
+      if (isAbortErr(native)) {
+        out["ok"] = false;
+        out["error"] = "aborted";
+        return out;
+      }
+      if (useNative) {
+        out["ok"] = false;
+        out["error"] =
+            "completion: " + native.value("error", std::string("failed"));
+        return out;
+      }
+    }
+
+    double temperature = 0.0;
+    double topP = 0.9;
+    if (inferenceOptions.is_object()) {
+      if (inferenceOptions.contains("temperature") &&
+          inferenceOptions["temperature"].is_number())
+        temperature = inferenceOptions["temperature"].get<double>();
+      if (inferenceOptions.contains("top_p") && inferenceOptions["top_p"].is_number())
+        topP = inferenceOptions["top_p"].get<double>();
+    }
+
+    json generatePayload = {{"content", formattedPrompt},
+                            {"max_tokens", effectiveMaxTokens},
+                            {"temperature", temperature},
+                            {"top_p", topP},
+                            {"decode_text", true},
+                            {"loop_mode", "token"}};
+    applyGenerateInferenceOptions(generatePayload, host, port, timeoutMs,
+                                  genOpts);
+
     json genResp;
     if (!postJson(host, port, "/phx/generate", generatePayload, timeoutMs, genResp,
                   error)) {
@@ -629,103 +990,57 @@ json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
   splitHostPort(endpoint, host, port);
 
   int effectiveMaxTokens = std::max(1, maxTokens);
-  // Greedy by default (keeps the unit-query regression stable); an EXPLICIT
-  // temperature from the affect/cognition layers is now honoured (v8.0
-  // migration of the ollama-era sampling-modulation channel).
-  double temperature = 0.0;
-  double topP = 0.9;
-  bool skipGraphContext = false;
   if (inferenceOptions.is_object()) {
-    if (inferenceOptions.contains("temperature") &&
-        inferenceOptions["temperature"].is_number())
-      temperature = inferenceOptions["temperature"].get<double>();
-    if (inferenceOptions.contains("top_p") && inferenceOptions["top_p"].is_number())
-      topP = inferenceOptions["top_p"].get<double>();
-    skipGraphContext = inferenceOptions.value("skipGraphContext", false);
+    if (inferenceOptions.contains("num_predict") &&
+        inferenceOptions["num_predict"].is_number_integer())
+      effectiveMaxTokens =
+          std::max(1, inferenceOptions["num_predict"].get<int>());
+  }
+  int callTimeoutMs = timeoutMs;
+  if (inferenceOptions.is_object() &&
+      inferenceOptions.contains("timeoutMs") &&
+      inferenceOptions["timeoutMs"].is_number_integer()) {
+    callTimeoutMs = std::max(1000, inferenceOptions["timeoutMs"].get<int>());
   }
 
-  // v8.0: graphContext (the ollama-era long-context memory channel) is now
-  // included again; callers that need the bare unit query (regression tests)
-  // pass skipGraphContext=true.
-  std::string prompt = buildPrompt(text, skipGraphContext ? "" : graphContext);
+  /* Prefix is the pin / working facts. Body is the recent window.
+     skipGraphContext only means GNN is in units, not that the prefix
+     should be dropped when a body exists. */
+  std::string ctxForPipeline;
+  if (inferenceOptions.is_object() &&
+      inferenceOptions.contains("system_content") &&
+      inferenceOptions["system_content"].is_string()) {
+    ctxForPipeline = inferenceOptions["system_content"].get<std::string>();
+  } else {
+    ctxForPipeline = graphContext;
+  }
 
-  json pipelineResult = hiddenStatePipeline(host, port, endpoint, prompt,
-                                             effectiveMaxTokens, temperature,
-                                             topP, timeoutMs);
+  const bool unitPipeline =
+      !inferenceOptions.is_object() ||
+      inferenceOptions.value("unitPipeline", true);
+  if (unitPipeline && !splitBackendReachable(host, port)) {
+    std::cerr << "[llama] /phx/enc probe missed (slot busy or timeout); "
+                 "continuing on /phx/generate"
+              << std::endl;
+  }
+
+  json pipelineResult = hiddenStatePipeline(
+      host, port, text, ctxForPipeline, effectiveMaxTokens, callTimeoutMs,
+      inferenceOptions);
   if (pipelineResult.is_object() && pipelineResult.value("ok", false)) {
     out["ok"] = true;
     out["reply"] = pipelineResult.value("reply", std::string());
+    if (pipelineResult.contains("feedbackFallback"))
+      out["feedbackFallback"] = pipelineResult["feedbackFallback"];
     return out;
   }
 
   std::string pipelineError =
       pipelineResult.is_object() ? pipelineResult.value("error", std::string())
-                                  : std::string("hidden-state pipeline failed");
-
-  // Fall back to llama-server's own native /v1/chat/completions endpoint
-  // (plain text I/O) so a single request can still succeed even if the
-  // /phx/enc or /phx/infer split endpoints are unavailable or misbehave.
-  // See the comment above textCompletionFallback() for why this is
-  // currently necessary against llama_server_mods/enc_dec_separation.patch.
-  std::string fallbackReply;
-  std::string fallbackError;
-  if (textCompletionFallback(host, port, text, graphContext, timeoutMs, effectiveMaxTokens,
-                              inferenceOptions, fallbackReply,
-                              fallbackError)) {
-    out["ok"] = true;
-    out["reply"] = fallbackReply;
-    out["splitBackendError"] = pipelineError;
-    out["splitBackendFallback"] = "v1/chat/completions";
-    return out;
-  }
-
+                                  : std::string("unit pipeline failed");
   out["ok"] = false;
   out["reply"] = "";
-  out["error"] = "hidden-state pipeline failed (" + pipelineError +
-                 ") and text-completion fallback also failed (" +
-                 fallbackError + ")";
-  return out;
-}
-
-json llamaTextOnlyChat(const std::string &baseUrl, int timeoutMs,
-                        const std::string &model, const std::string &text,
-                        const std::string &graphContext, int maxTokens,
-                        const json &inferenceOptions) {
-  json out;
-  out["provider"] = "llamacpp";
-  std::string selectedModel = model.empty() ? std::string("llamacpp") : model;
-  out["model"] = selectedModel;
-  out["reply"] = "";
-
-  std::string host;
-  int port = 8082;
-  std::string endpoint = baseUrl.empty() ? "http://127.0.0.1:8082" : baseUrl;
-  splitHostPort(endpoint, host, port);
-
-  int effectiveMaxTokens = std::max(1, maxTokens);
-  if (inferenceOptions.is_object()) {
-    if (inferenceOptions.contains("num_predict") &&
-        inferenceOptions["num_predict"].is_number_integer())
-      effectiveMaxTokens = std::max(1, inferenceOptions["num_predict"].get<int>());
-  }
-
-  std::string reply;
-  std::string error;
-  try {
-    if (textCompletionFallback(host, port, text, graphContext, timeoutMs, effectiveMaxTokens,
-                               inferenceOptions, reply, error)) {
-      out["ok"] = true;
-      out["reply"] = reply;
-      return out;
-    }
-  } catch (const std::exception &e) {
-    error = std::string("exception: ") + e.what();
-  } catch (...) {
-    error = "unknown error";
-  }
-
-  out["ok"] = false;
-  out["error"] = error;
+  out["error"] = "split pipeline failed: " + pipelineError;
   return out;
 }
 

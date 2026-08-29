@@ -3,6 +3,8 @@
 
 #include "autonomy_stack.hpp"
 
+#include "emergency_stop.hpp"
+
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -90,6 +92,47 @@ TEST_F(AutonomyLoopTest, AutonomyLoopTicksWithoutExternalIterate) {
     auto stop = mgr_->stopAutonomyLoop();
     EXPECT_TRUE(stop.value("ok", false));
     EXPECT_FALSE(mgr_->autonomyLoopStatus()["result"].value("running", true));
+}
+
+TEST_F(AutonomyLoopTest, RestartsAfterEstopBreaksLoopThread) {
+    auto cfg = mgr_->configureAutonomyLoop(json{{"enabled", true},
+                                                {"intervalSec", 1},
+                                                {"maxStepsPerTick", 1},
+                                                {"persistEveryTicks", 10000}});
+    ASSERT_TRUE(cfg.value("ok", false));
+
+    ASSERT_TRUE(mgr_->startAutonomyLoop().value("ok", false));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2200));
+    EXPECT_TRUE(mgr_->autonomyLoopStatus()["result"].value("running", false));
+    const uint64_t ticksBefore =
+        mgr_->autonomyLoopStatus()["result"].value("tickCount", 0ull);
+    EXPECT_GE(ticksBefore, 1u);
+
+    /* Simulate the production bug: loopRun breaks on latched E-stop while
+       loopStop_ is still false, leaving a joinable-but-dead thread that
+       blocked startAutonomyLoop() from spawning a replacement. */
+    phoenix::safety::EmergencyStop::instance().press("gtest-estop");
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  phoenix::safety::EmergencyStop::instance().resetForTesting();
+
+  ASSERT_TRUE(mgr_->startAutonomyLoop().value("ok", false))
+      << "must restart after the loop thread exits";
+  std::this_thread::sleep_for(std::chrono::milliseconds(2200));
+  EXPECT_TRUE(mgr_->autonomyLoopStatus()["result"].value("running", false));
+  EXPECT_GT(mgr_->autonomyLoopStatus()["result"].value("tickCount", 0ull),
+            ticksBefore);
+
+  mgr_->stopAutonomyLoop();
+}
+
+TEST_F(AutonomyLoopTest, AssignMissionResetsIterationCounter) {
+    mgr_->importState(json{{"sessions", json::object()},
+                           {"iteration", 1007},
+                           {"missionEnabled", false}});
+    EXPECT_EQ(mgr_->status()["result"].value("iteration", 0), 1007);
+
+    mgr_->assignMission(json{{"enabled", true}, {"goal", "fresh goal"}});
+    EXPECT_EQ(mgr_->status()["result"].value("iteration", 0), 0);
 }
 
 TEST_F(AutonomyLoopTest, ExportImportRoundTripsEvolution) {

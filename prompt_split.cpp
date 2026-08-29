@@ -26,15 +26,8 @@ SystemPrompt SystemPrompt::fromJson(const nlohmann::json &j) {
 }
 
 SystemPrompt SystemPrompt::arthurDefault() {
-    SystemPrompt s;
-    s.identity = "You are Phoenix, an autonomous cognitive assistant codenamed Lancelot.";
-    s.version = "Phoenix v8.0 Lancelot";
-    s.constraints = "Always be honest, safe, and aligned with the user's goals. "
-                     "Do not produce instructions for self-replication, cyberattacks, or illegal acts. "
-                     "Respect user privacy and avoid generating harmful content.";
-    s.coreDirective = "Assist the user, learn from context, protect system integrity, and "
-                      "balance exploration with harm avoidance.";
-    return s;
+    /* No assistant/user identity. Autonomy is one stream, not two roles. */
+    return SystemPrompt();
 }
 
 nlohmann::json MemoryPrompt::toJson() const {
@@ -83,7 +76,8 @@ std::string PromptComposer::compose(const std::string &userPrompt,
                                     bool includeMemory,
                                     const std::string &separator) const {
     std::ostringstream oss;
-    oss << system_.identity << "\n";
+    if (!system_.identity.empty())
+        oss << system_.identity << "\n";
     if (!system_.constraints.empty()) {
         oss << "Constraints: " << system_.constraints << "\n";
     }
@@ -124,50 +118,17 @@ std::string PromptComposer::compose(const std::string &userPrompt,
         }
         oss << separator;
     }
-    oss << "User: " << userPrompt << "\n";
+    if (!userPrompt.empty())
+        oss << userPrompt << "\n";
     return oss.str();
 }
 
 nlohmann::json PromptComposer::composeMessages(const std::string &userPrompt, bool includeMemory) const {
+    /* No system/user/assistant roles. Same raw text as compose(). */
+    const std::string text = compose(userPrompt, includeMemory);
     nlohmann::json messages = nlohmann::json::array();
-
-    std::string systemText = system_.identity;
-    if (!system_.constraints.empty()) {
-        systemText += "\nConstraints: " + system_.constraints;
-    }
-    if (!system_.coreDirective.empty()) {
-        systemText += "\nMission: " + system_.coreDirective;
-    }
-    messages.push_back({{"role", "system"}, {"content", systemText}});
-
-    if (includeMemory) {
-        std::ostringstream memoryText;
-        if (!memory_.summary.empty()) memoryText << "[Memory] " << memory_.summary << "\n";
-        if (!memory_.relevantFacts.empty()) {
-            memoryText << "Relevant facts:\n";
-            for (const auto &fact : memory_.relevantFacts) memoryText << "- " << fact << "\n";
-        }
-        if (!memory_.activeGoals.empty()) {
-            memoryText << "Active goals:\n";
-            for (const auto &goal : memory_.activeGoals) memoryText << "- " << goal << "\n";
-        }
-        if (!memory_.emotionalTone.empty()) memoryText << "Tone: " << memory_.emotionalTone << "\n";
-        if (!memory_.benefitHarmBias.empty()) memoryText << "Directive: " << memory_.benefitHarmBias << "\n";
-        if (!memory_.driveVector.empty()) {
-            memoryText << "Affect: " << memory_.emotionTensor.modulationHint() << "\n";
-            std::ostringstream dv;
-            for (size_t i = 0; i < memory_.driveVector.size(); ++i) {
-                if (i) dv << ", ";
-                dv << memory_.driveVector[i];
-            }
-            memoryText << "Drive vector: " << dv.str() << "\n";
-        }
-        if (!memoryText.str().empty()) {
-            messages.push_back({{"role", "system"}, {"content", memoryText.str()}});
-        }
-    }
-
-    messages.push_back({{"role", "user"}, {"content", userPrompt}});
+    if (!text.empty())
+        messages.push_back({{"content", text}});
     return messages;
 }
 

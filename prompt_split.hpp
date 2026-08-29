@@ -19,7 +19,7 @@ namespace prompt {
  * This portion is kept stable across turns and is not derived from memory.
  */
 struct SystemPrompt {
-    std::string identity;       /*!< Who/what the assistant is. */
+    std::string identity;       /*!< Optional prefix; empty by default. */
     std::string version;        /*!< Version tag, e.g. "Lancelot v8.0". */
     std::string constraints;      /*!< Hard rules and safety guardrails. */
     std::string coreDirective;  /*!< Primary mission statement. */
@@ -55,10 +55,9 @@ struct MemoryPrompt {
 };
 
 /**
- * @brief Composes the final prompt from immutable system + dynamic memory + user.
+ * @brief Composes raw completion text from optional prefix + memory + body.
  *
- * The split allows the runtime to keep the system prompt fixed while
- * continuously rewriting the memory portion from context and affect signals.
+ * No chat roles. Memory is overlay text, not a second person.
  */
 class PromptComposer {
 public:
@@ -69,7 +68,7 @@ public:
                         bool includeMemory = true,
                         const std::string &separator = "\n---\n") const;
 
-    /** Compose structured messages suitable for JSON chat APIs. */
+    /** Same text as compose(), wrapped as [{content}] with no role. */
     nlohmann::json composeMessages(const std::string &userPrompt, bool includeMemory = true) const;
 
     /** Build a memory prompt from a list of context entries. */

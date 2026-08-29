@@ -55,10 +55,12 @@
   },
   "llama_server": {
     "threads": 6,
-    "parallel": 2,
+    "parallel": 1,
     "ctx_size": 4096
   },
   "llama": {
+    "instanceIsolation": "exclusive",
+    "useNativeCompletion": false,
     "parallelDecode": {
       "enabled": false,
       "N": 4,
@@ -147,7 +149,7 @@
     "mappingDepth": 1,
     "reflectionTopMemes": 18,
     "reflectionTopWords": 24,
-    "reflectionMinScore": 0.000001
+    "reflectionMinScore": 1e-06
   },
   "dialog": {
     "rlEvery": 20,
@@ -253,7 +255,9 @@
     }
   },
   "spark": {
-    "scopes": ["all"],
+    "scopes": [
+      "all"
+    ],
     "comment": "v8.3 default: spark applies to every domain (gnn + whole project); set [\"none\"] to disable, [] for legacy per-feature flags",
     "gnnScheduler": {
       "enabled": true,
@@ -328,7 +332,7 @@
     "llamacppModel": "",
     "probeTimeoutMs": 60000,
     "knownSimThreshold": 0.5,
-    "crossSessionLearnEnabled": false
+    "crossSessionLearnEnabled": true
   },
   "world_model": {
     "agentCount": 4,
@@ -377,7 +381,7 @@
     "aiApiBase": "http://127.0.0.1:5080"
   },
   "agi": {
-    "enabled": false,
+    "enabled": true,
     "horizon": 3,
     "dim": 128,
     "pragmaticWeight": 1,
@@ -390,7 +394,7 @@
     "actions": []
   },
   "subconscious": {
-    "enabled": false,
+    "enabled": true,
     "baselineValence": 0,
     "baselineArousal": 0,
     "baselineDominance": 0,
@@ -401,14 +405,14 @@
     "instincts": []
   },
   "mission": {
-    "enabled": false,
+    "enabled": true,
     "id": "",
     "goal": "",
     "painGainPerSec": 0.01,
     "maxPain": 1,
     "pressureMode": "asymptotic",
     "pressureHorizonSec": 3600,
-    "pressureTauSec": 1800,
+    "pressureTauSec": 86400,
     "pressureExpr": "Pmax*tanh(t/tau)",
     "workspaceDir": "./runtime_store/mission_workspace",
     "maxWorkspaceFileBytes": 4194304,
@@ -417,14 +421,35 @@
     "maxReplicas": 4,
     "maxReplicaDepth": 0,
     "ctxSize": 4096,
+    "goalClipChars": 8000,
     "contextPack": "full_and_summary",
-    "includeGnnSummary": false,
+    "includeGnnSummary": true,
+    "gnnPretrainMinNodes": 16,
+    "gnnPretrainDocs": 256,
+    "corpusPretrainStamp": "./runtime_store/corpus_pretrain_stamp.json",
     "minDeliverableChars": 1200,
     "childMinDeliverableChars": 200,
     "outlineEnabled": true,
     "outlineSize": 12,
-    "llmTimeoutMs": 900000,
+    "llmTimeoutMs": 5400000,
+    "deliberateMaxTokens": 256,
+    "resumeChars": 720,
+    "childDeliberateMaxTokens": 48,
+    "temperature": 0.35,
+    "topP": 0.9,
+    "frequencyPenalty": 0.15,
+    "repeatPenalty": 1.12,
+    "repeatLastN": 256,
+    "maxSideTokens": 512,
+    "compactDeliberatorPrompt": true,
+    "cacheEnabled": false,
     "cacheSim": 0.95,
+    "disableParallelDecode": true,
+    "hiddenLoop": false,
+    "unitPipeline": true,
+    "useNativeCompletion": false,
+    "graphEmbRounds": 2,
+    "templateOverheadTokens": 384,
     "maxSelfPauseTicks": 6,
     "experiencePath": "./runtime_store/mission_experience.json",
     "multimodal": {
@@ -452,10 +477,14 @@
     "maxStepsPerTick": 8,
     "maxChildrenPerTick": 0,
     "maxMissionsPerTick": 0,
+    "parallelMissions": true,
     "persistEveryTicks": 5,
     "persistPath": "runtime_store/autonomy_state.json"
   },
-  "cliTools": [],
+  "cliTools": [
+    {"name": "python3", "command": "python3", "args": [], "timeoutMs": 30000, "json": false, "maxReply": 4000},
+    {"name": "python", "command": "python3", "args": [], "timeoutMs": 30000, "json": false, "maxReply": 4000}
+  ],
   "search": {
     "enabled": true,
     "backends": [
@@ -552,7 +581,7 @@
     "reservedMemMb": 256,
     "useTorchEmbed": false,
     "cognitionAutonomyEnabled": true,
-    "disableGraphSelector": true,
+    "disableGraphSelector": false,
     "groupSize": 7,
     "groupWorkerPort": 0,
     "frontendSpawnDepth": 0,
@@ -602,7 +631,7 @@
       "llamaCppLoraFiles": "",
       "llamaCppLoraInitWithoutApply": false,
       "llamaCppFineTuning": false,
-      "llamaUseSplitBackend": false,
+      "llamaUseSplitBackend": true,
       "bitnetModel": "",
       "bitnetBaseUrl": "http://127.0.0.1:8090",
       "bitnetTimeoutMs": 120000,
@@ -610,12 +639,29 @@
       "tinyllamaBaseUrl": "http://192.168.1.104:8086",
       "tinyllamaTimeoutMs": 5000,
       "tinyllamaEnabled": true,
-      "conceptMatrixEnabled": false,
+      "conceptMatrixEnabled": true,
       "conceptMatrixClearPerRequest": true,
       "ggufModelsDir": "GGUF_models",
       "externalBackendStyleSim": false,
       "transformerBootstrap": false,
-      "transformerBootstrapDocs": 256
+      "transformerBootstrapDocs": 256,
+      "gnnBootstrap": true,
+      "gnnBootstrapDocs": 256,
+      "unitPipeline": true,
+      "loopMode": "unit",
+      "feedbackMode": "dec_enc",
+      "autoFeedbackFallback": true,
+      "llamaEmbDim": 4096,
+      "graphEmbRounds": 2,
+      "memoryEnabled": true,
+      "gnnEnabled": true,
+      "memoryWeight": 1.0,
+      "gnnWeight": 1.0,
+      "ngramMerge": 2,
+      "ngramProtectLast": 16,
+      "ragMixCap": 256,
+      "leftoverBeta": 0.08,
+      "leftoverK": 8
     },
     "lmdb": {
       "root": "lmdb",
@@ -635,15 +681,15 @@
       "connectTimeoutMs": 1500
     },
     "robots": {
-      "autoload": false,
+      "autoload": true,
       "chunkMaxWords": 20,
       "chunkMinWords": 3,
       "dir": "robots",
-      "warmupLimit": 0,
+      "warmupLimit": 256,
       "warmupShuffle": false
     },
     "disable": {
-      "memebarrier": true,
+      "memebarrier": false,
       "rl": false,
       "adv": false,
       "learning": false,

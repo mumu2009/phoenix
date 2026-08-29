@@ -19,6 +19,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "mission_reply_parse.hpp"
+#include "subprocess.hpp"
+
 namespace phoenix {
 namespace mission {
 
@@ -53,9 +56,10 @@ inline std::string sanitizeScope(const std::string &scope) {
 /**
  * Execute one sandboxed workspace operation.
  *
- * payload: {"action": "list"|"read"|"write"|"append"|"delete",
+ * payload: {"action": "list"|"read"|"write"|"append"|"replace"|"delete"|"run",
  *           "path": "relative/path.md" (no "..", no absolute),
- *           "content": "..." (write/append only)}
+ *           "content": "..." (write/append/replace),
+ *           "find": "..." (replace only)}
  *
  * Returns {ok: bool, result/error, bytes} - never throws.
  */
@@ -67,7 +71,7 @@ inline nlohmann::json workspaceExecute(const std::string &workspaceRoot,
        memory view and deliverable.md diverged / looked "truncated". */
     constexpr size_t kMaxFileBytes = 4u * 1024u * 1024u;
     const std::string action = payload.value("action", std::string());
-    const std::string rel = payload.value("path", std::string());
+    std::string rel = payload.value("path", std::string());
 
     if (action.empty()) {
         return nlohmann::json{{"ok", false}, {"error", "action required"}};
@@ -134,7 +138,12 @@ inline nlohmann::json workspaceExecute(const std::string &workspaceRoot,
     }
 
     if (action == "write" || action == "append") {
-        const std::string content = payload.value("content", std::string());
+        /* Models often emit {"action":"append","text":"..."} with no path. */
+        if (rel.empty()) rel = "deliverable.md";
+        std::string content = payload.value("content", std::string());
+        if (content.empty() && payload.contains("text") &&
+            payload["text"].is_string())
+          content = payload["text"].get<std::string>();
         if (content.size() > kMaxFileBytes) {
             return nlohmann::json{{"ok", false}, {"error", "content exceeds size cap"}};
         }
@@ -147,10 +156,18 @@ inline nlohmann::json workspaceExecute(const std::string &workspaceRoot,
             if (!existing.value("ok", false) && fs::exists(target, ec)) {
                 return existing;
             }
-            std::string merged = (existing.value("ok", false)
-                                      ? existing.value("content", std::string())
-                                      : std::string()) +
-                                 content;
+            std::string prev = existing.value("ok", false)
+                                   ? existing.value("content", std::string())
+                                   : std::string();
+            std::string add = content;
+            if (isDeliverablePath(rel)) {
+              add = sanitizeDeliverableActionContent(add);
+              if (add.empty())
+                return nlohmann::json{{"ok", false},
+                                      {"error", "deliverable chunk dropped "
+                                                "(empty or language drift)"}};
+            }
+            std::string merged = joinDeliverableText(prev, add);
             bool trimmed = false;
             if (merged.size() > kMaxFileBytes) {
                 /* Prefer keeping the newest text (same policy as in-memory
@@ -165,10 +182,111 @@ inline nlohmann::json workspaceExecute(const std::string &workspaceRoot,
             if (trimmed) res["trimmedToCap"] = true;
             return res;
         }
+        if (isDeliverablePath(rel)) {
+          const nlohmann::json existing = readFile(target);
+          const std::string prev = existing.value("ok", false)
+                                       ? existing.value("content", std::string())
+                                       : std::string();
+          if (!prev.empty() && content.size() < prev.size()) {
+            if (content.empty()) {
+              return nlohmann::json{
+                  {"ok", false},
+                  {"error", "refuse empty overwrite of deliverable.md"},
+                  {"bytes", prev.size()}};
+            }
+            const std::string kept =
+                recoverDeliverableFromShorterWrite(prev, content);
+            nlohmann::json res = {{"ok", true},
+                                  {"bytes", kept.size()},
+                                  {"refusedShrink", true}};
+            if (kept == prev) {
+              return res;
+            }
+            content = kept;
+          }
+        }
         std::ofstream out(target, std::ios::binary | std::ios::trunc);
         if (!out) return nlohmann::json{{"ok", false}, {"error", "cannot write: " + target.string()}};
         out << content;
         return nlohmann::json{{"ok", true}, {"bytes", content.size()}};
+    }
+
+    if (action == "replace") {
+        if (rel.empty()) rel = "deliverable.md";
+        std::string find = payload.value("find", std::string());
+        if (find.empty() && payload.contains("old") && payload["old"].is_string())
+          find = payload["old"].get<std::string>();
+        std::string content = payload.value("content", std::string());
+        if (content.empty() && payload.contains("new") && payload["new"].is_string())
+          content = payload["new"].get<std::string>();
+        if (find.empty())
+          return nlohmann::json{{"ok", false}, {"error", "replace requires find"}};
+        const auto [ok, target] = resolve(rel);
+        if (!ok) return nlohmann::json{{"ok", false}, {"error", "invalid path (sandboxed)"}};
+        const nlohmann::json existing = readFile(target);
+        if (!existing.value("ok", false))
+          return existing;
+        std::string prev = existing.value("content", std::string());
+        const auto pos = prev.find(find);
+        if (pos == std::string::npos)
+          return nlohmann::json{{"ok", false}, {"error", "find text not in file"}};
+        if (isDeliverablePath(rel)) {
+          content = sanitizeDeliverableActionContent(content);
+          if (content.empty() && !payload.value("content", std::string()).empty())
+            return nlohmann::json{{"ok", false},
+                                  {"error", "deliverable replace dropped "
+                                            "(empty or language drift)"}};
+        }
+        std::string merged = prev.substr(0, pos) + content +
+                             prev.substr(pos + find.size());
+        if (merged.size() > kMaxFileBytes)
+          merged = merged.substr(merged.size() - kMaxFileBytes);
+        std::ofstream out(target, std::ios::binary | std::ios::trunc);
+        if (!out) return nlohmann::json{{"ok", false}, {"error", "cannot write: " + target.string()}};
+        out << merged;
+        return nlohmann::json{{"ok", true}, {"bytes", merged.size()}};
+    }
+
+    if (action == "run") {
+        /* Sandboxed script plugin: only a .py file inside this workspace,
+           executed with python3 via -c chdir+runpy (no shell). */
+        if (rel.empty())
+          return nlohmann::json{{"ok", false}, {"error", "run requires path"}};
+        if (rel.size() < 3 || rel.substr(rel.size() - 3) != ".py")
+          return nlohmann::json{{"ok", false}, {"error", "run allows .py only"}};
+        const auto [ok, target] = resolve(rel);
+        if (!ok) return nlohmann::json{{"ok", false}, {"error", "invalid path (sandboxed)"}};
+        std::error_code ec;
+        if (!fs::exists(target, ec))
+          return nlohmann::json{{"ok", false}, {"error", "script not found"}};
+        const std::string script = target.string();
+        const std::string cwd = root.string();
+        if (script.find("'''") != std::string::npos ||
+            cwd.find("'''") != std::string::npos)
+          return nlohmann::json{{"ok", false}, {"error", "path not runnable"}};
+        const int timeoutMs = payload.value("timeoutMs", 30000);
+        std::string py =
+            "import os,runpy; os.chdir(r'''" + cwd +
+            "'''); runpy.run_path(r'''" + script + "''')";
+        phoenix::subprocess::RunRequest req;
+        req.command = "python3";
+        req.args = {"-c", py};
+        req.timeoutMs = std::max(1000, std::min(timeoutMs, 120000));
+        req.maxOutputBytes = 64u * 1024u;
+        auto ran = phoenix::subprocess::run(req);
+        if (!ran.started)
+          return nlohmann::json{{"ok", false},
+                                {"error", ran.error.empty()
+                                              ? "python3 not started"
+                                              : ran.error}};
+        nlohmann::json out = {{"ok", ran.exitCode == 0 && !ran.timedOut},
+                              {"exitCode", ran.exitCode},
+                              {"stdout", ran.stdoutText},
+                              {"stderr", ran.stderrText}};
+        if (ran.timedOut) out["error"] = ran.error;
+        else if (ran.exitCode != 0 && out["ok"] == false)
+          out["error"] = ran.stderrText.empty() ? ran.error : ran.stderrText;
+        return out;
     }
 
     if (action == "delete") {
@@ -262,6 +380,31 @@ inline void workspaceCachePut(const std::string &scope, const std::string &key,
     auto &v = gWsCacheTable[scope];
     v.push_back({key, reply});
     if (v.size() > 64) v.erase(v.begin());
+}
+
+/** Drop L1 cache entries for one mission scope (parent or child path). */
+inline void workspaceCacheClearScope(const std::string &scope) {
+    using namespace ws_cache_detail;
+    std::lock_guard<std::mutex> lock(gWsCacheMu);
+    gWsCacheTable.erase(scope);
+    const std::string prefix = scope + "/";
+    for (auto it = gWsCacheTable.begin(); it != gWsCacheTable.end();) {
+        if (it->first.rfind(prefix, 0) == 0)
+            it = gWsCacheTable.erase(it);
+        else
+            ++it;
+    }
+}
+
+/** Wipe the on-disk sandbox for a scope so a new lifecycle starts clean. */
+inline bool workspaceResetScope(const std::string &workspaceRoot,
+                                const std::string &scope) {
+    const fs::path root =
+        fs::absolute(fs::path(workspaceRoot)) / sanitizeScope(scope);
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+    return !ec;
 }
 
 }  // namespace mission

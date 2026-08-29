@@ -77,6 +77,8 @@ struct Config {
   bool externalBackendStyleSim{false};
   bool transformerBootstrap{false};
   int transformerBootstrapDocs{256};
+  bool gnnBootstrap{true};
+  int gnnBootstrapDocs{256};
   std::string logMode{"release"};
   fs::path exportDir;
   bool httpLog{false};

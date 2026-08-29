@@ -2,6 +2,7 @@
 // Segment: section_before_MemeBarrier
 // Original lines: 7995-8003
 
+#include "memebarrier_phrase_blocklist.hpp"
 
 // ------------------ MemeBarrier ------------------
 

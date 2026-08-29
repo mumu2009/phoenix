@@ -54,6 +54,7 @@
 #include "../DATABASE_079.hpp"
 #include "../addon.hpp"
 #include "../emergency_stop.hpp"
+#include "../inference_abort.hpp"
 #include "../instance_registry.hpp"
 #include "../addons/cli_json_addon.hpp"
 #include "../autonomy_stack.hpp"
@@ -75,6 +76,7 @@
 #include "../model_deployment.hpp"
 #include "../mission_workspace.hpp"
 #include "../context_window_pack.hpp"
+#include "../instance_isolation.hpp"
 
 #ifndef AI_OUTSIDES_LINK_MODE
 #define AI_OUTSIDES_LINK_MODE "headers-only"
@@ -262,6 +264,7 @@ static std::mutex gFrontendProcMu;
 static std::mutex gPidFileMu;
 static fs::path gPidFilePath = fs::path("runtime_store") / "phoenix_main.pid";
 static bool gPidFileArmed = false;
+static std::atomic<bool> gInterruptRequested{false};
 #ifdef _WIN32
 static HANDLE gFrontendProcessHandle = nullptr;
 static DWORD gFrontendProcessId = 0;
@@ -311,6 +314,10 @@ static void ensureFrontendJobObjectLocked() noexcept {
 }
 #else
 static pid_t gFrontendProcessPid = -1;
+static std::atomic<bool> gForceExitArmed{false};
+static std::atomic<int> gForceExitMs{12000};
+static void armForceExitWatchdog() noexcept;
+static void onInterruptSignal(int);
 #endif
 
 static void appendFatalLog(const std::string &line);
@@ -473,19 +480,54 @@ static void cleanupFrontendProcess() noexcept {
 #endif
 }
 
+#ifndef _WIN32
+static void armForceExitWatchdog() noexcept {
+  bool expected = false;
+  if (!gForceExitArmed.compare_exchange_strong(expected, true))
+    return;
+  std::thread([]() {
+    int waitMs = gForceExitMs.load(std::memory_order_relaxed);
+    if (waitMs < 1000)
+      waitMs = 1000;
+    if (waitMs > 600000)
+      waitMs = 600000;
+    std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+    cleanupFrontendProcess();
+    cleanupPidFile();
+    std::_Exit(130);
+  }).detach();
+}
+
+static void onInterruptSignal(int) {
+  gInterruptRequested.store(true, std::memory_order_release);
+  phoenix::inference::requestShutdownAbort();
+}
+#endif
+
 #ifdef _WIN32
 static BOOL WINAPI onConsoleControl(DWORD ctrlType) {
   switch (ctrlType) {
   case CTRL_C_EVENT:
   case CTRL_BREAK_EVENT:
-    // Suppress CTRL+C/BREAK to prevent accidental termination of the server.
-    // The server should only be stopped via explicit shutdown commands or CTRL_CLOSE.
-    appendFatalLog(std::string("console control event suppressed type=") + std::to_string(ctrlType));
+    appendFatalLog(std::string("console ctrl-c abort+quit type=") +
+                   std::to_string(ctrlType));
+    gInterruptRequested.store(true, std::memory_order_release);
+    phoenix::inference::requestShutdownAbort();
+    armCtrlForceExitWatchdog();
+    try {
+      phoenix::safety::EmergencyStop::instance().press("ctrl-c");
+    } catch (...) {
+      try {
+        drogon::app().quit();
+      } catch (...) {
+      }
+    }
     return TRUE;
   case CTRL_CLOSE_EVENT:
   case CTRL_LOGOFF_EVENT:
   case CTRL_SHUTDOWN_EVENT:
     appendFatalLog(std::string("console close/shutdown event type=") + std::to_string(ctrlType));
+    phoenix::inference::requestShutdownAbort();
     armCtrlForceExitWatchdog();
     cleanupFrontendProcess();
     cleanupPidFile();
@@ -611,6 +653,9 @@ static void installFatalHooks(const fs::path &baseDir) {
   std::signal(SIGILL, onFatalSignal);
   std::signal(SIGFPE, onFatalSignal);
   std::signal(SIGTERM, onFatalSignal);
+#ifndef _WIN32
+  std::signal(SIGINT, onInterruptSignal);
+#endif
 }
 
 #ifdef _WIN32

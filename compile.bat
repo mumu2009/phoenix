@@ -53,22 +53,15 @@ REM is the source of truth for these changes (see llama_server_mods\README.md).
 REM Failures here are non-fatal to the overall Phoenix build unless the
 REM caller explicitly opts in via PHOENIX_REQUIRE_LLAMA_SERVER=1.
 set "PHOENIX_LLAMA_SERVER_OK=1"
-REM v8.0: the enc/dec split patch is SEALED (known-broken - the patched
-REM build leaks raw template tokens at temperature > 0 and crashes with
-REM GGML_ASSERT(backend_res != nullptr); the stock build serves chat fine).
-REM Opt back in with PHOENIX_LLAMA_SPLIT=1 once llama_server_mods is fixed.
-if "%PHOENIX_LLAMA_SPLIT%"=="1" (
-  if exist "%CD%\llama_server_mods\apply_patches.bat" (
-    call "%CD%\llama_server_mods\apply_patches.bat"
-    if errorlevel 1 (
-      echo [WARN] llama_server_mods\apply_patches.bat failed - continuing with whatever is currently in outsides\llamacpp.
-      set "PHOENIX_LLAMA_SERVER_OK=0"
-    )
-  ) else (
-    echo [INFO] llama_server_mods\apply_patches.bat not found. Skipping llama.cpp patch step.
+REM v8.x: split-only — always apply enc_dec_separation.patch and build patched llama-server.
+if exist "%CD%\llama_server_mods\apply_patches.bat" (
+  call "%CD%\llama_server_mods\apply_patches.bat"
+  if errorlevel 1 (
+    echo [WARN] llama_server_mods\apply_patches.bat failed - continuing with whatever is currently in outsides\llamacpp.
+    set "PHOENIX_LLAMA_SERVER_OK=0"
   )
 ) else (
-  echo [INFO] PHOENIX_LLAMA_SPLIT is not 1 - split patch step skipped, stock llama-server build.
+  echo [INFO] llama_server_mods\apply_patches.bat not found. Skipping llama.cpp patch step.
 )
 
 if exist "%CD%\llama_server_mods\build_llama_server.bat" (

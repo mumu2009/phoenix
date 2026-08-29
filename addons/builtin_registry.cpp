@@ -74,6 +74,9 @@ std::shared_ptr<Addon> createBuiltinAddon(const std::string &type, const std::st
 	if (type == "computer" || type == "shell" || type == "desktop") {
 		return createComputerShellAddon(name.empty() ? std::string("computer") : name);
 	}
+	if (type == "cli-json" || type == "cli" || type == "cli_json") {
+		return createCliJsonAddon(name.empty() ? std::string("cli-json") : name);
+	}
 	if (error) *error = "unsupported addon type";
 	return nullptr;
 }
@@ -89,6 +92,9 @@ std::vector<std::shared_ptr<Addon>> createDefaultBuiltinAddons(const std::string
 	}
 	if (wantsAddon(selected, "computer")) {
 		out.push_back(createComputerShellAddon("computer"));
+	}
+	if (wantsAddon(selected, "cli-json") || wantsAddon(selected, "cli")) {
+		out.push_back(createCliJsonAddon("cli-json"));
 	}
 	return out;
 }

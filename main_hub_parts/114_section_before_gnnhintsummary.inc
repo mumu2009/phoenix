@@ -76,6 +76,13 @@
     int nodeCount = 0;
     auto rtState = std::dynamic_pointer_cast<RuntimeState>(runtime);
     for (auto &m : memes) {
+      if (rtState) {
+        try {
+          if (rtState->graph().getMeta(m.first).value("isolated", false))
+            continue;
+        } catch (...) {
+        }
+      }
       if (nodeCount++)
         oss << " ; ";
       auto ws = runtime->getMemeWords(m.first);

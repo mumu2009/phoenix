@@ -17,6 +17,10 @@ jest.mock('../api/client', () => ({
 
 const { api } = require('../api/client');
 
+const openMissionTab = (name) => {
+  fireEvent.click(screen.getByRole('tab', { name }));
+};
+
 const okMissionStatus = () => ({
   ok: true,
   result: {
@@ -96,6 +100,7 @@ test('polls mission/autonomy/estop and loop status on mount', async () => {
   expect(api.estopStatus).toHaveBeenCalled();
   expect(api.autonomyLoop).toHaveBeenCalledWith({ action: 'status' });
 
+  openMissionTab('监控产出');
   expect(await screen.findByText('Running')).toBeInTheDocument();
   expect(screen.getByText('7')).toBeInTheDocument();
   expect(screen.getByText('c1')).toBeInTheDocument();
@@ -117,6 +122,7 @@ test('sets up the polling interval and clears it on unmount', () => {
 
 test('judge buttons call missionReport with the goalAchieved flag', async () => {
   render(<MissionPanel onError={jest.fn()} />);
+  openMissionTab('干预控制');
 
   fireEvent.click(screen.getByRole('button', { name: '判定完成' }));
   await waitFor(() => expect(api.missionReport).toHaveBeenCalledWith(true));
@@ -129,6 +135,7 @@ test('judge buttons call missionReport with the goalAchieved flag', async () => 
 
 test('interject sends text and optional amendGoal', async () => {
   render(<MissionPanel onError={jest.fn()} />);
+  openMissionTab('干预控制');
 
   fireEvent.change(screen.getByLabelText('插话内容'), { target: { value: '注意截止时间' } });
   fireEvent.change(screen.getByLabelText('重定向目标'), { target: { value: '改为分析性能' } });
@@ -139,14 +146,16 @@ test('interject sends text and optional amendGoal', async () => {
 
 test('autonomy loop configure/start/stop follow the action contract', async () => {
   render(<MissionPanel onError={jest.fn()} />);
+  openMissionTab('干预控制');
 
   await waitFor(() => expect(api.autonomyLoop).toHaveBeenCalledWith({ action: 'status' }));
 
   fireEvent.change(screen.getByLabelText('intervalSec'), { target: { value: '5' } });
   fireEvent.change(screen.getByLabelText('maxStepsPerTick'), { target: { value: '10' } });
   fireEvent.change(screen.getByLabelText('persistEveryTicks'), { target: { value: '3' } });
+  fireEvent.change(screen.getByLabelText('deliberateMaxTokens'), { target: { value: '64' } });
   fireEvent.click(screen.getByRole('button', { name: '配置' }));
-  await waitFor(() => expect(api.autonomyLoop).toHaveBeenCalledWith({ action: 'configure', intervalSec: 5, maxStepsPerTick: 10, persistEveryTicks: 3 }));
+  await waitFor(() => expect(api.autonomyLoop).toHaveBeenCalledWith({ action: 'configure', intervalSec: 5, maxStepsPerTick: 10, deliberateMaxTokens: 64, persistEveryTicks: 3 }));
 
   fireEvent.click(screen.getByRole('button', { name: '启动' }));
   await waitFor(() => expect(api.autonomyLoop).toHaveBeenCalledWith({ action: 'start' }));
@@ -159,6 +168,7 @@ test('estop requires confirmation and sends the reason', async () => {
   const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
 
   render(<MissionPanel onError={jest.fn()} />);
+  openMissionTab('干预控制');
   fireEvent.change(screen.getByLabelText('急停原因'), { target: { value: '行为越界' } });
   fireEvent.click(screen.getByRole('button', { name: '急停' }));
 

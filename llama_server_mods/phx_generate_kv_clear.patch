@@ -1,0 +1,29 @@
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -4369,6 +4369,13 @@
+             stop_token_ids.push_back(eos);
+         }
+ 
++        // Fresh KV for every /phx/generate: without this, the second request
++        // hits llama_decode ret=1 (no free KV slot) after the first fill.
++        {
++            std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
++            llama_kv_cache_clear(ctx_server.ctx);
++        }
++
+         // --- encode prompt into hidden states ---
+         int32_t n_prompt_tokens = 0;
+         std::vector<float> prompt_hidden;
+@@ -4412,6 +4419,11 @@
+             if (n_prompt_tokens == 0) {
+                 res_error(res, format_error_response("no tokens to encode", ERROR_TYPE_INVALID_REQUEST));
+                 return;
+             }
++            if (n_prompt_tokens + max_tokens > n_ctx) {
++                res_error(res, format_error_response(
++                    "prompt tokens + max_tokens exceed context size", ERROR_TYPE_INVALID_REQUEST));
++                return;
++            }
+             prompt_hidden.resize((size_t) n_prompt_tokens * n_embd);
+             int32_t ret;
+             {

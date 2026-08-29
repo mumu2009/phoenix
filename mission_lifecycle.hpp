@@ -172,6 +172,7 @@ class MissionLifecycle {
   /** v8.0 mission worker: append the LLM-produced work product (capped at
       4 MiB) so the human supervisor can read and judge the deliverable. */
   void appendDeliverable(const std::string &text);
+  void setDeliverable(const std::string &text);
 
   /** @brief Replicate: mutate THIS instance's genome and record a successor
       bound to the current goal.  Returns the child genome.  Throws

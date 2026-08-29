@@ -1,0 +1,106 @@
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -4458,27 +4458,85 @@
+             res_error(res, format_error_response("\"hidden\", \"tokens\" or \"content\" must be provided", ERROR_TYPE_INVALID_REQUEST));
+             return;
+         }
+ 
+-        // --- fuse GNN/memory prefix unit-queries (once per iteration) ---
+-        if (!prefix_hidden_rows.empty()) {
+-            for (const auto & row : prefix_hidden_rows) {
+-                if ((int32_t) row.size() != n_embd) {
+-                    res_error(res, format_error_response(
+-                        "each \"prefix_hidden\" row must have n_embd floats", ERROR_TYPE_INVALID_REQUEST));
+-                    return;
+-                }
+-            }
+-            const int32_t n_prefix = (int32_t) prefix_hidden_rows.size();
+-            std::vector<float> fused((size_t)(n_prefix + n_prompt_tokens) * n_embd);
+-            for (int32_t i = 0; i < n_prefix; i++) {
+-                std::copy(prefix_hidden_rows[i].begin(), prefix_hidden_rows[i].end(),
+-                          fused.begin() + (size_t) i * n_embd);
++        // Side streams stay in tok_embd (E). Encoded here so the client
++        // never ships n_tokens*n_embd floats. Order: context UQ, gnn UQ,
++        // optional prefix_hidden, then prompt tokens.
++        auto encode_side_text = [&](const std::string & text, const char * name,
++                                    std::vector<float> & out_hidden, int32_t & out_n) -> bool {
++            out_n = 0;
++            out_hidden.clear();
++            if (text.empty()) return true;
++            const llama_tokens tokens = tokenize_mixed(ctx_server.vocab, text, false, true);
++            out_n = (int32_t) tokens.size();
++            if (out_n <= 0) {
++                out_n = 0;
++                return true;
+             }
+-            std::copy(prompt_hidden.begin(), prompt_hidden.end(),
+-                      fused.begin() + (size_t) n_prefix * n_embd);
+-            prompt_hidden = std::move(fused);
+-            n_prompt_tokens += n_prefix;
++            out_hidden.resize((size_t) out_n * n_embd);
++            int32_t side_ret;
++            {
++                std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
++                side_ret = llama_phx_encode(ctx_server.ctx, tokens.data(), out_n, out_hidden.data());
++            }
++            if (side_ret != 0) {
++                res_error(res, format_error_response(
++                    std::string("llama_phx_encode failed for ") + name, ERROR_TYPE_SERVER));
++                return false;
++            }
++            return true;
++        };
++
++        std::vector<float> context_hidden;
++        std::vector<float> gnn_hidden;
++        int32_t n_context = 0;
++        int32_t n_gnn = 0;
++        if (!encode_side_text(json_value(body, "context_content", std::string()),
++                              "context_content", context_hidden, n_context)) {
++            return;
++        }
++        if (!encode_side_text(json_value(body, "gnn_content", std::string()),
++                              "gnn_content", gnn_hidden, n_gnn)) {
++            return;
++        }
++
++        for (const auto & row : prefix_hidden_rows) {
++            if ((int32_t) row.size() != n_embd) {
++                res_error(res, format_error_response(
++                    "each \"prefix_hidden\" row must have n_embd floats", ERROR_TYPE_INVALID_REQUEST));
++                return;
++            }
++        }
++        const int32_t n_prefix = (int32_t) prefix_hidden_rows.size();
++        const int32_t n_sides = n_context + n_gnn + n_prefix;
++        if (n_sides + n_prompt_tokens + max_tokens > n_ctx) {
++            res_error(res, format_error_response(
++                "context/gnn/prompt tokens + max_tokens exceed context size", ERROR_TYPE_INVALID_REQUEST));
++            return;
++        }
++        if (n_sides > 0) {
++            std::vector<float> fused((size_t)(n_sides + n_prompt_tokens) * n_embd);
++            int32_t off = 0;
++            if (n_context > 0) {
++                std::copy(context_hidden.begin(), context_hidden.end(),
++                          fused.begin() + (size_t) off * n_embd);
++                off += n_context;
++            }
++            if (n_gnn > 0) {
++                std::copy(gnn_hidden.begin(), gnn_hidden.end(),
++                          fused.begin() + (size_t) off * n_embd);
++                off += n_gnn;
++            }
++            for (int32_t i = 0; i < n_prefix; i++) {
++                std::copy(prefix_hidden_rows[i].begin(), prefix_hidden_rows[i].end(),
++                          fused.begin() + (size_t)(off + i) * n_embd);
++            }
++            off += n_prefix;
++            std::copy(prompt_hidden.begin(), prompt_hidden.end(),
++                      fused.begin() + (size_t) off * n_embd);
++            prompt_hidden = std::move(fused);
++            n_prompt_tokens += n_sides;
+         }
+ 
+         // --- prime KV cache with prompt ---
+         std::vector<llama_pos> prompt_positions(n_prompt_tokens);

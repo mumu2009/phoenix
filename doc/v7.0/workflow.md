@@ -1350,8 +1350,9 @@ flowchart TB
 
 **说明**：
 
-- 启动时 `ensure_wikitext.py` 会在 `robots/wikitext-103-all.txt` 缺失时自动从官方 `wikitext-103-raw-v1.zip` 下载并合并。
-- `TorchTextModels::initFromCorpus` 优先读取 `wikitext-103-all.txt` 的前 `context.torch.pretrainLines` 行（默认 2000）对 RNN/LSTM 做预训练，再读取 `robotsDir` 下其他 `.txt` 文件做补充。
+- 启动时 `ensure_wikitext.py` 会在 `robots/wikitext-103-all.txt` 缺失时自动从官方 `wikitext-103-raw-v1.zip` 下载并合并（主机侧；RDK 请把已有文件放到 `robots/`，不要在板端现下 500MB）。
+- **Live（RDK / phoenix_main）**：`GatewayServer::seedGnnGraphFromRobotsCorpus` 在启动线程（`main.inference.gnnBootstrap` / `learningWarmup`）优先读 `wikitext-103-all.txt`，否则 `wikitext-101-all.txt`，再否则 `robots/*.txt`。同一批 unit 写入：(1) MemeGraph `ingestDocument`，(2) CCM + HierarchicalMemory，(3) `EmotionSystem::processMessage` + Novelty sensation。`disableLearning` **不再**跳过这条语料预训练（它只关 RL/ADV/GNN-GA）。成功后写 `mission.corpusPretrainStamp`；有戳才跳过，**不是**「图里已有 16 个节点」。日志前缀 `[corpus-pretrain]`。
+- `TorchTextModels::initFromCorpus`（frontend / `HAVE_TORCH`）仍按 `context.torch.pretrainLines`（默认 2000）做 RNN/LSTM；RDK 交叉编译通常无 Torch，以网关语料预训练为准。
 - `SummaryModel` 通过 `summary_model.useTinyllama` 开关决定走 TinyLlama 还是本地 seq2seq；默认启用 TinyLlama。
 
 ---

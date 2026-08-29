@@ -70,6 +70,48 @@ public:
 
   Stats getStats() const { return stats_; }
 
+  struct Inspect {
+    bool blocked{false};
+    std::string reason;
+  };
+
+  /** Safety intercept only. Style / format / knowledge are not blocked. */
+  Inspect inspectText(const std::string &text) const {
+    Inspect out;
+    if (text.empty())
+      return out;
+    if (text.find("BEGIN PRIVATE KEY") != std::string::npos ||
+        text.find("BEGIN RSA PRIVATE KEY") != std::string::npos ||
+        text.find("BEGIN OPENSSH PRIVATE KEY") != std::string::npos ||
+        text.find("BEGIN EC PRIVATE KEY") != std::string::npos) {
+      out.blocked = true;
+      out.reason = "secret-material";
+      return out;
+    }
+    try {
+      const auto tokens = tokenize(text);
+      const auto hit = phraseBlocklist_.matchTokens(tokens);
+      if (hit.blocked) {
+        out.blocked = true;
+        out.reason = "blocklist";
+        return out;
+      }
+    } catch (...) {
+    }
+    return out;
+  }
+
+  bool isIsolated(const std::string &memeId) const {
+    if (!runtime_ || memeId.empty())
+      return false;
+    try {
+      const auto meta = runtime_->graph().getMeta(memeId);
+      return meta.value("isolated", false);
+    } catch (...) {
+      return false;
+    }
+  }
+
 private:
   struct NodeStats {
     int degree{0};
@@ -101,6 +143,8 @@ private:
   double disableRateTarget_{phoenix::cfg<double>("memebarrier.disableRateTarget")};
   int recommenderTopics_{phoenix::cfg<int>("memebarrier.recommenderTopics")};
   int recommenderDim_{phoenix::cfg<int>("memebarrier.recommenderDim")};
+  mutable memebarrier_phrase_blocklist::Store phraseBlocklist_{
+      "runtime_store/memebarrier_phrase_blocklist.json"};
   std::once_flag recommenderInit_;
   std::vector<std::vector<float>> topicVectors_;
   std::unordered_map<std::string, int> corpusFreq_;
@@ -724,27 +768,35 @@ private:
 
   bool isolateMeme(const std::string &memeId, double score,
                    const std::string &reason) {
-    if (!runtime_)
+    if (!runtime_ || memeId.empty())
       return false;
-    int cut = runtime_->graph().removeOutgoingEdges(memeId);
-    if (cut > 0) {
-      stats_.isolated++;
-      json item{{"memeID", memeId},
-                {"score", score},
-                {"reason", reason},
-                {"cut", cut}};
-      stats_.lastIsolated.insert(stats_.lastIsolated.begin(), item);
-      if (stats_.lastIsolated.size() > 20)
-        stats_.lastIsolated.resize(20);
-      auto &logger = LoggerCXX::instance();
-      if (logger.enabled())
-        logger.log(LoggerCXX::Type::MONITORING,
-                   std::string("memebarrier blocked meme=") + memeId +
-                       " score=" + std::to_string(score) +
-                       " cut=" + std::to_string(cut) + " reason=" + reason);
-      return true;
+    int cut = 0;
+    try {
+      cut = runtime_->graph().removeOutgoingEdges(memeId);
+      json meta = runtime_->graph().getMeta(memeId);
+      meta["isolated"] = true;
+      meta["isolatedScore"] = score;
+      meta["isolatedReason"] = reason;
+      meta["isolatedAt"] = nowEpochMs();
+      runtime_->graph().setMeta(memeId, meta);
+    } catch (...) {
+      return false;
     }
-    return false;
+    stats_.isolated++;
+    json item{{"memeID", memeId},
+              {"score", score},
+              {"reason", reason},
+              {"cut", cut}};
+    stats_.lastIsolated.insert(stats_.lastIsolated.begin(), item);
+    if (stats_.lastIsolated.size() > 20)
+      stats_.lastIsolated.resize(20);
+    auto &logger = LoggerCXX::instance();
+    if (logger.enabled())
+      logger.log(LoggerCXX::Type::MONITORING,
+                 std::string("memebarrier isolated meme=") + memeId +
+                     " score=" + std::to_string(score) +
+                     " cut=" + std::to_string(cut) + " reason=" + reason);
+    return true;
   }
 
   void scanNetwork() {
@@ -798,6 +850,12 @@ private:
     std::vector<double> scoreValues;
     scoreValues.reserve(points.size());
     for (auto &id : points) {
+      try {
+        const auto meta = runtime_->graph().getMeta(id);
+        if (meta.value("isolated", false))
+          continue;
+      } catch (...) {
+      }
       const auto &ns = nodeStats[id];
       double s = evaluateCompositeScore(id, ns, avgDeg, avgOut, stdDeg, stdOut);
       scored.push_back(Scored{id, s, generateReason(id, s)});

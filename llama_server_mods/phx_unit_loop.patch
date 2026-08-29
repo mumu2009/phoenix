@@ -1,0 +1,106 @@
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -4358,6 +4358,23 @@
+         const bool return_hidden = json_value(body, "return_hidden", true);
+         const bool decode_text   = json_value(body, "decode_text", true);
++        /* loop_mode: "unit" = enc->(memory/gnn modulate)->infer, per step
++         *             infer->dec + matrix feedback (see feedback_mode);
++         * "token" = legacy dec->enc->infer;
++         * "hidden" = alias for unit + hidden feedback (compat). */
++        const std::string loop_mode = json_value(body, "loop_mode", std::string("unit"));
++        const std::string feedback_mode = json_value(body, "feedback_mode", std::string("hidden"));
++        const bool dec_enc_feedback =
++            (feedback_mode == "dec_enc" || feedback_mode == "token" ||
++             loop_mode == "token");
++
++        // Optional memory/gnn unit rows — fused once per iteration after enc
++        std::vector<std::vector<float>> prefix_hidden_rows;
++        if (body.contains("prefix_hidden") && body.at("prefix_hidden").is_array()) {
++            for (const auto & row : body.at("prefix_hidden")) {
++                if (!row.is_array()) continue;
++                prefix_hidden_rows.push_back(row.get<std::vector<float>>());
++            }
++        }
+         std::vector<llama_token> stop_token_ids;
+         if (body.contains("stop_token_ids") && body.at("stop_token_ids").is_array()) {
+             stop_token_ids = body.at("stop_token_ids").get<std::vector<llama_token>>();
+@@ -4453,6 +4470,25 @@
+             return;
+         }
+ 
++        // --- fuse GNN/memory prefix unit-queries (once per iteration) ---
++        if (!prefix_hidden_rows.empty()) {
++            for (const auto & row : prefix_hidden_rows) {
++                if ((int32_t) row.size() != n_embd) {
++                    res_error(res, format_error_response(
++                        "each \"prefix_hidden\" row must have n_embd floats", ERROR_TYPE_INVALID_REQUEST));
++                    return;
++                }
++            }
++            const int32_t n_prefix = (int32_t) prefix_hidden_rows.size();
++            std::vector<float> fused((size_t)(n_prefix + n_prompt_tokens) * n_embd);
++            for (int32_t i = 0; i < n_prefix; i++) {
++                std::copy(prefix_hidden_rows[i].begin(), prefix_hidden_rows[i].end(),
++                          fused.begin() + (size_t) i * n_embd);
++            }
++            std::copy(prompt_hidden.begin(), prompt_hidden.end(),
++                      fused.begin() + (size_t) n_prefix * n_embd);
++            prompt_hidden = std::move(fused);
++            n_prompt_tokens += n_prefix;
++        }
++
+         // --- prime KV cache with prompt ---
+         std::vector<llama_pos> prompt_positions(n_prompt_tokens);
+         for (int32_t i = 0; i < n_prompt_tokens; i++) {
+@@ -4578,6 +4614,8 @@
+         std::vector<float> infer_out(n_embd);
+         std::vector<llama_pos> gen_pos(1);
+ 
++        const bool unit_loop =
++            (loop_mode == "unit" || loop_mode == "hidden");
++
+         {
+             std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
+             for (int32_t step = 0; step < max_tokens; ++step) {
+@@ -4600,20 +4638,28 @@
+                     generated_hidden.push_back(last_hidden);
+                 }
+ 
+-                // enc: token -> embedding (unit query for next infer step)
+-                int32_t enc_ret = llama_phx_encode(ctx_server.ctx, &tok, 1, embd.data());
+-                if (enc_ret != 0) {
+-                    res_error(res, format_error_response("llama_phx_encode failed", ERROR_TYPE_SERVER));
+-                    return;
+-                }
+-
+-                // infer: unit query -> unit query
+                 gen_pos[0] = n_prompt_tokens + step;
+-                int32_t infer_ret = llama_phx_infer(ctx_server.ctx, embd.data(), 1, gen_pos.data(), infer_out.data());
+-                if (infer_ret != 0) {
+-                    res_error(res, format_error_response("llama_phx_infer failed", ERROR_TYPE_SERVER));
+-                    return;
++                if (unit_loop && !dec_enc_feedback) {
++                    int32_t infer_ret = llama_phx_infer(ctx_server.ctx, last_hidden.data(), 1,
++                                                        gen_pos.data(), infer_out.data());
++                    if (infer_ret != 0) {
++                        res_error(res, format_error_response("llama_phx_infer (hidden feedback) failed", ERROR_TYPE_SERVER));
++                        return;
++                    }
++                    std::copy(infer_out.begin(), infer_out.begin() + n_embd, last_hidden.begin());
++                } else {
++                    int32_t enc_ret = llama_phx_encode(ctx_server.ctx, &tok, 1, embd.data());
++                    if (enc_ret != 0) {
++                        res_error(res, format_error_response("llama_phx_encode failed", ERROR_TYPE_SERVER));
++                        return;
++                    }
++                    int32_t infer_ret = llama_phx_infer(ctx_server.ctx, embd.data(), 1, gen_pos.data(), infer_out.data());
++                    if (infer_ret != 0) {
++                        res_error(res, format_error_response("llama_phx_infer failed", ERROR_TYPE_SERVER));
++                        return;
++                    }
++                    std::copy(infer_out.begin(), infer_out.begin() + n_embd, last_hidden.begin());
+                 }
+-
+-                std::copy(infer_out.begin(), infer_out.begin() + n_embd, last_hidden.begin());
+             }
+         }

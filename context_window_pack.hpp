@@ -1,12 +1,17 @@
-/* context_window_pack.hpp - sliding-window prompt packing with pinned summaries
+/* context_window_pack.hpp - sliding-window packing with pinned summaries
 
-   Packs long mission/chat context into a fixed token budget:
-     [optional GNN summary | pinned] [text summary | pinned] [recent full | sliding]
+   Two streams (do not concatenate onto one causal blob):
+     causal: recent full text (sliding) — continuation chain
+     rag:    pinned extractive summary of the dropped head + optional GNN text
+
+   N-gram merge (2-3 token rows -> one unit) multiplies how much recent
+   text fits in the same KV slots. Summaries stay RAG and do not consume
+   causal positions.
 
    Modes:
-     - "summary"          : mostly summary + a small recent window
-     - "full_and_summary" : pinned summary of dropped head + as much recent full
-                            text as fits in the remaining budget
+     - "summary"          : mostly summary (RAG) + a small recent window
+     - "full_and_summary" : pinned summary of dropped head + as much recent
+                            full text as fits in the causal budget
 */
 #pragma once
 
@@ -25,16 +30,21 @@ struct PackOptions {
   bool includeGnnSummary{false};
   int ctxTokens{4096};          /* 4096 or 16384 typical */
   int replyReserveTokens{512};  /* leave room for model output */
-  int summaryBudgetTokens{512}; /* pinned summary slot */
-  int gnnBudgetTokens{256};     /* pinned GNN slot when enabled */
-  int overheadTokens{256};      /* goal/tools/instructions overhead */
+  int summaryBudgetTokens{512}; /* pinned summary slot (RAG) */
+  int gnnBudgetTokens{256};     /* pinned GNN slot when enabled (RAG) */
+  int overheadTokens{256};      /* pin / template overhead on causal */
+  int ngramMerge{2};            /* 0/1 = off; 2 or 3 = unit compaction */
 };
 
 struct PackResult {
-  std::string packed;
+  std::string packed;         /* legacy concat; do not put on causal tail */
+  std::string recentFull;     /* causal short-term / resume source */
+  std::string pinnedSummary;  /* RAG: dropped-head extractive */
+  std::string gnnPinned;      /* RAG: GNN text if any */
   size_t estimatedTokens{0};
   size_t fullCharsUsed{0};
   size_t droppedChars{0};
+  size_t causalTokenBudget{0};
   bool usedSummary{false};
   bool usedGnn{false};
 };
@@ -84,76 +94,68 @@ inline std::string fitTokensHead(const std::string &s, size_t budgetTokens) {
 }
 
 /**
- * Pack full text (+ optional GNN summary) into a sliding window under ctx.
- *
- * Layout (fixed prefix, sliding suffix):
- *   === GNN summary (pinned) ===
- *   === Context summary (pinned) ===
- *   === Recent full text (sliding) ===
+ * Split full text (+ optional GNN summary) into causal recent + RAG pins.
+ * Causal budget uses n-gram compaction: 4096 slots * ngram=2 ≈ 8k tokens
+ * of recent draft. Pinned summaries never occupy those slots.
  */
 inline PackResult packContext(const std::string &fullText,
                               const std::string &gnnSummary,
                               const PackOptions &opt) {
   PackResult out;
-  const int usable = std::max(256, opt.ctxTokens - opt.replyReserveTokens - opt.overheadTokens);
-  size_t remaining = static_cast<size_t>(usable);
+  const int ngram = (opt.ngramMerge >= 2) ? std::min(opt.ngramMerge, 3) : 1;
+  const int usableSlots =
+      std::max(256, opt.ctxTokens - opt.replyReserveTokens - opt.overheadTokens);
+  const size_t causalBudget =
+      static_cast<size_t>(usableSlots) * static_cast<size_t>(ngram);
+  out.causalTokenBudget = causalBudget;
   std::ostringstream body;
 
-  std::string gnn;
   if (opt.includeGnnSummary && !gnnSummary.empty()) {
-    gnn = fitTokensHead(gnnSummary, static_cast<size_t>(std::max(32, opt.gnnBudgetTokens)));
-    if (estimateTokens(gnn) > remaining / 2)
-      gnn = fitTokensHead(gnn, remaining / 2);
-    if (!gnn.empty()) {
-      body << "=== GNN summary (pinned) ===\n" << gnn << "\n\n";
-      remaining -= std::min(remaining, estimateTokens(gnn) + 12);
+    out.gnnPinned = fitTokensHead(
+        gnnSummary, static_cast<size_t>(std::max(32, opt.gnnBudgetTokens)));
+    if (!out.gnnPinned.empty()) {
+      body << "=== GNN summary (pinned) ===\n" << out.gnnPinned << "\n\n";
       out.usedGnn = true;
     }
   }
 
-  const bool wantSummary = (opt.mode == "summary" || opt.mode == "full_and_summary");
-  size_t summaryBudget = static_cast<size_t>(std::max(64, opt.summaryBudgetTokens));
-  if (opt.mode == "summary") {
-    /* summary mode: give most of the remaining budget to the summary */
-    summaryBudget = std::max(summaryBudget, remaining * 2 / 3);
-  } else {
-    summaryBudget = std::min(summaryBudget, remaining / 3);
+  const bool wantSummary =
+      (opt.mode == "summary" || opt.mode == "full_and_summary");
+  size_t recentBudget = causalBudget;
+  if (opt.mode == "summary")
+    recentBudget = std::max(static_cast<size_t>(64), causalBudget / 3);
+
+  if (!fullText.empty() && recentBudget > 0) {
+    out.recentFull = fitTokensTail(fullText, recentBudget);
+    out.fullCharsUsed = out.recentFull.size();
+    if (fullText.size() > out.recentFull.size())
+      out.droppedChars = fullText.size() - out.recentFull.size();
+    body << "=== Recent full text (sliding window) ===\n"
+         << out.recentFull << "\n";
   }
 
-  std::string summary;
-  if (wantSummary && !fullText.empty()) {
-    summary = extractiveSummary(fullText, summaryBudget);
-    if (!summary.empty()) {
-      body << "=== Context summary (pinned, global view) ===\n" << summary << "\n\n";
-      remaining -= std::min(remaining, estimateTokens(summary) + 16);
+  size_t summaryBudget = static_cast<size_t>(std::max(64, opt.summaryBudgetTokens));
+  if (opt.mode == "summary")
+    summaryBudget = std::max(summaryBudget, causalBudget * 2 / 3);
+  if (wantSummary && out.droppedChars > 0) {
+    const std::string droppedHead = takeHeadChars(fullText, out.droppedChars);
+    out.pinnedSummary = extractiveSummary(droppedHead, summaryBudget);
+    if (!out.pinnedSummary.empty()) {
+      body << "=== Context summary (pinned, global view) ===\n"
+           << out.pinnedSummary << "\n\n";
+      out.usedSummary = true;
+    }
+  } else if (wantSummary && !fullText.empty() && opt.mode == "summary") {
+    out.pinnedSummary = extractiveSummary(fullText, summaryBudget);
+    if (!out.pinnedSummary.empty()) {
+      body << "=== Context summary (pinned, global view) ===\n"
+           << out.pinnedSummary << "\n\n";
       out.usedSummary = true;
     }
   }
 
-  if (opt.mode == "full_and_summary" || opt.mode == "summary") {
-    /* Sliding recent full text in the leftover budget.
-       summary mode keeps a smaller recent window so the model still sees
-       the latest concrete wording. */
-    size_t recentBudget = remaining;
-    if (opt.mode == "summary")
-      recentBudget = std::min(remaining, remaining / 3 + 64);
-    if (recentBudget > 32 && !fullText.empty()) {
-      const std::string recent = fitTokensTail(fullText, recentBudget);
-      body << "=== Recent full text (sliding window) ===\n" << recent << "\n";
-      out.fullCharsUsed = recent.size();
-      if (fullText.size() > recent.size())
-        out.droppedChars = fullText.size() - recent.size();
-      remaining -= std::min(remaining, estimateTokens(recent) + 12);
-    }
-  } else {
-    /* unknown mode: fall back to tail-only */
-    const std::string recent = fitTokensTail(fullText, remaining);
-    body << recent;
-    out.fullCharsUsed = recent.size();
-  }
-
   out.packed = body.str();
-  out.estimatedTokens = estimateTokens(out.packed);
+  out.estimatedTokens = estimateTokens(out.recentFull);
   return out;
 }
 
@@ -178,6 +180,12 @@ inline PackOptions optionsFromJson(const nlohmann::json &j, const PackOptions &d
     if (c > 32768) c = 32768;
     o.ctxTokens = c;
   }
+  if (j.contains("ngramMerge") && j["ngramMerge"].is_number_integer())
+    o.ngramMerge = j["ngramMerge"].get<int>();
+  if (j.contains("ngram_merge") && j["ngram_merge"].is_number_integer())
+    o.ngramMerge = j["ngram_merge"].get<int>();
+  if (o.ngramMerge < 0) o.ngramMerge = 0;
+  if (o.ngramMerge > 3) o.ngramMerge = 3;
   /* Scale pinned/sliding budgets with ctx: 16k keeps summary + recent full. */
   if (o.ctxTokens >= 12000) {
     o.summaryBudgetTokens = std::max(o.summaryBudgetTokens, 1536);
