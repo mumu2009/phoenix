@@ -226,32 +226,11 @@ public:
               if (deliverable.size() > currentFile.size())
                 currentFile = deliverable;
 
-              /* Seed before pack. Packing an empty file made
-                 recentChars=0 and dropped the short-term window from
-                 the causal stream (2868973). No ChatML roles here —
-                 this is the document opening, not a user/assistant
-                 turn. */
-              bool seededEmpty = false;
-              if (currentFile.empty()) {
-                const std::string seed =
-                    phoenix::mission::formatEmptyFileSeed(goal);
-                if (!seed.empty()) {
-                  const auto wr = phoenix::mission::workspaceExecute(
-                      workspaceRoot, scope,
-                      nlohmann::json{{"action", "write"},
-                                     {"path", deliverablePath},
-                                     {"content", seed}});
-                  if (wr.value("ok", false)) {
-                    currentFile = seed;
-                    seededEmpty = true;
-                  }
-                }
-              }
+              const bool draftEmpty = currentFile.empty();
 
-              /* Two infer streams: causal = pin + working brief + draft
-                 tail (resume); RAG = memory/GNN unit-query sequences as
-                 residual emphasis. They are not concatenated onto the
-                 causal tail. */
+              /* Causal has word order: first-layer working brief +
+                 packContext recent draft. RAG (memory/GNN/search) only
+                 hints; it does not write the file. */
               std::vector<phoenix::inference::UnitQueryIO> missionMemorySnippets;
               std::vector<phoenix::inference::UnitQueryIO> missionGnnPkts;
               const bool unitPipelineEnabled =
@@ -277,9 +256,7 @@ public:
               const std::string packedBody = packed.packed;
               const std::string recallDraft = packed.recentFull.empty()
                   ? currentFile : packed.recentFull;
-              const bool pinOnly =
-                  phoenix::mission::deliverableIsOnlyPin(currentFile, goal) ||
-                  seededEmpty;
+              const bool pinOnly = draftEmpty;
               /* GNN pretrain gap: empty meme graph => empty diffusion prior.
                  Graph the same recent window infer sees, not a 2k tail and
                  not the human assignment. Pin-only is not a draft to graph. */
@@ -366,7 +343,7 @@ public:
               std::string goalClip = goal;
               {
                 const size_t goalMax =
-                    phoenix::cfgOr<size_t>("mission.goalClipChars", 8000);
+                    phoenix::cfgOr<size_t>("mission.goalClipChars", 16000);
                 if (goalClip.size() > goalMax)
                   goalClip = phoenix::mission::clipGoalKeepRequiredStructure(
                       goalClip, goalMax);
@@ -383,12 +360,11 @@ public:
                     missionMemorySnippets, packed.gnnPinned, "text");
               (void)packedBody;
 
-              /* Do not dump the human assignment (Required Chapters / SRS
-                 headings) into the chat system turn. That framed each tick
-                 as "answer the brief" and the 8B recopied Background
-                 Assumptions / Testing and Validation. Facts live in the
-                 seed + pin; the file tail is the continuation. */
-              std::string staticPrompt;
+              /* Working brief is first-layer recent context (word order).
+                 Catalog / appendix stay out of this prefix so the tip
+                 is not a chapter table. Full assignment is RAG hint. */
+              std::string staticPrompt =
+                  phoenix::mission::extractGoalWorkingContext(goalClip);
               {
                 const std::string expPath = phoenix::resolveConfig<std::string>(
                     "mission.experiencePath",
@@ -425,14 +401,13 @@ public:
                 } catch (...) {
                 }
                 }
-                /* Assignment is RAG emphasis after a real draft exists.
-                   On a pin-only first tick the working brief is already
-                   in the causal prefix; dumping Required Chapters as RAG
-                   framed the tick as "answer the exam". */
-                if (!pinOnly) {
+                /* Full assignment / catalog / tools: RAG hint only.
+                   They do not replace the causal recent window. */
+                {
+                const std::string brief = goalClip;
                 const size_t memBefore = missionMemorySnippets.size();
                 phoenix::inference::appendUnitQueriesFromParagraphs(
-                    missionMemorySnippets, goalClip, "text");
+                    missionMemorySnippets, brief, "text");
                 const size_t goalCap = 24;
                 if (missionMemorySnippets.size() > memBefore + goalCap)
                   missionMemorySnippets.resize(memBefore + goalCap);
@@ -459,6 +434,110 @@ public:
                     phoenix::inference::appendUnitQueriesFromParagraphs(
                         missionMemorySnippets, health, "text");
                 }
+                /* Plugins self-select. Host broadcasts the situation;
+                   each installed addon understands it and may contribute
+                   text or unit-query packets. Both become unit queries
+                   on the RAG stream. They are not a third protocol and
+                   they are not concatenated onto the causal prefix. */
+                if (phoenix::cfgOr<bool>("mission.pluginOffers", true) &&
+                    !goal.empty()) {
+                  try {
+                    auto rt = activeRuntime();
+                    auto st =
+                        rt ? std::dynamic_pointer_cast<RuntimeState>(rt)
+                           : nullptr;
+                    if (st) {
+                      const int seeded = st->ensureSearchIndexSeeded(
+                          phoenix::cfgOr<int>("mission.pluginSearchDocs",
+                                             64));
+                      nlohmann::json sit;
+                      sit["phase"] = "mission-deliberate";
+                      sit["goal"] = goal;
+                      sit["draft"] = currentFile;
+                      sit["allowWeb"] = phoenix::cfgOr<bool>(
+                          "mission.pluginSearchWeb", true);
+                      sit["allowIndex"] = true;
+                      sit["pinOnly"] = pinOnly;
+                      const auto offers = st->collectAddonOffers(sit);
+                      std::string srcAll;
+                      std::string names;
+                      size_t pluginUnits = 0;
+                      for (const auto &off : offers) {
+                        if (!names.empty()) names += ",";
+                        names += off.name;
+                        const std::string src =
+                            off.result.meta.value("source", std::string());
+                        if (!src.empty() &&
+                            srcAll.find(src) == std::string::npos) {
+                          if (!srcAll.empty()) srcAll += "+";
+                          srcAll += src;
+                        }
+                        if (off.result.meta.contains("results") &&
+                            off.result.meta["results"].is_array()) {
+                          for (const auto &hit : off.result.meta["results"]) {
+                            if (!hit.is_object()) continue;
+                            const std::string url =
+                                hit.value("url", std::string());
+                            const std::string title =
+                                hit.value("title", std::string());
+                            const std::string snip =
+                                hit.value("snippet", std::string());
+                            if (snip.size() < 40) continue;
+                            if (url.rfind("http://", 0) == 0 ||
+                                url.rfind("https://", 0) == 0)
+                              st->indexSearchDocument(url, title.empty()
+                                                               ? url
+                                                               : title,
+                                                      snip);
+                          }
+                        }
+                        const size_t before = missionMemorySnippets.size();
+                        if (off.result.units.is_array() &&
+                            !off.result.units.empty()) {
+                          phoenix::inference::appendUnitQueriesFromJsonArray(
+                              missionMemorySnippets, off.result.units);
+                        }
+                        pluginUnits +=
+                            missionMemorySnippets.size() - before;
+                        if (config_.httpLog)
+                          std::cout
+                              << "[mission-deliberate] plugin-offer name="
+                              << off.name << " score=" << off.score
+                              << " src="
+                              << (src.empty() ? std::string("-") : src)
+                              << " units="
+                              << (missionMemorySnippets.size() - before)
+                              << " reply=" << off.result.reply.size()
+                              << std::endl;
+                      }
+                      if (config_.httpLog && seeded > 0)
+                        std::cout
+                            << "[mission-deliberate] plugin-index seeded="
+                            << seeded << std::endl;
+                      if (config_.httpLog && !offers.empty()) {
+                        std::cout
+                            << "[mission-deliberate] plugin-offers who="
+                            << names << " src="
+                            << (srcAll.empty() ? std::string("-") : srcAll)
+                            << " pluginUnits=" << pluginUnits
+                            << " memUnits=" << missionMemorySnippets.size()
+                            << std::endl;
+                      } else if (config_.httpLog && offers.empty()) {
+                        std::cout
+                            << "[mission-deliberate] plugin-offers none"
+                            << std::endl;
+                      }
+                    }
+                  } catch (const std::exception &ex) {
+                    if (config_.httpLog)
+                      std::cout << "[mission-deliberate] plugin-offers error "
+                                << ex.what() << std::endl;
+                  } catch (...) {
+                    if (config_.httpLog)
+                      std::cout << "[mission-deliberate] plugin-offers error"
+                                << std::endl;
+                  }
+                }
                 /* C1: the model's own plan.md is RAG emphasis, not a
                    [NEXT] block on the causal stream. Resume stays the
                    file tail. Skip on pin-only — there is no draft yet. */
@@ -469,8 +548,8 @@ public:
                                      {"path", "plan.md"}});
                   if (planRes.value("ok", false)) {
                     std::string plan = planRes.value("content", std::string());
-                    if (plan.size() > 800)
-                      plan = plan.substr(plan.size() - 800);
+                    if (plan.size() > 2400)
+                      plan = plan.substr(plan.size() - 2400);
                     if (!plan.empty())
                       phoenix::inference::appendUnitQuery(
                           missionMemorySnippets,
@@ -491,7 +570,7 @@ public:
                   {"presence_penalty",
                    phoenix::cfgOr<double>("mission.presencePenalty", 0.15)},
                   {"max_side_tokens",
-                   phoenix::cfgOr<int>("mission.maxSideTokens", 512)},
+                   phoenix::cfgOr<int>("mission.maxSideTokens", 768)},
                   {"timeoutMs", phoenix::cfgOr<int>("mission.llmTimeoutMs", 5400000)},
                   {"ctxTokenBudget", packOpt.ctxTokens},
                   {"stop", nlohmann::json::array({
@@ -510,6 +589,8 @@ public:
               opts = buildUnitPipelineOptions(nlohmann::json::object(),
                                               missionMemorySnippets,
                                               missionGnnPkts, scope, true, opts);
+              opts["rag_mix_cap"] =
+                  phoenix::cfgOr<int>("mission.ragMixCap", 384);
               if (!phoenix::cfgOr<bool>("mission.disableParallelDecode", true) &&
                   phoenix::cfgOr<bool>("llama.parallelDecode.enabled", false)) {
                 opts["n_parallel"] =
@@ -582,65 +663,42 @@ public:
                   phoenix::mission::applyEmotionSampling(
                       opts, esOpts, esTensor, pressure * 0.5f);
               }
-              /* Names only. "Output is deliverable.md" + helper-box
-                 copy made the 8B wrap ```markdown and invent
-                 "Helper boxes spawned / please merge". The file tail
-                 is the continuation; this prefix is operating facts. */
-              if (phoenix::cfgOr<bool>("mission.compactDeliberatorPrompt", true)) {
-                /* Facts only. A JSON tool schema in this prefix taught
-                   every tick that the output *is* write/run/script, and
-                   the 8B wrote a station-ops manual instead of the
-                   design document. Bare JSON still hits the tool path;
-                   do not advertise the schema on the causal stream. */
-                (void)toolHint;
-                staticPrompt +=
-                    phoenix::mission::formatGoalConstraintPin(goalClip);
-                staticPrompt +=
-                    phoenix::mission::extractGoalWorkingContext(goalClip);
-                if (pinOnly)
-                  staticPrompt +=
-                      phoenix::mission::extractGoalOpeningHeading(goalClip);
-              } else {
-                (void)toolHint;
-                staticPrompt +=
-                    phoenix::mission::formatGoalConstraintPin(goalClip);
-                staticPrompt +=
-                    phoenix::mission::extractGoalWorkingContext(goalClip);
-                if (pinOnly)
-                  staticPrompt +=
-                      phoenix::mission::extractGoalOpeningHeading(goalClip);
-                (void)isChildBox;
-              }
+              /* Causal I/O is the deliverable file. Assignment /
+                 plugin / memory / GNN are unit queries on RAG.
+                 Emotion is the matrix-control interface. */
+              (void)toolHint;
+              (void)isChildBox;
               if (pinOnly)
                 opts["repeat_penalty"] = 1.0;
-              /* Pressure stays on the sampling / loop side. Putting
-                 "p=0.xxx" in the prefix made the 8B write
-                 "probability of failure (p) is 0.000". */
-              /* Llama body is empty (no user turn). Draft tail is
-                 resume_suffix so n_resume is real. Pin-only has no tail. */
               std::string dynamicPrompt;
               (void)listClip;
               std::string resumeSuffix;
-              if (pinOnly || seededEmpty || currentFile.empty()) {
+              /* Resume is the recent draft (the window being continued).
+                 Empty draft: working brief on the prefix is the context. */
+              if (!draftEmpty) {
+                resumeSuffix = packed.recentFull.empty() ? currentFile
+                                                         : packed.recentFull;
+              }
+              if (draftEmpty) {
                 opts.erase("gnn_units");
                 opts.erase("gnn_content");
-                resumeSuffix = phoenix::mission::formatMissionResumeSuffix(
-                    currentFile, goalClip);
-              } else {
-                /* Do not put the model's own headings into llama stop.
-                   ### / ## already written then blocked every later tick
-                   (7159339: heading-cut kept=0 after tick 2). */
-                const std::string resumeSrc = packed.recentFull.empty()
-                    ? currentFile : packed.recentFull;
-                const size_t resumeN = std::max(
-                    resumeSrc.size(),
-                    static_cast<size_t>(std::max(
-                        200, phoenix::cfgOr<int>("mission.resumeChars", 720))));
-                resumeSuffix = phoenix::mission::formatMissionResumeSuffix(
-                    resumeSrc, goalClip, resumeN);
               }
               if (!resumeSuffix.empty())
                 opts["resume_suffix"] = resumeSuffix;
+              if (config_.httpLog) {
+                std::string tip = !resumeSuffix.empty() ? resumeSuffix
+                                                        : staticPrompt;
+                if (tip.size() > 160) tip = tip.substr(tip.size() - 160);
+                for (char &c : tip) {
+                  if (c == '\n' || c == '\r') c = ' ';
+                }
+                std::cout << "[mission-deliberate] causalStaticLen="
+                          << staticPrompt.size()
+                          << " causalTokBudget=" << packed.causalTokenBudget
+                          << " recentChars=" << packed.fullCharsUsed
+                          << " tip=" << tip
+                          << std::endl;
+              }
               if (config_.httpLog) {
                 std::string msnId = scope;
                 const auto spP = msnId.find("/children/");
@@ -710,7 +768,8 @@ public:
                   }
                 }
               }
-              /* v8.x B1: attached images (encoded to concept notes) */
+              /* Image concept notes and helper-box ids are units, not
+                 a second text dump on the causal document. */
               {
                 const auto attRes = phoenix::mission::workspaceExecute(
                     workspaceRoot, scope,
@@ -723,24 +782,25 @@ public:
                   if (!att.is_discarded() && att.is_object() &&
                       att.contains("images") && att["images"].is_array() &&
                       !att["images"].empty()) {
-                    staticPrompt += "[image-context] attached images (concept):\n";
+                    std::string blob;
                     for (const auto &img : att["images"]) {
-                      staticPrompt += "- " + img.value("file", std::string()) +
-                                ": " + img.value("concept", std::string()) +
-                                "\n";
+                      if (!blob.empty()) blob += "\n";
+                      blob += img.value("file", std::string()) + ": " +
+                              img.value("concept", std::string());
                     }
-                    staticPrompt += "\n";
+                    if (!blob.empty()) {
+                      const auto pkt = phoenix::inference::unitQueryIOToJson(
+                          phoenix::inference::unitQueryFromText(blob, "text"));
+                      if (!opts.contains("context_units") ||
+                          !opts["context_units"].is_array())
+                        opts["context_units"] = nlohmann::json::array();
+                      opts["context_units"].push_back(pkt);
+                    }
                   }
                 }
               }
-              /* Resume is the file tail only. Headings / plan / outline
-                 stay in context_units, not in this suffix. */
               if (!isChildBox) {
-                /* DYNAMIC suffix: the parent's helper boxes (their files stay
-                   readable; the parent remains fully responsible for the
-                   final deliverable and keeps working itself). */
                 try {
-                  /* v8.x concurrent: the mission id lives in the scope */
                   std::string msnId = scope;
                   const auto slashPos = msnId.find("/children/");
                   if (slashPos != std::string::npos)
@@ -756,11 +816,21 @@ public:
                     }
                   }
                   if (children2.is_array() && !children2.empty()) {
-                    staticPrompt += "boxes:";
+                    std::string blob;
                     for (const auto &box : children2) {
-                      staticPrompt += " " + box.value("id", std::string());
+                      const std::string id = box.value("id", std::string());
+                      if (id.empty()) continue;
+                      if (!blob.empty()) blob += " ";
+                      blob += id;
                     }
-                    staticPrompt += "\n";
+                    if (!blob.empty()) {
+                      const auto pkt = phoenix::inference::unitQueryIOToJson(
+                          phoenix::inference::unitQueryFromText(blob, "text"));
+                      if (!opts.contains("context_units") ||
+                          !opts["context_units"].is_array())
+                        opts["context_units"] = nlohmann::json::array();
+                      opts["context_units"].push_back(pkt);
+                    }
                   }
               } catch (...) {
               }
@@ -776,10 +846,11 @@ public:
               const int ngramFac =
                   phoenix::inference::ngramMergeFactor(packOpt.ngramMerge);
               const size_t maxPromptChars =
-                  static_cast<size_t>(safePromptTokens) * 3 *
+                  static_cast<size_t>(safePromptTokens) *
+                  phoenix::context::charsPerPackedToken() *
                   static_cast<size_t>(ngramFac);
-              /* Split path: staticPrompt is pin + working brief.
-                 Recent window is resume_suffix, not dynamicPrompt. */
+              /* Split path: staticPrompt is the document head.
+                 Tail is resume_suffix, not a second prompt protocol. */
               {
                 const auto fitted = phoenix::mission::fitMissionPromptSplit(
                     staticPrompt, dynamicPrompt, maxPromptChars);
@@ -1549,24 +1620,14 @@ public:
                   chunk = cut;
                 }
               }
-              {
-                const bool exam =
-                    phoenix::mission::replyLooksLikeExamDump(chunk);
-                const bool leftover =
-                    phoenix::mission::replyLooksLikeLeftoverLoop(chunk);
-                const bool homework =
-                    phoenix::mission::replyLooksLikeHomeworkCodeDump(chunk);
-                if (chunk.empty() || exam || leftover || homework) {
-                  if (config_.httpLog)
-                    std::cout << "[mission-deliberate] drop "
-                              << (exam ? "exam-dump"
-                                       : leftover ? "leftover-loop"
-                                                  : homework ? "homework-code"
-                                                             : "empty")
-                              << " len=" << chunk.size() << " head="
-                              << chunk.substr(0, 120) << std::endl;
-                  return std::string();
-                }
+              if (chunk.empty() ||
+                  phoenix::mission::replyLooksLikeShortLineLoop(chunk)) {
+                if (config_.httpLog)
+                  std::cout << "[mission-deliberate] drop "
+                            << (chunk.empty() ? "empty" : "short-line-loop")
+                            << " len=" << chunk.size() << " head="
+                            << chunk.substr(0, 120) << std::endl;
+                return std::string();
               }
               {
                 std::string kept =
@@ -2397,6 +2458,7 @@ private:
     if (!typeLower.empty())
       toolPayload["__addonType"] = typeLower;
     result = runtime->runAddonTool(call.input, toolPayload);
+    addon::sealAddonResultUnits(result);
     if (result.handled && logger_.enabled()) {
       logger_.log(LoggerCXX::Type::COMPUTE,
                   std::string("addon_tool handled type=") +

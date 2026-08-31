@@ -32,7 +32,13 @@ public:
         std::make_shared<OnlineResearcher>(this, searchConfig_.active);
     researcher_->setEnabled(searchConfig_.enabled);
     addons_ = addon::createDefaultAddons();
+    addon::setAddonOnlineLookupHandler(
+        [this](const json &input, const json &options) {
+          return this->onlineLookup(input, options);
+        });
   }
+
+  ~RuntimeState() { addon::clearAddonOnlineLookupHandler(); }
 
   json cloneParams() const override {
     std::lock_guard<std::mutex> lock(stateMu_);
@@ -76,11 +82,88 @@ public:
         [this](const json &input, const json &options) {
           return this->onlineLookup(input, options);
         });
-    struct LookupGuard {
-      ~LookupGuard() { addon::clearAddonOnlineLookupHandler(); }
-    } guard;
-    auto result = addons_->run(text, payload);
-    return result;
+    return addons_->run(text, payload);
+  }
+
+  void refreshAutoloadAddons() {
+    if (!addons_)
+      return;
+    const std::string dir = phoenix::cfgOr<std::string>(
+        "addons.autoloadDir", std::string("./runtime_store/addons"));
+    json report = json::object();
+    const int n = addons_->scanAutoloadDir(dir, &report);
+    if (n > 0)
+      std::cout << "[addons] autoload +" << n << " from " << dir << std::endl;
+    json libs = phoenix::cfgOr<json>("addons.libraries", json::array());
+    if (libs.is_array()) {
+      for (const auto &p : libs) {
+        if (!p.is_string() || p.get<std::string>().empty())
+          continue;
+        std::string err;
+        (void)addons_->loadLibrary(p.get<std::string>(), &err);
+      }
+    }
+  }
+
+  std::vector<addon::AddonOffer> collectAddonOffers(const json &situation) {
+    if (!addons_)
+      return {};
+    refreshAutoloadAddons();
+    addon::setAddonOnlineLookupHandler(
+        [this](const json &input, const json &options) {
+          return this->onlineLookup(input, options);
+        });
+    const float minScore = static_cast<float>(
+        phoenix::cfgOr<double>("addons.offerMinScore", 0.35));
+    const size_t maxOffers = static_cast<size_t>(
+        std::max(1, phoenix::cfgOr<int>("addons.offerMax", 6)));
+    return addons_->collectOffers(situation, minScore, maxOffers);
+  }
+
+  void indexSearchDocument(const std::string &url, const std::string &title,
+                           const std::string &text) {
+    std::shared_ptr<OnlineResearcher> r;
+    {
+      std::lock_guard<std::mutex> lock(stateMu_);
+      if (!researcher_) {
+        researcher_ =
+            std::make_shared<OnlineResearcher>(this, searchConfig_.active);
+        researcher_->setEnabled(searchConfig_.enabled);
+      }
+      r = researcher_;
+    }
+    r->ingestText(url, title, text);
+  }
+
+  int ensureSearchIndexSeeded(int maxDocs) {
+    {
+      std::lock_guard<std::mutex> lock(stateMu_);
+      if (searchIndexSeeded_)
+        return 0;
+      searchIndexSeeded_ = true;
+    }
+    auto docs = collectRobotsDocuments(json{
+        {"limit", maxDocs},
+        {"shuffle", false},
+        {"files", json::array({"wikitext-103-all.txt"})}});
+    if (docs.empty())
+      docs = collectRobotsDocuments(json{
+          {"limit", maxDocs},
+          {"shuffle", false},
+          {"files", json::array({"wikitext-101-all.txt"})}});
+    if (docs.empty())
+      docs = collectRobotsDocuments(
+          json{{"limit", maxDocs}, {"shuffle", false}});
+    int n = 0;
+    for (auto &d : docs) {
+      if (d.text.empty())
+        continue;
+      const std::string file = d.file.empty() ? std::string("robots") : d.file;
+      indexSearchDocument("corpus://" + file + ":" + std::to_string(n), file,
+                          d.text);
+      ++n;
+    }
+    return n;
   }
 
   void setParamsLocked(const json &patch) {
@@ -1399,6 +1482,7 @@ private:
   json corpusStats_ = json{{"ingested", 0}, {"lastIngest", nullptr}};
   SearchConfig searchConfig_;
   std::shared_ptr<OnlineResearcher> researcher_;
+  bool searchIndexSeeded_{false};
   PatternMatrix pattern_;
   std::shared_ptr<addon::AddonManager> addons_;
 

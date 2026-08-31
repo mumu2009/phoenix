@@ -16,24 +16,70 @@ TEST(MissionUnitWorkflow, EmotionVocabTokensAlnumLower) {
   EXPECT_EQ(toks[2], "uncrewed");
 }
 
-TEST(MissionUnitWorkflow, RecallQueryPrefersDraftTail) {
+TEST(MissionUnitWorkflow, RecallQueryPutsGoalFirst) {
   const std::string draft(800, 'x');
   const std::string q = buildMemoryRecallQuery("GOALWORD helios", draft + " TAILMARK",
                                                80, 120);
   EXPECT_NE(q.find("TAILMARK"), std::string::npos);
   EXPECT_NE(q.find("GOALWORD"), std::string::npos);
+  EXPECT_LT(q.find("GOALWORD"), q.find("TAILMARK"));
 }
 
-TEST(MissionUnitWorkflow, RecallQueryDefaultWindowExceedsOld720) {
-  /* Preprocess used to query the last 720 chars while infer saw ~20k.
-     Default draft window must cover more than that old clip. */
+TEST(MissionUnitWorkflow, RecallQueryDefaultKeepsGoalAndDraftTail) {
+  /* Goal leads. Draft tail is short so a drifted body cannot dominate. */
   std::string draft(9000, 'a');
   draft.replace(8200, 8, "MIDMARKX");
   draft.replace(8988, 8, "TAILMARK");
   const std::string q = buildMemoryRecallQuery("GOALWORD", draft);
   EXPECT_NE(q.find("TAILMARK"), std::string::npos);
-  EXPECT_NE(q.find("MIDMARKX"), std::string::npos);
+  EXPECT_EQ(q.find("MIDMARKX"), std::string::npos);
   EXPECT_NE(q.find("GOALWORD"), std::string::npos);
+  EXPECT_LT(q.find("GOALWORD"), q.find("TAILMARK"));
+}
+
+TEST(MissionUnitWorkflow, PluginSearchQueryUsesThisGoal) {
+  const std::string goal =
+      "It is 2035. A science station has successfully landed.\n"
+      "Due to communications delays of 8-40 minutes, operate 1000 sols.\n\n"
+      "Chapter 1: Mission and Requirements Analysis\n";
+  const std::string q = buildPluginSearchQuery(goal);
+  EXPECT_NE(q.find("science station"), std::string::npos);
+  EXPECT_EQ(q.find("Chapter 1"), std::string::npos);
+  EXPECT_EQ(q.find("##"), std::string::npos);
+}
+
+TEST(MissionUnitWorkflow, PluginSearchSkipsTitleLineWithoutSentence) {
+  const std::string goal =
+      "Task Name\n"
+      "Design the Helios Mars Surface Autonomous Science Station "
+      "Long-Duration Operations Software System\n\n"
+      "It is 2035. A Mars science station has successfully landed.\n";
+  const auto qs = buildPluginSearchQueries(goal, "", 3);
+  ASSERT_FALSE(qs.empty());
+  EXPECT_EQ(qs.front().find("Design the"), std::string::npos);
+  EXPECT_NE(qs.front().find("Mars science station"), std::string::npos);
+  EXPECT_EQ(qs.front().rfind("It is 2035.", 0), std::string::npos);
+}
+
+TEST(MissionUnitWorkflow, PluginSearchQueriesBackgroundBeforeTitle) {
+  const std::string goal =
+      "Task Name\n"
+      "Design the Surface Station Operations Software\n\n"
+      "It is 2035. A science station has successfully landed.\n"
+      "Due to communications delays of 8-40 minutes, operate 1000 sols.\n\n"
+      "## Chapter 1: Mission and Requirements Analysis\n";
+  const auto qs = buildPluginSearchQueries(goal, "", 3);
+  ASSERT_FALSE(qs.empty());
+  EXPECT_NE(qs.front().find("science station"), std::string::npos);
+  bool sawTitle = false;
+  bool sawDelay = false;
+  for (const auto &q : qs) {
+    if (q.find("Surface Station") != std::string::npos) sawTitle = true;
+    if (q.find("8-40") != std::string::npos) sawDelay = true;
+    EXPECT_EQ(q.find("## Chapter"), std::string::npos);
+  }
+  EXPECT_TRUE(sawTitle);
+  EXPECT_TRUE(sawDelay);
 }
 
 TEST(MissionUnitWorkflow, ProjectRowsRepeatsShortVectors) {
@@ -155,6 +201,11 @@ TEST(MissionUnitWorkflow, RagProtectLeavesShortPrefixOpen) {
   EXPECT_EQ(ragProtectUnits(20, 80, 16), 5);
 }
 
+TEST(MissionUnitWorkflow, EstimateTokensTwoWordsPerPackedToken) {
+  EXPECT_EQ(phoenix::context::estimateTokens("alpha beta gamma delta"), 2u);
+  EXPECT_EQ(phoenix::context::charsPerPackedToken(), 6u);
+}
+
 TEST(MissionUnitWorkflow, PackSplitsRecentCausalFromSummaryRag) {
   phoenix::context::PackOptions opt;
   opt.ctxTokens = 4096;
@@ -166,7 +217,7 @@ TEST(MissionUnitWorkflow, PackSplitsRecentCausalFromSummaryRag) {
   const auto packed = phoenix::context::packContext(full, "gnn-pin-text", opt);
   EXPECT_FALSE(packed.recentFull.empty());
   EXPECT_EQ(packed.recentFull, full.substr(full.size() - packed.recentFull.size()));
-  EXPECT_GT(packed.causalTokenBudget, 4000u);
+  EXPECT_EQ(packed.causalTokenBudget, 8192u);
   EXPECT_GT(packed.fullCharsUsed, 8000u);
   EXPECT_TRUE(packed.usedGnn);
   EXPECT_EQ(packed.gnnPinned.find("gnn-pin"), 0u);

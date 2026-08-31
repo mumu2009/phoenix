@@ -264,10 +264,33 @@ OnlineResearcher::pickAspects(const std::vector<std::string> &tokens,
   return out;
 }
 
+void OnlineResearcher::ingestText(const std::string &url,
+                                  const std::string &title,
+                                  const std::string &text) {
+  if (url.empty() || text.empty())
+    return;
+  DocEntry doc;
+  doc.url = url;
+  doc.title = title.empty() ? url : title;
+  doc.text = text;
+  doc.tokens = tokenize(text);
+  doc.aspects = pickAspects(doc.tokens, 8);
+  doc.embedding.assign(8, 0.0f);
+  indexDocument(doc);
+}
+
 void OnlineResearcher::indexDocument(const DocEntry &doc) {
   if (doc.url.empty())
     return;
   std::lock_guard<std::mutex> lock(indexMu_);
+  auto old = docs_.find(doc.url);
+  if (old != docs_.end()) {
+    for (const auto &t : old->second.tokens) {
+      auto it = invertedIndex_.find(t);
+      if (it != invertedIndex_.end())
+        it->second.erase(doc.url);
+    }
+  }
   docs_[doc.url] = doc;
   urlToContent_[doc.url] = doc.text;
   auto &stop = getStopWords();
@@ -324,6 +347,33 @@ json OnlineResearcher::queryLocalIndex(const std::vector<std::string> &words,
       json item{{"url", it->second.url},
                 {"score", p.second},
                 {"title", it->second.title}};
+      std::string snippet = it->second.text;
+      if (snippet.empty()) {
+        auto cit = urlToContent_.find(it->second.url);
+        if (cit != urlToContent_.end())
+          snippet = cit->second;
+      }
+      if (!snippet.empty()) {
+        std::string lower = snippet;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) {
+                         return static_cast<char>(std::tolower(c));
+                       });
+        size_t at = 0;
+        for (const auto &w : queryTokens) {
+          if (w.size() < 2)
+            continue;
+          const auto hit = lower.find(w);
+          if (hit != std::string::npos) {
+            at = hit;
+            break;
+          }
+        }
+        const size_t begin = at > 80 ? at - 80 : 0;
+        snippet = snippet.substr(begin, std::min(snippet.size() - begin,
+                                                 size_t{360}));
+      }
+      item["snippet"] = snippet;
       if (!it->second.aspects.empty())
         item["aspects"] = it->second.aspects;
       urls.push_back(item);
@@ -333,6 +383,20 @@ json OnlineResearcher::queryLocalIndex(const std::vector<std::string> &words,
     }
   }
   out["urls"] = urls;
+  json results = json::array();
+  for (const auto &u : urls) {
+    if (!u.is_object())
+      continue;
+    const std::string snippet = u.value("snippet", std::string());
+    if (snippet.empty())
+      continue;
+    results.push_back(json{{"title", u.value("title", std::string())},
+                           {"url", u.value("url", std::string())},
+                           {"snippet", snippet}});
+  }
+  out["results"] = results;
+  if (results.empty())
+    out["ok"] = false;
 
   json aspects = json::array();
   {

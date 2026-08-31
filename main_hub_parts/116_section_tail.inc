@@ -2388,8 +2388,25 @@
               addonUsed = invokeAddonTool(addonCall, body, addonExec);
             }
             if (addonUsed) {
-              std::string followupGraphContext =
-                  buildAddonResultContext(graphContext, addonCall, addonExec);
+              addon::sealAddonResultUnits(addonExec);
+              std::string followupGraphContext = graphContext;
+              json followOpts = inferenceOptions.is_object()
+                                    ? inferenceOptions
+                                    : json::object();
+              if (usingLlamaCpp) {
+                std::vector<phoenix::inference::UnitQueryIO> followMem =
+                    instanceMemory;
+                if (addonExec.units.is_array())
+                  phoenix::inference::appendUnitQueriesFromJsonArray(
+                      followMem, addonExec.units);
+                followOpts = buildUnitPipelineOptions(
+                    graphResult, followMem, instanceGnn,
+                    sessionId.empty() ? std::string("chat") : sessionId,
+                    false, followOpts);
+              } else {
+                followupGraphContext = buildAddonResultContext(
+                    graphContext, addonCall, addonExec);
+              }
               if (usingLlamaCpp || usingBitNet)
                 dispatchExternalStyleTrainStep(backendMode, body, text,
                                                gnnHint.align);
@@ -2401,7 +2418,7 @@
               } else if (usingLlamaCpp) {
                 tReplyAfterTool =
                     chatWithLlamaCpp(text, followupGraphContext, maxTokens,
-                     inferenceOptions);
+                     followOpts);
               } else if (usingBitNet) {
                 tReplyAfterTool =
                     chatWithBitNet(text, followupGraphContext, maxTokens,
@@ -3019,8 +3036,25 @@
               addonUsed = invokeAddonTool(addonCall, body, addonExec);
             }
             if (addonUsed) {
-              std::string followupGraphContext =
-                  buildAddonResultContext(graphContext, addonCall, addonExec);
+              addon::sealAddonResultUnits(addonExec);
+              std::string followupGraphContext = graphContext;
+              json followOpts = inferenceOptions.is_object()
+                                    ? inferenceOptions
+                                    : json::object();
+              if (usingLlamaCpp) {
+                std::vector<phoenix::inference::UnitQueryIO> followMem =
+                    instanceMemory;
+                if (addonExec.units.is_array())
+                  phoenix::inference::appendUnitQueriesFromJsonArray(
+                      followMem, addonExec.units);
+                followOpts = buildUnitPipelineOptions(
+                    graphResult, followMem, instanceGnn,
+                    sessionId.empty() ? std::string("chat") : sessionId,
+                    false, followOpts);
+              } else {
+                followupGraphContext = buildAddonResultContext(
+                    graphContext, addonCall, addonExec);
+              }
               if (usingLlamaCpp || usingBitNet)
                 dispatchExternalStyleTrainStep(backendMode, body, text,
                                                gnnHint.align);
@@ -3032,7 +3066,7 @@
               } else if (usingLlamaCpp) {
                 tReplyAfterTool =
                     chatWithLlamaCpp(text, followupGraphContext, maxTokens,
-                     inferenceOptions);
+                     followOpts);
               } else if (usingBitNet) {
                 tReplyAfterTool =
                     chatWithBitNet(text, followupGraphContext, maxTokens,

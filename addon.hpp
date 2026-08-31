@@ -15,23 +15,56 @@ namespace addon {
 
 using json = nlohmann::json;
 
-/* Result structure returned by addon handlers.
-   Contains the reply, extra tokens, and metadata. */
+/* Module exchange is unit query only. A unit is a signal matrix
+   (rows) that appears as one packet. Text is enc/dec I/O: either
+   logs/UI (reply) or a not-yet-encoded text-modality payload
+   inside the packet ({modality, content}). Host never ingests
+   reply as a second protocol. extraTokens is not an exchange. */
 struct AddonResult {
 	bool handled{false};              /* Whether the addon handled the request */
-	std::string reply;                /* Reply text from the addon */
-	std::vector<std::string> extraTokens; /* Additional tokens to inject */
+	std::string reply;                /* Log / UI only — not a module protocol */
+	std::vector<std::string> extraTokens; /* Unused as module exchange */
+	json units = json::array();       /* Unit-query packets */
 	json meta = json::object();       /* Metadata about the handling */
 };
 
+inline void sealAddonResultUnits(AddonResult &r) {
+	if (!r.units.is_array()) r.units = json::array();
+	if (!r.units.empty() || r.reply.empty()) return;
+	r.units.push_back(json{{"modality", "text"}, {"content", r.reply}});
+}
+
+/* One plugin's bid + contribution. The host broadcasts a situation;
+   each installed plugin decides whether it has something to add.
+   This is offer/skill matching, not ReAct tool-calling. */
+struct AddonOffer {
+	float score{0.f};
+	std::string name;
+	std::string type;
+	std::string reason;
+	AddonResult result;
+};
+
 /* Abstract base class for addons/plugins.
-   Addons extend the system's functionality by handling specific requests. */
+   Addons extend the system's functionality by handling specific requests.
+   api v2: consider/contribute let the plugin self-select.
+   Dynamic libraries that still report addon_api_version()==1 are
+   handle-only and are skipped by collectOffers (vtable-safe). */
 class Addon {
 public:
 	virtual ~Addon() = default;
 	virtual std::string name() const = 0; /* Addon name */
 	virtual std::string type() const = 0; /* Addon type (e.g., "math", "search") */
 	virtual AddonResult handle(const std::string &text, const json &payload) = 0; /* Handle a request */
+	/* Plugin reads goal/draft/phase and returns 0 to stay silent. */
+	virtual float consider(const json &situation) const {
+		(void)situation;
+		return 0.f;
+	}
+	/* Produce material after consider() accepted the situation. */
+	virtual AddonResult contribute(const json &situation) {
+		return handle(situation.value("text", std::string()), situation);
+	}
 };
 
 /* Manager for addon registration, loading, and execution.
@@ -44,6 +77,13 @@ public:
 	bool removeAddon(const std::string &name, std::string *error = nullptr); /* Remove an addon */
 	json listAddons() const; /* List all registered addons */
 	AddonResult run(const std::string &text, const json &payload) const; /* Run addons on a request */
+	/* Ask every currently mounted plugin. Each one understands the
+	   situation and may contribute. Host does not name a tool. */
+	std::vector<AddonOffer> collectOffers(const json &situation,
+	                                      float minScore = 0.35f,
+	                                      size_t maxOffers = 6) const;
+	/* Hot-plug: load any not-yet-mounted .so/.dll in dir. */
+	int scanAutoloadDir(const std::string &dir, json *report = nullptr);
 
 private:
 	/* Internal record for a registered addon */
@@ -54,6 +94,7 @@ private:
 		std::string source;            /* Source (builtin or library) */
 		std::string path;              /* Library path (if loaded from library) */
 		void *libHandle{nullptr};      /* Dynamic library handle */
+		int apiVersion{2};             /* 1 = handle only; 2 = can self-offer */
 	};
 
 	/* Reference to an addon in the index */
@@ -66,7 +107,8 @@ private:
 				   const std::string &source,
 				   const std::string &path,
 				   void *libHandle,
-				   std::string *error); /* Add an addon record */
+				   std::string *error,
+				   int apiVersion = 2); /* Add an addon record */
 	std::vector<AddonRecord> &pickStore(const std::string &source); /* Get store by source */
 	const AddonRecord *findRecord(const std::string &name) const; /* Find addon record by name */
 	AddonRecord *findRecordMutable(const std::string &name); /* Find mutable addon record */

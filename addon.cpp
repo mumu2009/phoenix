@@ -4,6 +4,10 @@
 
 #include "addons/builtin_registry.hpp"
 
+#include <algorithm>
+#include <filesystem>
+#include <mutex>
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -12,21 +16,29 @@
 
 namespace addon {
 
-static thread_local AddonOnlineLookupHandler gAddonOnlineLookupHandler;
-static thread_local AddonComputerShellHandler gAddonComputerShellHandler;
+static std::mutex gAddonHandlerMu;
+static AddonOnlineLookupHandler gAddonOnlineLookupHandler;
+static AddonComputerShellHandler gAddonComputerShellHandler;
 
 void setAddonOnlineLookupHandler(AddonOnlineLookupHandler handler) {
+	std::lock_guard<std::mutex> lock(gAddonHandlerMu);
 	gAddonOnlineLookupHandler = std::move(handler);
 }
 
 void clearAddonOnlineLookupHandler() {
+	std::lock_guard<std::mutex> lock(gAddonHandlerMu);
 	gAddonOnlineLookupHandler = nullptr;
 }
 
 bool invokeAddonOnlineLookup(const json &input, const json &options, json &out) {
-	if (!gAddonOnlineLookupHandler) return false;
+	AddonOnlineLookupHandler handler;
+	{
+		std::lock_guard<std::mutex> lock(gAddonHandlerMu);
+		handler = gAddonOnlineLookupHandler;
+	}
+	if (!handler) return false;
 	try {
-		out = gAddonOnlineLookupHandler(input, options);
+		out = handler(input, options);
 		return true;
 	} catch (...) {
 		out = json::object();
@@ -104,7 +116,8 @@ bool AddonManager::loadLibrary(const std::string &path, std::string *error) {
 #endif
 		return false;
 	}
-	if (apiFn && apiFn() != 1) {
+	int apiVersion = apiFn ? apiFn() : 1;
+	if (apiVersion != 1 && apiVersion != 2) {
 		if (error) *error = "unsupported addon api version";
 #ifdef _WIN32
 		FreeLibrary(lib);
@@ -125,7 +138,7 @@ bool AddonManager::loadLibrary(const std::string &path, std::string *error) {
 	}
 	std::shared_ptr<Addon> addon(raw, [destroyFn](Addon *p) { destroyFn(p); });
 	std::lock_guard<std::mutex> lock(mu_);
-	if (!addRecord(addon, "library", path, lib, error)) {
+	if (!addRecord(addon, "library", path, lib, error, apiVersion)) {
 		addon.reset();
 #ifdef _WIN32
 		FreeLibrary(lib);
@@ -163,7 +176,12 @@ json AddonManager::listAddons() const {
 	json out = json::array();
 	auto append = [&](const std::vector<AddonRecord> &records) {
 		for (const auto &rec : records) {
-			out.push_back(json{{"name", rec.name}, {"type", rec.type}, {"source", rec.source}, {"path", rec.path}});
+			out.push_back(json{{"name", rec.name},
+			                   {"type", rec.type},
+			                   {"source", rec.source},
+			                   {"path", rec.path},
+			                   {"apiVersion", rec.apiVersion},
+			                   {"selfOffer", rec.apiVersion >= 2}});
 		}
 	};
 	append(builtinAddons_);
@@ -172,32 +190,127 @@ json AddonManager::listAddons() const {
 }
 
 AddonResult AddonManager::run(const std::string &text, const json &payload) const {
-	AddonResult combined;
-	std::lock_guard<std::mutex> lock(mu_);
-	auto runStore = [&](const std::vector<AddonRecord> &records) -> bool {
-		for (const auto &rec : records) {
-			if (!rec.addon) continue;
-			auto res = rec.addon->handle(text, payload);
-			if (res.handled) {
-				combined = std::move(res);
-				return true;
+	std::vector<std::shared_ptr<Addon>> snap;
+	{
+		std::lock_guard<std::mutex> lock(mu_);
+		auto take = [&](const std::vector<AddonRecord> &records) {
+			for (const auto &rec : records) {
+				if (rec.addon) snap.push_back(rec.addon);
 			}
-			if (!res.extraTokens.empty()) {
-				combined.extraTokens.insert(combined.extraTokens.end(), res.extraTokens.begin(), res.extraTokens.end());
+		};
+		take(builtinAddons_);
+		take(mountedAddons_);
+	}
+	AddonResult combined;
+	for (const auto &addon : snap) {
+		auto res = addon->handle(text, payload);
+		if (res.handled) return res;
+		if (!res.extraTokens.empty()) {
+			combined.extraTokens.insert(combined.extraTokens.end(), res.extraTokens.begin(), res.extraTokens.end());
+		}
+	}
+	return combined;
+}
+
+std::vector<AddonOffer> AddonManager::collectOffers(const json &situation,
+                                                    float minScore,
+                                                    size_t maxOffers) const {
+	struct Snap {
+		std::shared_ptr<Addon> addon;
+		std::string name;
+		std::string type;
+		int apiVersion{2};
+	};
+	std::vector<Snap> snap;
+	{
+		std::lock_guard<std::mutex> lock(mu_);
+		auto take = [&](const std::vector<AddonRecord> &records) {
+			for (const auto &rec : records) {
+				if (!rec.addon) continue;
+				snap.push_back({rec.addon, rec.name, rec.type, rec.apiVersion});
+			}
+		};
+		take(builtinAddons_);
+		take(mountedAddons_);
+	}
+	std::vector<AddonOffer> offers;
+	for (const auto &s : snap) {
+		if (s.apiVersion < 2) continue;
+		float score = 0.f;
+		try {
+			score = s.addon->consider(situation);
+		} catch (...) {
+			continue;
+		}
+		if (score < minScore) continue;
+		AddonOffer offer;
+		offer.score = score;
+		offer.name = s.name;
+		offer.type = s.type;
+		try {
+			offer.result = s.addon->contribute(situation);
+		} catch (...) {
+			continue;
+		}
+		sealAddonResultUnits(offer.result);
+		if (offer.result.meta.is_object() &&
+		    offer.result.meta.contains("reason") &&
+		    offer.result.meta["reason"].is_string())
+			offer.reason = offer.result.meta["reason"].get<std::string>();
+		if (offer.result.handled) offers.push_back(std::move(offer));
+	}
+	std::sort(offers.begin(), offers.end(),
+	          [](const AddonOffer &a, const AddonOffer &b) {
+		          return a.score > b.score;
+	          });
+	if (maxOffers > 0 && offers.size() > maxOffers) offers.resize(maxOffers);
+	return offers;
+}
+
+int AddonManager::scanAutoloadDir(const std::string &dir, json *report) {
+	namespace fs = std::filesystem;
+	if (dir.empty()) return 0;
+	std::error_code ec;
+	if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return 0;
+	std::vector<std::string> already;
+	{
+		std::lock_guard<std::mutex> lock(mu_);
+		for (const auto &rec : mountedAddons_) {
+			if (!rec.path.empty()) already.push_back(rec.path);
+		}
+	}
+	int loaded = 0;
+	for (const auto &entry : fs::directory_iterator(dir, ec)) {
+		if (ec) break;
+		if (!entry.is_regular_file(ec)) continue;
+		const auto ext = entry.path().extension().string();
+		if (ext != ".so" && ext != ".dll") continue;
+		const std::string path = entry.path().string();
+		bool skip = false;
+		for (const auto &a : already) {
+			if (a == path) {
+				skip = true;
+				break;
 			}
 		}
-		return false;
-	};
-	if (runStore(builtinAddons_)) return combined;
-	if (runStore(mountedAddons_)) return combined;
-	return combined;
+		if (skip) continue;
+		std::string error;
+		if (loadLibrary(path, &error)) {
+			++loaded;
+			already.push_back(path);
+		} else if (report) {
+			(*report)[path] = error.empty() ? std::string("load failed") : error;
+		}
+	}
+	return loaded;
 }
 
 bool AddonManager::addRecord(const std::shared_ptr<Addon> &addon,
 						 const std::string &source,
 						 const std::string &path,
 						 void *libHandle,
-						 std::string *error) {
+						 std::string *error,
+						 int apiVersion) {
 	if (!addon) {
 		if (error) *error = "addon is null";
 		return false;
@@ -219,6 +332,7 @@ bool AddonManager::addRecord(const std::shared_ptr<Addon> &addon,
 	rec.source = source;
 	rec.path = path;
 	rec.libHandle = libHandle;
+	rec.apiVersion = apiVersion < 1 ? 1 : apiVersion;
 	store.push_back(std::move(rec));
 	rebuildIndex();
 	return true;

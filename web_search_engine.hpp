@@ -2,17 +2,17 @@
 
 
    Purpose: give the evolving agent a *material source* (web search) that
-   works out of the box with no API key and no external SDK:
-    - built-in backend "ddg_lite": DuckDuckGo Lite HTML over plain HTTP,
-      parsed into structured {title,url,snippet} results;
+    works out of the box with no API key and no external SDK:
+    - built-in backend "bing": Bing HTML (HTTPS). Reachable on networks
+      where DuckDuckGo / Wikipedia are not;
+    - built-in backend "ddg_lite": DuckDuckGo Lite HTML over plain HTTP;
     - backend "endpoint": a configurable search HTTP endpoint returning JSON
       (the shape the gateway's OnlineResearcher already uses), so a private
       search API can replace the public backend.
 
-   Transport: raw-socket HTTP/1.1 GET (Winsock on Windows, POSIX elsewhere)
-   with connect/read timeouts and up to 5 redirects.  HTTPS is intentionally
-   NOT attempted here: the gateway's existing HAVE_CURL path covers HTTPS
-   endpoints.  Callers should prefer HTTPS-capable paths when configured.
+   Transport: libcurl when HAVE_CURL (HTTP and HTTPS, redirects). Otherwise
+   raw-socket HTTP/1.1 GET only. Page bodies of top hits are fetched so a
+   small model can read facts, not just SERP titles.
 
    All of this is stateless and thread-safe; results are deduplicated by URL
    and capped.  No pseudoscience: this is a plain HTTP client + HTML parser.
@@ -41,8 +41,9 @@ struct WebSearchConfig {
   size_t maxResults{8};
   int maxRedirects{5};
   std::string userAgent{"PhoenixWebSearch/1.0"};
-  std::vector<std::string> backends; /* "ddg_lite" and/or "endpoint" */
+  std::vector<std::string> backends; /* "bing", "ddg_lite", and/or "endpoint" */
   std::string endpoint;              /* JSON endpoint for backend "endpoint" */
+  size_t fetchPages{2};              /* follow top hits and take body excerpts */
 };
 
 /* Raw HTTP GET with timeouts + redirects.  Returns body on 2xx, empty on any
@@ -50,8 +51,15 @@ struct WebSearchConfig {
 std::string httpGetText(const std::string &url, int timeoutMs, int maxRedirects,
                         const std::string &userAgent);
 
-/* Parse DuckDuckGo Lite HTML into results (title/url/snippet). */
+/* Parse DuckDuckGo Lite HTML into results (title/url,snippet). */
 std::vector<SearchResult> parseDdgLiteHtml(const std::string &html);
+
+/* Parse Bing SERP HTML (www.bing.com / cn.bing.com). */
+std::vector<SearchResult> parseBingHtml(const std::string &html);
+
+/* From a fetched page, keep sentences that overlap the query. */
+std::string pageExcerpt(const std::string &html, const std::string &query,
+                        size_t maxChars = 720);
 
 /* Parse a JSON search-endpoint response into results.
    Accepts {"results":[{title,url,snippet,...}]} or a top-level array. */

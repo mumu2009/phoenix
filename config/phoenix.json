@@ -421,7 +421,7 @@
     "maxReplicas": 4,
     "maxReplicaDepth": 0,
     "ctxSize": 4096,
-    "goalClipChars": 8000,
+    "goalClipChars": 16000,
     "contextPack": "full_and_summary",
     "includeGnnSummary": true,
     "gnnPretrainMinNodes": 16,
@@ -433,7 +433,9 @@
     "outlineSize": 12,
     "llmTimeoutMs": 5400000,
     "deliberateMaxTokens": 256,
-    "resumeChars": 720,
+    "resumeChars": 8000,
+    "pluginOffers": true,
+    "pluginSearchWeb": true,
     "childDeliberateMaxTokens": 48,
     "temperature": 0.35,
     "topP": 0.9,
@@ -485,15 +487,23 @@
     {"name": "python3", "command": "python3", "args": [], "timeoutMs": 30000, "json": false, "maxReply": 4000},
     {"name": "python", "command": "python3", "args": [], "timeoutMs": 30000, "json": false, "maxReply": 4000}
   ],
+  "addons": {
+    "autoloadDir": "./runtime_store/addons",
+    "libraries": [],
+    "offerMinScore": 0.35,
+    "offerMax": 6
+  },
   "search": {
     "enabled": true,
     "backends": [
+      "bing",
       "ddg_lite"
     ],
     "endpoint": "",
-    "timeoutMs": 5000,
+    "timeoutMs": 8000,
     "maxResults": 8,
-    "userAgent": "PhoenixWebSearch/1.0"
+    "fetchPages": 2,
+    "userAgent": "Mozilla/5.0 (compatible; PhoenixWebSearch/1.0)"
   },
   "api": {
     "upstreamTimeoutMs": 45000,

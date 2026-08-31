@@ -506,10 +506,6 @@ void applyGenerateInferenceOptions(json &payload, const std::string &host,
     payload["feedback_mode"] = options["feedback_mode"].get<std::string>();
   if (options.contains("prefix_hidden") && options["prefix_hidden"].is_array())
     payload["prefix_hidden"] = options["prefix_hidden"];
-  if (options.contains("context_content") && options["context_content"].is_string())
-    payload["context_content"] = options["context_content"];
-  if (options.contains("gnn_content") && options["gnn_content"].is_string())
-    payload["gnn_content"] = options["gnn_content"];
   if (options.contains("context_units") && options["context_units"].is_array())
     payload["context_units"] = options["context_units"];
   if (options.contains("gnn_units") && options["gnn_units"].is_array())
@@ -630,11 +626,16 @@ int countContentTokens(const std::string &host, int port,
   return static_cast<int>(tokensFromJson(resp).size());
 }
 
-/* Causal continuation keeps the tail. Head+ellipsis made the 8B
-   jump topics (game review after a 3-number pin). */
-std::string clipPromptTail(const std::string &s, size_t charBudget) {
+/* Prefix is pin + retrieved + brief + lead. Keep the head (so
+   search stays readable) and a tail tip (so continuation is the
+   assignment, not a dropped catalog line). Tail-only clip dropped
+   retrieved; head-only clip dropped the lead sentence. */
+std::string clipPromptHeadAndTail(const std::string &s, size_t charBudget) {
   if (s.size() <= charBudget) return s;
-  return s.substr(s.size() - charBudget);
+  if (charBudget < 80) return s.substr(0, charBudget);
+  const size_t headN = std::max<size_t>(32, (charBudget * 2) / 3);
+  const size_t tailN = charBudget - headN;
+  return s.substr(0, headN) + "\n" + s.substr(s.size() - tailN);
 }
 
 // Truncate formatted prompt so prompt_tokens + genReserve fits ctx budget.
@@ -649,10 +650,10 @@ std::string fitPromptToTokenBudget(const std::string &host, int port,
   if (nTok <= budget) return prompt;
   size_t lo = prompt.size() / 4;
   size_t hi = prompt.size();
-  std::string best = clipPromptTail(prompt, lo);
+  std::string best = clipPromptHeadAndTail(prompt, lo);
   while (lo + 1 < hi) {
     const size_t mid = (lo + hi) / 2;
-    const std::string candidate = clipPromptTail(prompt, mid);
+    const std::string candidate = clipPromptHeadAndTail(prompt, mid);
     nTok = countContentTokens(host, port, candidate, timeoutMs);
     if (nTok <= budget) {
       best = candidate;
@@ -834,20 +835,25 @@ json hiddenStatePipeline(const std::string &host, int port,
         inferenceOptions.contains("resume_suffix") &&
         inferenceOptions["resume_suffix"].is_string())
       resume = inferenceOptions["resume_suffix"].get<std::string>();
-    /* Do not fold resume into content. Server needs resume_tokens so
-       n_resume drives RAG protect. Empty content is illegal; if the
-       prefix is empty, use resume as content and drop the suffix. */
+    /* Causal text is the recent window (working brief and/or draft).
+       RAG units only enhance. A newline is last-resort I/O when the
+       server rejects 0 tokens — it is not a substitute for context. */
     json genOpts =
         inferenceOptions.is_object() ? inferenceOptions : json::object();
+    const bool haveUnits =
+        (genOpts.contains("context_units") &&
+         genOpts["context_units"].is_array() &&
+         !genOpts["context_units"].empty()) ||
+        (genOpts.contains("gnn_units") && genOpts["gnn_units"].is_array() &&
+         !genOpts["gnn_units"].empty());
     if (formattedPrompt.empty()) {
-      formattedPrompt = resume;
-      resume.clear();
-      genOpts.erase("resume_suffix");
-    }
-    if (formattedPrompt.empty()) {
-      out["ok"] = false;
-      out["error"] = "empty causal text";
-      return out;
+      if (!resume.empty() || haveUnits)
+        formattedPrompt = "\n";
+      else {
+        out["ok"] = false;
+        out["error"] = "empty causal text";
+        return out;
+      }
     }
 
     const int ctxBudget =
@@ -1003,9 +1009,8 @@ json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
     callTimeoutMs = std::max(1000, inferenceOptions["timeoutMs"].get<int>());
   }
 
-  /* Prefix is the pin / working facts. Body is the recent window.
-     skipGraphContext only means GNN is in units, not that the prefix
-     should be dropped when a body exists. */
+  /* Prefix is the document head. Resume is the document tail.
+     skipGraphContext means GNN is in units, not prompt text. */
   std::string ctxForPipeline;
   if (inferenceOptions.is_object() &&
       inferenceOptions.contains("system_content") &&

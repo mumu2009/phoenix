@@ -8,8 +8,10 @@
 #include <vector>
 #include <algorithm>
 #include <unordered_set>
+#include <unordered_map>
 
 #include <sstream>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -23,121 +25,35 @@ inline std::string trimCopy(const std::string &s) {
   return s.substr(b, e - b + 1);
 }
 
-/** True when a markdown heading is a student SDLC/SRS template title. */
-inline bool isSrsTemplateHeadingLine(const std::string &line) {
-  std::string t = trimCopy(line);
-  if (t.empty() || t[0] != '#') return false;
-  while (!t.empty() && t[0] == '#') t.erase(t.begin());
-  t = trimCopy(t);
-  std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-  static const char *heads[] = {
-      "software requirements",
-      "software design",
-      "software implementation",
-      "testing and validation",
-      "system requirements",
-      "implementation plan",
-      "software development life cycle",
-      "example use cases",
-  };
-  for (const char *h : heads) {
-    if (t.rfind(h, 0) == 0) return true;
+/** Word-boundary match. Not a phrase catalog. */
+inline bool hasAlnumWord(const std::string &lower, const std::string &w) {
+  if (w.empty() || lower.empty()) return false;
+  size_t p = 0;
+  while ((p = lower.find(w, p)) != std::string::npos) {
+    const bool left =
+        p == 0 || !std::isalnum(static_cast<unsigned char>(lower[p - 1]));
+    const bool right =
+        p + w.size() >= lower.size() ||
+        !std::isalnum(static_cast<unsigned char>(lower[p + w.size()]));
+    if (left && right) return true;
+    ++p;
   }
   return false;
 }
 
-/** True when a paragraph is assistant/editor voice, not document prose. */
+/** Short paragraph that asks a second person a question.
+    Structure only — no style/title phrase list. */
 inline bool isReaderAddressText(const std::string &raw) {
-  std::string lower = trimCopy(raw);
-  if (lower.empty()) return false;
+  const std::string t = trimCopy(raw);
+  if (t.size() < 12 || t.size() > 280) return false;
+  if (t.find('?') == std::string::npos) return false;
+  std::string lower = t;
   std::transform(lower.begin(), lower.end(), lower.begin(),
                  [](unsigned char c) {
                    return static_cast<char>(std::tolower(c));
                  });
-  static const char *needles[] = {
-      "is there anything else",
-      "the plan for the remaining sections",
-      "please let me know if",
-      "would you like me to",
-      "what specific aspect",
-      "the final answer is",
-      "the tool feedback",
-      "do you want me to",
-      "how can i help",
-      "if you need any further",
-      "if you have any questions",
-      "feel free to ask",
-      "need me to add",
-      "need me to change",
-      "given the urgency of the task",
-      "keep working steadily toward the goal",
-      "the next steps in the process will",
-      "by following this plan, it is possible to complete",
-      "here is an updated outline",
-      "this outline should provide a solid foundation",
-      "this outline should provide",
-      "plan: remaining sections",
-      "plan: remaining",
-      "the remaining sections",
-      "overall, these features",
-      "ideal solution",
-      "overall performance and effectiveness",
-      "this approach simplifies",
-      "this approach allows",
-      "requires careful planning",
-      "duration suggests",
-      "duration of the mission suggests",
-      "the fact that it's",
-      "**key features:**",
-      "**mission objectives:**",
-      "**scientific instruments:**",
-      "the following sections are still missing",
-      "sections are still missing",
-      "the code snippet provided",
-      "in the prompt",
-      "here is a revised version",
-      "to address these concerns",
-      "note: this is a simplified",
-      "although there's a mention",
-      "this code defines",
-      "this code implements",
-      "this code provides",
-      "this code could be written",
-      "this code does not contain",
-      "here's an example of how this code",
-      "here's an example of how the above",
-      "this code would define",
-      "this information could be used",
-      "could be used for a story",
-      "for a story about",
-      "this approach simplifies",
-      "this approach allows",
-      "requires careful planning",
-      "overall, the design",
-      "these details suggest",
-      "this text was generated",
-      "this mission might be part",
-      "technological marvel",
-      "human ingenuity",
-      "key features:",
-      "is there anything specific you'd like",
-      "these conclusions are based on the provided",
-      "here's a breakdown of the key points",
-      "given these characteristics",
-      "given these details",
-      "**key considerations**",
-      "**scientific objectives**",
-      "**potential risks**",
-      "**recommendations**",
-      "**additional considerations**",
-      "this could be part of nasa",
-  };
-  for (const char *n : needles) {
-    if (lower.find(n) != std::string::npos) return true;
-  }
-  return false;
+  return hasAlnumWord(lower, "you") || hasAlnumWord(lower, "your") ||
+         lower.find("you'd") != std::string::npos;
 }
 
 /** Optional utility: drop markdown fence marker lines. Persist / resume
@@ -994,34 +910,111 @@ inline bool deliverableChunkLooksDrifted(const std::string &s,
   return true;
 }
 
-/** Opening of the file, not of a chat turn. Only operational facts
-    extracted from this goal (year / delay / duration). No chapter
-    table — this prompt is one example of a user goal. An empty seed
-    left ChatML at assistant-start and the 8B wrote Q&A filler. */
-inline std::string formatEmptyFileSeed(const std::string &goal) {
-  return formatGoalConstraintPin(goal);
+/** Empty draft stays empty. Do not invent year/delay text. */
+inline std::string formatEmptyFileSeed(const std::string &) {
+  return std::string();
 }
 
 /** Untyped working brief from THIS goal: text before the chapter table.
     Not a user/assistant turn. Empty if the goal has no such prefix. */
 inline std::string extractGoalWorkingContext(const std::string &goal,
-                                             size_t maxChars = 2400) {
+                                             size_t maxChars = 8000) {
   if (goal.empty() || maxChars == 0) return std::string();
   std::string src = goal;
   size_t cut = std::string::npos;
-  static const char *marks[] = {
-      "Required Chapters",
-      "Required chapters",
-      "\nChapter 1:",
-      "\nChapter 1 ",
-  };
-  for (const char *m : marks) {
-    const auto p = src.find(m);
-    if (p != std::string::npos && (cut == std::string::npos || p < cut))
-      cut = p;
+  size_t scan = 0;
+  while (scan < src.size()) {
+    size_t eol = src.find('\n', scan);
+    if (eol == std::string::npos) eol = src.size();
+    std::string line = trimCopy(src.substr(scan, eol - scan));
+    while (!line.empty() && line[0] == '#') {
+      line.erase(line.begin());
+      line = trimCopy(line);
+    }
+    if (line.rfind("Chapter ", 0) == 0 && line.size() > 8 &&
+        std::isdigit(static_cast<unsigned char>(line[8]))) {
+      cut = scan;
+      break;
+    }
+    scan = (eol == src.size()) ? src.size() : eol + 1;
   }
   if (cut != std::string::npos) src = src.substr(0, cut);
   src = trimCopy(src);
+  /* The line immediately before "Chapter N" is usually a catalog
+     section title (no sentence), not working prose. Leaving it as
+     the causal tip made the 8B continue a chapter table. */
+  if (cut != std::string::npos && !src.empty()) {
+    const auto lastNl = src.find_last_of('\n');
+    const std::string last =
+        trimCopy(lastNl == std::string::npos ? src : src.substr(lastNl + 1));
+    const bool headingOnly =
+        !last.empty() && last.size() < 96 &&
+        last.find('.') == std::string::npos &&
+        last.find('?') == std::string::npos &&
+        last.find('!') == std::string::npos;
+    if (headingOnly)
+      src = lastNl == std::string::npos
+                ? std::string()
+                : trimCopy(src.substr(0, lastNl));
+  }
+  /* Later heading sections are author-instructions (word count,
+     output format). Those belong in RAG, not the causal stream —
+     putting them next to the tip made the 8B restate the brief. */
+  {
+    const auto facts = extractGoalOperationalFacts(src);
+    const bool haveFacts = !facts.year.empty() || !facts.delay.empty() ||
+                           !facts.duration.empty();
+    auto mentions = [&](const std::string &t) {
+      if (t.empty()) return false;
+      if (!facts.year.empty() && t.find(facts.year) != std::string::npos)
+        return true;
+      if (!facts.delay.empty() && t.find(facts.delay) != std::string::npos)
+        return true;
+      if (!facts.duration.empty() &&
+          t.find(facts.duration) != std::string::npos)
+        return true;
+      return false;
+    };
+    if (haveFacts) {
+      std::string kept;
+      std::string heading;
+      std::string body;
+      auto flush = [&]() {
+        if (!mentions(body) && !mentions(heading)) return;
+        if (!kept.empty()) return;
+        if (!heading.empty()) kept += heading + "\n";
+        kept += trimCopy(body);
+      };
+      size_t pos = 0;
+      while (pos <= src.size()) {
+        size_t eol = src.find('\n', pos);
+        if (eol == std::string::npos) eol = src.size();
+        const std::string line = trimCopy(src.substr(pos, eol - pos));
+        const bool headingOnly =
+            !line.empty() && line.size() < 96 &&
+            line.find('.') == std::string::npos &&
+            line.find('?') == std::string::npos &&
+            line.find('!') == std::string::npos;
+        if (headingOnly || pos == src.size()) {
+          flush();
+          heading = headingOnly ? line : std::string();
+          body.clear();
+        } else if (!line.empty()) {
+          if (!body.empty()) body += "\n";
+          body += line;
+        }
+        if (eol == src.size()) break;
+        pos = eol + 1;
+      }
+      flush();
+      if (!kept.empty()) {
+        const std::string title = extractGoalTitle(goal);
+        if (!title.empty() && kept.find(title) == std::string::npos)
+          kept = title + "\n\n" + kept;
+        src = trimCopy(kept);
+      }
+    }
+  }
   if (src.size() > maxChars) {
     src.resize(maxChars);
     const auto nl = src.rfind('\n');
@@ -1031,6 +1024,330 @@ inline std::string extractGoalWorkingContext(const std::string &goal,
   }
   if (!src.empty() && src.back() != '\n') src.push_back('\n');
   return src;
+}
+
+/** Chapter lines taken from THIS goal (not a built-in outline). */
+inline std::vector<std::string>
+collectGoalChapterHeadings(const std::string &goal) {
+  std::vector<std::string> out;
+  size_t pos = 0;
+  while (pos < goal.size()) {
+    size_t eol = goal.find('\n', pos);
+    if (eol == std::string::npos) eol = goal.size();
+    std::string line = trimCopy(goal.substr(pos, eol - pos));
+    pos = (eol == goal.size()) ? goal.size() : eol + 1;
+    while (!line.empty() && line[0] == '#') {
+      line.erase(line.begin());
+      line = trimCopy(line);
+    }
+    if (line.rfind("Chapter ", 0) == 0 && line.size() > 8 &&
+        std::isdigit(static_cast<unsigned char>(line[8])))
+      out.push_back(line);
+  }
+  return out;
+}
+
+/** First chapter heading in the goal that the draft has not opened. */
+inline std::string firstMissingGoalChapter(const std::string &goal,
+                                           const std::string &draft) {
+  const std::string dlow = lowerCopy(draft);
+  for (const auto &h : collectGoalChapterHeadings(goal)) {
+    std::string key = h;
+    const auto colon = key.find(':');
+    if (colon != std::string::npos) key = trimCopy(key.substr(0, colon));
+    if (dlow.find(lowerCopy(key)) == std::string::npos) return h;
+  }
+  return std::string();
+}
+
+/** Web-searchable queries from THIS goal. Title / background / the first
+    chapter the draft has not opened. No chapter table dump, no invented
+    nouns. Owned by the search plugin's understanding of a situation. */
+inline std::vector<std::string>
+buildPluginSearchQueries(const std::string &goal, const std::string &draft = "",
+                         size_t maxQueries = 3, size_t maxChars = 140) {
+  std::vector<std::string> out;
+  if (goal.empty() || maxQueries == 0) return out;
+  auto clip = [&](std::string s) {
+    s = trimCopy(s);
+    if (s.size() <= maxChars) return s;
+    s.resize(maxChars);
+    const auto sp = s.find_last_of(" \t");
+    if (sp != std::string::npos && sp > maxChars / 2) s.resize(sp);
+    return trimCopy(s);
+  };
+  auto add = [&](std::string s) {
+    s = clip(stripDesignThePrefix(trimCopy(s)));
+    if (s.size() < 12) return;
+    for (const auto &e : out) {
+      if (e == s) return;
+    }
+    out.push_back(std::move(s));
+  };
+  const std::string title = extractGoalTitle(goal);
+  const std::string work = extractGoalWorkingContext(goal, 1200);
+  size_t pos = 0;
+  int paras = 0;
+  while (pos < work.size() && paras < 2 && out.size() < maxQueries) {
+    size_t eol = work.find('\n', pos);
+    if (eol == std::string::npos) eol = work.size();
+    const std::string line = trimCopy(work.substr(pos, eol - pos));
+    pos = (eol == work.size()) ? work.size() : eol + 1;
+    if (line.size() < 40) continue;
+    if (line.rfind("Task ", 0) == 0 || line.rfind("Chapter ", 0) == 0 ||
+        line.rfind("#", 0) == 0)
+      continue;
+    if (line.find('.') == std::string::npos &&
+        line.find('?') == std::string::npos &&
+        line.find('!') == std::string::npos)
+      continue;
+    const std::string stripped = stripDesignThePrefix(line);
+    if (!title.empty() &&
+        (stripped == title ||
+         line.find(title.substr(0, std::min(title.size(), size_t{12}))) !=
+             std::string::npos))
+      continue;
+    std::string focused = line;
+    size_t si = 0;
+    while (si < focused.size()) {
+      const size_t dot = focused.find(". ", si);
+      if (dot == std::string::npos) break;
+      const std::string sent = trimCopy(focused.substr(si, dot - si + 1));
+      if (sent.size() >= 40) {
+        focused = trimCopy(focused.substr(si));
+        si = 0;
+        break;
+      }
+      si = dot + 2;
+    }
+    if (si > 0 && si < focused.size())
+      focused = trimCopy(focused.substr(si));
+    add(focused);
+    ++paras;
+  }
+  if (!title.empty()) add(title);
+  const std::string missing = firstMissingGoalChapter(goal, draft);
+  if (!missing.empty() && out.size() < maxQueries) {
+    std::string topic = missing;
+    const auto colon = topic.find(':');
+    if (colon != std::string::npos) topic = trimCopy(topic.substr(colon + 1));
+    std::string prefix = title;
+    if (prefix.size() > 48) {
+      const auto sp = prefix.find(' ', prefix.size() / 3);
+      if (sp != std::string::npos) prefix = trimCopy(prefix.substr(sp));
+    }
+    if (!topic.empty()) {
+      if (!prefix.empty()) add(prefix + " " + topic);
+      else add(topic);
+    }
+  }
+  if (out.empty()) {
+    std::string fallback = trimCopy(extractGoalWorkingContext(goal, maxChars));
+    if (fallback.empty()) fallback = clip(goal);
+    add(fallback);
+  }
+  if (out.size() > maxQueries) out.resize(maxQueries);
+  return out;
+}
+
+inline std::string buildPluginSearchQuery(const std::string &goal,
+                                          size_t maxChars = 140) {
+  const auto qs = buildPluginSearchQueries(goal, "", 1, maxChars);
+  return qs.empty() ? std::string() : qs.front();
+}
+
+/** Display / log clip only. Not a module-to-module protocol.
+    Knowledge travels as unit-query packets, not as a causal listicle. */
+inline std::string formatPluginRetrievedPrefix(const std::string &raw,
+                                              size_t maxChars = 4000) {
+  std::string s = trimCopy(raw);
+  if (s.empty() || maxChars == 0) return std::string();
+  if (s.size() > maxChars) {
+    s.resize(maxChars);
+    const auto nl = s.rfind('\n');
+    if (nl != std::string::npos && nl > maxChars / 2) s.resize(nl);
+    s = trimCopy(s);
+  }
+  if (!s.empty() && s.back() != '\n') s.push_back('\n');
+  return s;
+}
+
+/** Tokens of length >= minLen from this string (alnum, lower). */
+inline std::vector<std::string> alnumTokensMinLen(const std::string &s,
+                                                  size_t minLen) {
+  std::vector<std::string> toks;
+  std::string cur;
+  for (unsigned char c : s) {
+    if (std::isalnum(c))
+      cur.push_back(static_cast<char>(std::tolower(c)));
+    else if (!cur.empty()) {
+      if (cur.size() >= minLen) toks.push_back(cur);
+      cur.clear();
+    }
+  }
+  if (cur.size() >= minLen) toks.push_back(cur);
+  return toks;
+}
+
+inline int goalWorkTokenOverlap(const std::string &text,
+                                const std::string &goal) {
+  const std::string work = extractGoalWorkingContext(goal, 2000);
+  std::unordered_set<std::string> focus;
+  for (const auto &t : alnumTokensMinLen(work, 5)) focus.insert(t);
+  int n = 0;
+  std::unordered_set<std::string> seen;
+  for (const auto &t : alnumTokensMinLen(text, 5)) {
+    if (focus.count(t) && seen.insert(t).second) ++n;
+  }
+  return n;
+}
+
+/** Share THIS goal's extracted year / delay / duration — not generic
+    topic overlap (a planet page shares "mars" with a surface-station
+    assignment). Duration-only is ignored when year or delay exist:
+    many unrelated mission pages mention a sol count. */
+inline bool hitMentionsGoalYear(const std::string &text,
+                                const GoalOperationalFacts &f) {
+  if (f.year.empty() || text.empty()) return false;
+  return hasAlnumWord(lowerCopy(text), lowerCopy(f.year));
+}
+
+inline bool hitMentionsGoalDelay(const std::string &text,
+                                 const GoalOperationalFacts &f) {
+  if (f.delay.empty() || text.empty()) return false;
+  const std::string lower = lowerCopy(text);
+  const std::string d = lowerCopy(f.delay);
+  if (lower.find(d) != std::string::npos) return true;
+  const bool hasUnit =
+      (d.find("minute") != std::string::npos &&
+       lower.find("minute") != std::string::npos) ||
+      (d.find("second") != std::string::npos &&
+       lower.find("second") != std::string::npos) ||
+      (d.find("hour") != std::string::npos &&
+       lower.find("hour") != std::string::npos);
+  if (!hasUnit) return false;
+  const auto span = parseDelaySpan(f.delay);
+  if (span.first > 0 &&
+      hasAlnumWord(lower, std::to_string(span.first)))
+    return true;
+  if (span.second > 0 && span.second != span.first &&
+      hasAlnumWord(lower, std::to_string(span.second)))
+    return true;
+  return false;
+}
+
+inline bool hitMentionsGoalDuration(const std::string &text,
+                                    const GoalOperationalFacts &f) {
+  if (f.duration.empty() || text.empty()) return false;
+  const std::string lower = lowerCopy(text);
+  const std::string d = lowerCopy(f.duration);
+  if (lower.find(d) != std::string::npos) return true;
+  const int n = firstIntIn(f.duration);
+  if (n <= 0 || lower.find(std::to_string(n)) == std::string::npos)
+    return false;
+  if (d.find("sol") != std::string::npos &&
+      (hasAlnumWord(lower, "sol") || hasAlnumWord(lower, "sols")))
+    return true;
+  if (d.find("year") != std::string::npos && hasAlnumWord(lower, "year"))
+    return true;
+  if (d.find("day") != std::string::npos &&
+      (hasAlnumWord(lower, "day") || hasAlnumWord(lower, "days")))
+    return true;
+  return false;
+}
+
+inline bool searchHitAlignedToGoal(const std::string &text,
+                                   const std::string &goal) {
+  if (text.empty() || goal.empty()) return false;
+  const auto facts = extractGoalOperationalFacts(goal);
+  const bool haveYearOrDelay =
+      !facts.year.empty() || !facts.delay.empty();
+  if (haveYearOrDelay)
+    return hitMentionsGoalYear(text, facts) ||
+           hitMentionsGoalDelay(text, facts);
+  if (!facts.duration.empty())
+    return hitMentionsGoalDuration(text, facts);
+  return goalWorkTokenOverlap(text, goal) >= 3;
+}
+
+inline nlohmann::json keepSearchHitsAlignedToGoal(const nlohmann::json &hits,
+                                                 const std::string &goal,
+                                                 size_t maxKeep = 6) {
+  nlohmann::json out = nlohmann::json::array();
+  if (!hits.is_array() || goal.empty()) return out;
+  for (const auto &h : hits) {
+    if (!h.is_object()) continue;
+    const std::string title = h.value("title", std::string());
+    const std::string snip =
+        h.value("snippet", h.value("text", std::string()));
+    if (snip.size() < 40) continue;
+    if (!searchHitAlignedToGoal(title + "\n" + snip, goal)) continue;
+    out.push_back(h);
+    if (out.size() >= maxKeep) break;
+  }
+  return out;
+}
+
+/** Unit-query packets from search hits. Same shape as unitQueryIOToJson. */
+inline nlohmann::json searchHitsToUnitQueries(const nlohmann::json &hits,
+                                             size_t maxUnits = 8) {
+  nlohmann::json arr = nlohmann::json::array();
+  if (!hits.is_array()) return arr;
+  for (const auto &h : hits) {
+    if (!h.is_object()) continue;
+    const std::string title = h.value("title", std::string());
+    std::string snip = h.value("snippet", h.value("text", std::string()));
+    if (snip.size() < 40) continue;
+    const std::string content =
+        title.empty() ? snip : (title + "\n" + snip);
+    arr.push_back(nlohmann::json{{"modality", "text"}, {"content", content}});
+    if (arr.size() >= maxUnits) break;
+  }
+  return arr;
+}
+
+/** First working sentence from THIS goal (after a short year-stamp).
+    Goes on the causal opening so continuation is the assignment, not a
+    chapter table and not an empty heading. */
+inline std::string extractGoalLeadParagraph(const std::string &goal,
+                                            size_t maxChars = 480) {
+  const std::string work = extractGoalWorkingContext(goal, 1600);
+  size_t pos = 0;
+  while (pos < work.size()) {
+    size_t eol = work.find('\n', pos);
+    if (eol == std::string::npos) eol = work.size();
+    std::string line = trimCopy(work.substr(pos, eol - pos));
+    pos = (eol == work.size()) ? work.size() : eol + 1;
+    if (line.size() < 40) continue;
+    if (line.find('.') == std::string::npos &&
+        line.find('?') == std::string::npos &&
+        line.find('!') == std::string::npos)
+      continue;
+    size_t si = 0;
+    while (si < line.size()) {
+      const size_t dot = line.find(". ", si);
+      if (dot == std::string::npos) break;
+      const std::string sent = trimCopy(line.substr(si, dot - si + 1));
+      if (sent.size() >= 40) {
+        line = trimCopy(line.substr(si));
+        si = 0;
+        break;
+      }
+      si = dot + 2;
+    }
+    if (si > 0 && si < line.size())
+      line = trimCopy(line.substr(si));
+    if (line.size() > maxChars) {
+      line.resize(maxChars);
+      const auto cut = line.find_last_of(".?!");
+      if (cut != std::string::npos && cut > maxChars / 2)
+        line.resize(cut + 1);
+    }
+    line = trimCopy(line);
+    if (!line.empty() && line.back() != '\n') line += "\n\n";
+    return line;
+  }
+  return std::string();
 }
 
 /** First chapter line from THIS goal, as a markdown heading.
@@ -1057,16 +1374,10 @@ inline std::string formatEmptyFileResume(const std::string &) {
   return std::string();
 }
 
-/** True when the file is still only the extracted pin (or empty).
-    Assign often writes the seed before the first tick, so "we just
-    seeded" is not the same as "there is a real recent window". */
+/** No recent draft yet. Does not invent year/delay text. */
 inline bool deliverableIsOnlyPin(const std::string &body,
-                                 const std::string &goal) {
-  const std::string b = trimCopy(body);
-  if (b.empty()) return true;
-  const std::string pin = trimCopy(formatGoalConstraintPin(goal));
-  if (pin.empty()) return false;
-  return b == pin;
+                                 const std::string &) {
+  return trimCopy(body).empty();
 }
 
 inline std::string formatExistingSectionsBlock(const std::string &body) {
@@ -1277,6 +1588,8 @@ inline std::string joinParagraphs(const std::vector<std::string> &paras,
   return oss.str();
 }
 
+inline std::string prefixBeforeRepeatedShortLine(const std::string &reply);
+
 /** Causal resume only: whole-paragraph tail, even fences, no closer.
     Outline / heading lists stay in RAG (buildMissionOutline), not here.
     Disk is not rewritten. */
@@ -1294,38 +1607,8 @@ inline std::string formatContinuationContext(const std::string &body,
                    [](unsigned char c) {
                      return static_cast<char>(std::tolower(c));
                    });
-    size_t cut = std::string::npos;
-    static const char *ann[] = {
-        "here is an updated outline",
-        "this outline should provide",
-        "plan: remaining sections",
-        "plan: remaining",
-        "the remaining sections",
-        "the following sections are still missing",
-        "sections are still missing",
-        "the final answer is",
-        "there is no specific numerical answer",
-        "## solution",
-        "### solution",
-        "### step",
-        "step-by-step solution",
-        "here's an example of how this code",
-        "here's an example of how the above",
-        "this code provides",
-        "this code could be written",
-        "[leftmargin",
-        "[rightmargin",
-        "[itemsep",
-        "[topsep",
-        "[parsep",
-    };
-    for (const char *a : ann) {
-      const auto p = lower.find(a);
-      if (p != std::string::npos && (cut == std::string::npos || p < cut))
-        cut = p;
-    }
-    if (cut != std::string::npos && cut > 24)
-      src = src.substr(0, cut);
+    (void)lower;
+    src = prefixBeforeRepeatedShortLine(src);
   }
   while (!src.empty()) {
     const auto lastBreak = src.rfind("\n\n");
@@ -1404,6 +1687,17 @@ inline std::string formatMissionResumeSuffix(const std::string &body,
   if (body.empty() || deliverableIsOnlyPin(body, goal))
     return std::string();
   return formatContinuationContext(body, std::string(), resumeChars);
+}
+
+/** Recent context is the draft window. Split by size so n_resume can
+    protect the tail. Do not invent year/delay text. */
+inline std::pair<std::string, std::string>
+splitDeliverableCausal(const std::string &body, const std::string &,
+                       size_t resumeChars = 8000) {
+  if (body.empty()) return {std::string(), std::string()};
+  const size_t cap = resumeChars == 0 ? body.size() : resumeChars;
+  if (body.size() <= cap) return {body, std::string()};
+  return {body.substr(0, body.size() - cap), body.substr(body.size() - cap)};
 }
 
 inline const char *contradictedOperationalFact(const std::string &reply,
@@ -1503,25 +1797,6 @@ inline std::string inspectDeliverableHealth(const std::string &body,
   }
 
   {
-    std::string lower = body;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
-    const bool claimsLive =
-        lower.find("near real-time") != std::string::npos ||
-        lower.find("near-real-time") != std::string::npos ||
-        lower.find("real-time data exchange") != std::string::npos ||
-        lower.find("real-time communication") != std::string::npos ||
-        lower.find("realtime communication") != std::string::npos ||
-        lower.find("without major communication delay") != std::string::npos;
-    if (claimsLive) {
-      const auto facts = extractGoalOperationalFacts(goal);
-      std::string note =
-          "- draft claims near-real-time or undelayed Earth contact";
-      if (!facts.delay.empty()) note += "; one-way delay is " + facts.delay;
-      notes.emplace_back(note);
-    }
     /* Latest span only: the whole draft may discuss the constraint
        correctly. This is RAG, not a refuse gate. */
     const std::string tail =
@@ -1536,6 +1811,36 @@ inline std::string inspectDeliverableHealth(const std::string &body,
     if (isReaderAddressText(last))
       notes.emplace_back("- the last paragraph addresses a reader; continue "
                          "the design and do not answer it");
+  }
+
+  if (!goal.empty() && body.size() >= 400 &&
+      !deliverableIsOnlyPin(body, goal)) {
+    const std::string work = extractGoalWorkingContext(goal, 8000);
+    std::unordered_set<std::string> goalWords;
+    std::string cur;
+    auto flush = [&]() {
+      if (cur.size() >= 6) goalWords.insert(cur);
+      cur.clear();
+    };
+    for (unsigned char c : work) {
+      if (std::isalnum(c))
+        cur.push_back(static_cast<char>(std::tolower(c)));
+      else
+        flush();
+    }
+    flush();
+    int hit = 0;
+    if (goalWords.size() >= 8) {
+      const std::string blow = lowerCopy(body);
+      for (const auto &w : goalWords) {
+        if (blow.find(w) != std::string::npos) ++hit;
+        if (hit >= 2) break;
+      }
+      if (hit < 2)
+        notes.emplace_back("- the draft shares almost none of this "
+                           "assignment's working terms; continue from those "
+                           "terms");
+    }
   }
 
   if (notes.empty()) return std::string();
@@ -1609,14 +1914,6 @@ inline bool replyIsBrochurePinRestatement(const std::string &reply,
     t = std::move(u);
   }
   const std::string lower = lowerCopy(t);
-  static const char *design[] = {
-      "queue",        "watchdog", "protocol",   "packet",
-      "interface",    "buffer",   "fsm",        "checksum",
-      "sol clock",    "uplink",   "downlink",   "timeout",
-      "state machine"};
-  for (const char *d : design) {
-    if (lower.find(d) != std::string::npos) return false;
-  }
   const auto facts = extractGoalOperationalFacts(goal);
   int hits = 0;
   if (!facts.year.empty() && lower.find(lowerCopy(facts.year)) != std::string::npos)
@@ -1631,25 +1928,25 @@ inline bool replyIsBrochurePinRestatement(const std::string &reply,
       lower.find(std::to_string(firstIntIn(facts.duration))) != std::string::npos)
     ++hits;
   if (facts.uncrewed &&
-      (lower.find("uncrewed") != std::string::npos ||
-       lower.find("unmanned") != std::string::npos))
+      (hasAlnumWord(lower, "uncrewed") || hasAlnumWord(lower, "unmanned")))
     ++hits;
   if (facts.noRealtime &&
       (lower.find("no real-time") != std::string::npos ||
        lower.find("real-time human") != std::string::npos))
     ++hits;
   if (hits < 1) return false;
-  const std::string title = lowerCopy(extractGoalTitle(goal));
-  const bool brochureLead =
-      lower.compare(0, 11, "the station") == 0 ||
-      lower.compare(0, 11, "the mission") == 0 ||
-      lower.find("this text was") != std::string::npos ||
-      lower.find("these details") != std::string::npos ||
-      (!title.empty() && title.size() >= 4 &&
-       lower.find(title.substr(0, std::min(title.size(), size_t{16}))) == 0);
-  if (!brochureLead) return false;
-  if (lower.find("because") != std::string::npos && t.size() >= 140)
-    return false;
+  int words = 0;
+  for (size_t i = 0; i < t.size();) {
+    while (i < t.size() &&
+           !std::isalnum(static_cast<unsigned char>(t[i])))
+      ++i;
+    if (i >= t.size()) break;
+    ++words;
+    while (i < t.size() && std::isalnum(static_cast<unsigned char>(t[i])))
+      ++i;
+  }
+  if (words > 24) return false;
+  if (lower.find("because") != std::string::npos) return false;
   return true;
 }
 
@@ -1686,118 +1983,110 @@ inline std::string prefixBeforeSelfRepeat(const std::string &reply) {
 /** Cut a same-reply slogan loop, then keep only paragraphs that are new. */
 inline std::string keepUniqueContinuation(const std::string &reply,
                                           const std::string &existing) {
-  return stripAlreadyWrittenParagraphs(prefixBeforeSelfRepeat(reply),
-                                       existing);
+  return stripAlreadyWrittenParagraphs(
+      prefixBeforeSelfRepeat(prefixBeforeRepeatedShortLine(reply)), existing);
 }
 
-/** Needle that fired, or nullptr. Compared to THIS goal's extracted facts. */
+/** True when a real-time mention is denied in the same window. */
+inline bool realtimeMentionIsNegated(const std::string &lower, size_t at,
+                                     size_t n) {
+  const size_t lo = at > 28 ? at - 28 : 0;
+  const size_t hi = std::min(lower.size(), at + n + 36);
+  const std::string win = lower.substr(lo, hi - lo);
+  return win.find("without") != std::string::npos ||
+         win.find("impossible") != std::string::npos ||
+         win.find("no real") != std::string::npos ||
+         win.find("not real") != std::string::npos ||
+         win.find("cannot") != std::string::npos;
+}
+
+/** Compared to THIS goal's extracted flags/spans. No topic phrase catalog. */
 inline const char *contradictedOperationalFact(const std::string &reply,
                                                const std::string &goal) {
   if (reply.empty() || goal.empty()) return nullptr;
   const auto facts = extractGoalOperationalFacts(goal);
   const std::string lower = lowerCopy(trimCopy(reply));
-  const bool noRt = facts.noRealtime;
-  const bool mentionsEarth = lower.find("earth") != std::string::npos;
+  const bool mentionsEarth = hasAlnumWord(lower, "earth");
   const auto span = parseDelaySpan(facts.delay);
 
-  if (noRt) {
-    if (lower.find("near real-time") != std::string::npos)
-      return "near real-time";
-    if (lower.find("near-real-time") != std::string::npos)
-      return "near-real-time";
-    if (lower.find("real-time collaboration") != std::string::npos)
-      return "real-time collaboration";
-    if (lower.find("without major communication delay") != std::string::npos)
-      return "without major communication delay";
-    if (mentionsEarth && lower.find("in real-time") != std::string::npos)
-      return "earth+in real-time";
-    if (mentionsEarth && lower.find("real-time support") != std::string::npos)
-      return "earth+real-time support";
-    if (mentionsEarth && lower.find("provide real-time") != std::string::npos)
-      return "earth+provide real-time";
-    if (lower.find("providing real-time") != std::string::npos ||
-        lower.find("real-time information") != std::string::npos)
-      return "real-time information";
+  if (facts.noRealtime) {
+    bool live = false;
+    size_t p = 0;
+    while ((p = lower.find("real", p)) != std::string::npos) {
+      const bool hyphen = p + 9 <= lower.size() &&
+                          lower.compare(p, 9, "real-time") == 0;
+      const bool glued = p + 8 <= lower.size() &&
+                         lower.compare(p, 8, "realtime") == 0;
+      const bool spaced = p + 9 <= lower.size() &&
+                          lower.compare(p, 9, "real time") == 0;
+      const size_t n = hyphen || spaced ? 9 : glued ? 8 : 0;
+      if (n && !realtimeMentionIsNegated(lower, p, n)) {
+        if (mentionsEarth || lower.find("communicat") != std::string::npos)
+          live = true;
+      }
+      ++p;
+    }
+    if (live) return "real-time";
     if (mentionsEarth &&
-        (lower.find("remote control") != std::string::npos ||
-         lower.find("controlled remotely") != std::string::npos ||
-         lower.find("remotely by") != std::string::npos ||
-         lower.find("remote monitoring and control") != std::string::npos))
+        (hasAlnumWord(lower, "remote") ||
+         hasAlnumWord(lower, "remotely")) &&
+        (hasAlnumWord(lower, "control") ||
+         hasAlnumWord(lower, "controlled") ||
+         hasAlnumWord(lower, "controller") ||
+         hasAlnumWord(lower, "controllers")))
       return "earth+remote control";
     if (mentionsEarth &&
-        (lower.find("earth-based controller") != std::string::npos ||
-         lower.find("earth based controller") != std::string::npos))
-      return "earth-based controller";
+        (hasAlnumWord(lower, "controller") ||
+         hasAlnumWord(lower, "controllers")))
+      return "earth+remote control";
   }
 
   if (span.second > 0) {
-    const bool delayCtx =
-        lower.find("delay") != std::string::npos ||
-        lower.find("light-time") != std::string::npos ||
-        lower.find("communication") != std::string::npos ||
-        mentionsEarth;
-    if (delayCtx &&
-        (lower.find("over an hour") != std::string::npos ||
-         lower.find("over 1 hour") != std::string::npos ||
-         lower.find("more than an hour") != std::string::npos) &&
-        span.second <= 60)
-      return "delay>max";
-    if (delayCtx &&
-        lower.find("more than " + std::to_string(span.second) + " minute") !=
-            std::string::npos)
-      return "delay>max";
-    if (delayCtx &&
-        (lower.find("several hours") != std::string::npos ||
-         lower.find("hours later") != std::string::npos) &&
-        span.second <= 120)
-      return "delay-hours";
-    if (delayCtx &&
-        (lower.find("3-20 minute") != std::string::npos ||
-         lower.find("3–20 minute") != std::string::npos) &&
-        (span.first != 3 || span.second != 20))
-      return "delay-range";
+    const bool delayCtx = lower.find("delay") != std::string::npos ||
+                          lower.find("communicat") != std::string::npos ||
+                          mentionsEarth;
+    if (delayCtx) {
+      if ((lower.find("hour") != std::string::npos) && span.second <= 60 &&
+          (lower.find("over") != std::string::npos ||
+           lower.find("several") != std::string::npos ||
+           lower.find("hours later") != std::string::npos ||
+           lower.find("more than") != std::string::npos))
+        return lower.find("later") != std::string::npos ? "delay-hours"
+                                                       : "delay>max";
+      int nums[4] = {0, 0, 0, 0};
+      int nN = 0;
+      for (size_t i = 0; i < lower.size() && nN < 4; ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(lower[i]))) continue;
+        int v = 0;
+        size_t j = i;
+        while (j < lower.size() &&
+               std::isdigit(static_cast<unsigned char>(lower[j]))) {
+          v = v * 10 + (lower[j] - '0');
+          ++j;
+        }
+        if (lower.find("minute", j) != std::string::npos &&
+            lower.find("minute", j) < j + 16)
+          nums[nN++] = v;
+        i = j;
+      }
+      if (nN >= 2 && (nums[0] != span.first || nums[1] != span.second))
+        return "delay-range";
+    }
   }
 
   if (facts.landed) {
-    if (lower.find("spacecraft for launch") != std::string::npos)
-      return "spacecraft for launch";
-    if (lower.find("launch preparation") != std::string::npos)
-      return "launch preparation";
-    if (lower.find("will be launched") != std::string::npos ||
-        lower.find("heavy-lift") != std::string::npos)
+    if (lower.find("launch") != std::string::npos)
       return "prelaunch";
-    if (lower.find("station's orbit") != std::string::npos ||
-        lower.find("station orbit") != std::string::npos ||
-        lower.find("orbiting around mars") != std::string::npos ||
-        lower.find("in orbit around mars") != std::string::npos ||
-        lower.find("orbit around mars") != std::string::npos)
+    if (hasAlnumWord(lower, "orbit") || hasAlnumWord(lower, "orbiting") ||
+        lower.find("station's orbit") != std::string::npos)
       return "surface-station-orbit";
   }
 
-  if (facts.uncrewed) {
-    if (lower.find("humans on the spacecraft") != std::string::npos ||
-        lower.find("human operator on board") != std::string::npos ||
-        lower.find("humans on board") != std::string::npos)
-      return "crew-on-spacecraft";
-  }
-
-  const int days = parseDurationDays(facts.duration);
-  if (days >= 300) {
-    if ((lower.find("five year") != std::string::npos ||
-         lower.find("5 year") != std::string::npos) &&
-        (lower.find("extension") != std::string::npos ||
-         lower.find("last for") != std::string::npos ||
-         lower.find("up to five") != std::string::npos))
-      return "five-year-duration";
-    if ((lower.find("at least 1 year") != std::string::npos ||
-         lower.find("at least one year") != std::string::npos ||
-         lower.find("30 day") != std::string::npos ||
-         lower.find("30-day") != std::string::npos) &&
-        (lower.find("autonom") != std::string::npos ||
-         lower.find("operate") != std::string::npos ||
-         lower.find("duration") != std::string::npos))
-      return "short-duration";
-  }
+  if (facts.uncrewed &&
+      (lower.find("humans on") != std::string::npos ||
+       lower.find("on board") != std::string::npos ||
+       lower.find("onboard crew") != std::string::npos))
+    return "crew-on-spacecraft";
   return nullptr;
 }
 
@@ -1808,158 +2097,53 @@ inline bool replyContradictsOperationalFacts(const std::string &reply,
   return contradictedOperationalFact(reply, goal) != nullptr;
 }
 
-/** Homework / boxed-answer dump. Not a design continuation. */
-inline bool replyLooksLikeExamDump(const std::string &reply) {
-  const std::string t = trimCopy(reply);
-  if (t.empty()) return false;
-  const std::string lower = lowerCopy(t);
-  if (lower.rfind("## solution", 0) == 0) return true;
-  if (lower.rfind("### solution", 0) == 0) return true;
-  if (lower.rfind("### step", 0) == 0) return true;
-  if (lower.rfind("step-by-step solution", 0) == 0) return true;
-  if (lower.rfind("the final answer is", 0) == 0) return true;
-  if (lower.rfind("there is no specific numerical answer", 0) == 0) return true;
-  return false;
-}
-
-/** LaTeX enumitem leftovers leaked as bullets. Not design prose. */
-inline bool lineLooksLikeLeftoverListMarkup(const std::string &line) {
-  std::string t = trimCopy(line);
-  if (t.empty()) return false;
-  if (t[0] == '*' || t[0] == '-' || t[0] == '+') {
-    t = trimCopy(t.substr(1));
-  }
-  const std::string lower = lowerCopy(t);
-  if (lower.rfind("[leftmargin", 0) == 0) return true;
-  if (lower.rfind("[rightmargin", 0) == 0) return true;
-  if (lower.rfind("[itemsep", 0) == 0) return true;
-  if (lower.rfind("[topsep", 0) == 0) return true;
-  if (lower.rfind("[parsep", 0) == 0) return true;
-  return false;
-}
-
-/** Whole-drop only when the reply is leftover markup, or starts as one. */
-inline bool replyLooksLikeLeftoverLoop(const std::string &reply) {
-  const std::string t = trimCopy(reply);
-  if (t.empty()) return false;
-  size_t leftover = 0;
-  size_t lines = 0;
+/** Cut when the same short line repeats. No phrase list — structure only. */
+inline std::string prefixBeforeRepeatedShortLine(const std::string &reply) {
+  if (reply.size() < 32) return reply;
+  std::vector<std::string> lines;
+  std::vector<size_t> offs;
   size_t i = 0;
-  while (i < t.size()) {
-    size_t nl = t.find('\n', i);
-    if (nl == std::string::npos) nl = t.size();
-    const std::string line = t.substr(i, nl - i);
-    if (!trimCopy(line).empty()) {
-      ++lines;
-      if (lineLooksLikeLeftoverListMarkup(line)) ++leftover;
+  while (i < reply.size()) {
+    size_t nl = reply.find('\n', i);
+    if (nl == std::string::npos) nl = reply.size();
+    offs.push_back(i);
+    lines.push_back(trimCopy(reply.substr(i, nl - i)));
+    i = (nl == reply.size()) ? reply.size() : nl + 1;
+    if (nl == reply.size()) break;
+  }
+  std::unordered_map<std::string, int> cnt;
+  for (const auto &ln : lines) {
+    if (ln.size() >= 4 && ln.size() <= 64) cnt[ln]++;
+  }
+  std::string worst;
+  int worstN = 0;
+  for (const auto &kv : cnt) {
+    if (kv.second > worstN) {
+      worstN = kv.second;
+      worst = kv.first;
     }
-    i = nl + 1;
   }
-  if (leftover == 0) return false;
-  if (lineLooksLikeLeftoverListMarkup(
-          t.substr(0, t.find('\n') == std::string::npos ? t.size()
-                                                        : t.find('\n'))))
-    return true;
-  return leftover >= 4;
+  if (worstN < 4 || worst.empty()) return reply;
+  int seen = 0;
+  for (size_t k = 0; k < lines.size(); ++k) {
+    if (lines[k] != worst) continue;
+    ++seen;
+    if (seen == 2) return trimCopy(reply.substr(0, offs[k]));
+  }
+  return reply;
 }
 
-/** Homework class-stub dump. Not station software design. */
-inline bool replyLooksLikeHomeworkCodeDump(const std::string &reply) {
+/** True when most of the reply is one short line looping. */
+inline bool replyLooksLikeShortLineLoop(const std::string &reply) {
   const std::string t = trimCopy(reply);
-  if (t.empty()) return false;
-  const std::string lower = lowerCopy(t);
-  if (lower.rfind("here's an example of how this code", 0) == 0) return true;
-  if (lower.rfind("here's an example of how the above", 0) == 0) return true;
-  if (lower.rfind("this code provides a basic structure", 0) == 0) return true;
-  if (lower.rfind("```", 0) == 0 &&
-      lower.find("def __init__") != std::string::npos &&
-      lower.find("class ") != std::string::npos)
-    return true;
-  if (t[0] == '}' &&
-      (lower.find("here's an example") != std::string::npos ||
-       lower.find("```python") != std::string::npos))
-    return true;
-  return false;
+  if (t.size() < 32) return false;
+  const std::string cut = prefixBeforeRepeatedShortLine(t);
+  return !cut.empty() && cut.size() * 4 < t.size();
 }
 
-/** Keep the model's own design text and drop a later project-charter closer. */
+/** Structural loop cut only. Phrase lists are not a knowledge fix. */
 inline std::string prefixBeforeForbiddenCloser(const std::string &reply) {
-  if (reply.empty()) return reply;
-  std::string lower = reply;
-  std::transform(lower.begin(), lower.end(), lower.begin(),
-                 [](unsigned char c) {
-                   return static_cast<char>(std::tolower(c));
-                 });
-  static const char *marks[] = {
-      "software development methodologies",
-      "agile and devops",
-      "overall, these features",
-      "overall, the design",
-      "these details suggest",
-      "this text was generated",
-      "this mission might be part",
-      "technological marvel",
-      "human ingenuity",
-      "key features:",
-      "is there anything specific you'd like",
-      "these conclusions are based on the provided",
-      "here's a breakdown of the key points",
-      "given these characteristics",
-      "given these details",
-      "**key considerations**",
-      "**scientific objectives**",
-      "**potential risks**",
-      "**recommendations**",
-      "**additional considerations**",
-      "**conclusion**",
-      "ideal solution",
-      "overall performance and effectiveness",
-      "this approach simplifies",
-      "this approach allows",
-      "requires careful planning",
-      "duration suggests",
-      "duration of the mission suggests",
-      "the fact that it's",
-      "**key features:**",
-      "**mission objectives:**",
-      "**scientific instruments:**",
-      "plan: remaining",
-      "software requirements specification",
-      "## example use cases",
-      "## software requirements",
-      "## software design",
-      "## software implementation",
-      "## testing and validation",
-      "## system requirements",
-      "the following sections are still missing",
-      "sections are still missing",
-      "this code defines",
-      "this code implements",
-      "this code provides",
-      "this code could be written",
-      "this code does not contain",
-      "here's an example of how this code",
-      "here's an example of how the above",
-      "the final answer is",
-      "there is no specific numerical answer",
-      "\n## solution",
-      "\n### solution",
-      "\n### step",
-      "\nstep-by-step solution",
-      "[leftmargin",
-      "[rightmargin",
-      "[itemsep",
-      "[topsep",
-      "[parsep",
-  };
-  size_t cut = std::string::npos;
-  for (const char *m : marks) {
-    const auto p = lower.find(m);
-    if (p != std::string::npos && (cut == std::string::npos || p < cut))
-      cut = p;
-  }
-  if (cut == std::string::npos) return reply;
-  return trimCopy(reply.substr(0, cut));
+  return prefixBeforeRepeatedShortLine(reply);
 }
 
 /**
@@ -2214,11 +2398,10 @@ fitMissionPromptSplit(const std::string &staticPart,
   if (maxChars == 0) return {"", ""};
   if (staticPart.size() + dynamicPart.size() <= maxChars)
     return {staticPart, dynamicPart};
-  /* Recent window is the continuation. Keep the pin if it fits, then
-     the TAIL of the draft — never head+middle-clip the causal stream. */
+  /* 4096 slots * ngram=2 holds the working brief AND the draft tail.
+     Do not throw away the static prefix at maxChars/8. Keep all of it
+     whenever any resume room remains. */
   std::string st = staticPart;
-  const size_t staticCap = std::max<size_t>(maxChars / 8, 64);
-  if (st.size() > staticCap) st.resize(staticCap);
   if (st.size() >= maxChars) return {st.substr(0, maxChars), std::string()};
   const size_t dynBudget = maxChars - st.size();
   std::string dyn = dynamicPart;

@@ -881,6 +881,14 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
 
     json payload = context;
     if (!spec.addonType.empty()) payload["__addonType"] = spec.addonType;
+    if (spec.addonType == "search") {
+      if (!payload.contains("searchOptions") ||
+          !payload["searchOptions"].is_object())
+        payload["searchOptions"] = json::object();
+      if (!payload["searchOptions"].contains("allowWeb"))
+        payload["searchOptions"]["allowWeb"] = true;
+      payload["searchOptions"]["preferIndex"] = false;
+    }
 
     addon::AddonResult res = addonManager_->run(text, payload);
     if (!res.handled) {

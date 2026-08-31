@@ -586,11 +586,69 @@ json evaluateMathExpression(const std::string &expr) {
   }
 }
 
+std::string lowerAscii(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return s;
+}
+
+/* Plugin-owned: only fire when the situation asks for arithmetic.
+   "8-40 minutes" / "1000 sols" in a brief is not a calc request. */
+std::string extractMathAsk(const json &situation) {
+  const std::string blob =
+      situation.value("text", std::string()) + "\n" +
+      situation.value("goal", std::string()) + "\n" +
+      situation.value("draft", std::string());
+  const std::string low = lowerAscii(blob);
+  const char *cues[] = {"math:", "calc:", "calculate ", "compute ",
+                        "evaluate ", "计算:", "计算"};
+  for (const char *cue : cues) {
+    const auto pos = low.find(cue);
+    if (pos == std::string::npos) continue;
+    std::string rest = blob.substr(pos + std::char_traits<char>::length(cue));
+    auto eol = rest.find('\n');
+    if (eol != std::string::npos) rest.resize(eol);
+    auto st = rest.find_first_not_of(" \t\r");
+    if (st == std::string::npos) continue;
+    rest = rest.substr(st);
+    std::string expr;
+    for (char ch : rest) {
+      const unsigned char uc = static_cast<unsigned char>(ch);
+      if (std::isdigit(uc) || ch == '+' || ch == '-' || ch == '*' ||
+          ch == '/' || ch == '%' || ch == '^' || ch == '(' || ch == ')' ||
+          ch == '.' || ch == '!' || ch == ' ') {
+        expr.push_back(ch);
+        continue;
+      }
+      if (std::isalpha(uc)) break;
+      break;
+    }
+    while (!expr.empty() && (expr.back() == ' ' || expr.back() == '+' ||
+                             expr.back() == '-' || expr.back() == '*' ||
+                             expr.back() == '/'))
+      expr.pop_back();
+    if (expr.size() >= 3) return expr;
+  }
+  return std::string();
+}
+
 class MathAddon : public Addon {
 public:
   explicit MathAddon(std::string name) : name_(std::move(name)) {}
   std::string name() const override { return name_; }
   std::string type() const override { return "math"; }
+
+  float consider(const json &situation) const override {
+    return extractMathAsk(situation).empty() ? 0.f : 0.9f;
+  }
+
+  AddonResult contribute(const json &situation) override {
+    const std::string expr = extractMathAsk(situation);
+    if (expr.empty()) return AddonResult{};
+    json payload = situation.is_object() ? situation : json::object();
+    payload["__addonType"] = "math";
+    return handle("math: " + expr, payload);
+  }
 
   AddonResult handle(const std::string &text, const json &payload) override {
     AddonResult res;
@@ -632,6 +690,7 @@ public:
         res.reply += " (at char " + std::to_string(out["position"].get<size_t>()) + ")";
       }
     }
+    sealAddonResultUnits(res);
     return res;
   }
 

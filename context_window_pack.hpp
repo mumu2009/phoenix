@@ -16,6 +16,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <sstream>
 #include <string>
@@ -32,7 +33,7 @@ struct PackOptions {
   int replyReserveTokens{512};  /* leave room for model output */
   int summaryBudgetTokens{512}; /* pinned summary slot (RAG) */
   int gnnBudgetTokens{256};     /* pinned GNN slot when enabled (RAG) */
-  int overheadTokens{256};      /* pin / template overhead on causal */
+  int overheadTokens{256};      /* unused for recent-window size */
   int ngramMerge{2};            /* 0/1 = off; 2 or 3 = unit compaction */
 };
 
@@ -49,9 +50,30 @@ struct PackResult {
   bool usedGnn{false};
 };
 
-/** Rough token estimate (mixed EN/ZH): ~3 chars/token. */
+/** After ngram=2, ~2 words occupy one packed slot.
+    Use this when converting a token budget into stored chars. */
+inline size_t charsPerPackedToken() { return 6; }
+
+/** ~2 English words / packed token; CJK ~2 chars / packed token. */
 inline size_t estimateTokens(const std::string &s) {
-  return s.empty() ? 0 : (s.size() + 2) / 3;
+  if (s.empty()) return 0;
+  size_t words = 0;
+  size_t cjk = 0;
+  bool inWord = false;
+  for (unsigned char c : s) {
+    if ((c & 0x80) != 0) {
+      if ((c & 0xC0) != 0x80) ++cjk;
+      inWord = false;
+    } else if (std::isalnum(c) || c == '\'') {
+      if (!inWord) {
+        ++words;
+        inWord = true;
+      }
+    } else {
+      inWord = false;
+    }
+  }
+  return (words + 1) / 2 + (cjk + 1) / 2;
 }
 
 inline std::string takeTailChars(const std::string &s, size_t maxChars) {
@@ -70,7 +92,7 @@ inline std::string takeHeadChars(const std::string &s, size_t maxChars) {
  */
 inline std::string extractiveSummary(const std::string &full, size_t budgetTokens) {
   if (full.empty() || budgetTokens < 32) return std::string();
-  const size_t budgetChars = budgetTokens * 3;
+  const size_t budgetChars = budgetTokens * charsPerPackedToken();
   if (full.size() <= budgetChars) return full;
   const size_t head = budgetChars / 3;
   const size_t tail = budgetChars - head - 48;
@@ -85,12 +107,12 @@ inline std::string extractiveSummary(const std::string &full, size_t budgetToken
 /** Truncate to an approximate token budget (prefer keeping the end). */
 inline std::string fitTokensTail(const std::string &s, size_t budgetTokens) {
   if (budgetTokens == 0) return std::string();
-  return takeTailChars(s, budgetTokens * 3);
+  return takeTailChars(s, budgetTokens * charsPerPackedToken());
 }
 
 inline std::string fitTokensHead(const std::string &s, size_t budgetTokens) {
   if (budgetTokens == 0) return std::string();
-  return takeHeadChars(s, budgetTokens * 3);
+  return takeHeadChars(s, budgetTokens * charsPerPackedToken());
 }
 
 /**
@@ -103,10 +125,13 @@ inline PackResult packContext(const std::string &fullText,
                               const PackOptions &opt) {
   PackResult out;
   const int ngram = (opt.ngramMerge >= 2) ? std::min(opt.ngramMerge, 3) : 1;
-  const int usableSlots =
-      std::max(256, opt.ctxTokens - opt.replyReserveTokens - opt.overheadTokens);
+  /* Recent window = ctxSize × n-gram. 4096 slots × 2 ≈ 8192 tokens.
+     Reply reserve is generation, not a cut of this window. */
   const size_t causalBudget =
-      static_cast<size_t>(usableSlots) * static_cast<size_t>(ngram);
+      static_cast<size_t>(std::max(256, opt.ctxTokens)) *
+      static_cast<size_t>(ngram);
+  (void)opt.replyReserveTokens;
+  (void)opt.overheadTokens;
   out.causalTokenBudget = causalBudget;
   std::ostringstream body;
 
