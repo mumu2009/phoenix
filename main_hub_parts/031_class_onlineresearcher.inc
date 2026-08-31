@@ -37,6 +37,12 @@ public:
   void setEnabled(bool enabled) { enabled_ = enabled; }
 
   json lookup(const json &input, const json &options);
+  void ingestText(const std::string &url, const std::string &title,
+                  const std::string &text);
+  size_t indexedDocumentCount() const {
+    std::lock_guard<std::mutex> lock(indexMu_);
+    return docs_.size();
+  }
 
 private:
   struct CacheEntry {
@@ -64,7 +70,7 @@ private:
   std::unordered_map<std::string, std::unordered_set<std::string>>
       aspectToUrls_;
   std::unordered_map<std::string, std::string> urlToContent_;
-  std::mutex indexMu_;
+  mutable std::mutex indexMu_;
 
   std::string normalizeKey(const std::vector<std::string> &words) const;
   void pruneCache();

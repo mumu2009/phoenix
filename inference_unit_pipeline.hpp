@@ -1,27 +1,25 @@
-/* inference_unit_pipeline.hpp - unified text/unit iteration workflow
+/* inference_unit_pipeline.hpp - single-instance unit-query workflow
    Copyright (C) 2026 079 Project
 
-   Single-instance path (every module except infer is optional):
-     I/O enc (paragraph in, unit-query sequence out)
-       -> preprocess (memory / emotion / ...)
-       -> gnn
-       -> infer
-       -> I/O dec (unit-query sequence in, paragraph text out)
-   Paragraph I/O is an async boundary (enc/dec/infer can overlap later).
-   It does NOT mean-pool a paragraph into one vector. Enc still emits a
-   unit-query sequence. After enc, N-gram merge (2-3 adjacent token
-   rows -> one equivalent vector) is the same protocol step for every
-   module that speaks unit query: enc output, preprocess, gnn, infer,
-   dec. Causal and RAG both go through it — they are the same unit
-   stream type. Pre-built graph-node rows are already units (not token
-   n-grams) and are not merged again.
-   Two infer streams (mainstream RAG / FiD-style, not one causal pipe):
-     causal: pin + packed recent draft (only this is decoded)
-     rag:    memory + GNN + dropped-head summary unit-query sequences
-   RAG is cross-attended into causal embeddings as residual emphasis.
-   Last resume units stay unmerged so generate continues the document,
-   never the memory. RAG rows never occupy sequence positions.
-   Internal 8B pair: infer -> dec -> enc -> infer.
+   One protocol on every module dash: unit query. A unit is a signal
+   matrix; it appears as one packet. Token is only text-mode I/O
+   (enc in / dec out). Direct matrix math is allowed only when both
+   sides confirm the matrices are aligned; otherwise compute with
+   the unit as a whole.
+   Single-instance shapes (every module except infer is optional):
+     enc - infer - dec
+     enc - memory - infer(RAG) - dec
+     enc - memory - gnn - infer(RAG) - dec
+     enc - emotion/affect (not memory) - infer(matrix-control) - dec
+     after first-layer input: infer - dec - enc - infer
+   Enc of a paragraph is still a unit-query sequence (one row per
+   token), not one pooled vector. After enc, N-gram merge (2-3) is
+   the same step on every unit stream. Graph-node rows are already
+   units and are not merged again.
+   Infer interfaces (not a second text protocol):
+     causal units = enc(document I/O); only this is decoded
+     RAG units    = memory / GNN residual (same unit type, no sequence slot)
+     matrix-control = emotion / sampling (not unit exchange)
    Infer never sees memory as prompt text. */
 #pragma once
 
@@ -333,6 +331,37 @@ inline nlohmann::json unitRowsToJson(
   nlohmann::json arr = nlohmann::json::array();
   for (const auto &r : rows) arr.push_back(r);
   return arr;
+}
+
+/** Plugin / module exchange is this packet: text content (enc payload)
+    or already-encoded rows. No third protocol. */
+inline void appendUnitQueryFromJson(std::vector<UnitQueryIO> &dst,
+                                    const nlohmann::json &item) {
+  if (item.is_string()) {
+    appendUnitQuery(dst, unitQueryFromText(item.get<std::string>(), "text"));
+    return;
+  }
+  if (!item.is_object()) return;
+  if (item.contains("rows") && item["rows"].is_array()) {
+    auto rows = jsonToUnitRows(item["rows"]);
+    if (!rows.empty()) {
+      appendUnitQuery(dst, unitQueryFromRows(std::move(rows),
+                                             item.value("modality", "unit")));
+      return;
+    }
+  }
+  const std::string content = item.value("content", std::string());
+  const std::string mod = item.value("modality", std::string("text"));
+  if (!content.empty() && mod != "audio" && mod != "video" &&
+      mod != "image")
+    appendUnitQuery(dst, unitQueryFromText(content, mod));
+}
+
+inline void appendUnitQueriesFromJsonArray(std::vector<UnitQueryIO> &dst,
+                                           const nlohmann::json &arr) {
+  if (!arr.is_array()) return;
+  for (const auto &item : arr)
+    appendUnitQueryFromJson(dst, item);
 }
 
 /** Stable slot for chat / mission isolation on llama-server parallel slots. */

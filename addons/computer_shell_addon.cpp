@@ -138,6 +138,30 @@ public:
 	std::string name() const override { return name_; }
 	std::string type() const override { return "computer"; }
 
+	float consider(const json &situation) const override {
+		if (situation.contains("computerCommand") &&
+		    situation["computerCommand"].is_string() &&
+		    !situation["computerCommand"].get<std::string>().empty())
+			return 0.88f;
+		const std::string text = lowerCopy(trimCopy(
+		    situation.value("text", std::string())));
+		if (text.rfind("computer:", 0) == 0 || text.rfind("shell:", 0) == 0 ||
+		    text.rfind("desktop:", 0) == 0)
+			return 0.84f;
+		return 0.f;
+	}
+
+	AddonResult contribute(const json &situation) override {
+		std::string text = situation.value("text", std::string());
+		if (situation.contains("computerCommand") &&
+		    situation["computerCommand"].is_string())
+			text = situation["computerCommand"].get<std::string>();
+		if (text.empty()) return AddonResult{};
+		json payload = situation.is_object() ? situation : json::object();
+		payload["__addonType"] = "computer";
+		return handle(text, payload);
+	}
+
 	AddonResult handle(const std::string &text, const json &payload) override {
 		AddonResult result;
 		std::string addonType = trimCopy(payload.value("__addonType", std::string()));
@@ -170,6 +194,7 @@ public:
 		if (bridge.contains("error") && bridge["error"].is_string()) {
 			result.meta["error"] = bridge["error"].get<std::string>();
 		}
+		sealAddonResultUnits(result);
 		return result;
 	}
 

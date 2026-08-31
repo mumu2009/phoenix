@@ -5,8 +5,13 @@
 #include <cctype>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <regex>
 #include <sstream>
+
+#ifdef HAVE_CURL
+#include <curl/curl.h>
+#endif
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -110,14 +115,57 @@ static std::string htmlDecode(const std::string &s) {
 
 std::string htmlToText(const std::string &s) {
   /* decode entities first, then strip tags: "&lt;b&gt;" must vanish, not
-     become a literal "<b>". */
+     become a literal "<b>". script/style/noscript bodies are dropped so a
+     page excerpt is prose, not bundled JavaScript. */
   std::string t = htmlDecode(s);
+  auto startsWithIgnore = [](const std::string &src, size_t at,
+                             const char *pat) {
+    for (size_t i = 0; pat[i]; ++i) {
+      if (at + i >= src.size()) return false;
+      const char a = static_cast<char>(std::tolower(static_cast<unsigned char>(src[at + i])));
+      const char b = static_cast<char>(std::tolower(static_cast<unsigned char>(pat[i])));
+      if (a != b) return false;
+    }
+    return true;
+  };
   std::string stripped;
   bool inTag = false;
-  for (char c : t) {
-    if (c == '<') { inTag = true; continue; }
-    if (c == '>') { inTag = false; continue; }
-    if (!inTag) stripped.push_back(c);
+  bool skip = false;
+  const char *skipEnd = nullptr;
+  for (size_t i = 0; i < t.size(); ++i) {
+    if (!inTag && t[i] == '<') {
+      if (startsWithIgnore(t, i, "<script")) {
+        skip = true;
+        skipEnd = "</script";
+        inTag = true;
+        continue;
+      }
+      if (startsWithIgnore(t, i, "<style")) {
+        skip = true;
+        skipEnd = "</style";
+        inTag = true;
+        continue;
+      }
+      if (startsWithIgnore(t, i, "<noscript")) {
+        skip = true;
+        skipEnd = "</noscript";
+        inTag = true;
+        continue;
+      }
+      inTag = true;
+      continue;
+    }
+    if (inTag && t[i] == '>') {
+      inTag = false;
+      continue;
+    }
+    if (skip && skipEnd && startsWithIgnore(t, i, skipEnd)) {
+      skip = false;
+      skipEnd = nullptr;
+      inTag = true;
+      continue;
+    }
+    if (!inTag && !skip) stripped.push_back(t[i]);
   }
   t = std::move(stripped);
   /* collapse whitespace */
@@ -132,6 +180,131 @@ std::string htmlToText(const std::string &s) {
       space = false;
     }
   }
+  return out;
+}
+
+/* ------------------------ query / URL helpers ------------------------ */
+
+static std::string lowerAscii(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return s;
+}
+
+static std::vector<std::string> queryWords(const std::string &q) {
+  std::vector<std::string> out;
+  std::string cur;
+  for (unsigned char c : q) {
+    if (std::isalnum(c) || c == '-')
+      cur.push_back(static_cast<char>(std::tolower(c)));
+    else if (!cur.empty()) {
+      bool alpha = false;
+      for (char x : cur) {
+        if (std::isalpha(static_cast<unsigned char>(x))) {
+          alpha = true;
+          break;
+        }
+      }
+      if (cur.size() >= 4 && alpha) out.push_back(cur);
+      cur.clear();
+    }
+  }
+  if (cur.size() >= 4) {
+    bool alpha = false;
+    for (char x : cur) {
+      if (std::isalpha(static_cast<unsigned char>(x))) {
+        alpha = true;
+        break;
+      }
+    }
+    if (alpha) out.push_back(cur);
+  }
+  return out;
+}
+
+static int tokenOverlap(const std::string &text, const std::vector<std::string> &toks) {
+  const std::string low = lowerAscii(text);
+  int n = 0;
+  for (const auto &t : toks) {
+    if (low.find(t) != std::string::npos) ++n;
+  }
+  return n;
+}
+
+static bool isSerpOrLoginUrl(const std::string &url) {
+  const std::string u = lowerAscii(url);
+  if (u.rfind("javascript:", 0) == 0 || u.rfind("mailto:", 0) == 0) return true;
+  if (u.find("bing.com/search") != std::string::npos) return true;
+  if (u.find("bing.com/ck/") != std::string::npos) return true;
+  if (u.find("duckduckgo.com") != std::string::npos) return true;
+  if (u.find("baidu.com/s?") != std::string::npos) return true;
+  if (u.find("account.microsoft.com") != std::string::npos) return true;
+  if (u.find("login.live.com") != std::string::npos) return true;
+  return false;
+}
+
+#ifdef HAVE_CURL
+static size_t curlWriteBody(char *ptr, size_t size, size_t nmemb, void *ud) {
+  auto *out = static_cast<std::string *>(ud);
+  const size_t n = size * nmemb;
+  if (out->size() + n > 2u * 1024u * 1024u) return 0;
+  out->append(ptr, n);
+  return n;
+}
+
+static std::string curlGetText(const std::string &url, int timeoutMs,
+                               int maxRedirects, const std::string &userAgent) {
+  static std::once_flag once;
+  std::call_once(once, []() { curl_global_init(CURL_GLOBAL_DEFAULT); });
+  CURL *c = curl_easy_init();
+  if (!c) return "";
+  std::string body;
+  curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(c, CURLOPT_MAXREDIRS, static_cast<long>(std::max(1, maxRedirects)));
+  curl_easy_setopt(c, CURLOPT_TIMEOUT_MS, static_cast<long>(std::max(1000, timeoutMs)));
+  curl_easy_setopt(c, CURLOPT_USERAGENT, userAgent.c_str());
+  curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curlWriteBody);
+  curl_easy_setopt(c, CURLOPT_WRITEDATA, &body);
+  curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");
+  curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+  const CURLcode rc = curl_easy_perform(c);
+  long status = 0;
+  curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
+  curl_easy_cleanup(c);
+  if (rc != CURLE_OK || status < 200 || status >= 300) return "";
+  return body;
+}
+#endif
+
+std::string pageExcerpt(const std::string &html, const std::string &query,
+                        size_t maxChars) {
+  std::string text = htmlToText(html);
+  if (text.size() > 40000) text.resize(40000);
+  const auto toks = queryWords(query);
+  if (toks.empty() || text.empty()) {
+    if (text.size() > maxChars) text.resize(maxChars);
+    return text;
+  }
+  std::string out;
+  size_t i = 0;
+  while (i < text.size() && out.size() < maxChars) {
+    size_t end = text.find(". ", i);
+    if (end == std::string::npos) end = text.size();
+    else end += 1;
+    std::string sent = text.substr(i, end - i);
+    i = end + (end < text.size() && text[end] == ' ' ? 1 : 0);
+    while (!sent.empty() && std::isspace(static_cast<unsigned char>(sent.front())))
+      sent.erase(sent.begin());
+    if (sent.size() < 40) continue;
+    if (tokenOverlap(sent, toks) <= 0) continue;
+    if (!out.empty()) out.push_back(' ');
+    out += sent;
+  }
+  if (out.empty()) {
+    out = text.substr(0, std::min(text.size(), maxChars));
+  }
+  if (out.size() > maxChars) out.resize(maxChars);
   return out;
 }
 
@@ -165,6 +338,12 @@ SplitUrl splitHttpUrl(const std::string &urlIn) {
 
 std::string httpGetText(const std::string &url, int timeoutMs, int maxRedirects,
                         const std::string &userAgent) {
+#ifdef HAVE_CURL
+  if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0)
+    return curlGetText(url, timeoutMs, maxRedirects, userAgent);
+#endif
+  if (url.rfind("https://", 0) == 0)
+    return "";
   std::string current = url;
   for (int hop = 0; hop <= maxRedirects; ++hop) {
     const SplitUrl u = splitHttpUrl(current);
@@ -347,6 +526,34 @@ std::vector<SearchResult> parseDdgLiteHtml(const std::string &html) {
   return out;
 }
 
+std::vector<SearchResult> parseBingHtml(const std::string &html) {
+  std::vector<SearchResult> out;
+  static const std::regex linkRe(
+      R"bing(<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>)bing",
+      std::regex::icase);
+  std::sregex_iterator it(html.begin(), html.end(), linkRe), end;
+  for (; it != end; ++it) {
+    std::string url = it->str(1);
+    std::string title = htmlToText(it->str(2));
+    if (title.empty() || isSerpOrLoginUrl(url)) continue;
+    std::string snippet;
+    const size_t after = static_cast<size_t>(it->position() + it->length());
+    const size_t cap = html.find("b_caption", after);
+    if (cap != std::string::npos && cap < after + 2500) {
+      const size_t p0 = html.find("<p", cap);
+      if (p0 != std::string::npos && p0 < cap + 400) {
+        const size_t gt = html.find('>', p0);
+        const size_t p1 = html.find("</p>", gt == std::string::npos ? p0 : gt);
+        if (gt != std::string::npos && p1 != std::string::npos)
+          snippet = htmlToText(html.substr(gt + 1, p1 - gt - 1));
+      }
+    }
+    if (snippet.size() > 600) snippet.resize(600);
+    out.push_back(SearchResult{title, url, snippet, 0.0});
+  }
+  return out;
+}
+
 /* ------------------------- endpoint JSON ---------------------------- */
 
 std::vector<SearchResult> parseEndpointJson(const nlohmann::json &raw) {
@@ -386,6 +593,28 @@ std::vector<SearchResult> parseEndpointJson(const nlohmann::json &raw) {
 nlohmann::json WebSearchEngine::searchBackend(const std::string &backend,
                                               const std::string &query,
                                               const WebSearchConfig &cfg) const {
+  if (backend == "bing") {
+    const std::string q = urlEncode(query);
+    const std::vector<std::string> urls = {
+        "https://www.bing.com/search?q=" + q + "&setlang=en-US&mkt=en-US",
+        "https://cn.bing.com/search?q=" + q + "&setlang=en&mkt=en-US",
+    };
+    json lastErr = json{{"ok", false}, {"backend", backend}, {"error", "http fetch failed"}};
+    for (const auto &url : urls) {
+      const std::string html =
+          httpGetText(url, cfg.timeoutMs, cfg.maxRedirects, cfg.userAgent);
+      if (html.empty()) continue;
+      auto results = parseBingHtml(html);
+      if (results.empty()) {
+        lastErr["error"] = "no parseable hits";
+        continue;
+      }
+      json arr = json::array();
+      for (const auto &r : results) arr.push_back(r.toJson());
+      return json{{"ok", true}, {"backend", backend}, {"results", arr}};
+    }
+    return lastErr;
+  }
   if (backend == "ddg_lite") {
     const std::string url = "http://lite.duckduckgo.com/lite/?q=" + urlEncode(query);
     const std::string html = httpGetText(url, cfg.timeoutMs, cfg.maxRedirects, cfg.userAgent);
@@ -440,15 +669,22 @@ nlohmann::json WebSearchEngine::search(const std::string &query,
     for (const auto &b : options["backends"])
       if (b.is_string()) cfg.backends.push_back(b.get<std::string>());
   }
-  if (cfg.backends.empty()) cfg.backends.push_back("ddg_lite");
+  if (cfg.backends.empty()) {
+    cfg.backends.push_back("bing");
+    cfg.backends.push_back("ddg_lite");
+  }
   if (!cfg.enabled) return json{{"ok", false}, {"error", "web search disabled"}};
+  if (options.contains("fetchPages") && options["fetchPages"].is_number())
+    cfg.fetchPages = options["fetchPages"].get<size_t>();
 
   std::vector<SearchResult> merged;
   std::vector<std::string> usedUrls;
   json sources = json::array();
   for (const auto &backend : cfg.backends) {
     json one = searchBackend(backend, query, cfg);
-    sources.push_back(json{{"backend", backend}, {"ok", one.value("ok", false)}});
+    sources.push_back(json{{"backend", backend},
+                           {"ok", one.value("ok", false)},
+                           {"error", one.value("error", std::string())}});
     if (!one.value("ok", false)) continue;
     for (const auto &item : one["results"]) {
       SearchResult r;
@@ -456,7 +692,7 @@ nlohmann::json WebSearchEngine::search(const std::string &query,
       r.url = item.value("url", "");
       r.snippet = item.value("snippet", "");
       r.score = item.value("score", 0.0);
-      if (r.url.empty()) continue;
+      if (r.url.empty() || isSerpOrLoginUrl(r.url)) continue;
       if (std::find(usedUrls.begin(), usedUrls.end(), r.url) != usedUrls.end()) continue;
       usedUrls.push_back(r.url);
       merged.push_back(r);
@@ -467,6 +703,32 @@ nlohmann::json WebSearchEngine::search(const std::string &query,
   if (merged.empty()) {
     return json{{"ok", false}, {"query", query}, {"sources", sources},
                 {"error", "no results from any backend"}};
+  }
+  const auto toks = queryWords(query);
+  for (auto &r : merged)
+    r.score = static_cast<double>(tokenOverlap(r.title + " " + r.snippet, toks));
+  std::sort(merged.begin(), merged.end(),
+            [](const SearchResult &a, const SearchResult &b) { return a.score > b.score; });
+  if (!toks.empty()) {
+    const double best = merged.front().score;
+    if (best >= 2.0) {
+      merged.erase(std::remove_if(merged.begin(), merged.end(),
+                                  [](const SearchResult &r) { return r.score < 1.0; }),
+                   merged.end());
+    }
+  }
+  const size_t pages = std::min(cfg.fetchPages, merged.size());
+  for (size_t i = 0; i < pages; ++i) {
+    if (isSerpOrLoginUrl(merged[i].url)) continue;
+    const std::string html =
+        httpGetText(merged[i].url, cfg.timeoutMs, cfg.maxRedirects, cfg.userAgent);
+    if (html.empty()) continue;
+    std::string ex = pageExcerpt(html, query, 720);
+    if (ex.size() < 80) continue;
+    if (merged[i].snippet.size() < ex.size()) merged[i].snippet = std::move(ex);
+    else if (ex.find(merged[i].snippet) == std::string::npos)
+      merged[i].snippet += " " + ex;
+    if (merged[i].snippet.size() > 900) merged[i].snippet.resize(900);
   }
   json results = json::array();
   for (const auto &r : merged) results.push_back(r.toJson());

@@ -145,6 +145,22 @@ public:
   std::string name() const override { return name_; }
   std::string type() const override { return "cli-json"; }
 
+  float consider(const json &situation) const override {
+    if (situation.contains("__cliTool") &&
+        situation["__cliTool"].is_string() &&
+        !situation["__cliTool"].get<std::string>().empty())
+      return 0.8f;
+    const std::string text = lowerCopy(situation.value("text", std::string()));
+    if (text.rfind("cli:", 0) == 0) return 0.8f;
+    return 0.f;
+  }
+
+  AddonResult contribute(const json &situation) override {
+    json payload = situation.is_object() ? situation : json::object();
+    payload["__addonType"] = "cli-json";
+    return handle(situation.value("text", std::string()), payload);
+  }
+
   AddonResult handle(const std::string &text, const json &payload) override {
     AddonResult res;
     std::string addonType = payload.value("__addonType", std::string());
@@ -174,6 +190,7 @@ public:
     if (!out.value("ok", false)) {
       res.reply = "[cli-json error] " + out.value("error", std::string("command failed"));
     }
+    sealAddonResultUnits(res);
     return res;
   }
 

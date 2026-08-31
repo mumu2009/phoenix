@@ -48,17 +48,17 @@ inline std::vector<std::string> splitEmotionVocabTokens(const std::string &text,
 inline std::string buildMemoryRecallQuery(const std::string &goal,
                                           const std::string &draft,
                                           size_t goalChars = 800,
-                                          size_t draftChars = 8000) {
+                                          size_t draftChars = 400) {
   std::string q;
-  if (!draft.empty()) {
-    q = draft.size() > draftChars ? draft.substr(draft.size() - draftChars)
-                                  : draft;
-  }
   if (!goal.empty()) {
-    const std::string g =
-        goal.size() > goalChars ? goal.substr(0, goalChars) : goal;
+    q = goal.size() > goalChars ? goal.substr(0, goalChars) : goal;
+  }
+  if (!draft.empty()) {
+    const std::string d =
+        draft.size() > draftChars ? draft.substr(draft.size() - draftChars)
+                                  : draft;
     if (!q.empty()) q.push_back('\n');
-    q += g;
+    q += d;
   }
   return q;
 }

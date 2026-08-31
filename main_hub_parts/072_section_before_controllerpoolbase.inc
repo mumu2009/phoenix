@@ -78,8 +78,14 @@ json OnlineResearcher::lookup(const json &input, const json &options) {
     auto idx = queryLocalIndex(words, options.value("limitUrls", 12),
                                options.value("limitAspects", 10),
                                options.value("kClusters", 4));
-    if (options.value("preferIndex", true) ||
-        options.value("mode", "search") == "aspect") {
+    const bool hasHits =
+        (idx.contains("results") && idx["results"].is_array() &&
+         !idx["results"].empty()) ||
+        (idx.contains("urls") && idx["urls"].is_array() &&
+         !idx["urls"].empty());
+    if (hasHits && !options.value("allowWeb", false) &&
+        (options.value("preferIndex", true) ||
+         options.value("mode", "search") == "aspect")) {
       return idx;
     }
   }
