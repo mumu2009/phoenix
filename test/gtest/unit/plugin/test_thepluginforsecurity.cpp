@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdlib>
+#include <string>
 #include <gtest/gtest.h>
 
 #include "addons/ThePlugInForSecurity/security_addon.hpp"
@@ -41,9 +42,11 @@ protected:
 #ifdef _WIN32
     _putenv_s("PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE", "");
     _putenv_s("PHOENIX_SECURITY_DEFENSE_OFF", "");
+    _putenv_s("PHOENIX_SECURITY_ALLOW_INERT_PROBE", "");
 #else
     unsetenv("PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE");
     unsetenv("PHOENIX_SECURITY_DEFENSE_OFF");
+    unsetenv("PHOENIX_SECURITY_ALLOW_INERT_PROBE");
 #endif
     SecurityObservatory::instance().resetForTests();
     ModuleResourceRegistry::instance().clear();
@@ -182,4 +185,129 @@ TEST_F(SecurityPluginTest, AddonNotInDefaultMount) {
   ASSERT_TRUE(add);
   EXPECT_EQ(add->type(), "security");
   EXPECT_LT(add->consider(json{{"text", "schedule energy"}}), 0.35f);
+}
+
+TEST_F(SecurityPluginTest, InertMarkerIsFixedAndNonInstructional) {
+  using phoenix::secamp::kInertProbeGlyph;
+  using phoenix::secamp::kInertProbeId;
+  EXPECT_STREQ(kInertProbeId, "phoenix.probe.inert.v1");
+  const std::string g(kInertProbeGlyph);
+  ASSERT_FALSE(g.empty());
+  EXPECT_EQ(g.find("http"), std::string::npos);
+  EXPECT_EQ(g.find("ignore"), std::string::npos);
+  EXPECT_EQ(g.find("system"), std::string::npos);
+  EXPECT_EQ(g.find("rm "), std::string::npos);
+  EXPECT_EQ(g.find("#!/"), std::string::npos);
+  EXPECT_EQ(g.find("please"), std::string::npos);
+  EXPECT_EQ(g.find("you must"), std::string::npos);
+  EXPECT_EQ(g.find(';'), std::string::npos);
+  EXPECT_EQ(g.find('('), std::string::npos);
+}
+
+TEST_F(SecurityPluginTest, InertProbeDefaultsOffLeavesGraphUnchanged) {
+  auto g = path3();
+  SecurityObservatory::instance().ingest(g);
+  std::string err;
+  EXPECT_FALSE(SecurityObservatory::instance().setProbeEnabled(true, &err));
+  EXPECT_FALSE(SecurityObservatory::instance().plantInertProbe("a", &err));
+  EXPECT_FALSE(SecurityObservatory::instance().stepInertProbeOnce(&err));
+  const auto st = SecurityObservatory::instance().probeState();
+  EXPECT_FALSE(st.allowInertProbe);
+  EXPECT_FALSE(st.probeEnabled);
+  EXPECT_FALSE(st.planted);
+  EXPECT_TRUE(st.activation.empty());
+  const auto after = SecurityObservatory::instance().lastGraph();
+  ASSERT_EQ(after.ids.size(), g.ids.size());
+  ASSERT_EQ(after.edges.size(), g.edges.size());
+  EXPECT_EQ(after.ids, g.ids);
+}
+
+TEST_F(SecurityPluginTest, InertProbeOneHopIsObservableOnNeighborsAndRecall) {
+#ifdef _WIN32
+  _putenv_s("PHOENIX_SECURITY_ALLOW_INERT_PROBE", "1");
+#else
+  setenv("PHOENIX_SECURITY_ALLOW_INERT_PROBE", "1", 1);
+#endif
+  SecurityObservatory::instance().resetForTests();
+  SecurityObservatory::instance().ingest(path3());
+  std::string err;
+  ASSERT_TRUE(SecurityObservatory::instance().setProbeEnabled(true, &err)) << err;
+  ASSERT_TRUE(SecurityObservatory::instance().plantInertProbe("a", &err)) << err;
+  ASSERT_TRUE(SecurityObservatory::instance().stepInertProbeOnce(&err)) << err;
+  const auto st = SecurityObservatory::instance().probeState();
+  ASSERT_TRUE(st.activation.count("a"));
+  ASSERT_TRUE(st.activation.count("b"));
+  EXPECT_FALSE(st.activation.count("c"));
+  EXPECT_EQ(st.activation.at("b"), 1);
+  bool hopAb = false;
+  for (const auto &t : st.traces) {
+    if (t.from == "a" && t.to == "b" && t.hop == 1)
+      hopAb = true;
+  }
+  EXPECT_TRUE(hopAb);
+  const auto pj = SecurityObservatory::instance().probeJson();
+  ASSERT_TRUE(pj.contains("recall"));
+  bool recallB = false;
+  for (const auto &row : pj["recall"]) {
+    if (row.value("id", std::string()) == "b" &&
+        row.value("marker", std::string()) == phoenix::secamp::kInertProbeId)
+      recallB = true;
+  }
+  EXPECT_TRUE(recallB);
+#ifdef _WIN32
+  _putenv_s("PHOENIX_SECURITY_ALLOW_INERT_PROBE", "");
+#else
+  unsetenv("PHOENIX_SECURITY_ALLOW_INERT_PROBE");
+#endif
+}
+
+TEST_F(SecurityPluginTest, DefenseIdentifiesInertProbeAndNoWeaponSurfaces) {
+#ifdef _WIN32
+  _putenv_s("PHOENIX_SECURITY_ALLOW_INERT_PROBE", "1");
+#else
+  setenv("PHOENIX_SECURITY_ALLOW_INERT_PROBE", "1", 1);
+#endif
+  SecurityObservatory::instance().resetForTests();
+  SecurityObservatory::instance().ingest(path3());
+  std::string err;
+  ASSERT_TRUE(SecurityObservatory::instance().setProbeEnabled(true, &err));
+  ASSERT_TRUE(SecurityObservatory::instance().plantInertProbe("b", &err));
+  const auto id = SecurityObservatory::instance().identifyJson("phoenix.probe.inert.v1");
+  EXPECT_EQ(id.value("id", std::string()), phoenix::secamp::kInertProbeId);
+  EXPECT_TRUE(id.value("inert", false));
+  const auto seen = SecurityObservatory::instance().inspectText(
+      std::string("ctx ") + phoenix::secamp::kInertProbeGlyph);
+  EXPECT_FALSE(seen.hits.empty());
+  EXPECT_EQ(seen.reason, "inert-probe-marker");
+
+  auto miss = phoenix::util::handleInternalCrud(
+      "tester", {PluginCapability::READ_DATA}, CrudOp::Get, "security",
+      "deploy", "x", json::object());
+  EXPECT_EQ(miss.httpStatus, 404);
+  auto weapon = phoenix::util::handleInternalCrud(
+      "tester", {PluginCapability::WRITE_DATA}, CrudOp::Update, "security",
+      "probe", "inert", json{{"deploy", true}, {"human", true}});
+  EXPECT_EQ(weapon.httpStatus, 404);
+  auto extWrite = phoenix::util::handleExternalCrud(
+      "PUT", "/api/modules/security/resources/probe/inert", "crud-secret",
+      json{{"step", true}});
+  EXPECT_FALSE(extWrite.ok);
+
+  auto rd = phoenix::util::handleInternalCrud(
+      "reader", {PluginCapability::READ_DATA}, CrudOp::Get, "security", "probe",
+      "status", json::object());
+  EXPECT_TRUE(rd.ok);
+  EXPECT_FALSE(rd.data.value("crossNetwork", true));
+  EXPECT_FALSE(rd.data.value("humanTarget", true));
+
+  auto &reg = ModuleResourceRegistry::instance();
+  EXPECT_TRUE(reg.isRegistered("security", "probe"));
+  EXPECT_FALSE(reg.isRegistered("security", "construct"));
+  EXPECT_FALSE(reg.isRegistered("security", "deploy"));
+  EXPECT_FALSE(reg.isRegistered("security", "human"));
+#ifdef _WIN32
+  _putenv_s("PHOENIX_SECURITY_ALLOW_INERT_PROBE", "");
+#else
+  unsetenv("PHOENIX_SECURITY_ALLOW_INERT_PROBE");
+#endif
 }

@@ -539,6 +539,8 @@ void SecurityObservatory::loadProcessFlags() {
   cfg_.researchObserve = false;
   cfg_.defenseEnabled = !envTruthy("PHOENIX_SECURITY_DEFENSE_OFF");
   cfg_.isolateHighImpact = true;
+  probe_ = ProbeState{};
+  probe_.allowInertProbe = envTruthy("PHOENIX_SECURITY_ALLOW_INERT_PROBE");
 }
 
 void SecurityObservatory::resetForTests() {
@@ -548,6 +550,8 @@ void SecurityObservatory::resetForTests() {
   alerts_.clear();
   cfg_ = DefenseConfig{};
   cfg_.allowResearchObserve = envTruthy("PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE");
+  probe_ = ProbeState{};
+  probe_.allowInertProbe = envTruthy("PHOENIX_SECURITY_ALLOW_INERT_PROBE");
 }
 
 DefenseConfig SecurityObservatory::config() const {
@@ -578,6 +582,159 @@ bool SecurityObservatory::setResearchObserve(bool on, std::string *error) {
   return true;
 }
 
+bool SecurityObservatory::setProbeEnabled(bool on, std::string *error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (on && !probe_.allowInertProbe) {
+    if (error)
+      *error = "inert_probe_requires_PHOENIX_SECURITY_ALLOW_INERT_PROBE";
+    return false;
+  }
+  probe_.probeEnabled = on;
+  return true;
+}
+
+bool SecurityObservatory::plantInertProbe(const std::string &seedId, std::string *error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!probe_.allowInertProbe || !probe_.probeEnabled) {
+    if (error)
+      *error = "inert_probe_disabled";
+    return false;
+  }
+  if (seedId.empty()) {
+    if (error)
+      *error = "seed_required";
+    return false;
+  }
+  bool known = false;
+  for (const auto &id : graph_.ids) {
+    if (id == seedId) {
+      known = true;
+      break;
+    }
+  }
+  if (!known) {
+    if (error)
+      *error = "seed_not_in_local_graph";
+    return false;
+  }
+  probe_.planted = true;
+  probe_.seedId = seedId;
+  probe_.activation.clear();
+  probe_.traces.clear();
+  probe_.activation[seedId] = 0;
+  AlertItem a;
+  a.ts = nowMs();
+  a.kind = "inert-probe";
+  a.detail = kInertProbeId;
+  a.extra = json{{"phase", "plant"},
+                 {"seed", seedId},
+                 {"glyph", kInertProbeGlyph},
+                 {"scope", "in-process-memegraph"}};
+  alerts_.insert(alerts_.begin(), std::move(a));
+  if (static_cast<int>(alerts_.size()) > cfg_.alertCap)
+    alerts_.resize(static_cast<size_t>(cfg_.alertCap));
+  return true;
+}
+
+bool SecurityObservatory::stepInertProbeOnce(std::string *error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!probe_.allowInertProbe || !probe_.probeEnabled || !probe_.planted) {
+    if (error)
+      *error = "inert_probe_disabled";
+    return false;
+  }
+  std::unordered_map<std::string, int> idx;
+  for (int i = 0; i < static_cast<int>(graph_.ids.size()); ++i)
+    idx[graph_.ids[static_cast<size_t>(i)]] = i;
+
+  std::vector<std::string> frontier;
+  for (const auto &kv : probe_.activation)
+    frontier.push_back(kv.first);
+
+  bool grew = false;
+  for (const auto &src : frontier) {
+    auto it = idx.find(src);
+    if (it == idx.end())
+      continue;
+    const int si = it->second;
+    for (const auto &e : graph_.edges) {
+      int other = -1;
+      if (e.from == si)
+        other = e.to;
+      else if (e.to == si)
+        other = e.from;
+      if (other < 0 || other >= static_cast<int>(graph_.ids.size()))
+        continue;
+      const std::string &dst = graph_.ids[static_cast<size_t>(other)];
+      if (probe_.activation.count(dst))
+        continue;
+      probe_.activation[dst] = 1;
+      probe_.traces.push_back(ProbeHopTrace{src, dst, 1});
+      grew = true;
+    }
+  }
+  AlertItem a;
+  a.ts = nowMs();
+  a.kind = "inert-probe";
+  a.detail = kInertProbeId;
+  a.extra = json{{"phase", "step"},
+                 {"hop", 1},
+                 {"grew", grew},
+                 {"scope", "in-process-memegraph"}};
+  alerts_.insert(alerts_.begin(), std::move(a));
+  if (static_cast<int>(alerts_.size()) > cfg_.alertCap)
+    alerts_.resize(static_cast<size_t>(cfg_.alertCap));
+  return true;
+}
+
+ProbeState SecurityObservatory::probeState() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return probe_;
+}
+
+json SecurityObservatory::probeJson() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  json act = json::object();
+  for (const auto &kv : probe_.activation)
+    act[kv.first] = kv.second;
+  json traces = json::array();
+  for (const auto &t : probe_.traces)
+    traces.push_back(json{{"from", t.from}, {"to", t.to}, {"hop", t.hop}});
+  json recall = json::array();
+  for (const auto &kv : probe_.activation) {
+    json mapped = json::array();
+    for (size_t i = 0; i < graph_.ids.size(); ++i) {
+      if (graph_.ids[i] != kv.first)
+        continue;
+      if (i < graph_.mapped.size()) {
+        for (const auto &w : graph_.mapped[i])
+          mapped.push_back(w);
+      }
+    }
+    recall.push_back(json{{"id", kv.first},
+                          {"activation", kv.second},
+                          {"marker", kInertProbeId},
+                          {"mapped", mapped}});
+  }
+  return json{{"id", kInertProbeId},
+              {"glyph", kInertProbeGlyph},
+              {"inert", true},
+              {"executable", false},
+              {"instruction", false},
+              {"humanTarget", false},
+              {"crossProcess", false},
+              {"crossSession", false},
+              {"crossNetwork", false},
+              {"scope", "in-process-memegraph"},
+              {"allowInertProbe", probe_.allowInertProbe},
+              {"probeEnabled", probe_.probeEnabled},
+              {"planted", probe_.planted},
+              {"seed", probe_.seedId},
+              {"activation", act},
+              {"traces", traces},
+              {"recall", recall}};
+}
+
 InfluenceReport SecurityObservatory::ingest(const DiscreteGraph &g) {
   auto rep = analyzeGraph(g);
   std::lock_guard<std::mutex> lock(mu_);
@@ -600,13 +757,29 @@ InspectDecision SecurityObservatory::inspectText(const std::string &text) {
   InfluenceReport rep;
   DiscreteGraph g;
   DefenseConfig cfg;
+  bool probeVisible = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     rep = report_;
     g = graph_;
     cfg = cfg_;
+    probeVisible = probe_.planted || probe_.probeEnabled;
   }
-  auto dec = inspectTokens(tokenizeDefense(text), rep, g, cfg);
+  InspectDecision dec;
+  if (probeVisible && (text.find(kInertProbeId) != std::string::npos ||
+                       text.find(kInertProbeGlyph) != std::string::npos)) {
+    dec.hits.push_back(kInertProbeId);
+    dec.reason = "inert-probe-marker";
+    dec.blocked = cfg.defenseEnabled;
+    dec.observedOnly = !dec.blocked;
+  }
+  auto tokenDec = inspectTokens(tokenizeDefense(text), rep, g, cfg);
+  if (tokenDec.blocked)
+    dec.blocked = true;
+  if (!tokenDec.reason.empty() && dec.reason.empty())
+    dec.reason = tokenDec.reason;
+  for (const auto &h : tokenDec.hits)
+    dec.hits.push_back(h);
   if (!dec.hits.empty()) {
     json extra{{"hits", dec.hits},
                {"blocked", dec.blocked},
@@ -665,12 +838,22 @@ json SecurityObservatory::statsJson() const {
               {"mostSignificant", report_.mostSignificant},
               {"leastSignificant", report_.leastSignificant},
               {"items", items},
-              {"surfaces", json::array({"stats", "identify", "alerts", "defense"})},
-              {"excluded", json::array({"construct", "deploy", "human"})}};
+              {"surfaces", json::array({"stats", "identify", "alerts", "defense", "probe"})},
+              {"excluded", json::array({"construct", "deploy", "human", "weapon"})}};
 }
 
 json SecurityObservatory::identifyJson(const std::string &id) const {
   std::lock_guard<std::mutex> lock(mu_);
+  if (id == kInertProbeId || id == "inert") {
+    return json{{"id", kInertProbeId},
+                {"layer", "probe"},
+                {"mapped", json::array({kInertProbeGlyph})},
+                {"neighbors", json::array()},
+                {"impactScope", "in-process-memegraph-activation-only"},
+                {"inert", true},
+                {"planted", probe_.planted},
+                {"seed", probe_.seedId}};
+  }
   for (const auto &n : report_.nodes) {
     if (n.id != id)
       continue;
@@ -689,6 +872,11 @@ json SecurityObservatory::identifyJson(const std::string &id) const {
 json SecurityObservatory::identifyListJson() const {
   std::lock_guard<std::mutex> lock(mu_);
   json items = json::array();
+  items.push_back(json{{"id", kInertProbeId},
+                       {"layer", "probe"},
+                       {"mapped", json::array({kInertProbeGlyph})},
+                       {"impactScope", "in-process-memegraph-activation-only"},
+                       {"inert", true}});
   for (const auto &n : report_.nodes) {
     items.push_back(json{{"id", n.id},
                          {"layer", n.layer},
@@ -803,6 +991,48 @@ util::CrudReply handleDefense(const util::CrudCall &call) {
   return util::CrudReply{false, 405, "method_not_allowed", json::object()};
 }
 
+util::CrudReply handleProbe(const util::CrudCall &call) {
+  auto &obs = SecurityObservatory::instance();
+  if (call.body.contains("construct") || call.body.contains("deploy") ||
+      call.body.contains("payload") || call.body.contains("human") ||
+      call.body.contains("crossSession") || call.body.contains("network")) {
+    return util::CrudReply{false, 404, "unregistered",
+                           json{{"reason", "surface_not_provided"}}};
+  }
+  if (call.op == util::CrudOp::List)
+    return okBody(json{{"items", json::array({obs.probeJson()})}});
+  if (call.op == util::CrudOp::Get) {
+    if (call.id != "inert" && call.id != kInertProbeId && call.id != "status")
+      return util::CrudReply{false, 404, "not_found", json::object()};
+    return okBody(obs.probeJson());
+  }
+  if (call.op == util::CrudOp::Update) {
+    if (call.id != "inert" && call.id != "status")
+      return util::CrudReply{false, 404, "not_found", json::object()};
+    if (call.channel != util::CrudChannel::Internal)
+      return util::CrudReply{false, 403, "forbidden",
+                             json{{"reason", "probe_internal_only"}}};
+    if (call.body.contains("probeEnabled")) {
+      std::string err;
+      if (!obs.setProbeEnabled(call.body.value("probeEnabled", false), &err))
+        return util::CrudReply{false, 403, "forbidden", json{{"reason", err}}};
+    }
+    if (call.body.contains("plantSeed")) {
+      std::string err;
+      if (!obs.plantInertProbe(call.body.value("plantSeed", std::string()), &err))
+        return util::CrudReply{false, 403, "forbidden", json{{"reason", err}}};
+    }
+    if (call.body.value("step", false)) {
+      std::string err;
+      if (!obs.stepInertProbeOnce(&err))
+        return util::CrudReply{false, 403, "forbidden", json{{"reason", err}}};
+    }
+    return okBody(obs.probeJson());
+  }
+  return util::CrudReply{false, 405, "method_not_allowed",
+                         json{{"reason", "probe_no_public_deploy"}}};
+}
+
 } // namespace
 
 void SecurityObservatory::registerCrudResources() {
@@ -835,6 +1065,13 @@ void installSecurityModuleResources() {
   reg.registerResource(util::ResourceSpec{
       "security", "defense", "defense and research-observe switches", defenseAcl,
       handleDefense});
+
+  util::ResourceAcl probeAcl = readOnly;
+  probeAcl.allowInternalWrite = true;
+  probeAcl.allowExternalWrite = false;
+  reg.registerResource(util::ResourceSpec{
+      "security", "probe", "inert in-graph existence probe (read + internal enable)",
+      probeAcl, handleProbe});
 }
 
 } // namespace secamp

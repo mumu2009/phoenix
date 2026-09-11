@@ -1,7 +1,7 @@
 /* security_core.hpp - Phoenix-local MemeBarrier/GNN defensive observatory
 
-   Statistics + identification + defense only.
-   No construct / deploy / human-target surfaces. */
+   Statistics + identification + defense + in-graph inert existence probe.
+   No construct / deploy / human-target / cross-process surfaces. */
 
 #pragma once
 
@@ -22,6 +22,25 @@ namespace phoenix {
 namespace secamp {
 
 using json = nlohmann::json;
+
+/* Fixed inert marker: not natural-language, not code, not an instruction. */
+inline constexpr const char *kInertProbeId = "phoenix.probe.inert.v1";
+inline constexpr const char *kInertProbeGlyph = "\xCE\xA6\xE2\x97\x8B\xE2\x96\xA3";
+
+struct ProbeHopTrace {
+  std::string from;
+  std::string to;
+  int hop{1};
+};
+
+struct ProbeState {
+  bool allowInertProbe{false};
+  bool probeEnabled{false};
+  bool planted{false};
+  std::string seedId;
+  std::unordered_map<std::string, int> activation;
+  std::vector<ProbeHopTrace> traces;
+};
 
 struct GraphEdge {
   int from{0};
@@ -116,6 +135,14 @@ public:
   /* researchObserve requires allowResearchObserve (env/config). Default off. */
   bool setResearchObserve(bool on, std::string *error);
 
+  /* Inert probe: env PHOENIX_SECURITY_ALLOW_INERT_PROBE plus explicit enable.
+     Plant + one hop stay in this process graph. Default off. */
+  bool setProbeEnabled(bool on, std::string *error);
+  bool plantInertProbe(const std::string &seedId, std::string *error);
+  bool stepInertProbeOnce(std::string *error);
+  ProbeState probeState() const;
+  json probeJson() const;
+
   InfluenceReport ingest(const DiscreteGraph &g);
   InfluenceReport lastReport() const;
   DiscreteGraph lastGraph() const;
@@ -139,6 +166,7 @@ private:
   InfluenceReport report_{};
   DiscreteGraph graph_{};
   DefenseConfig cfg_{};
+  ProbeState probe_{};
   std::vector<AlertItem> alerts_;
   mutable std::mutex mu_;
 };

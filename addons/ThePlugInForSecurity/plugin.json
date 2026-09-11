@@ -5,8 +5,10 @@
   "defaultEnabled": false,
   "publish": false,
   "github": false,
-  "surfaces": ["stats", "identify", "alerts", "defense"],
-  "excludedSurfaces": ["construct", "deploy", "human"],
+  "surfaces": ["stats", "identify", "alerts", "defense", "probe"],
+  "excludedSurfaces": ["construct", "deploy", "human", "weapon"],
   "researchObserveDefault": false,
-  "researchObserveRequires": "PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE=1"
+  "researchObserveRequires": "PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE=1",
+  "inertProbeDefault": false,
+  "inertProbeRequires": "PHOENIX_SECURITY_ALLOW_INERT_PROBE=1"
 }

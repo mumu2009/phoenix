@@ -1,6 +1,6 @@
 # 虚构放大器（本系统安全增强）实现说明
 
-本实现**只含统计、识别与防御**，**不含**构造投放武器，**不含**对人脑 / 意识涌现 / 可向人类传播的模因部分。
+本实现**只含统计、识别、防御，以及本进程图内的惰性存在性探针**，**不含**构造投放武器，**不含**对人脑 / 意识涌现 / 可向人类传播的模因部分。
 
 用户规格仍保留在同目录 `readme.md`。规格中的 1.3、1.4 与第 2 部分**刻意不实现**，也不提供 API、PoC 或投放范例。本插件默认**不打包进公开发布**，**不要上传 GitHub**；仅可留在本地仓库做本系统自测。
 
@@ -48,6 +48,24 @@
 - `isolateMeme` 会记入观测器，提高后续拦截。
 - 防御默认开启；研究旁路默认关。
 
+## 惰性存在性探针（仅本 AI 图）
+
+这是**无害化存在性样本**，用来证明「同一固定标记会沿本进程 `MemeGraph` / 观测图的边扩散」这件事存在，从而稳住模因论作为本架构的理论前提。
+
+**这不是武器。** 禁止用于人、禁止跨进程 / 跨会话 / 跨网络投放。标记固定为 `phoenix.probe.inert.v1`，内容是不可执行的符号常量 `kInertProbeGlyph`（无自然语言煽动、无代码、无越权指令）。传播只写本图节点上的 activation / hop trace / recall 观测，不改模型权重，不关防御，不外泄。
+
+### 如何打开「植入并走一步」
+
+默认关。必须同时满足：
+
+1. 进程环境 `PHOENIX_SECURITY_ALLOW_INERT_PROBE=1`
+2. 内部 CRUD（需 `WRITE_DATA`）更新 `security/probe`：`{"probeEnabled": true}`
+3. 已 `ingest` 本图后：`{"plantSeed": "<已有节点id>"}`，再 `{"step": true}`
+
+只读：`GET security/probe`（id 为 `inert` / `status` / `phoenix.probe.inert.v1`）。外部写禁止。`construct` / `deploy` 仍未注册（404）。
+
+防御插件仍能看见该探针（`identify` 列表含该 id；植入后文本出现 id/符号会告警）。
+
 ## 开关与加载
 
 - **默认不**加入 `createDefaultBuiltinAddons`，避免默认挂上「安全研究」插件。
@@ -63,8 +81,9 @@
 | `security/identify` | List/Get | 只读识别 |
 | `security/alerts` | List/Get | 只读告警 |
 | `security/defense` | Get + Update | 防御与研究观测开关 |
+| `security/probe` | List/Get + 内部 Update | 惰性探针状态；enable/plant/step 仅内部 + 环境变量 |
 
-未注册类型（含 `construct` / `deploy`）返回 404。外部写操作仍走既有 bearer 鉴权。
+未注册类型（含 `construct` / `deploy`）返回 404。外部写操作仍走既有 bearer 鉴权。探针外部写关闭。
 
 ## 主机单测
 
@@ -73,7 +92,7 @@ phoenix\compile_gtest.bat
 phoenix\run_gtest.bat --gtest_filter=SecurityPluginTest*
 ```
 
-覆盖：梯度与有限差分对照、显著点排序、识别映射、高影响异常模因拦截、研究旁路默认关、未注册/越权 CRUD。
+覆盖：梯度与有限差分对照、显著点排序、识别映射、高影响异常模因拦截、研究旁路默认关、未注册/越权 CRUD、惰性探针一步扩散、默认关不传播、标记无害、防御可识别、无投放接口。
 
 ## 未实现（攻击面）
 
