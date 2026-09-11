@@ -19,6 +19,12 @@
 #include "../plugin_system.hpp"
 
 namespace phoenix {
+namespace secamp {
+void installSecurityModuleResources();
+}
+} // namespace phoenix
+
+namespace phoenix {
 namespace util {
 
 using json = nlohmann::json;
@@ -586,6 +592,7 @@ inline void installBuiltinModuleResources() {
     reg.registerResource(ResourceSpec{"module_mount", "factories",
                                       "which module factories are installed", readExt,
                                       handleModuleMountFactories});
+    secamp::installSecurityModuleResources();
     reg.markBuiltinsInstalled();
 }
 

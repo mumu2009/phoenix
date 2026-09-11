@@ -5,6 +5,7 @@
 ## 目录内容
 
 - `builtin_registry.cpp/.hpp/.py`：内建插件注册表，统一维护插件发现与绑定。
+- `ThePlugInForSecurity/`：本系统 MemeBarrier/GNN 统计、识别与防御增强（默认不挂载、不公开发布）。
 - `math_addon.cpp/.hpp/.py`：数学相关扩展能力。
 - `search_addon.cpp/.hpp/.py`：检索与搜索相关扩展能力。
 - `__init__.py`：Python 侧包入口。

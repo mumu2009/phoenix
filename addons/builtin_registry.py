@@ -5,6 +5,7 @@ from typing import List, Optional
 from addons.cli_json_addon import createCliJsonAddon
 from addons.math_addon import createMathAddon
 from addons.search_addon import createSearchAddon
+from addons.ThePlugInForSecurity.security_addon import createSecurityAddon
 
 
 def createBuiltinAddon(typ: str, name: str):
@@ -15,6 +16,8 @@ def createBuiltinAddon(typ: str, name: str):
         return createSearchAddon(name or "search")
     if t in {"cli-json", "cli", "clijson"}:
         return createCliJsonAddon(name or "cli-json")
+    if t in {"security", "thepluginforsecurity"}:
+        return createSecurityAddon(name or "security")
     return None
 
 

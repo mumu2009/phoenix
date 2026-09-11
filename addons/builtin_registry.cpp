@@ -6,6 +6,7 @@
 #include "computer_shell_addon.hpp"
 #include "math_addon.hpp"
 #include "search_addon.hpp"
+#include "ThePlugInForSecurity/security_addon.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -77,6 +78,10 @@ std::shared_ptr<Addon> createBuiltinAddon(const std::string &type, const std::st
 	if (type == "cli-json" || type == "cli" || type == "cli_json") {
 		return createCliJsonAddon(name.empty() ? std::string("cli-json") : name);
 	}
+	if (type == "security" || type == "thepluginforsecurity" ||
+	    type == "memebarrier-security") {
+		return createSecurityAddon(name.empty() ? std::string("security") : name);
+	}
 	if (error) *error = "unsupported addon type";
 	return nullptr;
 }
@@ -95,6 +100,11 @@ std::vector<std::shared_ptr<Addon>> createDefaultBuiltinAddons(const std::string
 	}
 	if (wantsAddon(selected, "cli-json") || wantsAddon(selected, "cli")) {
 		out.push_back(createCliJsonAddon("cli-json"));
+	}
+	/* Security is never part of empty/"all"/"default" selection. */
+	if (!selected.empty() && !selected.count("all") && !selected.count("default") &&
+	    (selected.count("security") || selected.count("thepluginforsecurity"))) {
+		out.push_back(createSecurityAddon("security"));
 	}
 	return out;
 }

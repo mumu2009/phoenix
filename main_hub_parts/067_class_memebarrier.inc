@@ -98,6 +98,13 @@ public:
       }
     } catch (...) {
     }
+    {
+      const auto extra = phoenix::secamp::SecurityObservatory::instance().inspectText(text);
+      if (extra.blocked) {
+        out.blocked = true;
+        out.reason = extra.reason.empty() ? "security-observatory" : extra.reason;
+      }
+    }
     return out;
   }
 
@@ -790,6 +797,8 @@ private:
     stats_.lastIsolated.insert(stats_.lastIsolated.begin(), item);
     if (stats_.lastIsolated.size() > 20)
       stats_.lastIsolated.resize(20);
+    phoenix::secamp::SecurityObservatory::instance().noteIsolation(memeId, score,
+                                                                  reason);
     auto &logger = LoggerCXX::instance();
     if (logger.enabled())
       logger.log(LoggerCXX::Type::MONITORING,
@@ -925,5 +934,34 @@ private:
           std::min(maxThreshold_, std::max(minThreshold_, blended));
     }
     stats_.lastThreshold = maliciousThreshold_;
+
+    phoenix::secamp::DiscreteGraph snap;
+    snap.ids = points;
+    snap.layers.assign(points.size(), "meme");
+    snap.mapped.resize(points.size());
+    std::unordered_map<std::string, int> ix;
+    for (size_t i = 0; i < points.size(); ++i) {
+      ix[points[i]] = (int)i;
+      if (runtime_)
+        snap.mapped[i] = runtime_->getMemeWords(points[i]);
+      try {
+        if (runtime_->graph().getMeta(points[i]).value("isolated", false))
+          snap.isolated.insert(points[i]);
+      } catch (...) {
+      }
+    }
+    for (size_t i = 0; i < points.size(); ++i) {
+      auto neigh = runtime_->graph().neighborsOf(points[i]);
+      for (auto &n : neigh) {
+        auto it = ix.find(n.first);
+        if (it == ix.end())
+          continue;
+        if (it->second <= (int)i)
+          continue;
+        snap.edges.push_back(phoenix::secamp::GraphEdge{(int)i, it->second,
+                                                       n.second.first});
+      }
+    }
+    phoenix::secamp::SecurityObservatory::instance().ingest(snap);
   }
 };

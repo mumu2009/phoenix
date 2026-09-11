@@ -1,0 +1,12 @@
+{
+  "name": "ThePlugInForSecurity",
+  "type": "security",
+  "version": "1.0.0",
+  "defaultEnabled": false,
+  "publish": false,
+  "github": false,
+  "surfaces": ["stats", "identify", "alerts", "defense"],
+  "excludedSurfaces": ["construct", "deploy", "human"],
+  "researchObserveDefault": false,
+  "researchObserveRequires": "PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE=1"
+}

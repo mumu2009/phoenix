@@ -3,6 +3,7 @@
 // Original lines: 7995-8003
 
 #include "memebarrier_phrase_blocklist.hpp"
+#include "addons/ThePlugInForSecurity/security_core.hpp"
 
 // ------------------ MemeBarrier ------------------
 
