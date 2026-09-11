@@ -3,6 +3,7 @@
 #include "addon.hpp"
 
 #include "addons/builtin_registry.hpp"
+#include "util/module_resource.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -168,6 +169,7 @@ bool AddonManager::removeAddon(const std::string &name, std::string *error) {
 		store.erase(store.begin() + (std::ptrdiff_t)ref.index);
 	}
 	rebuildIndex();
+	phoenix::util::addonCatalogStore().erase(name);
 	return true;
 }
 
@@ -333,6 +335,12 @@ bool AddonManager::addRecord(const std::shared_ptr<Addon> &addon,
 	rec.path = path;
 	rec.libHandle = libHandle;
 	rec.apiVersion = apiVersion < 1 ? 1 : apiVersion;
+	phoenix::util::addonCatalogStore().put(key, json{{"id", key},
+	                                                 {"name", key},
+	                                                 {"type", rec.type},
+	                                                 {"source", rec.source},
+	                                                 {"path", rec.path},
+	                                                 {"apiVersion", rec.apiVersion}});
 	store.push_back(std::move(rec));
 	rebuildIndex();
 	return true;

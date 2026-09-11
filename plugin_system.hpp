@@ -230,6 +230,25 @@ public:
     /* Get plugin instance */
     std::shared_ptr<Plugin> getPlugin(const std::string& pluginName) const; /* Get plugin by name */
 
+    /* Dual CRUD: plugin-side access to registered module resources. */
+    PluginResult crudList(const std::string& actor,
+                          const std::string& moduleId,
+                          const std::string& type) const;
+    PluginResult crudGet(const std::string& actor,
+                         const std::string& moduleId,
+                         const std::string& type,
+                         const std::string& id) const;
+    PluginResult crudWrite(const std::string& actor,
+                           const std::string& moduleId,
+                           const std::string& type,
+                           const std::string& id,
+                           const nlohmann::json& value,
+                           bool create) const;
+    PluginResult crudDelete(const std::string& actor,
+                            const std::string& moduleId,
+                            const std::string& type,
+                            const std::string& id) const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

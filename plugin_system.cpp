@@ -1,6 +1,7 @@
 /* plugin_system.cpp - Plugin system implementation */
 
 #include "plugin_system.hpp"
+#include "util/module_resource.hpp"
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -451,6 +452,11 @@ bool PluginManager::registerPlugin(std::shared_ptr<Plugin> plugin) {
     impl_->plugins[pluginName] = plugin;
     impl_->pluginMetadata[pluginName] = metadata;
     impl_->pluginStates[pluginName] = PluginState::LOADED;
+    phoenix::util::pluginCatalogStore().put(pluginName, nlohmann::json{
+        {"id", pluginName},
+        {"name", pluginName},
+        {"version", metadata.version},
+        {"kind", "instance"}});
     
     return true;
 }
@@ -466,6 +472,7 @@ bool PluginManager::unregisterPlugin(const std::string& pluginName) {
     impl_->plugins.erase(it);
     impl_->pluginMetadata.erase(pluginName);
     impl_->pluginStates.erase(pluginName);
+    phoenix::util::pluginCatalogStore().erase(pluginName);
     
     return true;
 }
@@ -479,6 +486,63 @@ std::shared_ptr<Plugin> PluginManager::getPlugin(const std::string& pluginName) 
     }
     
     return nullptr;
+}
+
+namespace {
+PluginResult crudToPluginResult(const phoenix::util::CrudReply &r) {
+    PluginResult out;
+    out.success = r.ok;
+    out.errorMessage = r.error;
+    out.data = r.data;
+    out.shouldContinue = r.ok;
+    return out;
+}
+
+std::vector<PluginCapability> actorCapsUnlocked(const PluginManager &mgr,
+                                                const std::string &actor) {
+    auto plugin = mgr.getPlugin(actor);
+    if (!plugin)
+        return {};
+    return plugin->getCapabilities();
+}
+} // namespace
+
+PluginResult PluginManager::crudList(const std::string &actor,
+                                     const std::string &moduleId,
+                                     const std::string &type) const {
+    return crudToPluginResult(phoenix::util::handleInternalCrud(
+        actor, actorCapsUnlocked(*this, actor), phoenix::util::CrudOp::List,
+        moduleId, type, "", nlohmann::json::object()));
+}
+
+PluginResult PluginManager::crudGet(const std::string &actor,
+                                    const std::string &moduleId,
+                                    const std::string &type,
+                                    const std::string &id) const {
+    return crudToPluginResult(phoenix::util::handleInternalCrud(
+        actor, actorCapsUnlocked(*this, actor), phoenix::util::CrudOp::Get,
+        moduleId, type, id, nlohmann::json::object()));
+}
+
+PluginResult PluginManager::crudWrite(const std::string &actor,
+                                      const std::string &moduleId,
+                                      const std::string &type,
+                                      const std::string &id,
+                                      const nlohmann::json &value,
+                                      bool create) const {
+    return crudToPluginResult(phoenix::util::handleInternalCrud(
+        actor, actorCapsUnlocked(*this, actor),
+        create ? phoenix::util::CrudOp::Create : phoenix::util::CrudOp::Update,
+        moduleId, type, id, value));
+}
+
+PluginResult PluginManager::crudDelete(const std::string &actor,
+                                       const std::string &moduleId,
+                                       const std::string &type,
+                                       const std::string &id) const {
+    return crudToPluginResult(phoenix::util::handleInternalCrud(
+        actor, actorCapsUnlocked(*this, actor), phoenix::util::CrudOp::Delete,
+        moduleId, type, id, nlohmann::json::object()));
 }
 
 // Plugin registry implementation

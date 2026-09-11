@@ -1,3 +1,5 @@
+import { humanizeAuthError } from './authMessages';
+
 const API_BASE = process.env.REACT_APP_API_BASE || '';
 const OPENCLAW_CHAT_PATH = process.env.REACT_APP_OPENCLAW_CHAT_PATH || '/openclaw/chat';
 const DEFAULT_CHAT_PROVIDER = process.env.REACT_APP_CHAT_PROVIDER || 'core';
@@ -55,10 +57,14 @@ async function request(path, { method = 'GET', body, headers } = {}) {
     json = { ok: false, error: 'invalid-json', raw: text };
   }
   if (!res.ok) {
-    const msg = json && typeof json === 'object' ? (json.error || json.message || res.statusText) : res.statusText;
+    let msg = json && typeof json === 'object'
+      ? humanizeAuthError(json.error, json.message || res.statusText)
+      : res.statusText;
+    if (res.status === 429) msg = '系统正忙，请稍后重试';
     const err = new Error(msg);
     err.status = res.status;
     err.payload = json;
+    err.retryAfterMs = Number(json?.retryAfterMs) || 2000;
     throw err;
   }
   return json;
@@ -115,6 +121,13 @@ export const api = {
     setAuthToken('');
     return out;
   },
+  authAdminUsers: () => request('/auth/admin/users'),
+  authSetRole: (username, role) => request('/auth/admin/set-role', { method: 'POST', body: { username, role } }),
+  opsMonitor: () => request('/api/ops/monitor'),
+  opsModules: () => request('/api/ops/modules'),
+  opsModuleSet: (id, enabled) => request('/api/ops/modules', { method: 'POST', body: { id, enabled } }),
+  opsDatabase: () => request('/api/ops/database'),
+  opsDatabaseBackup: () => request('/api/ops/database/backup', { method: 'POST', body: {} }),
   chat: (text, sessionId, extra) => chatWithProvider(text, sessionId, extra),
   arrayChat: (text, sessionId, options) => request('/api/array/chat', { method: 'POST', body: { text, sessionId, options } }),
   visionAnalyze: (imageBase64) => request('/vision/analyze', { method: 'POST', body: { imageBase64 } }),

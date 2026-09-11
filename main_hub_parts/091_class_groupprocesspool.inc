@@ -11,11 +11,14 @@ public:
       : config_(config), kvmStore_(std::move(kvmStore)),
         memeStore_(std::move(memeStore)),
         sessionStore_(std::move(sessionStore)) {
-    for (int i = 0; i < config_.groupCount; i++) {
+    const auto layout = phoenix::planControllerLayout(
+        config_.aiCount, config_.groupCount, config_.groupSize);
+    for (int i = 0; i < layout.groupCount; i++) {
       std::string gid = "G" + std::to_string(i + 1);
       groupIds_.push_back(gid);
       std::vector<std::string> names;
-      for (int j = 0; j < config_.groupSize; j++) {
+      const int nInGroup = layout.groupSizes[(size_t)i];
+      for (int j = 0; j < nInGroup; j++) {
         std::string name = gid + "_AI" + std::to_string(j + 1);
         names.push_back(name);
         controllerToGroup_[name] = gid;
@@ -334,7 +337,11 @@ private:
   void spawnWorkerProcess(const std::string &groupId, int port,
                           WorkerInfo &info) const {
     std::string portStr = std::to_string(port);
-    std::string groupSize = std::to_string(config_.groupSize);
+    int nInGroup = config_.groupSize;
+    auto git = groups_.find(groupId);
+    if (git != groups_.end() && !git->second.empty())
+      nInGroup = (int)git->second.size();
+    std::string groupSize = std::to_string(nInGroup);
 #ifdef _WIN32
     STARTUPINFOA si{};
     PROCESS_INFORMATION pi{};
@@ -348,8 +355,9 @@ private:
       envBlock += k + "=" + v + "\0";
     };
     addEnv("AI_GROUP_ID", groupId);
+    addEnv("AI_COUNT", groupSize);
     addEnv("AI_GROUP_SIZE", groupSize);
-    addEnv("AI_GROUP_COUNT", std::to_string(config_.groupCount));
+    addEnv("AI_GROUP_COUNT", "1");
     addEnv("AI_LMDB_ROOT", config_.lmdbRoot.string());
     addEnv("AI_LMDB_MAP_BYTES", std::to_string(config_.lmdbMapSizeBytes));
     addEnv("AI_BASE_DIR", config_.baseDir.string());
@@ -367,8 +375,9 @@ private:
     pid_t pid = fork();
     if (pid == 0) {
       setenv("AI_GROUP_ID", groupId.c_str(), 1);
+      setenv("AI_COUNT", groupSize.c_str(), 1);
       setenv("AI_GROUP_SIZE", groupSize.c_str(), 1);
-      setenv("AI_GROUP_COUNT", std::to_string(config_.groupCount).c_str(), 1);
+      setenv("AI_GROUP_COUNT", "1", 1);
       setenv("AI_LMDB_ROOT", config_.lmdbRoot.string().c_str(), 1);
       setenv("AI_LMDB_MAP_BYTES",
              std::to_string(config_.lmdbMapSizeBytes).c_str(), 1);

@@ -40,6 +40,7 @@
 #include <Eigen/Dense>
 
 #include "DATABASE_079.hpp"
+#include "product_ops.hpp"
 #include "speak_io.hpp"
 #include "v51_runtime.hpp"
 #include "gguf_tensor_parser.hpp"
@@ -82,8 +83,7 @@ namespace
         Json::Value out;
         out["ok"] = false;
         out["error"] = error;
-        if (!message.empty())
-            out["message"] = message;
+        out["message"] = message.empty() ? phoenix::product::humanAuthError(error) : message;
         auto resp = drogon::HttpResponse::newHttpJsonResponse(out);
         resp->setStatusCode(code);
         cb(resp);
@@ -307,8 +307,6 @@ namespace
     }
 
             static std::atomic<int> gChatProxyInFlight{0};
-            static std::mutex gChatDispatchMu;
-            static std::chrono::steady_clock::time_point gLastChatDispatch = std::chrono::steady_clock::now();
 
     // UserRecord 表示用户账户的持久化字段。
     // 调用方式：由 UserStore 读写并在认证流程中传递。
@@ -602,6 +600,25 @@ namespace
                     save();
             }
             return toRemove.size();
+        }
+
+        bool setRole(const std::string &username, const std::string &role, std::string &err)
+        {
+            if (!phoenix::product::isValidRole(role))
+            {
+                err = "role not allowed";
+                return false;
+            }
+            std::lock_guard<std::mutex> lock(mu_);
+            auto it = users_.find(username);
+            if (it == users_.end())
+            {
+                err = "user not found";
+                return false;
+            }
+            it->second.role = role;
+            save();
+            return true;
         }
 
         // 生成邮箱验证令牌。
@@ -3212,6 +3229,13 @@ namespace
             stage.queueCV.notify_one();
         }
 
+        // 把聊天准备/转发从 Drogon IO 线程挪走。IO 线程上做 PPMI+SVD
+        // 会把同一 event loop 上的后续请求全部串死，看起来像整层一起崩。
+        void enqueueWorker(std::function<void()> task)
+        {
+            submitToStage(contextStage_, std::move(task));
+        }
+
         Json::Value ingest(const std::string &sessionId, const std::string &text, const std::string &modeHint)
         {
             // Torch model warm-up can be expensive; do it before taking the session mutex
@@ -3265,14 +3289,12 @@ namespace
                     }
                     if (ctx.empty())
                     {
+                        fitVectorDim(embedding, rnn_.inputDim);
                         std::vector<float> rnnHidden;
                         {
                             std::lock_guard<std::mutex> lock(mu_);
                             auto &state = sessions_[sessionIdCopy];
-                            if (state.rnnHidden.empty())
-                            {
-                                state.rnnHidden.assign(rnn_.hiddenDim, 0.0f);
-                            }
+                            fitVectorDim(state.rnnHidden, rnn_.hiddenDim);
                             rnnHidden = state.rnnHidden;
                         }
                         auto newHidden = rnn_.step(embedding, rnnHidden);
@@ -3298,15 +3320,13 @@ namespace
                     }
                     if (ctx.empty())
                     {
+                        fitVectorDim(embedding, lstm_.inputDim);
                         std::vector<float> lstmHidden, lstmCell;
                         {
                             std::lock_guard<std::mutex> lock(mu_);
                             auto &state = sessions_[sessionIdCopy];
-                            if (state.lstmHidden.empty())
-                            {
-                                state.lstmHidden.assign(lstm_.hiddenDim, 0.0f);
-                                state.lstmCell.assign(lstm_.hiddenDim, 0.0f);
-                            }
+                            fitVectorDim(state.lstmHidden, lstm_.hiddenDim);
+                            fitVectorDim(state.lstmCell, lstm_.hiddenDim);
                             lstmHidden = state.lstmHidden;
                             lstmCell = state.lstmCell;
                         }
@@ -3365,44 +3385,58 @@ namespace
         //          → 检索 Episodic Memory 注入跨 session 相关摘要。
         // 返回值：可直接作为 contextHint 注入的字符串；空表示无可用上下文。
         // 注意事项：返回的历史包含当前这条用户消息（gateway 会去重末尾 user 行）。
+        static void fitVectorDim(std::vector<float> &v, int dim)
+        {
+            if (dim <= 0)
+                return;
+            if ((int)v.size() < dim)
+                v.resize((size_t)dim, 0.0f);
+            else if ((int)v.size() > dim)
+                v.resize((size_t)dim);
+        }
+
         std::string prepareChatContext(const std::string &sessionId, const std::string &text, const std::string &modeHint, float latencyMs = 0.0f)
         {
             ensureTorchReady();
-            std::lock_guard<std::mutex> lock(mu_);
-            auto &state = sessions_[sessionId];
-            state.messageCount += 1;
-
-            // 将 AdaptiveController 的动态 maxMessages 应用到 shortWindow
-            if (state.adaptive.maxMessages > 0)
-                state.shortWindow.maxMessages = static_cast<size_t>(state.adaptive.maxMessages);
-
             const auto tokens = Tokenizer::tokenize(text);
             const int tokenCount = static_cast<int>(tokens.size());
-            const std::string mode = selectMode(modeHint, tokenCount, state);
-
-            auto embedding = embeddings_.embedText(text);
-#ifdef HAVE_TORCH
-            if (useTorchModels_ && torchModels_.ready)
+            std::string mode;
+            bool needEmbed = false;
             {
-                embedding = torchModels_.embedText(tokens);
+                std::lock_guard<std::mutex> lock(mu_);
+                auto &state = sessions_[sessionId];
+                state.messageCount += 1;
+                if (state.adaptive.maxMessages > 0)
+                    state.shortWindow.maxMessages = static_cast<size_t>(state.adaptive.maxMessages);
+                mode = selectMode(modeHint, tokenCount, state);
+                needEmbed = (mode == "rnn" || mode == "lstm" ||
+                             (state.messageCount == 1 && !episodicMemory_.empty()));
             }
+            std::vector<float> embedding;
+            if (needEmbed)
+            {
+                embedding = embeddings_.embedText(text);
+#ifdef HAVE_TORCH
+                if (useTorchModels_ && torchModels_.ready)
+                    embedding = torchModels_.embedText(tokens);
 #endif
+                const int want = (mode == "lstm") ? lstm_.inputDim : rnn_.inputDim;
+                fitVectorDim(embedding, want);
+            }
+            std::lock_guard<std::mutex> lock(mu_);
+            auto &state = sessions_[sessionId];
 
             std::string adaptiveHint;
             if (mode == "rnn")
             {
-                if (state.rnnHidden.empty())
-                    state.rnnHidden.assign(rnn_.hiddenDim, 0.0f);
+                fitVectorDim(state.rnnHidden, rnn_.hiddenDim);
                 state.rnnHidden = rnn_.step(embedding, state.rnnHidden);
                 adaptiveHint = buildTextHint(state.rnnHidden, tokens, "rnn");
             }
             else if (mode == "lstm")
             {
-                if (state.lstmHidden.empty())
-                {
-                    state.lstmHidden.assign(lstm_.hiddenDim, 0.0f);
-                    state.lstmCell.assign(lstm_.hiddenDim, 0.0f);
-                }
+                fitVectorDim(state.lstmHidden, lstm_.hiddenDim);
+                fitVectorDim(state.lstmCell, lstm_.hiddenDim);
                 auto next = lstm_.step(embedding, state.lstmHidden, state.lstmCell);
                 state.lstmHidden = std::move(next.first);
                 state.lstmCell = std::move(next.second);
@@ -3563,77 +3597,28 @@ namespace
             return n > 1e-9f ? dot / n : 0.0f;
         }
 
-        // 探测基座 LLM 是否"已知"某事实。
-        // 实现思路：向 llamacpp 适配器发不带上下文的探测问句，比较回答与事实的余弦相似度，
-        //          并检测否定/反义词语；相似度过低或含否定词 → 判定为"未知"（返回 false）。
-        // 注意事项：探测失败（超时/网络错误）时返回 false（按未知处理，倾向保留信息）。
-        // 注意事项：该方法发起阻塞式 HTTP，应在后台线程调用，不可占用会话锁。
+        // 判定某事实是否已在本地跨会话记忆里。
+        // 禁止直打 llama :8082：--parallel 1 时旁路探测会取消在途生成，
+        // 前端/网关/使命会一起看起来像崩了。
         bool probeBaseModelKnows(const std::string &fact)
         {
             std::string subject = stripFactPrefix(fact);
             if (subject.empty())
                 subject = fact;
-            try
+            auto query = embeddings_.embedText(subject);
+            std::lock_guard<std::mutex> lock(mu_);
+            for (const auto &entry : episodicMemory_)
             {
-                std::string selectedModel = probeModel_.empty() ? std::string("llamacpp") : probeModel_;
-                std::string prompt = subject +
-                    "\n\n\xef\xbc\x88\xe8\xaf\xb7\xe4\xbb\x85\xe6\xa0\xb9\xe6\x8d\xae\xe4\xbd\xa0\xe5\xb7\xb2\xe6\x9c\x89\xe7\x9a\x84\xe7\x9f\xa5\xe8\xaf\x86\xe7\xae\x80\xe7\x9f\xad\xe5\x9b\x9e\xe7\xad\x94\xef\xbc\x9b\xe5\xa6\x82\xe6\x9e\x9c\xe4\xbd\xa0\xe5\xb9\xb6\xe4\xb8\x8d\xe4\xba\x86\xe8\xa7\xa3\xe4\xb8\x8a\xe8\xbf\xb0\xe4\xbf\xa1\xe6\x81\xaf\xef\xbc\x8c\xe8\xaf\xb7\xe7\x9b\xb4\xe6\x8e\xa5\xe5\x9b\x9e\xe7\xad\x94\xef\xbc\x9a\xe4\xb8\x8d\xe4\xba\x86\xe8\xa7\xa3\xe3\x80\x82\xef\xbc\x89"; // （请仅根据你已有的知识简短回答；如果你并不了解上述信息，请直接回答：不了解。）
-                nlohmann::json payload = {
-                    {"model", selectedModel},
-                    {"stream", false},
-                    {"messages", nlohmann::json::array({nlohmann::json{{"role", "user"}, {"content", prompt}}})},
-                    {"max_tokens", 96}};
-
-                auto client = drogon::HttpClient::newHttpClient(probeBaseUrl_);
-                if (!client)
-                    return false;
-                auto req = drogon::HttpRequest::newHttpRequest();
-                req->setMethod(drogon::Post);
-                req->setPath("/v1/chat/completions");
-                req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-                req->setBody(payload.dump());
-
-                std::promise<std::pair<drogon::ReqResult, drogon::HttpResponsePtr>> promise;
-                auto future = promise.get_future();
-                client->sendRequest(req, [&promise](drogon::ReqResult result, const drogon::HttpResponsePtr &resp)
-                                    { try { promise.set_value({result, resp}); } catch (...) {} });
-                if (future.wait_for(std::chrono::milliseconds(std::max(2000, probeTimeoutMs_))) != std::future_status::ready)
-                    return false; // 超时按未知处理
-                auto pr = future.get();
-                if (pr.first != drogon::ReqResult::Ok || !pr.second)
-                    return false;
-                if (pr.second->statusCode() < 200 || pr.second->statusCode() >= 300)
-                    return false;
-                nlohmann::json doc = nlohmann::json::parse(std::string(pr.second->getBody()), nullptr, false);
-                if (doc.is_discarded())
-                    return false;
-                std::string reply;
-                // Try OpenAI-compatible format (llama-server v1)
-                if (doc.contains("choices") && doc["choices"].is_array() && doc["choices"].size() > 0)
+                for (const auto &known : entry.facts)
                 {
-                    auto& choice = doc["choices"][0];
-                    if (choice.contains("message") && choice["message"].is_object() && choice["message"].contains("content") && choice["message"]["content"].is_string())
-                        reply = choice["message"]["content"].get<std::string>();
+                    if (known == fact || stripFactPrefix(known) == subject)
+                        return true;
                 }
-                // Fallback to legacy format
-                if (reply.empty())
-                {
-                    if (doc.contains("message") && doc["message"].is_object() && doc["message"].contains("content") && doc["message"]["content"].is_string())
-                        reply = doc["message"]["content"].get<std::string>();
-                    else if (doc.contains("response") && doc["response"].is_string())
-                        reply = doc["response"].get<std::string>();
-                }
-                if (reply.empty())
-                    return false;
-                if (hasNegation(reply))
-                    return false; // 明显否定/反义 → 未知
-                float sim = cosineOf(embeddings_.embedText(reply), embeddings_.embedText(subject));
-                return sim >= knownSimThreshold_; // 相似度达标 → 已知；否则未知
+                if (!query.empty() && !entry.embedding.empty() &&
+                    cosineOf(query, entry.embedding) >= knownSimThreshold_)
+                    return true;
             }
-            catch (...)
-            {
-                return false;
-            }
+            return false;
         }
 
         // 后台跨 session 学习：探测候选事实，仅将"未知"事实持久化到 Episodic Memory。
@@ -4303,12 +4288,18 @@ namespace
                     req->setContentTypeCode(drogon::ContentType::CT_APPLICATION_JSON);
                     req->setBody(payload.dump());
 
-                    std::promise<std::string> p;
-                    auto fut = p.get_future();
-                    client->sendRequest(req, [&p](drogon::ReqResult result, const drogon::HttpResponsePtr &resp) {
+                    auto promise = std::make_shared<std::promise<std::string>>();
+                    auto fut = promise->get_future();
+                    client->sendRequest(req, [client, promise](drogon::ReqResult result, const drogon::HttpResponsePtr &resp) {
+                        auto finish = [&](std::string value) {
+                            try {
+                                promise->set_value(std::move(value));
+                            } catch (const std::future_error &) {
+                            }
+                        };
                         if (result != drogon::ReqResult::Ok || !resp)
                         {
-                            p.set_value("");
+                            finish("");
                             return;
                         }
                         auto body = resp->getBody();
@@ -4320,21 +4311,20 @@ namespace
                                 j["message"].contains("content") && j["message"]["content"].is_string())
                             {
                                 std::string reply = j["message"]["content"].get<std::string>();
-                                // 截断到第一个句末标点，确保返回完整句子
                                 size_t dotPos = reply.find_first_of(".!?。！？");
                                 if (dotPos != std::string::npos)
                                     reply = reply.substr(0, dotPos + 1);
                                 reply.erase(0, reply.find_first_not_of(" \t\r\n"));
-                                p.set_value(reply);
+                                finish(std::move(reply));
                             }
                             else
                             {
-                                p.set_value("");
+                                finish("");
                             }
                         }
-                        catch (...)
+                        catch (const std::exception &)
                         {
-                            p.set_value("");
+                            finish("");
                         }
                     });
 
@@ -4505,6 +4495,8 @@ void setupFrontendServer()
         worldModelDb ? worldModelDb->createStore("meme_graph") : nullptr,
         worldModelDb ? worldModelDb->createStore("session") : nullptr);
     static UserStore userStore(fs::path(resolveConfig<std::string>("auth.userDb", std::string("./auth/users.json"), "AUTH_DB")));
+    static phoenix::product::LogicalModuleBoard opsModuleBoard;
+    static phoenix::product::RequestMeter opsRequestMeter;
     static phoenix::emotion::EmotionSystem emotionSystem = []() {
         phoenix::emotion::EmotionSystem::Config cfg;
         cfg.enabled = phoenix::cfgOr<bool>("emotion.enabled", true);
@@ -4583,6 +4575,8 @@ void setupFrontendServer()
     std::string aiApiBase = resolveConfig<std::string>("chat.aiApiBase", std::string("http://127.0.0.1:5080"), "AI_API_BASE");
     while (!aiApiBase.empty() && aiApiBase.back() == '/')
         aiApiBase.pop_back();
+    static auto gatewayChatClient = drogon::HttpClient::newHttpClient(aiApiBase);
+    static auto gatewayApiClient = drogon::HttpClient::newHttpClient(aiApiBase);
     auto parseThreadCount = [](const std::string &raw, int fallback)
     {
         try
@@ -4747,7 +4741,6 @@ void setupFrontendServer()
             return fallback;
         }
     };
-    const int chatQueueWaitMs = std::max(3000, resolveConfig<int>("chat.queueWaitMs", 180000, "FRONTEND_CHAT_QUEUE_WAIT_MS"));
     const int chatUpstreamTimeoutMs = std::max(5000, resolveConfig<int>("chat.upstreamTimeoutMs", 360000, "FRONTEND_CHAT_UPSTREAM_TIMEOUT_MS"));
     const int apiUpstreamTimeoutMs = std::max(3000, resolveConfig<int>("api.upstreamTimeoutMs", 45000, "FRONTEND_API_UPSTREAM_TIMEOUT_MS"));
     const int chatMaxInFlight = std::max(1, std::min(16, resolveConfig<int>("chat.maxInFlight", 1, "FRONTEND_CHAT_MAX_INFLIGHT")));
@@ -4841,9 +4834,8 @@ void setupFrontendServer()
         return req;
     };
 
-    auto proxyApiCall = [aiApiBase, chatQueueWaitMs, chatUpstreamTimeoutMs, apiUpstreamTimeoutMs, chatMaxInFlight, frontendHttpLog, &contextService](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+    auto proxyApiCall = [aiApiBase, chatUpstreamTimeoutMs, apiUpstreamTimeoutMs, chatMaxInFlight, frontendHttpLog, &contextService](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
     {
-        std::cout << "[proxyApiCall] ENTER, path=" << req->path() << ", method=" << req->method() << std::endl;
         bool chatPath = false;
         // 聊天会话 ID：用于异步回调把助手回复写回 ContextService（实现 session 内记忆）。
         auto chatSessionId = std::make_shared<std::string>();
@@ -4873,8 +4865,6 @@ void setupFrontendServer()
         };
         try
         {
-            std::cout << "[proxyApiCall] In try block" << std::endl;
-            auto apiClient = drogon::HttpClient::newHttpClient(aiApiBase);
             auto isChatPath = [](const std::string &path)
             {
                 return path == "/api/chat" || path == "/api/transformer/chat";
@@ -4884,7 +4874,6 @@ void setupFrontendServer()
         outgoing->setMethod(req->method());
 
         std::string routePath = req->path();
-        std::cout << "[proxyApiCall] routePath=" << routePath << std::endl;
         if (routePath.size() > 1 && routePath.back() == '/')
         {
             bool apiPath = routePath.rfind("/api/", 0) == 0;
@@ -4904,13 +4893,75 @@ void setupFrontendServer()
         if (auth.empty())
             auth = "Bearer local-dev";
         outgoing->addHeader("Authorization", auth);
+        for (const auto &header : req->headers())
+        {
+            std::string keyLower = header.first;
+            std::transform(keyLower.begin(), keyLower.end(), keyLower.begin(), [](unsigned char c)
+                           { return static_cast<char>(std::tolower(c)); });
+            if (keyLower == "host" || keyLower == "connection" || keyLower == "content-length" ||
+                keyLower == "content-type" || keyLower == "authorization")
+                continue;
+            outgoing->addHeader(header.first, header.second);
+        }
 
         std::string requestContentType = req->getHeader("content-type");
 
         chatPath = isChatPath(routePath);
-        std::cout << "[proxyApiCall] chatPath=" << chatPath << std::endl;
         int upstreamTimeoutMs = chatPath ? chatUpstreamTimeoutMs : apiUpstreamTimeoutMs;
+        std::string bodyCopy;
         if (!req->body().empty())
+            bodyCopy.assign(req->body().data(), req->body().size());
+        std::shared_ptr<Json::Value> chatJsonCopy;
+        if (chatPath)
+        {
+            auto parsed = req->getJsonObject();
+            if (parsed)
+                chatJsonCopy = std::make_shared<Json::Value>(*parsed);
+        }
+        auto apiClient = chatPath ? gatewayChatClient : gatewayApiClient;
+        auto runUpstream = [outgoing, apiClient, finishOnce, releaseChatSlot, chatSessionId, chatSlotHeld,
+                            chatPath, routePath, requestContentType, upstreamTimeoutMs, frontendHttpLog,
+                            dispatchStarted, chatMaxInFlight, bodyCopy, chatJsonCopy, &contextService]()
+        {
+        try
+        {
+        if (chatPath)
+        {
+            int current = gChatProxyInFlight.load();
+            bool acquired = false;
+            while (current < chatMaxInFlight)
+            {
+                if (gChatProxyInFlight.compare_exchange_weak(current, current + 1))
+                {
+                    acquired = true;
+                    chatSlotHeld->store(true);
+                    break;
+                }
+            }
+            if (!acquired)
+            {
+                auto resp = drogon::HttpResponse::newHttpResponse();
+                resp->setStatusCode(drogon::k429TooManyRequests);
+                resp->setContentTypeString("application/json");
+                Json::Value out;
+                out["ok"] = false;
+                out["error"] = "chat-busy";
+                out["connected"] = true;
+                out["stage"] = "frontend-queue";
+                out["retryAfterMs"] = 2000;
+                out["maxInFlight"] = chatMaxInFlight;
+                out["inFlight"] = gChatProxyInFlight.load();
+                resp->setBody(out.toStyledString());
+                if (frontendHttpLog)
+                {
+                    std::cout << "[frontend-proxy] chat busy path=" << routePath
+                              << " inFlight=" << gChatProxyInFlight.load() << "/" << chatMaxInFlight << std::endl;
+                }
+                (void)finishOnce(resp);
+                return;
+            }
+        }
+        if (!bodyCopy.empty())
         {
             if (chatPath)
             {
@@ -4918,7 +4969,7 @@ void setupFrontendServer()
                 // ── 上下文路由集成：把 ContextService 接入主聊天流 ──────────────
                 // 解析聊天请求，按 sessionId 构建会话历史（concat/rnn/lstm 路由），
                 // 在前端未显式提供 contextHint 时自动注入，实现 session 内记忆。
-                auto chatJson = req->getJsonObject();
+                auto chatJson = chatJsonCopy;
                 bool injected = false;
                 if (chatJson && chatJson->isMember("text") && (*chatJson)["text"].isString())
                 {
@@ -4929,14 +4980,23 @@ void setupFrontendServer()
                     std::string modeHint = "auto";
                     if (chatJson->isMember("contextMode") && (*chatJson)["contextMode"].isString())
                         modeHint = (*chatJson)["contextMode"].asString();
-                    std::cout << "[frontend-proxy] chatJson exists, sid=" << sid << ", userText=" << userText << ", modeHint=" << modeHint << std::endl;
+                    if (frontendHttpLog)
+                    {
+                        std::cout << "[frontend-proxy] chatJson exists, sid=" << sid
+                                  << ", userTextLen=" << userText.size() << ", modeHint=" << modeHint << std::endl;
+                    }
                     if (!sid.empty() && !userText.empty())
                     {
                         try
                         {
                             std::string routedHint = contextService.prepareChatContext(sid, userText, modeHint);
                             bool frontendHint = chatJson->isMember("contextHint") && (*chatJson)["contextHint"].isString() && !(*chatJson)["contextHint"].asString().empty();
-                            std::cout << "[frontend-proxy] prepareChatContext: sid=" << sid << ", routedHint=" << (routedHint.empty() ? "(empty)" : routedHint.substr(0, 100)) << ", frontendHint=" << frontendHint << std::endl;
+                            if (frontendHttpLog)
+                            {
+                                std::cout << "[frontend-proxy] prepareChatContext: sid=" << sid
+                                          << ", routedHintLen=" << routedHint.size()
+                                          << ", frontendHint=" << frontendHint << std::endl;
+                            }
                             if (!frontendHint)
                             {
                                 // Always set the key (even empty) so the main gateway can detect
@@ -4945,7 +5005,8 @@ void setupFrontendServer()
                                 (*chatJson)["contextHint"] = routedHint;
                                 if (!chatJson->isMember("contextWeight") || !(*chatJson)["contextWeight"].isNumeric())
                                     (*chatJson)["contextWeight"] = 0.9;
-                                std::cout << "[frontend-proxy] Set contextHint weight=0.9" << std::endl;
+                                if (frontendHttpLog)
+                                    std::cout << "[frontend-proxy] Set contextHint weight=0.9" << std::endl;
                             }
                             *chatSessionId = sid; // 供异步回调写回助手回复
                             outgoing->setBody(chatJson->toStyledString());
@@ -4957,15 +5018,17 @@ void setupFrontendServer()
                     }
                     else
                     {
-                        std::cout << "[frontend-proxy] sid or userText empty, skipping prepareChatContext" << std::endl;
+                        if (frontendHttpLog)
+                            std::cout << "[frontend-proxy] sid or userText empty, skipping prepareChatContext" << std::endl;
                     }
                 }
                 else
                 {
-                    std::cout << "[frontend-proxy] chatJson invalid or missing text field" << std::endl;
+                    if (frontendHttpLog)
+                        std::cout << "[frontend-proxy] chatJson invalid or missing text field" << std::endl;
                 }
                 if (!injected)
-                    outgoing->setBody(std::string(req->body()));
+                    outgoing->setBody(bodyCopy);
             }
             else
             {
@@ -4973,110 +5036,17 @@ void setupFrontendServer()
                 std::transform(lowerCt.begin(), lowerCt.end(), lowerCt.begin(), [](unsigned char c)
                                { return static_cast<char>(std::tolower(c)); });
                 if (lowerCt.find("application/json") != std::string::npos)
-                {
                     outgoing->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-                    auto json = req->getJsonObject();
-                    if (json)
-                    {
-                        outgoing->setBody(json->toStyledString());
-                    }
-                    else
-                    {
-                        outgoing->setBody(std::string(req->body()));
-                    }
-                }
-                else
-                {
-                    outgoing->setBody(std::string(req->body()));
-                    if (!requestContentType.empty())
-                        outgoing->addHeader("content-type", requestContentType);
-                }
+                outgoing->setBody(bodyCopy);
+                if (!requestContentType.empty() && lowerCt.find("application/json") == std::string::npos)
+                    outgoing->addHeader("content-type", requestContentType);
             }
         }
-
-        if (chatPath)
+        if (chatPath && frontendHttpLog)
         {
-            auto started = std::chrono::steady_clock::now();
-            bool acquired = false;
-            long long queueWaitMs = 0;
-            while (!acquired)
-            {
-                int current = gChatProxyInFlight.load();
-                while (current < chatMaxInFlight)
-                {
-                    if (gChatProxyInFlight.compare_exchange_weak(current, current + 1))
-                    {
-                        acquired = true;
-                        chatSlotHeld->store(true);
-                        queueWaitMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-                        break;
-                    }
-                }
-                if (acquired)
-                {
-                    break;
-                }
-                auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-                if (waited > chatQueueWaitMs)
-                {
-                    auto resp = drogon::HttpResponse::newHttpResponse();
-                    resp->setStatusCode(drogon::k200OK);
-                    resp->setContentTypeString("application/json");
-                    Json::Value out;
-                    out["ok"] = false;
-                    out["error"] = "request-timeout:/api/chat";
-                    out["connected"] = false;
-                    out["stage"] = "frontend-queue";
-                    out["waitMs"] = (Json::Int64)waited;
-                    out["queueTimeoutMs"] = chatQueueWaitMs;
-                    out["maxInFlight"] = chatMaxInFlight;
-                    out["inFlight"] = gChatProxyInFlight.load();
-                    resp->setBody(out.toStyledString());
-                    if (frontendHttpLog)
-                    {
-                        std::cout << "[frontend-proxy] chat queue timeout path=" << routePath
-                                  << " waitMs=" << waited
-                                  << " queueTimeoutMs=" << chatQueueWaitMs
-                                  << " inFlight=" << gChatProxyInFlight.load() << "/" << chatMaxInFlight << std::endl;
-                    }
-                    (void)finishOnce(resp);
-                    return;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(30));
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(gChatDispatchMu);
-                auto now = std::chrono::steady_clock::now();
-                auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - gLastChatDispatch);
-                constexpr auto minGap = std::chrono::milliseconds(220);
-                if (since < minGap)
-                    std::this_thread::sleep_for(minGap - since);
-                gLastChatDispatch = std::chrono::steady_clock::now();
-            }
-
-            auto auth = req->getHeader("authorization");
-            if (!auth.empty())
-                outgoing->addHeader("authorization", auth);
-            if (frontendHttpLog)
-            {
-                std::cout << "[frontend-proxy] chat dispatch path=" << routePath
-                          << " queueWaitMs=" << queueWaitMs
-                          << " upstreamTimeoutMs=" << upstreamTimeoutMs
-                          << " inFlight=" << gChatProxyInFlight.load() << "/" << chatMaxInFlight << std::endl;
-            }
-        }
-        else
-        {
-            for (const auto &header : req->headers())
-            {
-                std::string keyLower = header.first;
-                std::transform(keyLower.begin(), keyLower.end(), keyLower.begin(), [](unsigned char c)
-                               { return static_cast<char>(std::tolower(c)); });
-                if (keyLower == "host" || keyLower == "connection" || keyLower == "content-length" || keyLower == "content-type")
-                    continue;
-                outgoing->addHeader(header.first, header.second);
-            }
+            std::cout << "[frontend-proxy] chat dispatch path=" << routePath
+                      << " upstreamTimeoutMs=" << upstreamTimeoutMs
+                      << " inFlight=" << gChatProxyInFlight.load() << "/" << chatMaxInFlight << std::endl;
         }
 
             apiClient->sendRequest(
@@ -5194,7 +5164,8 @@ void setupFrontendServer()
                         resp->setBody(out.toStyledString());
                         (void)finishOnce(resp);
                     }
-                });
+                },
+                chatPath ? (upstreamTimeoutMs / 1000.0) : 3.0);
 
             std::thread([finishOnce, releaseChatSlot, chatPath, routePath, upstreamTimeoutMs, frontendHttpLog]()
                         {
@@ -5217,6 +5188,27 @@ void setupFrontendServer()
                               << " chat=" << (chatPath ? "true" : "false") << std::endl;
                 } })
                 .detach();
+        }
+        catch (...)
+        {
+            std::cout << "[proxyApiCall] Exception caught in proxyApiCall" << std::endl;
+            releaseChatSlot();
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k500InternalServerError);
+            resp->setContentTypeString("application/json");
+            Json::Value out;
+            out["ok"] = false;
+            out["error"] = "proxy-dispatch-exception";
+            resp->setBody(out.toStyledString());
+            (void)finishOnce(resp);
+        }
+        };
+        if (chatPath)
+        {
+            contextService.enqueueWorker(std::move(runUpstream));
+            return;
+        }
+        runUpstream();
         }
         catch (...)
         {
@@ -5258,6 +5250,11 @@ void setupFrontendServer()
             } catch (...) {
             } });
     }
+
+    drogon::app().registerPostHandlingAdvice([](const drogon::HttpRequestPtr &, const drogon::HttpResponsePtr &resp)
+                                             {
+        const int status = resp ? (int)resp->statusCode() : 0;
+        opsRequestMeter.record(status, 0.0); });
 
     drogon::app().registerHandler("/", [webRoot](const drogon::HttpRequestPtr &, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
                                   {
@@ -5877,6 +5874,145 @@ void setupFrontendServer()
             return;
         }
         cb(resp); }, {drogon::Post});
+
+    drogon::app().registerHandler("/auth/admin/set-role", [resolveAuthenticatedUser, &userStore](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+                                  {
+        UserRecord full;
+        if (!resolveAuthenticatedUser(req, full)) {
+            sendAuthErrorJson(cb, drogon::k401Unauthorized, "unauthorized");
+            return;
+        }
+        auto json = req->getJsonObject();
+        if (!json || !json->isMember("username") || !json->isMember("role")) {
+            sendAuthErrorJson(cb, drogon::k400BadRequest, "Missing username or password");
+            return;
+        }
+        const std::string target = (*json)["username"].asString();
+        const std::string role = (*json)["role"].asString();
+        auto decided = phoenix::product::decideSetRole(full.role, role);
+        if (!decided.ok) {
+            sendAuthErrorJson(cb, static_cast<drogon::HttpStatusCode>(decided.status), decided.error, decided.message);
+            return;
+        }
+        std::string err;
+        if (!userStore.setRole(target, role, err)) {
+            sendAuthErrorJson(cb, drogon::k400BadRequest, err);
+            return;
+        }
+        UserRecord rec;
+        userStore.getUser(target, rec);
+        Json::Value out;
+        out["ok"] = true;
+        out["user"] = userRecordToJson(rec);
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(out);
+        cb(resp); }, {drogon::Post});
+
+    drogon::app().registerHandler("/api/ops/monitor", [resolveAuthenticatedUser, aiApiBase, port, host](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+                                  {
+        UserRecord full;
+        if (!resolveAuthenticatedUser(req, full)) {
+            sendAuthErrorJson(cb, drogon::k401Unauthorized, "unauthorized");
+            return;
+        }
+        std::string gwHost = resolveConfig<std::string>("api.gatewayHost", std::string("127.0.0.1"), "AI_GATEWAY_HOST");
+        int gwPort = 5080;
+        {
+            const std::string gwPortText = resolveConfig<std::string>("api.gatewayPort", std::string("5080"), "AI_GATEWAY_PORT");
+            if (!gwPortText.empty() && std::all_of(gwPortText.begin(), gwPortText.end(), [](unsigned char c) { return std::isdigit(c); }))
+                gwPort = std::stoi(gwPortText);
+        }
+        std::string llamaHost = "127.0.0.1";
+        int llamaPort = 0;
+        phoenix::product::parseHostPort(resolveConfig<std::string>("main.inference.llamaCppBaseUrl", std::string("http://127.0.0.1:8082"), "LLAMA_CPP_BASE_URL"), llamaHost, llamaPort);
+        std::int64_t llamaPid = 0;
+        const std::string llamaPidText = resolveConfig<std::string>("monitor.llamaPid", std::string(""), "PHOENIX_LLAMA_PID");
+        if (!llamaPidText.empty() && std::all_of(llamaPidText.begin(), llamaPidText.end(), [](unsigned char c) { return std::isdigit(c); }))
+            llamaPid = static_cast<std::int64_t>(std::stoll(llamaPidText));
+
+        std::string feHost = host == "0.0.0.0" ? "127.0.0.1" : host;
+        std::vector<phoenix::product::EndpointFact> ends;
+        ends.push_back({"frontend", "前端服务", feHost, port, phoenix::product::currentPid(),
+                        phoenix::product::tcpPortListening(feHost, port), "tcp-port"});
+        ends.push_back({"gateway", "网关", gwHost, gwPort, 0,
+                        phoenix::product::tcpPortListening(gwHost, gwPort), "tcp-port"});
+        if (llamaPort > 0)
+            ends.push_back({"inference-llama", "推理进程", llamaHost, llamaPort, llamaPid,
+                            phoenix::product::tcpPortListening(llamaHost, llamaPort), "tcp-port"});
+        (void)aiApiBase;
+        auto body = phoenix::product::buildMonitorJson(ends, phoenix::product::currentRssBytes(),
+                                                      opsRequestMeter.snapshot(), phoenix::product::currentPid());
+        sendNlohmannJson(cb, body); }, {drogon::Get});
+
+    drogon::app().registerHandler("/api/ops/modules", [resolveAuthenticatedUser](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+                                  {
+        UserRecord full;
+        if (!resolveAuthenticatedUser(req, full)) {
+            sendAuthErrorJson(cb, drogon::k401Unauthorized, "unauthorized");
+            return;
+        }
+        nlohmann::json body = {{"ok", true}, {"modules", opsModuleBoard.listJson()}};
+        sendNlohmannJson(cb, body); }, {drogon::Get});
+
+    drogon::app().registerHandler("/api/ops/modules", [resolveAuthenticatedUser](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+                                  {
+        UserRecord full;
+        if (!resolveAuthenticatedUser(req, full)) {
+            sendAuthErrorJson(cb, drogon::k401Unauthorized, "unauthorized");
+            return;
+        }
+        auto admin = phoenix::product::decideAdmin(full.role);
+        if (!admin.ok) {
+            sendAuthErrorJson(cb, static_cast<drogon::HttpStatusCode>(admin.status), admin.error, admin.message);
+            return;
+        }
+        auto json = req->getJsonObject();
+        if (!json || !json->isMember("id") || !json->isMember("enabled")) {
+            sendAuthErrorJson(cb, drogon::k400BadRequest, "Missing username or password");
+            return;
+        }
+        auto decided = opsModuleBoard.setEnabled((*json)["id"].asString(), (*json)["enabled"].asBool());
+        if (!decided.ok) {
+            sendAuthErrorJson(cb, static_cast<drogon::HttpStatusCode>(decided.status), decided.error, decided.message);
+            return;
+        }
+        nlohmann::json body = {{"ok", true}, {"modules", opsModuleBoard.listJson()}};
+        sendNlohmannJson(cb, body); }, {drogon::Post});
+
+    drogon::app().registerHandler("/api/ops/database", [resolveAuthenticatedUser](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+                                  {
+        UserRecord full;
+        if (!resolveAuthenticatedUser(req, full)) {
+            sendAuthErrorJson(cb, drogon::k401Unauthorized, "unauthorized");
+            return;
+        }
+        fs::path dbPath = resolveConfig<std::string>("main.dbPath", std::string("runtime_store/ai_store.sqlite"), "AI_DB_PATH");
+        fs::path lmdbRoot = resolveConfig<std::string>("main.lmdb.root", std::string("lmdb"), "AI_LMDB_ROOT");
+        fs::path backupDir = resolveConfig<std::string>("db.backupDir", std::string("runtime_store/db_backups"), "PHOENIX_DB_BACKUP_DIR");
+        auto info = phoenix::product::inspectDatabase(dbPath, lmdbRoot, backupDir);
+        sendNlohmannJson(cb, phoenix::product::databaseInfoJson(info)); }, {drogon::Get});
+
+    drogon::app().registerHandler("/api/ops/database/backup", [resolveAuthenticatedUser](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
+                                  {
+        UserRecord full;
+        if (!resolveAuthenticatedUser(req, full)) {
+            sendAuthErrorJson(cb, drogon::k401Unauthorized, "unauthorized");
+            return;
+        }
+        auto admin = phoenix::product::decideAdmin(full.role);
+        if (!admin.ok) {
+            sendAuthErrorJson(cb, static_cast<drogon::HttpStatusCode>(admin.status), admin.error, admin.message);
+            return;
+        }
+        fs::path dbPath = resolveConfig<std::string>("main.dbPath", std::string("runtime_store/ai_store.sqlite"), "AI_DB_PATH");
+        fs::path backupDir = resolveConfig<std::string>("db.backupDir", std::string("runtime_store/db_backups"), "PHOENIX_DB_BACKUP_DIR");
+        auto dest = phoenix::product::suggestedBackupPath(dbPath, backupDir, phoenix::product::nowMs());
+        auto copied = phoenix::product::copyDatabaseBackup(dbPath, dest);
+        if (!copied.ok) {
+            sendAuthErrorJson(cb, static_cast<drogon::HttpStatusCode>(copied.status), copied.error, copied.message);
+            return;
+        }
+        nlohmann::json body = {{"ok", true}, {"backupPath", dest.string()}};
+        sendNlohmannJson(cb, body); }, {drogon::Post});
 
     drogon::app().registerHandler("/api/gguf/inspect", [](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb)
                                   {

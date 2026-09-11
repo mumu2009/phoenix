@@ -40,6 +40,7 @@ using ioctl_arg_t = unsigned long;
 #include "mission_reply_parse.hpp"
 #include "mission_unit_workflow.hpp"
 
+#include "controller_layout.hpp"
 #include "main_hub_parts/000_section_before_config.inc"
 #include "main_hub_parts/001_struct_config.inc"
 #include "main_hub_parts/002_section_before_sharedmemoryslice.inc"

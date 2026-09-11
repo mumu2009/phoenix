@@ -76,7 +76,7 @@ public:
     int hits = 0;
     {
       std::lock_guard<std::mutex> lock(mu_);
-      hits = ++localHits_[key];
+      hits = localHits_.increment(key);
     }
     if (hits < hotThreshold)
       return;
@@ -112,5 +112,5 @@ private:
   std::shared_ptr<sw::redis::Redis> redis_;
 #endif
   std::mutex mu_;
-  std::unordered_map<std::string, int> localHits_;
+  phoenix::BoundedHitMap localHits_{4096};
 };

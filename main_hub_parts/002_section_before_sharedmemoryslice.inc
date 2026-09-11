@@ -65,9 +65,16 @@ static Config loadConfig(int argc, char **argv) {
   double sparkNumAiNum =
       numberOr(sparkNumAiRaw, numberOr(groupSizeRaw, numberOr(aiCountRaw, 7)));
 
-  c.aiCount = std::max(3, (int)aiCountNum);
+  c.aiCount = std::max(1, (int)aiCountNum);
   c.groupCount = std::max(1, (int)groupCountNum);
   c.groupSize = std::max(1, (int)groupSizeNum);
+  {
+    auto layout =
+        phoenix::planControllerLayout(c.aiCount, c.groupCount, c.groupSize);
+    c.groupCount = std::max(1, layout.groupCount);
+    if (!layout.groupSizes.empty())
+      c.groupSize = layout.groupSizes[0];
+  }
   c.sparkNumAI = std::max(1, (int)sparkNumAiNum);
   c.sparkBudget = argOrEnv("spark-budget", "AI_SPARK_BUDGET", "default");
 
@@ -120,6 +127,12 @@ static Config loadConfig(int argc, char **argv) {
           64, (std::size_t)numberOr(
                   argOrEnv("lmdb-map-mb", "AI_LMDB_MAP_MB", "4096"), 4096)) *
       1024ull * 1024ull;
+  {
+    const size_t availMb = getAvailablePhysicalMemoryMB();
+    const std::size_t edgeCap = 64ull * 1024ull * 1024ull;
+    if (availMb > 0 && availMb < 8192 && c.lmdbMapSizeBytes > edgeCap)
+      c.lmdbMapSizeBytes = edgeCap;
+  }
 
   c.searchEndpoint = argOrEnv("search-endpoint", "AI_SEARCH_ENDPOINT", "");
   c.robotsDir = pathArgOrEnv("robots-dir", "AI_ROBOTS_DIR", rootDir / "robots");
