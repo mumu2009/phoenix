@@ -86,6 +86,7 @@
 #include "../emotion_system.hpp"
 #include "../llamacpp_emotion_adjuster.hpp"
 #include "../plugin_system.hpp"
+#include "../util/module_resource.hpp"
 #include "../modern_context_system.hpp"
 #include "../graph_diffusion_summarizer.hpp"
 #include "../hierarchical_memory.hpp"
@@ -122,10 +123,14 @@ void transformer_ollama_ft_bridge_finalize(void);
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -202,8 +207,74 @@ static void postInferenceMemoryTrim() {
   trimProcessWorkingSet();
 }
 #else
-static bool preInferenceMemoryCheck(std::string &) { return true; }
-static void postInferenceMemoryTrim() {}
+static size_t getAvailablePhysicalMemoryMB() {
+  std::ifstream in("/proc/meminfo");
+  if (!in)
+    return 0;
+  std::string key;
+  size_t value = 0;
+  std::string unit;
+  size_t avail = 0;
+  size_t memFree = 0;
+  while (in >> key >> value >> unit) {
+    if (key == "MemAvailable:")
+      avail = value / 1024;
+    else if (key == "MemFree:")
+      memFree = value / 1024;
+  }
+  return avail ? avail : memFree;
+}
+
+static size_t getProcessWorkingSetMB() {
+  std::ifstream in("/proc/self/status");
+  if (!in)
+    return 0;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.rfind("VmRSS:", 0) != 0)
+      continue;
+    std::istringstream ls(line);
+    std::string tag;
+    size_t kb = 0;
+    ls >> tag >> kb;
+    return kb / 1024;
+  }
+  return 0;
+}
+
+static void trimProcessWorkingSet() {
+#ifdef __GLIBC__
+  malloc_trim(0);
+#endif
+}
+
+static bool preInferenceMemoryCheck(std::string &errorOut) {
+  size_t availMB = getAvailablePhysicalMemoryMB();
+  size_t wsMB = getProcessWorkingSetMB();
+  const size_t rssCapMb = static_cast<size_t>(std::max(
+      512,
+      phoenix::resolveConfig<int>("main.services.gateway.maxRssMb", 2048,
+                                  "AI_GATEWAY_MAX_RSS_MB")));
+  if (wsMB >= rssCapMb) {
+    errorOut = "gateway rss cap reached (available=" + std::to_string(availMB) +
+               "MB, process_ws=" + std::to_string(wsMB) +
+               "MB, cap=" + std::to_string(rssCapMb) + "MB)";
+    return false;
+  }
+  if (availMB < 800) {
+    trimProcessWorkingSet();
+    availMB = getAvailablePhysicalMemoryMB();
+    if (availMB < 400) {
+      errorOut = "Insufficient system memory for inference (available=" +
+                 std::to_string(availMB) + "MB, process_ws=" +
+                 std::to_string(wsMB) + "MB)";
+      return false;
+    }
+  }
+  return true;
+}
+
+static void postInferenceMemoryTrim() { trimProcessWorkingSet(); }
 #endif
 
 // 将 JsonCpp 的 Json::Value 递归转换为 nlohmann::json。
@@ -471,7 +542,46 @@ static bool acquirePidFile(const fs::path &pidPath, std::string &errorOut) {
 #endif
 }
 
+static std::atomic<bool> gSupervisorManaged{false};
+
+static bool supervisorManagesChildren() {
+  const char *env = std::getenv("AI_SUPERVISOR_MANAGED");
+  if (env && *env) {
+    bool on = env[0] == '1' || env[0] == 't' || env[0] == 'T' || env[0] == 'y' ||
+              env[0] == 'Y';
+    gSupervisorManaged.store(on, std::memory_order_relaxed);
+    return on;
+  }
+  bool on = phoenix::resolveConfig<bool>("main.supervisor.manageChildren", false);
+  gSupervisorManaged.store(on, std::memory_order_relaxed);
+  return on;
+}
+
+static bool supervisorManagesChildrenCached() noexcept {
+  const char *env = std::getenv("AI_SUPERVISOR_MANAGED");
+  if (env && *env)
+    return env[0] == '1' || env[0] == 't' || env[0] == 'T' || env[0] == 'y' ||
+           env[0] == 'Y';
+  return gSupervisorManaged.load(std::memory_order_relaxed);
+}
+
+static void writeServiceRolePid(const char *role) {
+  if (!role || !*role)
+    return;
+  std::string dir = phoenix::resolveConfig<std::string>(
+      "main.supervisor.pidDir", "runtime_store/pids", "AI_SUPERVISOR_PID_DIR");
+  fs::path p = fs::path(dir) / (std::string(role) + ".pid");
+  std::error_code ec;
+  fs::create_directories(p.parent_path(), ec);
+  std::ofstream out(p, std::ios::trunc);
+  if (!out)
+    return;
+  out << currentProcessId() << "\n";
+}
+
 static void cleanupFrontendProcess() noexcept {
+  if (supervisorManagesChildrenCached())
+    return;
   std::lock_guard<std::mutex> lock(gFrontendProcMu);
 #ifdef _WIN32
   if (gFrontendProcessHandle) {
@@ -490,7 +600,9 @@ static void cleanupFrontendProcess() noexcept {
   }
 #else
   if (gFrontendProcessPid > 0) {
-    kill(gFrontendProcessPid, SIGTERM);
+    pid_t victim = gFrontendProcessPid;
+    kill(victim, SIGTERM);
+    waitpid(victim, nullptr, WNOHANG);
     gFrontendProcessPid = -1;
   }
 #endif

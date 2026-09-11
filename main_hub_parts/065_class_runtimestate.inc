@@ -7,9 +7,18 @@ public:
   RuntimeState(std::shared_ptr<KeyValueStore> kvmStore,
                std::shared_ptr<KeyValueStore> memeStore,
                std::shared_ptr<KeyValueStore> sessionStore,
-               const Config &config)
-      : config_(config), kvm_(kvmStore, config.kvmCacheMaxEntries),
-        graph_(memeStore), sessions_(sessionStore), pattern_(&kvm_, &tensor_) {
+               const Config &config,
+               std::shared_ptr<KVMStore> sharedKvm = nullptr,
+               std::shared_ptr<MemeGraph> sharedGraph = nullptr)
+      : config_(config),
+        kvmHolder_(sharedKvm
+                       ? std::move(sharedKvm)
+                       : std::make_shared<KVMStore>(kvmStore,
+                                                    config.kvmCacheMaxEntries)),
+        graphHolder_(sharedGraph ? std::move(sharedGraph)
+                                 : std::make_shared<MemeGraph>(memeStore)),
+        kvm_(*kvmHolder_), graph_(*graphHolder_), sessions_(sessionStore),
+        pattern_(&kvm_, &tensor_) {
     surfaceStore_ = std::make_shared<NamespacedStore>(sessionStore, "surface");
     dialogStore_ = std::make_shared<NamespacedStore>(sessionStore, "dialog");
     surfaceLexicon_ = std::make_shared<MemeSurfaceLexicon>(surfaceStore_);
@@ -1460,8 +1469,10 @@ private:
   mutable std::mutex stateMu_;
   friend class OnlineResearcher;
   Config config_;
-  KVMStore kvm_;
-  MemeGraph graph_;
+  std::shared_ptr<KVMStore> kvmHolder_;
+  std::shared_ptr<MemeGraph> graphHolder_;
+  KVMStore &kvm_;
+  MemeGraph &graph_;
   TensorEngine tensor_;
   std::shared_ptr<KeyValueStore> sessions_;
   std::shared_ptr<SessionManager> sessionManager_;

@@ -5,6 +5,7 @@ import { api } from './api/client';
 import ConfigPanel from './components/ConfigPanel';
 import MissionPanel from './components/MissionPanel';
 import WorldPanel from './components/WorldPanel';
+import OpsPanel from './components/OpsPanel';
 
 const loadJson = (key, fallback) => {
   try {
@@ -120,7 +121,7 @@ const ChatMessage = memo(function ChatMessage({ message: m }) {
 });
 
 function App() {
-  const [account, setAccount] = useState(() => loadJson('phoenix.account', { id: 'local', name: 'Local User' }));
+  const [account, setAccount] = useState(() => loadJson('phoenix.account', { id: 'local', name: 'User', role: 'user' }));
   const [sessions, setSessions] = useState(() => loadJson('phoenix.sessions', []));
   const [activeSessionId, setActiveSessionId] = useState(() => loadJson('phoenix.activeSessionId', null));
   const [activePage, setActivePage] = useState(() => loadJson('phoenix.activePage', 'chat'));
@@ -194,6 +195,7 @@ function App() {
     let cancelled = false;
     let timer = null;
     const refresh = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       try {
         const r = await api.systemStatus();
         if (cancelled) return;
@@ -210,11 +212,28 @@ function App() {
         if (!cancelled) setStatus({ ok: false, error: e.message });
       }
     };
+    const onVis = () => {
+      if (!document.hidden) refresh();
+    };
+    const me = typeof api.authMe === 'function' ? api.authMe() : null;
+    if (me && typeof me.then === 'function') {
+      me.then((out) => {
+        if (cancelled || !out?.user) return;
+        setAccount({
+          id: out.user.username,
+          name: out.user.username,
+          role: out.user.role || 'user',
+          email: out.user.email || ''
+        });
+      }).catch(() => {});
+    }
     refresh();
-    timer = setInterval(refresh, 5000);
+    timer = setInterval(refresh, 15000);
+    document.addEventListener('visibilitychange', onVis);
     return () => {
       cancelled = true;
       if (timer) clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVis);
     };
   }, []);
 
@@ -302,6 +321,11 @@ function App() {
       if (disconnected) {
         setStatus({ ok: false, error: 'disconnected' });
         appendMessage(sid, { id: `m_${Date.now()}_err`, role: 'system', text: 'Error: disconnected', ts: Date.now() });
+        return;
+      }
+      if (r?.error === 'chat-busy') {
+        setError('系统正忙，请稍后重试');
+        appendMessage(sid, { id: `m_${Date.now()}_busy`, role: 'system', text: '系统正忙，请稍后重试', ts: Date.now() });
         return;
       }
       setStatus({ ok: true });
@@ -493,8 +517,15 @@ function App() {
             </div>
           </div>
           <div className="account-actions">
-            <button className="btn btn-ghost" onClick={() => setAccount((a) => ({ ...a, name: a.name === 'Local User' ? 'Operator' : 'Local User' }))}>
-              切换昵称
+            <button
+              className="btn btn-ghost"
+              onClick={() => {
+                api.authLogout().finally(() => {
+                  window.location.reload();
+                });
+              }}
+            >
+              退出登录
             </button>
             <button className="btn" onClick={newSession}>
               新会话
@@ -535,6 +566,9 @@ function App() {
             </button>
             <button className={`nav-item ${activePage === 'world' ? 'active' : ''}`} onClick={() => setActivePage('world')}>
               World
+            </button>
+            <button className={`nav-item ${activePage === 'ops' ? 'active' : ''}`} onClick={() => setActivePage('ops')}>
+              运维
             </button>
           </div>
         </div>
@@ -655,6 +689,21 @@ function App() {
             </header>
             <section className="cfg-wrap">
               <MissionPanel onError={(msg) => setError(msg)} />
+              {error ? <div className="error">{error}</div> : null}
+            </section>
+          </>
+        ) : activePage === 'ops' ? (
+          <>
+            <header className="topbar">
+              <div className="topbar-title">运维</div>
+              <div className="topbar-actions">
+                <button className="btn btn-ghost" onClick={() => api.opsMonitor().then(setStatus).catch((e) => setError(e.message))}>
+                  刷新监控
+                </button>
+              </div>
+            </header>
+            <section className="cfg-wrap">
+              <OpsPanel onError={(msg) => setError(msg)} isAdmin={account?.role === 'admin'} />
               {error ? <div className="error">{error}</div> : null}
             </section>
           </>

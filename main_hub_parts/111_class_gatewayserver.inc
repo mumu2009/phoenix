@@ -307,8 +307,8 @@ public:
                 } catch (const std::exception &ex) {
                   std::cout << "[mission] GNN pretrain/diffuse failed: "
                             << ex.what() << std::endl;
-                } catch (...) {
-                }
+              } catch (...) {
+              }
               }
 
               /* RDK llama prompt eval is ~1.5-2s/token.  Dumping every AGI
@@ -1942,7 +1942,7 @@ public:
           "mission.gnnPretrainDocs",
           phoenix::cfgOr<int>("main.inference.gnnBootstrapDocs", 256));
       seedGnnGraphFromRobotsCorpus(lim, "gnn-warmup-pretrain");
-    } catch (...) {
+        } catch (...) {
     }
   }
 

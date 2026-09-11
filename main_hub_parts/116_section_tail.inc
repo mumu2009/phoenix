@@ -1861,6 +1861,33 @@
             finalizeMetric(false);
             return unauthorized(cb);
           }
+          {
+            std::string memErr;
+            if (!preInferenceMemoryCheck(memErr)) {
+              finalizeMetric(false);
+              logRouteError("/api/chat", std::string("oom_guard: ") + memErr);
+              return respondJson(cb,
+                                 json{{"ok", false},
+                                      {"error", memErr},
+                                      {"stage", "oom_guard"}},
+                                 drogon::k503ServiceUnavailable);
+            }
+          }
+          bool parsedOk = true;
+          json parsedBody = parseRequestBody(req, parsedOk);
+          if (!parsedOk) {
+            finalizeMetric(false);
+            return badRequest(cb, "invalid json");
+          }
+          std::thread([this, body = std::move(parsedBody), cb = std::move(cb),
+                       routeStarted]() mutable {
+          auto finalizeMetric = [this, routeStarted](bool okFlag) {
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - routeStarted)
+                    .count();
+            recordRouteMetric("/api/chat", elapsed, okFlag);
+          };
           try {
             auto jsonStringOrEmpty = [](const json &obj,
                                         const char *key) -> std::string {
@@ -1870,12 +1897,7 @@
               }
               return obj[key].get<std::string>();
             };
-            bool ok = true;
-            json body = parseRequestBody(req, ok);
-            if (!ok) {
-              finalizeMetric(false);
-              return badRequest(cb, "invalid json");
-            }
+            (void)jsonStringOrEmpty;
             std::string text = body.value("text", body.value("message", ""));
             std::string prelimSessionId = body.value("sessionId", "");
             ingestWorldEvidence(prelimSessionId, text, "");
@@ -1894,16 +1916,21 @@
               auto cmStart = std::chrono::steady_clock::now();
               if (config_.httpLog)
                 std::cout << "[gateway] /api/chat stage=concept_matrix_start" << std::endl;
-              if (config_.conceptMatrixClearPerRequest)
-                conceptMatrix_.clear();
-              conceptMatrix_.encodeText(text);
-              conceptMatrix_.propagate(0);
-              matrixContext = conceptMatrix_.toContextString(32, 0.15f);
+              int activeCount = 0;
+              {
+                std::lock_guard<std::mutex> lock(chatMu_);
+                if (config_.conceptMatrixClearPerRequest)
+                  conceptMatrix_.clear();
+                conceptMatrix_.encodeText(text);
+                conceptMatrix_.propagate(0);
+                matrixContext = conceptMatrix_.toContextString(32, 0.15f);
+                activeCount = conceptMatrix_.activeCount();
+              }
               if (config_.httpLog) {
                 auto cmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - cmStart).count();
                 std::cout << "[gateway] /api/chat stage=concept_matrix_done active="
-                          << conceptMatrix_.activeCount()
+                          << activeCount
                           << " elapsedMs=" << cmMs << std::endl;
               }
             }
@@ -2592,6 +2619,7 @@
                         drogon::k500InternalServerError);
             finalizeMetric(false);
           }
+          }).detach();
         },
         {drogon::Post});
 
@@ -2660,16 +2688,21 @@
               auto cmStart = std::chrono::steady_clock::now();
               if (config_.httpLog)
                 std::cout << "[gateway] /api/chat stage=concept_matrix_start" << std::endl;
-              if (config_.conceptMatrixClearPerRequest)
-                conceptMatrix_.clear();
-              conceptMatrix_.encodeText(text);
-              conceptMatrix_.propagate(0);
-              matrixContext = conceptMatrix_.toContextString(32, 0.15f);
+              int activeCount = 0;
+              {
+                std::lock_guard<std::mutex> lock(chatMu_);
+                if (config_.conceptMatrixClearPerRequest)
+                  conceptMatrix_.clear();
+                conceptMatrix_.encodeText(text);
+                conceptMatrix_.propagate(0);
+                matrixContext = conceptMatrix_.toContextString(32, 0.15f);
+                activeCount = conceptMatrix_.activeCount();
+              }
               if (config_.httpLog) {
                 auto cmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - cmStart).count();
                 std::cout << "[gateway] /api/chat stage=concept_matrix_done active="
-                          << conceptMatrix_.activeCount()
+                          << activeCount
                           << " elapsedMs=" << cmMs << std::endl;
               }
             }
@@ -6982,6 +7015,68 @@
           }
         },
         {drogon::Get});
+
+    /* Dual CRUD: module-internal resources (auth + registry). */
+    phoenix::util::installBuiltinModuleResources();
+    {
+      phoenix::util::CrudHttpConfig crudHttp;
+      crudHttp.enabled = true;
+      crudHttp.acceptLocalToken = acceptLocalToken_;
+      crudHttp.token = phoenix::cfgOr<std::string>("crud.http.token", std::string());
+      phoenix::util::setCrudHttpConfig(crudHttp);
+      phoenix::util::setPublicConfig(json{
+          {"gatewayHost", phoenix::cfgOr<std::string>("api.gatewayHost", std::string("127.0.0.1"))},
+          {"gatewayPort", phoenix::cfgOr<std::string>("api.gatewayPort", std::string("5080"))},
+          {"addonsAutoloadDir", phoenix::cfgOr<std::string>("addons.autoloadDir", std::string())},
+          {"pluginOffers", phoenix::cfgOr<bool>("mission.pluginOffers", false)}});
+    }
+    auto crudCb = [this](const drogon::HttpRequestPtr &req,
+                         std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+      if (!authOK(req))
+        return unauthorized(cb);
+      bool ok = true;
+      json body = parseRequestBody(req, ok);
+      if (!ok)
+        body = json::object();
+      std::string method = "GET";
+      if (req->method() == drogon::Post)
+        method = "POST";
+      else if (req->method() == drogon::Put)
+        method = "PUT";
+      else if (req->method() == drogon::Patch)
+        method = "PATCH";
+      else if (req->method() == drogon::Delete)
+        method = "DELETE";
+      std::string path = std::string(req->path());
+      auto reply = phoenix::util::handleExternalCrud(
+          method, path, req->getHeader("authorization"), body);
+      drogon::HttpStatusCode code = drogon::k200OK;
+      if (reply.httpStatus == 201)
+        code = drogon::k201Created;
+      else if (reply.httpStatus == 400)
+        code = drogon::k400BadRequest;
+      else if (reply.httpStatus == 401)
+        code = drogon::k401Unauthorized;
+      else if (reply.httpStatus == 403)
+        code = drogon::k403Forbidden;
+      else if (reply.httpStatus == 404)
+        code = drogon::k404NotFound;
+      else if (reply.httpStatus == 405)
+        code = drogon::k405MethodNotAllowed;
+      else if (reply.httpStatus >= 500)
+        code = drogon::k500InternalServerError;
+      json out = reply.data.is_object() ? reply.data : json::object();
+      out["ok"] = reply.ok;
+      if (!reply.error.empty())
+        out["error"] = reply.error;
+      respondJson(cb, out, code);
+    };
+    drogon::app().registerHandler(
+        "/api/modules/{moduleId}/resources/{type}", crudCb,
+        {drogon::Get, drogon::Post, drogon::Put, drogon::Patch, drogon::Delete});
+    drogon::app().registerHandler(
+        "/api/modules/{moduleId}/resources/{type}/{id}", crudCb,
+        {drogon::Get, drogon::Post, drogon::Put, drogon::Patch, drogon::Delete});
   }
 
   void onDialogCompleted(const json &result, const json &payload) {
@@ -7551,7 +7646,11 @@ static int runGroupWorker(const Config &config) {
   std::string groupId = phoenix::resolveConfig<std::string>("main.groupId", "G1", "AI_GROUP_ID");
   if (groupId.empty())
     groupId = "G1";
-  int groupSize = std::max(1, phoenix::resolveConfig<int>("main.groupSize", 7, "AI_GROUP_SIZE"));
+  int aiCount = std::max(1, phoenix::resolveConfig<int>("main.aiCount", 7, "AI_COUNT"));
+  int groupSizeRaw =
+      std::max(1, phoenix::resolveConfig<int>("main.groupSize", 7, "AI_GROUP_SIZE"));
+  int groupSize = phoenix::planControllerLayout(aiCount, 1, groupSizeRaw)
+                      .groupSizes.front();
   int port = 0;
   try {
     port = phoenix::resolveConfig<int>("main.groupWorkerPort", 0, "AI_GROUP_WORKER_PORT");
@@ -7643,11 +7742,14 @@ static int runGroupWorker(const Config &config) {
 
   std::unordered_map<std::string, std::shared_ptr<RuntimeState>> runtimes;
   std::vector<std::string> controllerNames;
+  auto sharedKvm =
+      std::make_shared<KVMStore>(kvmNs, config.kvmCacheMaxEntries);
+  auto sharedGraph = std::make_shared<MemeGraph>(memeNs);
   for (int i = 0; i < groupSize; i++) {
     std::string name = groupId + "_AI" + std::to_string(i + 1);
     controllerNames.push_back(name);
-    runtimes[name] =
-        std::make_shared<RuntimeState>(kvmNs, memeNs, sessNs, config);
+    runtimes[name] = std::make_shared<RuntimeState>(
+        kvmNs, memeNs, sessNs, config, sharedKvm, sharedGraph);
   }
 
   std::shared_ptr<MemeBarrier> memeBarrier;
@@ -7998,8 +8100,17 @@ static bool spawnFrontendProcess() {
     _exit(1);
   }
   if (pid > 0) {
-    std::lock_guard<std::mutex> lock(gFrontendProcMu);
-    gFrontendProcessPid = pid;
+    {
+      std::lock_guard<std::mutex> lock(gFrontendProcMu);
+      gFrontendProcessPid = pid;
+    }
+    std::thread([pid]() {
+      int st = 0;
+      waitpid(pid, &st, 0);
+      std::lock_guard<std::mutex> lock(gFrontendProcMu);
+      if (gFrontendProcessPid == pid)
+        gFrontendProcessPid = -1;
+    }).detach();
     return true;
   }
   return false;
@@ -8072,6 +8183,7 @@ int main(int argc, char **argv) {
         args.count("frontend-only") != 0 ||
         phoenix::resolveConfig<bool>("main.frontendSubprocess", false, "AI_FRONTEND_SUBPROCESS");
     if (frontendOnlyRequested) {
+      writeServiceRolePid("frontend");
       try {
         setupFrontendServer();
         drogon::app().run();
@@ -8097,6 +8209,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     std::cout << "pid file locked: " << pidPath.string() << std::endl;
+    writeServiceRolePid("gateway");
     initProcessMemoryReservation();
     config = loadConfig(argc, argv);
     applyFrontendEnvFromConfig(config);
@@ -8466,7 +8579,8 @@ int main(int argc, char **argv) {
         phoenix::resolveConfig<bool>("main.frontendEnabled", true, "AI_FRONTEND_ENABLED");
     bool isFrontendSubprocess =
         phoenix::resolveConfig<bool>("main.frontendSubprocess", false, "AI_FRONTEND_SUBPROCESS");
-    if (frontendEnabled && !isFrontendSubprocess) {
+    if (frontendEnabled && !isFrontendSubprocess &&
+        !supervisorManagesChildren()) {
       if (!spawnFrontendProcess()) {
         std::cerr << "frontend subprocess spawn failed" << std::endl;
       }

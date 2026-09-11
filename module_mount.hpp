@@ -177,6 +177,21 @@ public:
     GnnGaLearnerFactory gnnGaLearnerFactory() const { std::lock_guard<std::mutex> lk(mu_); return gnnGaFactory_; }
     GatewayServerFactory gatewayServerFactory() const { std::lock_guard<std::mutex> lk(mu_); return gatewayFactory_; }
 
+    /* Presence flags only — no factory invocation, no inference state. */
+    nlohmann::json factoryPresence() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return nlohmann::json{
+            {"redisSynchronizer", (bool)redisSyncFactory_},
+            {"studyEngine", (bool)studyFactory_},
+            {"snapshotManager", (bool)snapshotFactory_},
+            {"personaForestAverager", (bool)personaFactory_},
+            {"sparkArray", (bool)sparkFactory_},
+            {"reinforcementLearner", (bool)rlFactory_},
+            {"adversarialLearner", (bool)advFactory_},
+            {"gnnGaLearner", (bool)gnnGaFactory_},
+            {"gatewayServer", (bool)gatewayFactory_}};
+    }
+
 private:
     ModuleRegistry() = default;
 

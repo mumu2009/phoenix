@@ -119,6 +119,29 @@ describe('mission & autonomy api helpers', () => {
     expect(JSON.parse(fetch.mock.calls[3][1].body)).toEqual({ reason: 'r' });
   });
 
+  test('ops helpers hit product routes', async () => {
+    fetch
+      .mockResolvedValueOnce(json({ ok: true, endpoints: [] }))
+      .mockResolvedValueOnce(json({ ok: true, modules: [] }))
+      .mockResolvedValueOnce(json({ ok: true }))
+      .mockResolvedValueOnce(json({ ok: true, path: 'x' }))
+      .mockResolvedValueOnce(json({ ok: true, backupPath: 'y' }));
+
+    const { api } = require('./client');
+    await api.opsMonitor();
+    await api.opsModules();
+    await api.opsModuleSet('search', false);
+    await api.opsDatabase();
+    await api.opsDatabaseBackup();
+
+    expect(fetch.mock.calls[0][0]).toBe('/api/ops/monitor');
+    expect(fetch.mock.calls[1][0]).toBe('/api/ops/modules');
+    expect(fetch.mock.calls[2][0]).toBe('/api/ops/modules');
+    expect(JSON.parse(fetch.mock.calls[2][1].body)).toEqual({ id: 'search', enabled: false });
+    expect(fetch.mock.calls[3][0]).toBe('/api/ops/database');
+    expect(fetch.mock.calls[4][0]).toBe('/api/ops/database/backup');
+  });
+
   test('non-ok response throws with the backend error text', async () => {
     fetch.mockResolvedValueOnce({
       ok: false,

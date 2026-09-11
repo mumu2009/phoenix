@@ -104,6 +104,7 @@ export default function MissionPanel({ onError }) {
   const [missionTab, setMissionTab] = useState('assign');
 
   const refreshStatuses = useCallback(async () => {
+    if (typeof document !== 'undefined' && document.hidden) return;
     let anyOk = false;
     const [m, a, e] = await Promise.all([
       api.missionStatus().catch(() => null),
@@ -116,11 +117,17 @@ export default function MissionPanel({ onError }) {
     setBackendDown(!anyOk);
   }, []);
 
-  // Poll every 4s and clean the timer up on unmount.
   useEffect(() => {
     refreshStatuses();
-    const timer = setInterval(refreshStatuses, 4000);
-    return () => clearInterval(timer);
+    const timer = setInterval(refreshStatuses, 8000);
+    const onVis = () => {
+      if (!document.hidden) refreshStatuses();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVis);
+    };
   }, [refreshStatuses]);
 
   // Loop status is a POST action; fetch it once on mount and on demand.

@@ -28,7 +28,9 @@ public:
         sessionStore = lmdbS;
     }
 #endif
-    for (int i = 0; i < config_.groupCount; i++) {
+    const auto layout = phoenix::planControllerLayout(
+        config_.aiCount, config_.groupCount, config_.groupSize);
+    for (int i = 0; i < layout.groupCount; i++) {
       std::string gid = "G" + std::to_string(i + 1);
       groupIds_.push_back(gid);
       std::vector<std::string> names;
@@ -37,11 +39,15 @@ public:
           std::make_shared<NamespacedStore>(memeStore, gid + ":graph");
       auto sessNs =
           std::make_shared<NamespacedStore>(sessionStore, gid + ":session");
-      for (int j = 0; j < config_.groupSize; j++) {
+      auto sharedKvm =
+          std::make_shared<KVMStore>(kvmNs, config_.kvmCacheMaxEntries);
+      auto sharedGraph = std::make_shared<MemeGraph>(memeNs);
+      const int nInGroup = layout.groupSizes[(size_t)i];
+      for (int j = 0; j < nInGroup; j++) {
         std::string name = gid + "_AI" + std::to_string(j + 1);
         controllers_[name] = std::make_shared<LocalController>(
-            name,
-            std::make_shared<RuntimeState>(kvmNs, memeNs, sessNs, config_));
+            name, std::make_shared<RuntimeState>(kvmNs, memeNs, sessNs, config_,
+                                                 sharedKvm, sharedGraph));
         names.push_back(name);
       }
       groups_[gid] = names;

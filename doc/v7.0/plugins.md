@@ -99,6 +99,16 @@ Phoenix 不需要复制它的 Python 栈：`cli_json_addon` 就是同一思想�
 
 ---
 
+## 5.1 模块内双 CRUD
+
+插件若要读写**其它模块已声明的内部对象**，走共用注册表，而不是直接摸内存。见 [module_crud.md](module_crud.md)：
+
+- 外部：`/api/modules/{moduleId}/resources/{type}/{id}`（Bearer）
+- 内部：`PluginManager::crudGet` / `phoenix::util::handleInternalCrud`
+- 未注册拒绝；能力 / ACL 显式检查
+
+---
+
 ## 6. 构建与测试
 
 - 新源文件（已入 `compile.bat` / `compile_gtest.bat` / `tools/build_rdk_x5.sh` 及两个 compat 脚本）：`web_search_engine.cpp`、`mcp_client.cpp`、`subprocess.cpp`、`addons/cli_json_addon.cpp`、`addons/math_exact.hpp`（头）。

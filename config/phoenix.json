@@ -493,6 +493,27 @@
     "offerMinScore": 0.35,
     "offerMax": 6
   },
+  "plugin": {
+    "directory": "plugins",
+    "autoLoad": true
+  },
+  "util": {
+    "moduleCrud": true
+  },
+  "crud": {
+    "http": {
+      "enabled": true,
+      "token": "",
+      "acceptLocalToken": true
+    },
+    "resources": [
+      "session/meta",
+      "plugin/catalog",
+      "addon/mounted",
+      "config/public",
+      "module_mount/factories"
+    ]
+  },
   "search": {
     "enabled": true,
     "backends": [
@@ -522,6 +543,13 @@
     "userDb": "./auth/users.json",
     "enabled": true,
     "acceptLocalToken": true
+  },
+  "monitor": {
+    "llamaPid": "",
+    "probe": "tcp-port"
+  },
+  "db": {
+    "backupDir": "runtime_store/db_backups"
   },
   "smtp": {
     "host": "",
@@ -675,7 +703,7 @@
     },
     "lmdb": {
       "root": "lmdb",
-      "mapMb": 4096
+      "mapMb": 64
     },
     "lemma": {
       "autoload": false,
@@ -711,6 +739,42 @@
     },
     "spark": {
       "budget": "default"
+    },
+    "supervisor": {
+      "enabled": false,
+      "manageChildren": false,
+      "pollIntervalMs": 5000,
+      "checkpointPath": "runtime_store/supervisor_checkpoint.json",
+      "pidDir": "runtime_store/pids",
+      "denyResumeMissions": ["2678077", "6477259", "9374278"],
+      "neverAssignMissionOnRestart": true,
+      "leaveLlamaIfAlive": true,
+      "llamaNeverCurlHealth": true
+    },
+    "services": {
+      "gateway": {
+        "role": "gateway",
+        "host": "127.0.0.1",
+        "port": 5080,
+        "maxRssMb": 2048
+      },
+      "frontend": {
+        "role": "frontend",
+        "host": "127.0.0.1",
+        "port": 5081,
+        "maxRssMb": 0
+      },
+      "llama": {
+        "role": "llama",
+        "host": "127.0.0.1",
+        "port": 8082,
+        "probe": "pid_or_listen",
+        "restartIfDead": false
+      }
+    },
+    "checkpoint": {
+      "path": "runtime_store/supervisor_checkpoint.json",
+      "writeIntervalMs": 10000
     }
   },
   "model_deployment": {

@@ -96,7 +96,7 @@ function LoginPanel({ onAuthed, needsBootstrap, allowRegister, requireEmailVerif
       onAuthed(me.user);
       setStatus({ busy: false, error: null, info: `欢迎 ${out.user?.username || username}` });
     } catch (e) {
-      if (e?.message && String(e.message).includes('email not verified')) {
+      if (e?.message && (String(e.message).includes('email not verified') || String(e.message).includes('尚未验证'))) {
         setMode('verify');
         setStatus({ busy: false, error: '邮箱未验证，请完成验证。', info: null });
       } else {
@@ -224,7 +224,7 @@ function LoginPanel({ onAuthed, needsBootstrap, allowRegister, requireEmailVerif
               autoComplete="username"
             />
           </label>
-          {mode !== 'login' || requireEmailVerify ? (
+          {mode !== 'login' ? (
             <label style={{ color: '#cbd5e1', fontSize: 12 }}>
               邮箱
               <input
