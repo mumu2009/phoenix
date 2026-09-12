@@ -987,7 +987,7 @@ public:
                   } catch (...) {
                   }
                   /* 1) exact tool-name mention - skip for long document drafts
-                     (a Helios chapter can casually mention a tool name). */
+                     (a long chapter can casually mention a tool name). */
                   const bool looksLikeDocument =
                       text.size() > 180 ||
                       lower.rfind("**", 0) == 0 ||
@@ -1180,7 +1180,7 @@ public:
                   }
                   /* Braces that are not a workspace action (plan/done/tool, or
                      prose with `{...}`) must fall through. Swallowing them
-                     left tick-2 Helios replies on the floor. */
+                     left tick-2 mission replies on the floor. */
                 }
                 std::string trimmed = trim(reply);
                 /* Only treat as JSON when the reply itself is a JSON

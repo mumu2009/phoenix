@@ -59,9 +59,11 @@ python tools/phoenix_supervisor.py --once --dry-run
 
 配置键（`config/phoenix.json` 的 `main.supervisor` / `main.services` / `main.checkpoint`）：
 
+- `main.supervisor.enabled` 默认 `false`：网关**不会**自己拉起监督器。单进程/本机调试保持原样。托管模式请**手动**跑 `python tools/phoenix_supervisor.py`（脚本一启动即托管；不必改 `enabled`）。若以后要从网关自动拉起，再把 `enabled` 设为 `true`。
 - `denyResumeMissions` 默认包含 `2678077`、`6477259`、`9374278`，断点重启不得把它们拉起来。
 - `neverAssignMissionOnRestart` 恒为产品约定：监督器从不调用 `/api/mission/assign`。
 - `llamaNeverCurlHealth`：运维约束，探活只用 pid/端口。
+- **RSS 保险丝（不是泄漏修复）**：`main.services.gateway.maxRssMb`（默认配置 2048）超限时监督器只重启网关，**永不**因 RSS 动 llama（`llama.maxRssMb` 视为 0）。这是托管模式下的保险丝，不能代替查泄漏。
 
 断点文件默认：`runtime_store/supervisor_checkpoint.json`（pid、角色、上次干净时间、脏 mission 名单）。`resumeMissions` 始终写 `false`。
 

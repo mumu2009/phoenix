@@ -3289,12 +3289,6 @@
               out = transformer_.pretrain(samples, epochs, lr);
             }
             finishTrainMonitor(out.value("ok", false), out);
-            if (logger_.enabled() &&
-                logger_.mode() == LoggerCXX::Mode::Release &&
-                !releaseSnapshotLogged_) {
-              logger_.log(LoggerCXX::Type::MEMORY, buildMemorySnapshotLog());
-              releaseSnapshotLogged_ = true;
-            }
             respondJson(
                 cb,
                 json{{"ok", true}, {"result", out}, {"monitorId", monitorId}});
@@ -3768,12 +3762,6 @@
               out = transformer_.jointTrain(samples, epochs, lr, gw);
             }
             finishTrainMonitor(out.value("ok", false), out);
-            if (logger_.enabled() &&
-                logger_.mode() == LoggerCXX::Mode::Release &&
-                !releaseSnapshotLogged_) {
-              logger_.log(LoggerCXX::Type::MEMORY, buildMemorySnapshotLog());
-              releaseSnapshotLogged_ = true;
-            }
             respondJson(
                 cb,
                 json{{"ok", true}, {"result", out}, {"monitorId", monitorId}});
@@ -3839,12 +3827,6 @@
               out = transformer_.optimizeGA(samples, generations, population);
             }
             finishTrainMonitor(out.value("ok", false), out);
-            if (logger_.enabled() &&
-                logger_.mode() == LoggerCXX::Mode::Release &&
-                !releaseSnapshotLogged_) {
-              logger_.log(LoggerCXX::Type::MEMORY, buildMemorySnapshotLog());
-              releaseSnapshotLogged_ = true;
-            }
             respondJson(
                 cb,
                 json{{"ok", true}, {"result", out}, {"monitorId", monitorId}});
@@ -7030,8 +7012,8 @@
           {"addonsAutoloadDir", phoenix::cfgOr<std::string>("addons.autoloadDir", std::string())},
           {"pluginOffers", phoenix::cfgOr<bool>("mission.pluginOffers", false)}});
     }
-    auto crudCb = [this](const drogon::HttpRequestPtr &req,
-                         std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+    auto runCrud = [this](const drogon::HttpRequestPtr &req,
+                          std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
       if (!authOK(req))
         return unauthorized(cb);
       bool ok = true;
@@ -7072,10 +7054,20 @@
       respondJson(cb, out, code);
     };
     drogon::app().registerHandler(
-        "/api/modules/{moduleId}/resources/{type}", crudCb,
+        "/api/modules/{moduleId}/resources/{type}",
+        [runCrud](const drogon::HttpRequestPtr &req,
+                  std::function<void(const drogon::HttpResponsePtr &)> &&cb,
+                  const std::string &, const std::string &) {
+          runCrud(req, std::move(cb));
+        },
         {drogon::Get, drogon::Post, drogon::Put, drogon::Patch, drogon::Delete});
     drogon::app().registerHandler(
-        "/api/modules/{moduleId}/resources/{type}/{id}", crudCb,
+        "/api/modules/{moduleId}/resources/{type}/{id}",
+        [runCrud](const drogon::HttpRequestPtr &req,
+                  std::function<void(const drogon::HttpResponsePtr &)> &&cb,
+                  const std::string &, const std::string &, const std::string &) {
+          runCrud(req, std::move(cb));
+        },
         {drogon::Get, drogon::Post, drogon::Put, drogon::Patch, drogon::Delete});
   }
 
@@ -7086,14 +7078,8 @@
         logger_.log(LoggerCXX::Type::LOG,
                     buildDialogContextLog(result, payload));
         if (logger_.mode() == LoggerCXX::Mode::Debug) {
-          logger_.log(LoggerCXX::Type::MEMORY, buildMemorySnapshotLog());
           logger_.log(LoggerCXX::Type::COMPUTE, buildComputeRouteLog(result));
           logger_.log(LoggerCXX::Type::MONITORING, buildMonitoringLog());
-        } else if (logger_.mode() == LoggerCXX::Mode::Release) {
-          if (!releaseSnapshotLogged_) {
-            logger_.log(LoggerCXX::Type::MEMORY, buildMemorySnapshotLog());
-            releaseSnapshotLogged_ = true;
-          }
         }
       }
       if (!dialogLearningEnabled_)
@@ -7474,10 +7460,7 @@ inline int GatewayServer::seedGnnGraphFromRobotsCorpus(int maxDocs,
     return 0;
   }
 
-  const auto snap = st->graph().exportSnapshot();
-  const int nodeN = snap.contains("nodes") && snap["nodes"].is_array()
-                        ? static_cast<int>(snap["nodes"].size())
-                        : 0;
+  const int nodeN = static_cast<int>(st->graph().nodeCount());
   int ingested = 0;
   int memN = 0;
   int emoN = 0;

@@ -6,7 +6,7 @@
 
 ## 登录与账号
 
-1. 打开前端。无账号时，`GET /auth/config` 的 `allowBootstrap=true`，请用「创建管理员」完成首次初始化（用户名 ≥3 字符、邮箱、密码 ≥6 位）。
+1. 打开前端。板上若直接打 `/api/*` 出现 **401**，先登录拿 Bearer。无账号时 `GET /auth/config` 的 `allowBootstrap=true`，用「创建管理员」（或 `POST /auth/bootstrap`）完成首次初始化（用户名 ≥3 字符、邮箱、密码 ≥6 位）。之后 `POST /auth/login`。
 2. 已有账号：输入用户名与密码点「登录」。令牌写入浏览器 `localStorage` 的 `phoenix_auth_token`，之后请求带 `Authorization: Bearer <token>`。
 3. 若配置 `auth.requireEmailVerify=true`，注册/初始化后需完成邮箱验证（开发环境验证码可能回显在响应的 `verifyToken` 或 `auth.outboxDir`）。
 4. 开放注册时（`auth.allowRegister=true`）可用「去注册」。忘记密码走邮箱重置码。
@@ -45,6 +45,8 @@
 - 前端已处理请求计数
 
 推理探活只用 **pid + TCP 端口**。可在 `phoenix.json` 的 `monitor.llamaPid` 或环境变量 `PHOENIX_LLAMA_PID` 填推理进程号。请求指标也可看网关 `GET /api/monitoring/stats`（需网关鉴权）。
+
+分进程托管：默认 `main.supervisor.enabled=false`（网关不自动拉监督器）。要监控+断点巡检时，在仓库 `phoenix/` 下运行 `python tools/phoenix_supervisor.py`。网关 RSS 超 `main.services.gateway.maxRssMb` 时监督器只重启网关，不杀 llama。登录与监督器无关，401 先走上面的 bootstrap/登录。
 
 `GET /api/health` 只表示前端 HTTP 自己还活着，不是推理健康检查。
 
