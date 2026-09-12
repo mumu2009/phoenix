@@ -213,7 +213,7 @@ TEST(MissionUnitWorkflow, PackSplitsRecentCausalFromSummaryRag) {
   opt.overheadTokens = 256;
   opt.ngramMerge = 2;
   opt.includeGnnSummary = true;
-  const std::string full(20000, 'a');
+  const std::string full(50000, 'a');
   const auto packed = phoenix::context::packContext(full, "gnn-pin-text", opt);
   EXPECT_FALSE(packed.recentFull.empty());
   EXPECT_EQ(packed.recentFull, full.substr(full.size() - packed.recentFull.size()));

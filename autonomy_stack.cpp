@@ -2547,6 +2547,7 @@ json CognitionAutonomyManager::startAutonomyLoop(const json &opts) {
             loopThread_.join();
         }
         loopStop_.store(false, std::memory_order_release);
+        loopRunning_.store(true, std::memory_order_release);
     }
     /* v8.0 fix: restore OUTSIDE the manager lock.  importState() takes mu_
        itself, and calling it while holding mu_ self-deadlocks (the assign

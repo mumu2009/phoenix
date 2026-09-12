@@ -203,6 +203,13 @@ inline nlohmann::json workspaceExecute(const std::string &workspaceRoot,
               return res;
             }
             content = kept;
+            std::ofstream recovered(target, std::ios::binary | std::ios::trunc);
+            if (!recovered)
+              return nlohmann::json{{"ok", false},
+                                    {"error", "cannot write: " + target.string()}};
+            recovered << content;
+            res["bytes"] = content.size();
+            return res;
           }
         }
         std::ofstream out(target, std::ios::binary | std::ios::trunc);

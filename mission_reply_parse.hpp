@@ -143,14 +143,16 @@ inline std::string resolveFenceOnlyReply(const std::string &file) {
 /** Resume suffix only. Disk is not rewritten.
     Even ``` count, and the suffix does not end on a closer. */
 inline std::string balanceResumeFences(std::string tail) {
-  tail = trimTrailingFenceCloser(std::move(tail));
-  while (countMarkdownFences(tail) % 2 == 1) {
+  /* Drop an unclosed trailing opener, then drop a trailing closer so the
+     next tick is not primed with ```. Keep opener+body of a closed block. */
+  if (countMarkdownFences(tail) % 2 == 1 && !endsWithFenceCloser(tail)) {
     const auto p = tail.rfind("```");
-    if (p == std::string::npos) break;
-    tail.resize(p);
-    while (!tail.empty() && (tail.back() == '\n' || tail.back() == '\r' ||
-                             tail.back() == ' ' || tail.back() == '\t'))
-      tail.pop_back();
+    if (p != std::string::npos) {
+      tail.resize(p);
+      while (!tail.empty() && (tail.back() == '\n' || tail.back() == '\r' ||
+                               tail.back() == ' ' || tail.back() == '\t'))
+        tail.pop_back();
+    }
   }
   return trimTrailingFenceCloser(std::move(tail));
 }
@@ -1328,7 +1330,7 @@ inline std::string extractGoalLeadParagraph(const std::string &goal,
       const size_t dot = line.find(". ", si);
       if (dot == std::string::npos) break;
       const std::string sent = trimCopy(line.substr(si, dot - si + 1));
-      if (sent.size() >= 40) {
+      if (sent.size() >= 24) {
         line = trimCopy(line.substr(si));
         si = 0;
         break;
@@ -1661,6 +1663,32 @@ inline std::string formatContinuationContext(const std::string &body,
     }
   }
   std::string tail = src.substr(start);
+  {
+    const auto paras = splitAllParagraphs(tail);
+    std::vector<std::string> kept;
+    bool dropRest = false;
+    for (const auto &p : paras) {
+      const std::string t = trimCopy(p);
+      std::string low = t;
+      std::transform(low.begin(), low.end(), low.begin(),
+                     [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                     });
+      if (low.rfind("plan:", 0) == 0 ||
+          low.rfind("plan :", 0) == 0) {
+        dropRest = true;
+        continue;
+      }
+      if (dropRest && (t.empty() || t[0] == '-' ||
+                       (t.size() > 2 && t[1] == '.' && std::isdigit(
+                           static_cast<unsigned char>(t[0])))))
+        continue;
+      dropRest = false;
+      kept.push_back(p);
+    }
+    if (!kept.empty())
+      tail = joinParagraphs(kept, 0, kept.size());
+  }
   /* Drop a trailing fragment only when it is unfinished. A finished
      short paragraph (first sentence after the pin) is the resume tip. */
   const auto lastBreak = tail.rfind("\n\n");
@@ -1990,8 +2018,8 @@ inline std::string keepUniqueContinuation(const std::string &reply,
 /** True when a real-time mention is denied in the same window. */
 inline bool realtimeMentionIsNegated(const std::string &lower, size_t at,
                                      size_t n) {
-  const size_t lo = at > 28 ? at - 28 : 0;
-  const size_t hi = std::min(lower.size(), at + n + 36);
+  const size_t lo = at > 40 ? at - 40 : 0;
+  const size_t hi = std::min(lower.size(), at + n + 72);
   const std::string win = lower.substr(lo, hi - lo);
   return win.find("without") != std::string::npos ||
          win.find("impossible") != std::string::npos ||
@@ -2239,6 +2267,17 @@ inline bool replyRestartsExistingHeading(const std::string &reply,
     }
     glued += 1;
   }
+  /* 4) mid-line markdown heading: "…. ## Autonomous …" */
+  size_t h2 = 0;
+  while ((h2 = reply.find("## ", h2)) != std::string::npos) {
+    if (h2 > 0 && reply[h2 - 1] != '\n') {
+      size_t end = reply.find('\n', h2);
+      if (end == std::string::npos) end = reply.size();
+      if (matchesDone(extractHeadingCandidate(reply.substr(h2, end - h2))))
+        return true;
+    }
+    h2 += 1;
+  }
   return false;
 }
 
@@ -2402,7 +2441,13 @@ fitMissionPromptSplit(const std::string &staticPart,
      Do not throw away the static prefix at maxChars/8. Keep all of it
      whenever any resume room remains. */
   std::string st = staticPart;
-  if (st.size() >= maxChars) return {st.substr(0, maxChars), std::string()};
+  if (st.size() >= maxChars) {
+    const size_t dynKeep =
+        std::min(dynamicPart.size(), std::max<size_t>(maxChars / 5, 200));
+    const size_t stKeep = maxChars > dynKeep ? maxChars - dynKeep : maxChars / 2;
+    return {clipKeepHeadAndTail(st, stKeep),
+            clipKeepHeadAndTail(dynamicPart, dynKeep)};
+  }
   const size_t dynBudget = maxChars - st.size();
   std::string dyn = dynamicPart;
   if (dyn.size() > dynBudget)

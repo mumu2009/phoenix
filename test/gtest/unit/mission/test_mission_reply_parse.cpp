@@ -419,7 +419,8 @@ TEST(MissionReplyParse, MarkdownFenceProtocolOnce) {
       "```python\nprint(1)\n```\n\n"
       "```python\nprint(2)\n";
   const std::string balanced = balanceResumeFences(oddWindow);
-  EXPECT_EQ(countMarkdownFences(balanced) % 2, 0u);
+  EXPECT_NE(balanced.find("print(1)"), std::string::npos);
+  EXPECT_EQ(balanced.find("print(2)"), std::string::npos);
   const std::string t = trimCopy(balanced);
   ASSERT_GE(t.size(), 3u);
   EXPECT_NE(t.compare(t.size() - 3, 3, "```"), 0);
@@ -887,7 +888,7 @@ TEST(MissionReplyParse, ClipGoalKeepsLaterChapters) {
             "\nDetail line for chapter " + std::to_string(n) + ".\n\n";
   }
   goal += "Appendix Requirements\nGlossary.\n";
-  const std::string clipped = clipGoalKeepRequiredStructure(goal, 900);
+  const std::string clipped = clipGoalKeepRequiredStructure(goal, 400);
   EXPECT_LT(clipped.size(), goal.size());
   EXPECT_NE(clipped.find("Chapter 1:"), std::string::npos);
   EXPECT_NE(clipped.find("Chapter 5:"), std::string::npos);

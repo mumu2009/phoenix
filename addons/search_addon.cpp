@@ -163,6 +163,24 @@ void appendLookupHits(const json &lookup, json &results) {
                            {"url", item.value("url", std::string())},
                            {"snippet", snippet}});
   };
+  if (lookup.contains("suggestions") && lookup["suggestions"].is_array()) {
+    for (const auto &sug : lookup["suggestions"]) {
+      if (!sug.is_object()) continue;
+      if (sug.contains("words") && sug["words"].is_array()) {
+        std::string joined;
+        for (const auto &w : sug["words"]) {
+          if (!w.is_string()) continue;
+          if (!joined.empty()) joined += " ";
+          joined += w.get<std::string>();
+        }
+        if (!joined.empty())
+          results.push_back(json{{"title", "suggestion"},
+                                 {"url", ""},
+                                 {"snippet", joined}});
+      }
+      push(sug);
+    }
+  }
   if (lookup.contains("results") && lookup["results"].is_array()) {
     for (const auto &r : lookup["results"]) push(r);
     return;
@@ -321,8 +339,11 @@ public:
       }
     };
 
-    /* Live web first: assignment text is not discovered knowledge. */
-    if (allowWeb) {
+    json lookup;
+    const bool handlerOk =
+        addon::invokeAddonOnlineLookup(json(query), options, lookup);
+    /* Live web first unless a unit-test / index handler already answered. */
+    if (allowWeb && !handlerOk) {
       const phoenix::websearch::WebSearchEngine engine(engineConfig(options));
       const json out = engine.search(query, options);
       if (out.value("ok", false) && out.contains("results") &&
@@ -334,9 +355,6 @@ public:
     }
 
     /* Previously ingested pages. Skip corpus/assignment echoes once web hit. */
-    json lookup;
-    const bool handlerOk =
-        addon::invokeAddonOnlineLookup(json(query), options, lookup);
     if (handlerOk && !lookup.is_null()) {
       json indexHits = json::array();
       appendLookupHits(lookup, indexHits);
@@ -403,7 +421,7 @@ public:
 
     res.handled = true;
     const size_t replyItems = static_cast<size_t>(options.value("replyItems", 5));
-    const size_t replyChars = static_cast<size_t>(options.value("replyChars", 2400));
+    const size_t replyChars = static_cast<size_t>(options.value("replyChars", 1200));
     res.reply = formatResults(results, replyItems, replyChars);
     res.units = phoenix::mission::searchHitsToUnitQueries(results);
     res.meta = json{{"addon", "search"}, {"name", name_}, {"query", query},
