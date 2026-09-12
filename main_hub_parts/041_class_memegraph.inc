@@ -233,6 +233,15 @@ public:
     return cur;
   }
 
+  size_t nodeCount() {
+    std::lock_guard<std::mutex> lock(graphMu_);
+    if (!fullyLoaded_) {
+      auto metaEntries = store_->entries("node:");
+      return metaEntries.size();
+    }
+    return metaOrder_.size();
+  }
+
   json exportSnapshot() {
     std::lock_guard<std::mutex> lock(graphMu_);
     loadAll();
@@ -589,13 +598,18 @@ private:
   void loadAll() {
     if (fullyLoaded_)
       return;
+    constexpr size_t kMaxInMemoryNodes = 8192;
     auto metaEntries = store_->entries("node:");
+    if (metaEntries.size() > kMaxInMemoryNodes)
+      metaEntries.resize(kMaxInMemoryNodes);
     for (auto &kv : metaEntries) {
       std::string id = kv.first.substr(5);
       meta_[id] = kv.second;
       pushMetaOrderIfNew(id);
     }
     auto rowEntries = store_->entries("row:");
+    if (rowEntries.size() > kMaxInMemoryNodes)
+      rowEntries.resize(kMaxInMemoryNodes);
     for (auto &kv : rowEntries) {
       std::string id = kv.first.substr(4);
       NodeEdges node;

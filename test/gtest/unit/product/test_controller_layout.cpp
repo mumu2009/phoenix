@@ -29,3 +29,9 @@ TEST(BoundedHitMap, CapsAndDoesNotGrowUnbounded) {
     hits.increment("k" + std::to_string(i));
   EXPECT_LE(hits.size(), 8u);
 }
+
+TEST(ProjectionBound, LlamaEmbDim4096DoesNotAllocateTargetOverThreeTriplets) {
+  const size_t nz = phoenix::boundedProjectionNonZeros(4096, 4096, 0);
+  EXPECT_LE(nz * 4096u, phoenix::kMaxProjectionTriplets);
+  EXPECT_LT(nz, 4096u / 3u);
+}

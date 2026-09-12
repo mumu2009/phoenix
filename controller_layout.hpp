@@ -64,4 +64,27 @@ private:
   std::unordered_map<std::string, int> hits_;
 };
 
+/* llamaEmbDim=4096 + JL default nz=target/3 => millions of triplets (~GiB).
+   Keep one projection under kMaxProjectionTriplets. */
+inline constexpr std::size_t kMaxProjectionDim = 4096;
+inline constexpr std::size_t kMaxProjectionTriplets = 65536;
+inline constexpr std::size_t kDefaultSparseNonZeros = 3;
+
+inline std::size_t boundedProjectionNonZeros(std::size_t sourceDim,
+                                             std::size_t targetDim,
+                                             std::size_t requested = 0) {
+  const std::size_t src =
+      sourceDim < 1 ? 1 : std::min(sourceDim, kMaxProjectionDim);
+  const std::size_t dst =
+      targetDim < 1 ? 1 : std::min(targetDim, kMaxProjectionDim);
+  std::size_t nz = requested == 0 ? std::max(kDefaultSparseNonZeros, dst / 3)
+                                  : requested;
+  if (nz > dst)
+    nz = dst;
+  const std::size_t maxNz = kMaxProjectionTriplets / src;
+  if (nz > maxNz)
+    nz = maxNz < 1 ? 1 : maxNz;
+  return nz;
+}
+
 } // namespace phoenix

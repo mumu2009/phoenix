@@ -21,5 +21,13 @@ int main() {
   for (int i = 0; i < 20; ++i)
     hits.increment("k" + std::to_string(i));
   require(hits.size() <= 4, "hit map must stay capped");
+
+  using phoenix::boundedProjectionNonZeros;
+  using phoenix::kMaxProjectionTriplets;
+  const size_t nz = boundedProjectionNonZeros(4096, 4096, 0);
+  require(nz * 4096 <= kMaxProjectionTriplets,
+          "4096x4096 JL must stay under triplet cap");
+  require(boundedProjectionNonZeros(1, 7, 3) <= 7,
+          "requested nz cannot exceed target dim");
   return 0;
 }

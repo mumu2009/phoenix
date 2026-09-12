@@ -89,6 +89,14 @@ const Eigen::SparseMatrix<float> &getSparseProjectionMatrix(size_t sourceDim,
                                                             size_t targetDim,
                                                             size_t nonZeros,
                                                             unsigned int seed) {
+  sourceDim = std::min(sourceDim, phoenix::kMaxProjectionDim);
+  targetDim = std::min(targetDim, phoenix::kMaxProjectionDim);
+  if (targetDim < 1)
+    targetDim = 1;
+  if (sourceDim < 1)
+    sourceDim = 1;
+  nonZeros = phoenix::boundedProjectionNonZeros(sourceDim, targetDim,
+                                                            nonZeros);
   ProjectionKey key{sourceDim, targetDim, seed, nonZeros};
   {
     std::shared_lock<std::shared_mutex> lock(gProjectionCacheMu);
@@ -104,14 +112,17 @@ const Eigen::SparseMatrix<float> &getSparseProjectionMatrix(size_t sourceDim,
   // exactly and preserves pairwise distances with high probability for larger
   // unit vectors, while reducing the per-projection cost from O(source*target)
   // to O(source*nonZeros).
+  const size_t srcCap = std::min(sourceDim, phoenix::kMaxProjectionDim);
+  const size_t dstCap = std::min(targetDim, phoenix::kMaxProjectionDim);
+  nonZeros = phoenix::boundedProjectionNonZeros(srcCap, dstCap, nonZeros);
   const float scale = 1.0f / std::sqrt(static_cast<float>(nonZeros));
-  std::mt19937 rng(static_cast<unsigned int>(sourceDim + targetDim * 1315423911u +
+  std::mt19937 rng(static_cast<unsigned int>(srcCap + dstCap * 1315423911u +
                                             seed + nonZeros * 2654435761u));
-  std::vector<int> rows(targetDim);
+  std::vector<int> rows(dstCap);
   std::iota(rows.begin(), rows.end(), 0);
   std::vector<Eigen::Triplet<float>> triplets;
-  triplets.reserve(sourceDim * nonZeros);
-  for (size_t c = 0; c < sourceDim; ++c) {
+  triplets.reserve(srcCap * nonZeros);
+  for (size_t c = 0; c < srcCap; ++c) {
     std::shuffle(rows.begin(), rows.end(), rng);
     for (size_t i = 0; i < nonZeros; ++i) {
       const int r = rows[i];
@@ -120,8 +131,8 @@ const Eigen::SparseMatrix<float> &getSparseProjectionMatrix(size_t sourceDim,
     }
   }
 
-  Eigen::SparseMatrix<float> mat(static_cast<Eigen::Index>(targetDim),
-                                 static_cast<Eigen::Index>(sourceDim));
+  Eigen::SparseMatrix<float> mat(static_cast<Eigen::Index>(dstCap),
+                                 static_cast<Eigen::Index>(srcCap));
   mat.setFromTriplets(triplets.begin(), triplets.end());
 
   std::unique_lock<std::shared_mutex> lock(gProjectionCacheMu);
@@ -267,6 +278,15 @@ float cosineSimilarity(const std::vector<float> &a, const std::vector<float> &b)
   return static_cast<float>(dot / denom);
 }
 
+std::vector<float> foldProjectionSource(const std::vector<float> &v) {
+  if (v.size() <= kMaxProjectionDim)
+    return v;
+  std::vector<float> folded(kMaxProjectionDim, 0.0f);
+  for (size_t i = 0; i < v.size(); ++i)
+    folded[i % kMaxProjectionDim] += v[i];
+  return folded;
+}
+
 std::vector<float> projectToDimensionSparse(const std::vector<float> &v,
                                             size_t targetDim,
                                             size_t nonZerosPerColumn,
@@ -274,22 +294,24 @@ std::vector<float> projectToDimensionSparse(const std::vector<float> &v,
   if (targetDim == 0 || targetDim == v.size() || v.empty()) {
     return v;
   }
+  const std::vector<float> src = foldProjectionSource(v);
+  targetDim = std::min(targetDim, kMaxProjectionDim);
+  if (targetDim == src.size())
+    return src;
+  nonZerosPerColumn =
+      boundedProjectionNonZeros(src.size(), targetDim, nonZerosPerColumn);
   if (nonZerosPerColumn == 0) {
-    nonZerosPerColumn = std::max<size_t>(3, targetDim / 3);
-  }
-  nonZerosPerColumn = std::min(nonZerosPerColumn, targetDim);
-  if (nonZerosPerColumn == 0) {
-    return v;
+    return src;
   }
 
-  const Eigen::Index sourceDim = static_cast<Eigen::Index>(v.size());
+  const Eigen::Index sourceDim = static_cast<Eigen::Index>(src.size());
   const Eigen::Index outDim = static_cast<Eigen::Index>(targetDim);
-  const Eigen::SparseMatrix<float> &mat =
-      getSparseProjectionMatrix(v.size(), targetDim, nonZerosPerColumn, seed);
+  const Eigen::SparseMatrix<float> &mat = getSparseProjectionMatrix(
+      src.size(), targetDim, nonZerosPerColumn, seed);
 
   Eigen::VectorXf in(sourceDim);
   for (Eigen::Index i = 0; i < sourceDim; ++i) {
-    in(i) = v[static_cast<size_t>(i)];
+    in(i) = src[static_cast<size_t>(i)];
   }
 
   Eigen::VectorXf out = mat * in;

@@ -75,7 +75,7 @@ static Config loadConfig(int argc, char **argv) {
     if (!layout.groupSizes.empty())
       c.groupSize = layout.groupSizes[0];
   }
-  c.sparkNumAI = std::max(1, (int)sparkNumAiNum);
+  c.sparkNumAI = std::max(1, std::min((int)sparkNumAiNum, c.aiCount));
   c.sparkBudget = argOrEnv("spark-budget", "AI_SPARK_BUDGET", "default");
 
   c.singleProc =
@@ -284,6 +284,11 @@ static Config loadConfig(int argc, char **argv) {
       argOrEnv("concept-matrix-enabled", "AI_CONCEPT_MATRIX_ENABLED", "false"), false);
   c.conceptMatrixClearPerRequest = boolFrom(
       argOrEnv("concept-matrix-clear-per-request", "AI_CONCEPT_MATRIX_CLEAR_PER_REQUEST", "true"), true);
+  {
+    const size_t availMb = getAvailablePhysicalMemoryMB();
+    if (availMb > 0 && availMb < 8192)
+      c.conceptMatrixEnabled = false;
+  }
   c.ggufModelsDir = pathArgOrEnv("gguf-models-dir", "AI_GGUF_MODELS_DIR",
                                  rootDir / "GGUF_models");
   {

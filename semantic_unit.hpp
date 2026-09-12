@@ -4,6 +4,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "controller_layout.hpp"
+
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <map>
@@ -91,6 +94,11 @@ float cosineSimilarity(const std::vector<float> &a,
  * @param seed Additional seed for reproducibility.
  * @return Projected vector.
  */
+using phoenix::boundedProjectionNonZeros;
+using phoenix::kDefaultSparseNonZeros;
+using phoenix::kMaxProjectionDim;
+using phoenix::kMaxProjectionTriplets;
+
 std::vector<float> projectToDimension(const std::vector<float> &v,
                                       size_t targetDim,
                                       unsigned int seed = 0x61727468U);
@@ -108,7 +116,8 @@ std::vector<float> projectToDimension(const std::vector<float> &v,
  * @param v Input vector.
  * @param targetDim Desired output dimension.  If 0, the input dimension is kept.
  * @param nonZerosPerColumn Number of non-zero entries per column.  If 0, a
- *        default of max(3, targetDim/3) is used.
+ *        default of max(kDefaultSparseNonZeros, targetDim/3) is used, then
+ *        capped by kMaxProjectionTriplets.
  * @param seed Additional seed for reproducibility.
  * @return Projected vector.
  */
