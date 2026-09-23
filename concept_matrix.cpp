@@ -91,9 +91,12 @@ std::vector<std::string> ConceptMatrix::tokenize_(const std::string &text) const
   while (iss >> w) {
     if (!w.empty()) out.push_back(w);
   }
-  // Bigrams / trigrams as composite concepts.
-  for (size_t i = 0; i + 1 < out.size(); ++i) out.push_back(out[i] + "_" + out[i + 1]);
-  for (size_t i = 0; i + 2 < out.size(); ++i)
+  // Snapshot word count first.  Pushing n-grams onto `out` while walking
+  // out.size() would grow the vector until OOM.
+  const size_t nWords = out.size();
+  for (size_t i = 0; i + 1 < nWords; ++i)
+    out.push_back(out[i] + "_" + out[i + 1]);
+  for (size_t i = 0; i + 2 < nWords; ++i)
     out.push_back(out[i] + "_" + out[i + 1] + "_" + out[i + 2]);
   return out;
 }

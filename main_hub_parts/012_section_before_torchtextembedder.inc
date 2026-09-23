@@ -365,6 +365,77 @@ static std::vector<std::string> tokenize(const std::string &text) {
   return parts;
 }
 
+/* GNN ingest/query tokenizer: keep stopwords. Mapping weight is 1/df later.
+   Other callers still use tokenize() which drops stops. */
+static std::vector<std::string> tokenizeKeepingStops(const std::string &text) {
+  auto isCjk = [](uint32_t cp) { return cp >= 0x4e00 && cp <= 0x9fff; };
+  auto decode = [](const std::string &s, size_t i, uint32_t &cp, size_t &len) {
+    unsigned char c = (unsigned char)s[i];
+    if (c < 0x80) {
+      cp = c;
+      len = 1;
+      return true;
+    }
+    if ((c >> 5) == 0x6 && i + 1 < s.size()) {
+      cp = ((c & 0x1f) << 6) | (s[i + 1] & 0x3f);
+      len = 2;
+      return true;
+    }
+    if ((c >> 4) == 0xe && i + 2 < s.size()) {
+      cp = ((c & 0x0f) << 12) | ((s[i + 1] & 0x3f) << 6) | (s[i + 2] & 0x3f);
+      len = 3;
+      return true;
+    }
+    if ((c >> 3) == 0x1e && i + 3 < s.size()) {
+      cp = ((c & 0x07) << 18) | ((s[i + 1] & 0x3f) << 12) |
+           ((s[i + 2] & 0x3f) << 6) | (s[i + 3] & 0x3f);
+      len = 4;
+      return true;
+    }
+    cp = c;
+    len = 1;
+    return false;
+  };
+
+  std::vector<std::string> parts;
+  std::string cur;
+  auto flush = [&]() {
+    if (cur.empty())
+      return;
+    parts.push_back(cur);
+    cur.clear();
+  };
+
+  for (size_t i = 0; i < text.size();) {
+    uint32_t cp = 0;
+    size_t len = 1;
+    decode(text, i, cp, len);
+    if (cp == '\r' || cp == '\n' || cp == '\t' || cp == ' ') {
+      flush();
+      i += len;
+      continue;
+    }
+    if (cp < 0x80) {
+      unsigned char c = (unsigned char)cp;
+      if (std::isalnum(c) || c == '_' || c == '-') {
+        cur.push_back((char)std::tolower(c));
+      } else {
+        flush();
+      }
+      i += len;
+      continue;
+    }
+    if (isCjk(cp)) {
+      cur.append(text.substr(i, len));
+    } else {
+      flush();
+    }
+    i += len;
+  }
+  flush();
+  return parts;
+}
+
 static double cosineSim(const std::vector<float> &a,
                         const std::vector<float> &b) {
   if (a.empty() || b.empty() || a.size() != b.size())

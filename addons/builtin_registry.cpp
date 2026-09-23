@@ -7,9 +7,11 @@
 #include "math_addon.hpp"
 #include "search_addon.hpp"
 #include "ThePlugInForSecurity/security_addon.hpp"
+#include "phoenix_config.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <unordered_set>
 
 namespace addon::builtins {
@@ -101,9 +103,14 @@ std::vector<std::shared_ptr<Addon>> createDefaultBuiltinAddons(const std::string
 	if (wantsAddon(selected, "cli-json") || wantsAddon(selected, "cli")) {
 		out.push_back(createCliJsonAddon("cli-json"));
 	}
-	/* Security is never part of empty/"all"/"default" selection. */
-	if (!selected.empty() && !selected.count("all") && !selected.count("default") &&
-	    (selected.count("security") || selected.count("thepluginforsecurity"))) {
+	/* Security is optional. Default off unless env/config/selection asks. */
+	const char *secEnv = std::getenv("PHOENIX_SECURITY_ENABLED");
+	const bool envOn = secEnv && (*secEnv == '1' || *secEnv == 't' || *secEnv == 'T' ||
+	                              *secEnv == 'y' || *secEnv == 'Y');
+	const bool configOn = phoenix::cfgOr<bool>("addons.security.enabled", false);
+	const bool named =
+	    selected.count("security") > 0 || selected.count("thepluginforsecurity") > 0;
+	if (!selected.count("none") && (envOn || configOn || named)) {
 		out.push_back(createSecurityAddon("security"));
 	}
 	return out;

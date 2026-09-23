@@ -1,0 +1,57 @@
+# /phx/cancel + generate-loop abort + n_predict floor 16
+# Apply on top of the current patched outsides/llamacpp server.cpp.
+# Live llama is NOT rebuilt by the gateway fix; this is for the next llama build.
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -1813,6 +1813,7 @@ struct server_context {
+     // production traffic; run the server with a single concurrent client
+     // when exercising these endpoints alongside normal completions.
+     std::mutex phx_mutex;
++    std::atomic<uint64_t> phx_cancel_epoch{0};
+ 
+     // Necessary similarity of prompt for slot selection
+     float slot_prompt_similarity = 0.0f;
+@@ -4586,8 +4587,10 @@ int main(int argc, char ** argv) {
+         const int32_t n_vocab = llama_vocab_n_tokens(ctx_server.vocab);
+         const int32_t n_ctx  = llama_n_ctx(ctx_server.ctx);
+ 
+-        const int32_t max_tokens = json_value(body, "max_tokens", 16);
+-        if (max_tokens < 1) {
++        const int32_t max_tokens_req = json_value(body, "max_tokens", 16);
++        const int32_t max_tokens = std::max<int32_t>(16, max_tokens_req);
++        const uint64_t cancel_at = ctx_server.phx_cancel_epoch.load(std::memory_order_acquire);
++        if (max_tokens_req < 1) {
+             res_error(res, format_error_response("\"max_tokens\" must be >= 1", ERROR_TYPE_INVALID_REQUEST));
+             return;
+         }
+@@ -5063,6 +5066,10 @@ int main(int argc, char ** argv) {
+                     return;
+                 }
+                 for (int32_t step = 0; step < max_tokens; ++step) {
++                    if (req.is_connection_closed() ||
++                        ctx_server.phx_cancel_epoch.load(std::memory_order_acquire) != cancel_at) {
++                        break;
++                    }
+                     float * logits = llama_get_logits_ith(ctx_server.ctx, batch.n_tokens - 1);
+                     if (!logits) {
+                         llama_batch_free(batch);
+@@ -5561,6 +5568,10 @@ int main(int argc, char ** argv) {
+         {
+             std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
+             for (int32_t step = 0; step < max_tokens; ++step) {
++                if (req.is_connection_closed() ||
++                    ctx_server.phx_cancel_epoch.load(std::memory_order_acquire) != cancel_at) {
++                    break;
++                }
+                 // Prompt infer already produced last_hidden.  Share one copy
+                 // with dec; keep/feed another copy for the next infer step.
+                 int32_t dec_ret = llama_phx_decode(ctx_server.ctx, last_hidden.data(), 1, logits.data());
+@@ -5942,6 +5953,10 @@ int main(int argc, char ** argv) {
+     svr->Post("/phx/dec",             handle_phx_dec);
+     svr->Post("/phx/generate",        handle_phx_generate);
++    svr->Post("/phx/cancel",          [&ctx_server, &res_ok](const httplib::Request &, httplib::Response & res) {
++        ctx_server.phx_cancel_epoch.fetch_add(1, std::memory_order_acq_rel);
++        res_ok(res, json{{"ok", true}, {"cancelled", true}});
++    });
+     svr->Post("/reranking",           handle_rerank);
+     svr->Post("/v1/rerank",           handle_rerank);

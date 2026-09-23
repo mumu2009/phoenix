@@ -25,6 +25,183 @@ inline std::string trimCopy(const std::string &s) {
   return s.substr(b, e - b + 1);
 }
 
+/** Strip whitespace so "1. 1. 1." and "1.1.1." compare the same. */
+inline std::string compactNonSpace(const std::string &s) {
+  std::string out;
+  out.reserve(s.size());
+  for (unsigned char c : s) {
+    if (!std::isspace(c))
+      out.push_back(static_cast<char>(c));
+  }
+  return out;
+}
+
+/** Letter count = information. Outline digits/dots do not count. */
+inline size_t deliverableInformationChars(const std::string &s) {
+  size_t n = 0;
+  for (unsigned char c : s) {
+    if (std::isalpha(c))
+      ++n;
+  }
+  return n;
+}
+
+/** Compact text has a 1.1.1 run (six or more ones plus dots). */
+inline bool hasOnesOutlineRun(const std::string &s) {
+  const std::string compact = compactNonSpace(s);
+  if (compact.size() < 10)
+    return false;
+  int ones = 0;
+  int dots = 0;
+  for (unsigned char c : compact) {
+    if (c == '1')
+      ++ones;
+    else if (c == '.')
+      ++dots;
+  }
+  if (ones >= 6 && dots >= 5)
+    return true;
+  return compact.find("1.1.1.1.1") != std::string::npos;
+}
+
+/** Anti-junk / loop-break prompt echoed as if it were the draft.
+    "Do not omit 1.1.1.1.1.1…" is the retest7 board body: letters>=8
+    used to escape looksLikeOnesJunk, then resume locked the 8B. */
+inline bool looksLikeRewriteInstructionEcho(const std::string &s) {
+  const std::string t = trimCopy(s);
+  if (t.size() < 10 || t.size() > 400)
+    return false;
+  std::string lower = t;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  const size_t letters = deliverableInformationChars(t);
+  const bool cue =
+      lower.find("do not omit") != std::string::npos ||
+      lower.find("do not emit") != std::string::npos ||
+      lower.find("do not append") != std::string::npos ||
+      lower.find("do not lengthen") != std::string::npos ||
+      lower.find("rewrite with real checklist") != std::string::npos ||
+      lower.find("write real checklist") != std::string::npos ||
+      lower.find("continue with new sentences") != std::string::npos ||
+      lower.find("number-only growth") != std::string::npos ||
+      lower.find("lengthening outline numbers") != std::string::npos ||
+      lower.find("outline-number growth") != std::string::npos ||
+      lower.find("the current draft is not a section") != std::string::npos;
+  if (!cue)
+    return false;
+  /* Our own rewrite hint, even when it has many letters. */
+  if (lower.find("lengthening outline numbers is not progress") !=
+          std::string::npos ||
+      lower.find("number-only growth is not progress") != std::string::npos ||
+      lower.find("the current draft is not a section") != std::string::npos)
+    return true;
+  if (hasOnesOutlineRun(t) && letters < 40)
+    return true;
+  if (letters < 48 && t.size() <= 280 &&
+      (lower.find("checklist") != std::string::npos ||
+       lower.find("outline") != std::string::npos ||
+       lower.find("canary") != std::string::npos ||
+       lower.find("1.1.1") != std::string::npos ||
+       lower.find("last line") != std::string::npos))
+    return true;
+  return false;
+}
+
+/** True when the body is essentially "1.1.1…" or the same outline
+    numbers lengthened. Real checklist sentences have letters.
+    A few letters plus a 1.1.1 run ("Do not omit 1.1.1…") is still junk. */
+inline bool looksLikeOnesJunk(const std::string &s) {
+  if (looksLikeRewriteInstructionEcho(s))
+    return true;
+  const std::string compact = compactNonSpace(s);
+  if (compact.size() < 10)
+    return false;
+  int letters = 0;
+  int ones = 0;
+  int dots = 0;
+  int digits = 0;
+  int other = 0;
+  for (unsigned char c : compact) {
+    if (std::isalpha(c))
+      ++letters;
+    else if (c == '1') {
+      ++ones;
+      ++digits;
+    } else if (std::isdigit(c))
+      ++digits;
+    else if (c == '.')
+      ++dots;
+    else
+      ++other;
+  }
+  /* Do not let 8 letters hide an outline run. Real bullets have
+     many more letters than ones. */
+  if (letters >= 16 && !(ones >= 6 && dots >= 5 && letters <= ones + 4))
+    return false;
+  if (letters >= 8 && !(ones >= 6 && dots >= 5 && letters <= ones + 4))
+    return false;
+  if (ones >= 6 && dots >= 5 && letters <= ones + 4 &&
+      other <= 2)
+    return true;
+  if (letters == 0 && other == 0 && ones >= 6 && dots >= 5 &&
+      ones + dots == static_cast<int>(compact.size()))
+    return true;
+  if (letters == 0 && other == 0 && digits >= 6 && dots >= 5 &&
+      digits + dots == static_cast<int>(compact.size()))
+    return true;
+  if (letters == 0 && other == 0) {
+    size_t i = 0;
+    int pairs = 0;
+    while (i + 1 < compact.size() && compact[i] == '1' &&
+           compact[i + 1] == '.') {
+      i += 2;
+      ++pairs;
+    }
+    if (pairs >= 6 &&
+        (i == compact.size() ||
+         (i + 1 == compact.size() && compact[i] == '1')))
+      return true;
+  }
+  return false;
+}
+
+/** RAG / tool-feedback only. Never put this on the causal tip —
+    the 8B will continue it into deliverable.md. No "Do not omit 1.1.1". */
+inline std::string onesJunkRewriteHint() {
+  return "The current draft is not a section. Write checklist sentences "
+         "and the assignment canary. Lengthening outline numbers is not "
+         "progress.";
+}
+
+/** True when `chunk` is (or would keep) ones-junk with no prose. */
+inline bool isOnesJunkAppend(const std::string &prev, const std::string &chunk) {
+  const std::string add = trimCopy(chunk);
+  if (add.empty())
+    return false;
+  if (looksLikeOnesJunk(add))
+    return true;
+  if (looksLikeOnesJunk(prev + add))
+    return true;
+  if (looksLikeOnesJunk(prev) &&
+      deliverableInformationChars(prev + add) <=
+          deliverableInformationChars(prev) + 2)
+    return true;
+  return false;
+}
+
+/** Length grew but letters did not — only when the draft is ones-junk. */
+inline bool isZeroInformationGrowth(const std::string &prev,
+                                    const std::string &next) {
+  if (next.size() <= prev.size())
+    return false;
+  if (!looksLikeOnesJunk(prev) && !looksLikeOnesJunk(next))
+    return false;
+  return deliverableInformationChars(next) <=
+         deliverableInformationChars(prev) + 2;
+}
+
 /** Word-boundary match. Not a phrase catalog. */
 inline bool hasAlnumWord(const std::string &lower, const std::string &w) {
   if (w.empty() || lower.empty()) return false;
@@ -426,6 +603,9 @@ inline std::string joinDeliverableText(const std::string &prev,
   if (last == '.' && out.size() >= 2 &&
       std::isdigit(static_cast<unsigned char>(out[out.size() - 2])) &&
       std::isdigit(first)) {
+    /* "2." + "5 billion" stays one number. "1." + "1." is fence-spin. */
+    if (looksLikeOnesJunk(prev) || looksLikeOnesJunk(chunk))
+      return prev;
     out += chunk;
     return out;
   }
@@ -1590,6 +1770,30 @@ inline std::string joinParagraphs(const std::vector<std::string> &paras,
   return oss.str();
 }
 
+/** Drop instruction-echo / ones-junk paragraphs. Keep real section prose
+    so a mixed tick can replace the draft instead of writing the hint. */
+inline std::string stripRewriteInstructionParagraphs(const std::string &raw) {
+  const std::string t = trimCopy(raw);
+  if (t.empty())
+    return std::string();
+  const auto paras = splitAllParagraphs(t);
+  if (paras.empty()) {
+    if (looksLikeRewriteInstructionEcho(t) || looksLikeOnesJunk(t))
+      return std::string();
+    return t;
+  }
+  std::vector<std::string> kept;
+  kept.reserve(paras.size());
+  for (const auto &p : paras) {
+    if (looksLikeRewriteInstructionEcho(p))
+      continue;
+    if (looksLikeOnesJunk(p) && deliverableInformationChars(p) < 20)
+      continue;
+    kept.push_back(p);
+  }
+  return trimCopy(joinParagraphs(kept, 0, kept.size()));
+}
+
 inline std::string prefixBeforeRepeatedShortLine(const std::string &reply);
 
 /** Causal resume only: whole-paragraph tail, even fences, no closer.
@@ -1599,6 +1803,9 @@ inline std::string formatContinuationContext(const std::string &body,
                                              const std::string &outlineOrGoal,
                                              size_t resumeChars = 720) {
   if (body.empty()) return std::string();
+  /* Instruction echo / ones-junk must not become the next causal tip. */
+  if (looksLikeOnesJunk(body) || looksLikeRewriteInstructionEcho(body))
+    return std::string();
 
   std::ostringstream oss;
   (void)outlineOrGoal;
@@ -1714,6 +1921,8 @@ inline std::string formatMissionResumeSuffix(const std::string &body,
                                             size_t resumeChars = 720) {
   if (body.empty() || deliverableIsOnlyPin(body, goal))
     return std::string();
+  if (looksLikeOnesJunk(body) || looksLikeRewriteInstructionEcho(body))
+    return std::string();
   return formatContinuationContext(body, std::string(), resumeChars);
 }
 
@@ -1734,8 +1943,19 @@ inline const char *contradictedOperationalFact(const std::string &reply,
 /** Computable defects in the model's own draft. Facts only — not an outline. */
 inline std::string inspectDeliverableHealth(const std::string &body,
                                            const std::string &goal = "") {
-  if (body.size() < 80) return std::string();
   std::vector<std::string> notes;
+  if (looksLikeOnesJunk(body) || looksLikeRewriteInstructionEcho(body)) {
+    notes.emplace_back("- draft is only 1.1.1 outline numbers or a rewrite "
+                       "instruction; do not lengthen the numbers; rewrite with "
+                       "canary and checklist sentences");
+    std::ostringstream oss;
+    oss << "Self-check (facts about the current draft):\n";
+    for (const auto &n : notes)
+      oss << n << "\n";
+    oss << "\n";
+    return oss.str();
+  }
+  if (body.size() < 80) return std::string();
 
   size_t fences = 0;
   for (size_t i = 0; i + 2 < body.size(); ++i)

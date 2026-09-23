@@ -59,6 +59,24 @@ def test_restart_gateway_leaves_llama() -> None:
     assert by["llama"]["reason"] == "alive"
 
 
+def test_refuse_llama_health_and_second_server() -> None:
+    assert s.refuse_llama_health("llama", "http://127.0.0.1:8082/health")
+    assert s.llama_probe_host("192.168.1.107") == "127.0.0.1"
+    assert s.llama_probe_host("10.0.0.8") == "127.0.0.1"
+    specs = [
+        {"role": "llama-draft", "cmd_env": "PHOENIX_LLAMA_DRAFT_CMD", "secondLlamaServer": True},
+        {"role": "llama", "cmd_env": "PHOENIX_LLAMA_CMD", "restartIfDead": False},
+    ]
+    observed = [
+        {"role": "llama-draft", "alive": False},
+        {"role": "llama", "alive": True},
+    ]
+    decisions = s.plan_and_act(observed, specs, Path("."), dry_run=True)
+    by = {d["role"]: d for d in decisions}
+    assert by["llama-draft"]["action"] == "leave"
+    assert by["llama"]["action"] == "leave"
+
+
 def test_rss_fuse_restarts_gateway_not_llama() -> None:
     specs = [
         {"role": "gateway", "cmd_env": "PHOENIX_GATEWAY_CMD", "restartIfDead": True},
@@ -81,6 +99,7 @@ def main() -> int:
     test_dirty_mission_refuse()
     test_restart_gateway_leaves_llama()
     test_rss_fuse_restarts_gateway_not_llama()
+    test_refuse_llama_health_and_second_server()
     print("supervisor policy tests OK")
     return 0
 

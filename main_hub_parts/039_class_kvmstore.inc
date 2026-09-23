@@ -32,7 +32,23 @@ public:
     return out.order;
   }
 
+  int wordTf(const std::string &memeId, const std::string &word) {
+    if (memeId.empty() || word.empty())
+      return 0;
+    auto memeEntry = loadOrdered("meme:" + memeId);
+    auto it = memeEntry.tf.find(word);
+    if (it != memeEntry.tf.end() && it->second > 0)
+      return it->second;
+    return memeEntry.set.count(word) ? 1 : 0;
+  }
+
   void link(const std::string &word, const std::string &memeId) {
+    link(word, memeId, true);
+  }
+
+  /* countTf: ingest increments meme-conditional tf. Query-time
+     re-bind of an existing pair must not inflate weights. */
+  void link(const std::string &word, const std::string &memeId, bool countTf) {
     std::string wordKey = "word:" + word;
     std::string memeKey = "meme:" + memeId;
     auto wordEntry = loadOrdered(wordKey);
@@ -43,10 +59,29 @@ public:
       store_->put(wordKey, json(wordEntry.order));
       cacheSet(wordKey, wordEntry);
     }
-    if (!memeEntry.set.count(word)) {
+    bool freshWord = !memeEntry.set.count(word);
+    if (freshWord) {
       memeEntry.set.insert(word);
       memeEntry.order.push_back(word);
+      memeEntry.tf[word] = 1;
+    } else if (countTf) {
+      int cur = 1;
+      auto it = memeEntry.tf.find(word);
+      if (it != memeEntry.tf.end() && it->second > 0)
+        cur = it->second;
+      memeEntry.tf[word] = cur + 1;
+    }
+    if (freshWord || countTf) {
       store_->put(memeKey, json(memeEntry.order));
+      json tfJson = json::object();
+      for (const auto &w : memeEntry.order) {
+        int t = 1;
+        auto it = memeEntry.tf.find(w);
+        if (it != memeEntry.tf.end() && it->second > 0)
+          t = it->second;
+        tfJson[w] = t;
+      }
+      store_->put("meme_tf:" + memeId, tfJson);
       cacheSet(memeKey, memeEntry);
     }
   }
@@ -68,7 +103,17 @@ public:
       auto it = std::find(memeEntry.order.begin(), memeEntry.order.end(), word);
       if (it != memeEntry.order.end())
         memeEntry.order.erase(it);
+      memeEntry.tf.erase(word);
       store_->put(memeKey, json(memeEntry.order));
+      json tfJson = json::object();
+      for (const auto &w : memeEntry.order) {
+        int t = 1;
+        auto jt = memeEntry.tf.find(w);
+        if (jt != memeEntry.tf.end() && jt->second > 0)
+          t = jt->second;
+        tfJson[w] = t;
+      }
+      store_->put("meme_tf:" + memeId, tfJson);
       cacheSet(memeKey, memeEntry);
     }
   }
@@ -95,6 +140,7 @@ private:
   struct OrderedSet {
     std::vector<std::string> order;
     std::unordered_set<std::string> set;
+    std::unordered_map<std::string, int> tf;
   };
   struct CacheEntry {
     OrderedSet value;
@@ -152,6 +198,22 @@ private:
         std::string s = x.get<std::string>();
         if (out.set.insert(s).second)
           out.order.push_back(s);
+      }
+    }
+    if (key.rfind("meme:", 0) == 0) {
+      auto tfv = store_->get("meme_tf:" + key.substr(5));
+      if (tfv && tfv->is_object()) {
+        for (auto &kv : tfv->items()) {
+          if (!kv.value().is_number())
+            continue;
+          int t = kv.value().get<int>();
+          if (t > 0)
+            out.tf[kv.key()] = t;
+        }
+      }
+      for (const auto &w : out.order) {
+        if (!out.tf.count(w) || out.tf[w] <= 0)
+          out.tf[w] = 1;
       }
     }
     cacheSet(key, out);

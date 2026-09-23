@@ -16,14 +16,17 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <iostream>
 #include <cmath>
 #include <cstdlib>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -95,8 +98,12 @@ void splitHostPort(const std::string &baseUrl, std::string &host, int &port) {
 // main_hub_parts/112_section_before_contexthint.inc.
 HttpResult httpRequest(const std::string &host, int port,
                         const std::string &method, const std::string &path,
-                        const std::string &body, int timeoutMs) {
+                        const std::string &body, int timeoutMs,
+                        bool ignoreAbort = false) {
   HttpResult result;
+  std::unique_ptr<phoenix::inference::InFlightGenerateGuard> inFlight;
+  if (!ignoreAbort)
+    inFlight = std::make_unique<phoenix::inference::InFlightGenerateGuard>();
 
   std::ostringstream req;
   req << method << " " << path << " HTTP/1.1\r\n"
@@ -133,6 +140,63 @@ HttpResult httpRequest(const std::string &host, int port,
       return select((int)s + 1, wantRead ? &rfds : nullptr,
                     wantWrite ? &wfds : nullptr, nullptr, &tv);
     };
+    /* Abort must not RST llama-server (--parallel 1). Drain then FIN.
+       Timeout/background leftover uses a detached worker. Report cancel
+       must drain synchronously so inFlight/slots stay held until llama
+       finishes the leftover last-tick (live llama may ignore /phx/cancel). */
+    auto drainUntilIdle = [&](SOCKET s, int maxMs) {
+      char buf[4096];
+      const auto t0 = std::chrono::steady_clock::now();
+      while (true) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - t0)
+                                 .count();
+        if (elapsed >= maxMs)
+          break;
+        const int n = recv(s, buf, sizeof(buf), 0);
+        if (n > 0)
+          continue;
+        if (n == 0)
+          break;
+        if (n < 0 && wouldBlock()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+          continue;
+        }
+        break;
+      }
+#ifdef _WIN32
+      shutdown(s, SD_SEND);
+#else
+      shutdown(s, SHUT_WR);
+#endif
+      closesocket(s);
+    };
+    auto drainThenClose = [&](SOCKET s) {
+      std::thread([s]() {
+        char buf[4096];
+        int waited = 0;
+        while (waited < 120000) {
+          const int n = recv(s, buf, sizeof(buf), 0);
+          if (n > 0)
+            continue;
+          if (n == 0)
+            break;
+#ifdef _WIN32
+          const bool again = WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+          const bool again =
+              errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+#endif
+          if (n < 0 && again) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            waited += 200;
+            continue;
+          }
+          break;
+        }
+        closesocket(s);
+      }).detach();
+    };
 
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -162,7 +226,7 @@ HttpResult httpRequest(const std::string &host, int port,
                 WSAGetLastError() == EINPROGRESS)) {
       int waited = 0;
       while (waited < timeoutVal) {
-        if (phoenix::inference::shouldAbort(epoch)) {
+        if (!ignoreAbort && phoenix::inference::shouldAbort(epoch)) {
           closesocket(sock);
           result.error = "aborted";
           return result;
@@ -191,9 +255,12 @@ HttpResult httpRequest(const std::string &host, int port,
     int sent = 0;
     int sendWaited = 0;
     while (sent < (int)reqStr.size() && sendWaited < timeoutVal) {
-      if (phoenix::inference::shouldAbort(epoch)) {
-        closesocket(sock);
+      if (!ignoreAbort && phoenix::inference::shouldAbort(epoch)) {
         result.error = "aborted";
+        if (sent > 0)
+          drainUntilIdle(sock, phoenix::inference::lastTickCancelDrainWaitMs());
+        else
+          closesocket(sock);
         return result;
       }
       int n = send(sock, reqStr.c_str() + sent, (int)reqStr.size() - sent, 0);
@@ -211,9 +278,19 @@ HttpResult httpRequest(const std::string &host, int port,
     }
     char buf[8192];
     int recvWaited = 0;
+    bool drained = false;
     while (recvWaited < timeoutVal) {
-      if (phoenix::inference::shouldAbort(epoch)) {
+      if (!ignoreAbort && phoenix::inference::shouldAbort(epoch)) {
         result.error = "aborted";
+        std::cout << "[phx] abort-drain start" << std::endl;
+        const auto d0 = std::chrono::steady_clock::now();
+        drainUntilIdle(sock, phoenix::inference::lastTickCancelDrainWaitMs());
+        const auto dms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - d0)
+                             .count();
+        std::cout << "[phx] abort-drain sec="
+                  << (static_cast<double>(dms) / 1000.0) << std::endl;
+        drained = true;
         break;
       }
       int n = recv(sock, buf, sizeof(buf), 0);
@@ -232,8 +309,16 @@ HttpResult httpRequest(const std::string &host, int port,
       }
       break;
     }
-    closesocket(sock);
-    if (result.error == "aborted")
+    if (!drained) {
+      if (recvWaited >= timeoutVal) {
+        result.error = "generate-timeout";
+        drainThenClose(sock);
+        drained = true;
+      } else {
+        closesocket(sock);
+      }
+    }
+    if (result.error == "aborted" || result.error == "generate-timeout")
       return result;
   }
 
@@ -285,11 +370,13 @@ HttpResult httpRequest(const std::string &host, int port,
 
 bool postJson(const std::string &host, int port, const std::string &path,
               const json &payload, int timeoutMs, json &outJson,
-              std::string &error) {
+              std::string &error, bool ignoreAbort = false) {
   HttpResult r =
-      httpRequest(host, port, "POST", path, payload.dump(), timeoutMs);
-  if (r.connectFailed) {
-    error = r.error;
+      httpRequest(host, port, "POST", path, payload.dump(), timeoutMs,
+                  ignoreAbort);
+  if (r.connectFailed || r.error == "aborted" ||
+      r.error == "generate-timeout") {
+    error = r.error.empty() ? "connect failed" : r.error;
     return false;
   }
   if (r.status < 200 || r.status >= 300) {
@@ -432,13 +519,14 @@ std::vector<int> tokensFromJson(const json &resp) {
   return out;
 }
 
-// Maps one word to token ids via the patched server's /phx/enc only.
+// Map one word to token ids via /tokenize. Never /phx/enc here: a
+// concurrent enc storm corrupted the board llama (malloc smallbin).
 std::vector<int> tokenizeWord(const std::string &host, int port,
                               const std::string &word, int timeoutMs) {
   json resp;
   std::string err;
-  if (!postJson(host, port, "/phx/enc", json{{"content", word}}, timeoutMs, resp,
-                err)) {
+  if (!postJson(host, port, "/tokenize", json{{"content", word}}, timeoutMs,
+                resp, err)) {
     return {};
   }
   return tokensFromJson(resp);
@@ -494,7 +582,7 @@ void applyGenerateInferenceOptions(json &payload, const std::string &host,
     payload["rag_mix_cap"] = options["rag_mix_cap"].get<int>();
   if (options.contains("num_predict") && options["num_predict"].is_number_integer())
     payload["max_tokens"] =
-        std::max(1, options["num_predict"].get<int>());
+        std::max(minPredictTokens(), options["num_predict"].get<int>());
   if (options.contains("logit_bias") && options["logit_bias"].is_object() &&
       !options["logit_bias"].empty()) {
     json mapped = normalizeLogitBias(host, port, options["logit_bias"], timeoutMs);
@@ -547,8 +635,21 @@ bool phxEncodePrompt(const std::string &host, int port,
   return true;
 }
 
+bool isUnsafeGenerateFallback(const std::string &err) {
+  /* Only block fallback while generate may still hold phx_mutex.
+     A finished HTTP 500 / llama_phx_* has already released the lock;
+     /completion is then the heal path (stock decode resets a dirty
+     phx stage that kv_clear alone does not). */
+  return err.find("aborted") != std::string::npos ||
+         err.find("timeout") != std::string::npos ||
+         err.find("status 0") != std::string::npos;
+}
+
 json runPhxGenerate(const std::string &host, int port, json payload,
                     int timeoutMs, std::string &error) {
+  if (payload.contains("max_tokens") && payload["max_tokens"].is_number_integer())
+    payload["max_tokens"] =
+        std::max(minPredictTokens(), payload["max_tokens"].get<int>());
   json genResp;
   if (!postJson(host, port, "/phx/generate", payload, timeoutMs, genResp,
                 error))
@@ -558,8 +659,12 @@ json runPhxGenerate(const std::string &host, int port, json payload,
     error = "phx/generate: missing text";
     return json{{"ok", false}, {"error", error}};
   }
-  return json{{"ok", true}, {"reply", genResp["text"].get<std::string>()},
-              {"raw", genResp}};
+  const std::string text = genResp["text"].get<std::string>();
+  if (text.empty()) {
+    error = "phx/generate: empty text";
+    return json{{"ok", false}, {"error", error}};
+  }
+  return json{{"ok", true}, {"reply", text}, {"raw", genResp}};
 }
 
 // Rewrites a string-keyed logit_bias map into the integer-token-id map that
@@ -588,31 +693,10 @@ json normalizeLogitBias(const std::string &host, int port,
   return out;
 }
 
-// Only cache a successful probe. A 4s miss while llama is in /phx/generate
-// (--parallel 1 + phx_mutex) used to lock the whole mission on "unavailable".
-// The unit path encodes inside /phx/generate; this probe is optional.
-bool splitBackendReachable(const std::string &host, int port) {
-  static std::mutex mu;
-  static std::map<std::string, bool> cache;
-  const std::string key = host + ":" + std::to_string(port);
-  {
-    std::lock_guard<std::mutex> lk(mu);
-    const auto it = cache.find(key);
-    if (it != cache.end() && it->second) return true;
-  }
-  json resp;
-  std::string err;
-  const bool ok =
-      postJson(host, port, "/phx/enc", json{{"content", "probe"}}, 8000, resp,
-               err) &&
-      resp.is_object() && (resp.contains("tokens") || resp.contains("hidden") ||
-                           resp.contains("n_tokens"));
-  if (ok) {
-    std::lock_guard<std::mutex> lk(mu);
-    cache[key] = true;
-  }
-  return ok;
-}
+// Optional reachability. Never POST /phx/enc: on --parallel 1 it waits
+// on phx_mutex and a probe storm corrupted board llama. The unit path
+// encodes inside /phx/generate.
+bool splitBackendReachable(const std::string &, int) { return true; }
 
 // Returns token count for content via /tokenize (falls back to chars/4).
 int countContentTokens(const std::string &host, int port,
@@ -673,7 +757,7 @@ json textCompletionFallback(const std::string &host, int port,
                             const json &inferenceOptions) {
   json out;
   json payload = {{"prompt", formattedPrompt},
-                  {"n_predict", effectiveMaxTokens},
+                  {"n_predict", std::max(minPredictTokens(), effectiveMaxTokens)},
                   {"stream", false},
                   {"cache_prompt", false}};
   if (inferenceOptions.is_object()) {
@@ -692,7 +776,7 @@ json textCompletionFallback(const std::string &host, int port,
     if (inferenceOptions.contains("num_predict") &&
         inferenceOptions["num_predict"].is_number_integer())
       payload["n_predict"] =
-          std::max(1, inferenceOptions["num_predict"].get<int>());
+          std::max(minPredictTokens(), inferenceOptions["num_predict"].get<int>());
   }
   std::string error;
   json resp;
@@ -743,7 +827,8 @@ json unitIterationPipeline(const std::string &host, int port,
 
     auto buildPayload = [&](const std::string &feedbackMode) {
       json payload = {{"content", formattedPrompt},
-                      {"max_tokens", effectiveMaxTokens},
+                      {"max_tokens",
+                       std::max(minPredictTokens(), effectiveMaxTokens)},
                       {"temperature", temperature},
                       {"top_p", topP},
                       {"decode_text", true},
@@ -826,7 +911,20 @@ json hiddenStatePipeline(const std::string &host, int port,
                           int timeoutMs, const json &inferenceOptions) {
   json out;
   std::string error;
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(std::max(1000, timeoutMs));
+  auto remainMs = [&]() -> int {
+    return static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now())
+            .count());
+  };
   try {
+    if (remainMs() < 200) {
+      out["ok"] = false;
+      out["error"] = "generate-timeout";
+      return out;
+    }
     const std::string cleanCtx = cleanGraphContextForSystem(graphContext, text);
     std::string formattedPrompt =
         assembleCausalText(cleanCtx, text);
@@ -868,9 +966,22 @@ json hiddenStatePipeline(const std::string &host, int port,
                 inferenceOptions["ngram_merge"].is_number_integer()
             ? inferenceOptions["ngram_merge"].get<int>()
             : 2;
-    formattedPrompt = fitPromptToTokenBudget(
-        host, port, std::move(formattedPrompt), ctxBudget,
-        effectiveMaxTokens + 64, timeoutMs, ngramFit);
+    /* Short asks fit in ctx; an extra /tokenize (or worse /phx/enc)
+       on --parallel 1 races the generate we are about to run. */
+    if (formattedPrompt.size() > 2048) {
+      const int fitMs = std::min(1500, std::max(0, remainMs()));
+      if (fitMs < 200) {
+        out["ok"] = false;
+        out["error"] = "generate-timeout";
+        return out;
+      }
+      formattedPrompt = fitPromptToTokenBudget(
+          host, port, std::move(formattedPrompt), ctxBudget,
+          effectiveMaxTokens + 64, fitMs, ngramFit);
+    } else {
+      (void)ctxBudget;
+      (void)ngramFit;
+    }
 
     if (phoenix::inference::shutdownRequested()) {
       out["ok"] = false;
@@ -885,36 +996,53 @@ json hiddenStatePipeline(const std::string &host, int port,
       return phoenix::inference::shutdownRequested() ||
              err.find("aborted") != std::string::npos;
     };
+    const int genMs = std::max(0, remainMs());
+    if (genMs < 200) {
+      out["ok"] = false;
+      out["error"] = "generate-timeout";
+      return out;
+    }
     if (unitPipeline) {
       json unit = unitIterationPipeline(host, port, formattedPrompt,
-                                        effectiveMaxTokens, timeoutMs,
+                                        effectiveMaxTokens, genMs,
                                         genOpts);
       if (unit.value("ok", false) &&
           !unit.value("reply", std::string()).empty())
         return unit;
-      if (isAbortErr(unit)) {
+      const std::string unitErr = unit.value("error", std::string());
+      if (isAbortErr(unit) || isUnsafeGenerateFallback(unitErr)) {
         out["ok"] = false;
-        out["error"] = "aborted";
+        out["error"] = isAbortErr(unit) ? std::string("aborted")
+                                        : (unitErr.empty() ? "phx/generate failed"
+                                                           : unitErr);
         return out;
       }
       std::cerr << "[llama] unit /phx/generate failed; falling back to "
                    "/completion: "
-                << unit.value("error", std::string("empty reply")) << std::endl;
+                << (unitErr.empty() ? std::string("empty reply") : unitErr)
+                << std::endl;
     }
     if (phoenix::inference::shutdownRequested()) {
       out["ok"] = false;
       out["error"] = "aborted";
       return out;
     }
+    const int restMs = std::max(0, remainMs());
+    if (restMs < 200) {
+      out["ok"] = false;
+      out["error"] = "generate-timeout";
+      return out;
+    }
     if (useNative || unitPipeline) {
       json native = textCompletionFallback(host, port, formattedPrompt,
-                                           effectiveMaxTokens, timeoutMs,
+                                           effectiveMaxTokens, restMs,
                                            genOpts);
       const std::string nativeErr = native.value("error", std::string());
       if (!native.value("ok", false) &&
-          nativeErr.find("status 0") != std::string::npos) {
+          nativeErr.find("status 0") != std::string::npos &&
+          remainMs() >= 200) {
         native = textCompletionFallback(host, port, formattedPrompt,
-                                        effectiveMaxTokens, timeoutMs,
+                                        effectiveMaxTokens, remainMs(),
                                         genOpts);
       }
       if (native.value("ok", false)) return native;
@@ -942,16 +1070,23 @@ json hiddenStatePipeline(const std::string &host, int port,
     }
 
     json generatePayload = {{"content", formattedPrompt},
-                            {"max_tokens", effectiveMaxTokens},
+                            {"max_tokens",
+                             std::max(minPredictTokens(), effectiveMaxTokens)},
                             {"temperature", temperature},
                             {"top_p", topP},
                             {"decode_text", true},
                             {"loop_mode", "token"}};
-    applyGenerateInferenceOptions(generatePayload, host, port, timeoutMs,
+    const int lastMs = std::max(0, remainMs());
+    if (lastMs < 200) {
+      out["ok"] = false;
+      out["error"] = "generate-timeout";
+      return out;
+    }
+    applyGenerateInferenceOptions(generatePayload, host, port, lastMs,
                                   genOpts);
 
     json genResp;
-    if (!postJson(host, port, "/phx/generate", generatePayload, timeoutMs, genResp,
+    if (!postJson(host, port, "/phx/generate", generatePayload, lastMs, genResp,
                   error)) {
       out["ok"] = false;
       out["error"] = "phx/generate: " + error;
@@ -980,6 +1115,24 @@ json hiddenStatePipeline(const std::string &host, int port,
 
 }  // namespace
 
+void cancelPhxGenerate(const std::string &baseUrl) {
+  std::string host;
+  int port = 8082;
+  splitHostPort(baseUrl.empty() ? "http://127.0.0.1:8082" : baseUrl, host,
+                port);
+  std::thread([host, port]() {
+    struct NotifyDone {
+      ~NotifyDone() { phoenix::inference::notifyAbortFinished(); }
+    } done;
+    json resp;
+    std::string err;
+    /* Cancel the in-flight generate only. Do not /slots/0?action=release:
+       report/stop used to release slot 0 after the last tick was already
+       gone, and the next short ask inherited an empty/aborted slot. */
+    postJson(host, port, "/phx/cancel", json::object(), 1500, resp, err, true);
+  }).detach();
+}
+
 json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
                      const std::string &model, const std::string &text,
                      const std::string &graphContext, int maxTokens,
@@ -994,13 +1147,19 @@ json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
   int port = 8082;
   std::string endpoint = baseUrl.empty() ? "http://127.0.0.1:8082" : baseUrl;
   splitHostPort(endpoint, host, port);
+  static std::once_flag cancelOnce;
+  std::call_once(cancelOnce, [endpoint]() {
+    phoenix::inference::setAbortNotify([]() {
+      cancelPhxGenerate("http://127.0.0.1:8082");
+    });
+  });
 
-  int effectiveMaxTokens = std::max(1, maxTokens);
+  int effectiveMaxTokens = std::max(minPredictTokens(), maxTokens);
   if (inferenceOptions.is_object()) {
     if (inferenceOptions.contains("num_predict") &&
         inferenceOptions["num_predict"].is_number_integer())
-      effectiveMaxTokens =
-          std::max(1, inferenceOptions["num_predict"].get<int>());
+      effectiveMaxTokens = std::max(
+          minPredictTokens(), inferenceOptions["num_predict"].get<int>());
   }
   int callTimeoutMs = timeoutMs;
   if (inferenceOptions.is_object() &&
@@ -1008,6 +1167,12 @@ json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
       inferenceOptions["timeoutMs"].is_number_integer()) {
     callTimeoutMs = std::max(1000, inferenceOptions["timeoutMs"].get<int>());
   }
+  /* Short user ask (≤32 tokens) keeps the 90–120s cap. Mission /
+     autonomy / deliberateMaxTokens≥64 / maxTokens>32 keep the caller
+     budget. The old `lowPriority && maxTokens>256` missed default 256. */
+  callTimeoutMs = resolveGenerateTimeoutMs(
+      callTimeoutMs, effectiveMaxTokens,
+      inferenceOptions.is_object() ? inferenceOptions : json::object());
 
   /* Prefix is the document head. Resume is the document tail.
      skipGraphContext means GNN is in units, not prompt text. */
@@ -1019,19 +1184,27 @@ json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
   } else {
     ctxForPipeline = graphContext;
   }
-
-  const bool unitPipeline =
-      !inferenceOptions.is_object() ||
-      inferenceOptions.value("unitPipeline", true);
-  if (unitPipeline && !splitBackendReachable(host, port)) {
-    std::cerr << "[llama] /phx/enc probe missed (slot busy or timeout); "
-                 "continuing on /phx/generate"
-              << std::endl;
+  json shortOpts = inferenceOptions.is_object() ? inferenceOptions
+                                                : json::object();
+  /* Short ask: do not ship cognition/GNN units or a long prefix.
+     Board chat was returning empty text at the 90s cap; the same
+     llama finishes the bare prompt in ~26s. */
+  if (effectiveMaxTokens <= 32) {
+    ctxForPipeline.clear();
+    shortOpts.erase("context_units");
+    shortOpts.erase("gnn_units");
+    shortOpts.erase("logit_bias");
+    shortOpts.erase("system_content");
+    shortOpts.erase("resume_suffix");
   }
+
+  /* Do not POST /phx/enc as a reachability probe. On --parallel 1 it
+     waits on phx_mutex behind an in-flight generate and ate 8s of the
+     chat budget (board short-ask 32s = 8s probe + 20s generate). */
 
   json pipelineResult = hiddenStatePipeline(
       host, port, text, ctxForPipeline, effectiveMaxTokens, callTimeoutMs,
-      inferenceOptions);
+      shortOpts);
   if (pipelineResult.is_object() && pipelineResult.value("ok", false)) {
     out["ok"] = true;
     out["reply"] = pipelineResult.value("reply", std::string());
@@ -1044,8 +1217,10 @@ json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
       pipelineResult.is_object() ? pipelineResult.value("error", std::string())
                                   : std::string("unit pipeline failed");
   out["ok"] = false;
-  out["reply"] = "";
   out["error"] = "split pipeline failed: " + pipelineError;
+  /* Do not copy the error into reply. That made generate-timeout look
+     like a 39-char model completion on August handlers. */
+  out["reply"] = "";
   return out;
 }
 

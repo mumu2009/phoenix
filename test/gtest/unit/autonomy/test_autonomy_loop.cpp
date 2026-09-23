@@ -4,9 +4,11 @@
 #include "autonomy_stack.hpp"
 
 #include "emergency_stop.hpp"
+#include "inference_abort.hpp"
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -19,8 +21,14 @@ namespace {
 class AutonomyLoopTest : public ::testing::Test {
 protected:
     std::unique_ptr<CognitionAutonomyManager> mgr_;
-    void SetUp() override { mgr_ = std::make_unique<CognitionAutonomyManager>(); }
-    void TearDown() override { mgr_.reset(); }
+    void SetUp() override {
+        phoenix::inference::resetAbortStateForTesting();
+        mgr_ = std::make_unique<CognitionAutonomyManager>();
+    }
+    void TearDown() override {
+        mgr_.reset();
+        phoenix::inference::resetAbortStateForTesting();
+    }
 };
 
 }  // namespace
@@ -91,6 +99,9 @@ TEST_F(AutonomyLoopTest, AutonomyLoopTicksWithoutExternalIterate) {
 
     auto stop = mgr_->stopAutonomyLoop();
     EXPECT_TRUE(stop.value("ok", false));
+    EXPECT_TRUE(stop["result"].value("stopping", false));
+    for (int i = 0; i < 40 && mgr_->autonomyLoopStatus()["result"].value("running", false); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     EXPECT_FALSE(mgr_->autonomyLoopStatus()["result"].value("running", true));
 }
 
@@ -123,6 +134,198 @@ TEST_F(AutonomyLoopTest, RestartsAfterEstopBreaksLoopThread) {
             ticksBefore);
 
   mgr_->stopAutonomyLoop();
+}
+
+TEST_F(AutonomyLoopTest, StartAutonomyLoopReturnsWithoutJoiningStuckIterate) {
+    mgr_->setMissionDeliberator([](const std::string &, const std::string &, int,
+                                   const std::string &) -> std::string {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+        return "slow-deliberate";
+    });
+    mgr_->configureAutonomyLoop(json{{"enabled", true},
+                                     {"intervalSec", 1},
+                                     {"maxStepsPerTick", 1},
+                                     {"persistEveryTicks", 10000}});
+    mgr_->assignMission(json{{"enabled", true},
+                             {"id", "start-join-1"},
+                             {"goal", "occupy the loop"}});
+    ASSERT_TRUE(mgr_->startAutonomyLoop(json{{"restoreState", false}}).value("ok", false));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    mgr_->stopAutonomyLoop();
+    const auto t0 = std::chrono::steady_clock::now();
+    auto start = mgr_->startAutonomyLoop(json{{"restoreState", false}});
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+    EXPECT_TRUE(start.value("ok", false));
+    EXPECT_LT(ms, 800) << "start must not join a multi-second iterate";
+    mgr_->stopAutonomyLoop();
+}
+
+TEST_F(AutonomyLoopTest, StopAutonomyLoopReturnsWithoutJoiningStuckIterate) {
+    mgr_->setMissionDeliberator([](const std::string &, const std::string &, int,
+                                   const std::string &) -> std::string {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+        return "slow-deliberate";
+    });
+    mgr_->configureAutonomyLoop(json{{"enabled", true},
+                                     {"intervalSec", 1},
+                                     {"maxStepsPerTick", 1},
+                                     {"persistEveryTicks", 10000}});
+    mgr_->assignMission(json{{"enabled", true},
+                             {"id", "stop-join-1"},
+                             {"goal", "occupy the loop"}});
+    ASSERT_TRUE(mgr_->startAutonomyLoop(json{{"restoreState", false}}).value("ok", false));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto t0 = std::chrono::steady_clock::now();
+    auto stop = mgr_->stopAutonomyLoop();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+    EXPECT_TRUE(stop.value("ok", false));
+    EXPECT_LT(ms, 800) << "stop must not join a multi-second iterate";
+    for (int i = 0; i < 80 && mgr_->autonomyLoopStatus()["result"].value("running", false); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
+
+TEST_F(AutonomyLoopTest, FileEditEmptyReturnStillTicksAgain) {
+    std::atomic<int> calls{0};
+    mgr_->setMissionDeliberator([&](const std::string &, const std::string &prior,
+                                    int, const std::string &) -> std::string {
+        const int n = ++calls;
+        if (n == 1)
+            return std::string(); /* file-edit already wrote; same as soak */
+        return "second-tick-revision-" + std::to_string(prior.size());
+    });
+    mgr_->configureAutonomyLoop(json{{"enabled", true},
+                                     {"intervalSec", 1},
+                                     {"maxStepsPerTick", 1},
+                                     {"persistEveryTicks", 10000}});
+    mgr_->assignMission(json{{"enabled", true},
+                             {"id", "loop-revise-1"},
+                             {"goal", "keep writing the draft"}});
+    ASSERT_TRUE(mgr_->startAutonomyLoop(json{{"restoreState", false}}).value("ok", false));
+    for (int i = 0; i < 80 && calls.load() < 2; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    mgr_->stopAutonomyLoop();
+    EXPECT_GE(calls.load(), 2) << "150-char file-edit must not stop the loop";
+    const std::string body =
+        mgr_->missionStatus()["result"]["stats"]["mission"].value(
+            "deliverable", std::string());
+    EXPECT_NE(body.find("second-tick-revision"), std::string::npos);
+}
+
+TEST_F(AutonomyLoopTest, ReportOutcomeDoesNotAbortLastTick) {
+    phoenix::inference::resetAbortStateForTesting();
+    static std::atomic<int> fired{0};
+    fired.store(0);
+    phoenix::inference::setAbortNotify([]() { fired.fetch_add(1); });
+    auto *guard = new phoenix::inference::InFlightGenerateGuard();
+    std::thread releaser([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        delete guard;
+    });
+    mgr_->assignMission(json{{"enabled", true},
+                             {"id", "report-no-abort-1"},
+                             {"goal", "keep last tick"}});
+    auto r = mgr_->reportMissionOutcome(json{{"goalAchieved", true},
+                                             {"missionId", "report-no-abort-1"}});
+    releaser.join();
+    EXPECT_TRUE(r.value("ok", false));
+    EXPECT_EQ(fired.load(), 0) << "report must wait the last tick out, not /phx/cancel";
+    phoenix::inference::resetAbortStateForTesting();
+}
+
+TEST_F(AutonomyLoopTest, ReportOutcomeCancelsAfterBudgetThenInteractiveFresh) {
+    phoenix::inference::resetAbortStateForTesting();
+    phoenix::inference::testLastTickIdleWaitMsOverride().store(40);
+    phoenix::inference::testLastTickCancelDrainWaitMsOverride().store(400);
+    phoenix::inference::testLastTickCancelSettleMsOverride().store(1);
+    static std::atomic<int> fired{0};
+    fired.store(0);
+    phoenix::inference::setAbortNotify([]() {
+        fired.fetch_add(1);
+        phoenix::inference::notifyAbortFinished();
+    });
+    const uint64_t start = phoenix::inference::currentAbortEpoch();
+    auto *guard = new phoenix::inference::InFlightGenerateGuard();
+    phoenix::inference::llamaSlotsHeld().store(1);
+    std::thread worker([&]() {
+        while (!phoenix::inference::shouldAbort(start))
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        delete guard;
+        phoenix::inference::llamaSlotsHeld().store(0);
+    });
+    mgr_->assignMission(json{{"enabled", true},
+                             {"id", "report-cancel-1"},
+                             {"goal", "cancel last tick after budget"}});
+    auto r = mgr_->reportMissionOutcome(json{{"goalAchieved", true},
+                                             {"missionId", "report-cancel-1"}});
+    worker.join();
+    EXPECT_TRUE(r.value("ok", false));
+    EXPECT_EQ(fired.load(), 1) << "timeout must /phx/cancel the last tick";
+    EXPECT_EQ(phoenix::inference::inFlightGenerates().load(), 0);
+    EXPECT_EQ(phoenix::inference::llamaSlotsHeld().load(), 0);
+    const uint64_t chatEpoch = phoenix::inference::beginInteractiveEpoch(200);
+    EXPECT_FALSE(phoenix::inference::shouldAbort(chatEpoch))
+        << "next chat must not inherit the report cancel epoch";
+    phoenix::inference::resetAbortStateForTesting();
+}
+
+TEST_F(AutonomyLoopTest, ReportOutcomeRetargetsDefaultAndStopsWhenLastDone) {
+    mgr_->configureAutonomyLoop(json{{"enabled", true},
+                                     {"intervalSec", 1},
+                                     {"maxStepsPerTick", 1},
+                                     {"persistEveryTicks", 10000}});
+    mgr_->assignMission(json{{"enabled", true},
+                             {"id", "keep-live"},
+                             {"goal", "first"}});
+    mgr_->assignMission(json{{"enabled", true},
+                             {"id", "done-soon"},
+                             {"goal", "second"}});
+    EXPECT_EQ(mgr_->missionStatus()["result"].value("defaultMissionId", std::string()),
+              "done-soon");
+    auto r = mgr_->reportMissionOutcome(json{{"goalAchieved", true},
+                                             {"missionId", "done-soon"}});
+    EXPECT_TRUE(r.value("ok", false));
+    EXPECT_EQ(mgr_->missionStatus()["result"].value("defaultMissionId", std::string()),
+              "keep-live");
+    ASSERT_TRUE(mgr_->startAutonomyLoop(json{{"restoreState", false}}).value("ok", false));
+    auto last = mgr_->reportMissionOutcome(json{{"goalAchieved", true},
+                                                {"missionId", "keep-live"}});
+    EXPECT_TRUE(last.value("ok", false));
+    EXPECT_TRUE(mgr_->missionStatus()["result"].value("defaultMissionId", std::string()).empty());
+    for (int i = 0; i < 40 && mgr_->autonomyLoopStatus()["result"].value("running", false); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_FALSE(mgr_->autonomyLoopStatus()["result"].value("running", true));
+}
+
+TEST_F(AutonomyLoopTest, IterateWithoutSessionBindsCurrentMission) {
+    phoenix::memory::ScopedTrainableMemory::instance().resetForTest();
+    mgr_->configureAgi(json{{"enabled", true}, {"dim", 8}});
+    mgr_->assignMission(json{{"enabled", true},
+                             {"id", "scope-bind-1"},
+                             {"goal", "keep isolated"}});
+    auto r = mgr_->iterate(json::object(), json{});
+    ASSERT_TRUE(r.value("ok", false)) << r.dump();
+    EXPECT_EQ(r["result"].value("memoryScope", std::string()), "mission:scope-bind-1");
+    auto plan = mgr_->agiPlan();
+    EXPECT_EQ(plan["result"].value("memoryScope", std::string()),
+              "mission:scope-bind-1");
+}
+
+TEST_F(AutonomyLoopTest, IterateWithoutSessionDoesNotSweepForeignChat) {
+    phoenix::memory::ScopedTrainableMemory::instance().resetForTest();
+    mgr_->observe(buildCognitionAutonomySeedPayload("foreign-chat", "other goal", 0.8),
+                  json{});
+    auto r = mgr_->iterate(json::object(), json{});
+    ASSERT_TRUE(r.value("ok", false)) << r.dump();
+    EXPECT_EQ(r["result"].value("memoryScope", std::string()),
+              "chat:__autonomy_heartbeat__");
+    const auto &sess = r["result"].value("sessions", json::array());
+    for (const auto &s : sess) {
+        EXPECT_NE(s.value("sessionId", std::string()), "foreign-chat");
+    }
 }
 
 TEST_F(AutonomyLoopTest, AssignMissionResetsIterationCounter) {

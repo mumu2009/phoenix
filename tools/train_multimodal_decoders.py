@@ -418,7 +418,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="cuda", help="PyTorch device (cuda/cpu). Prefer cuda on the remote 1680 Super.")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 

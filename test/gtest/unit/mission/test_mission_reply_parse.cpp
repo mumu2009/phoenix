@@ -881,6 +881,46 @@ TEST(MissionReplyParse, PrefixBeforeSelfRepeatCutsSloganLoop) {
   EXPECT_EQ(second, std::string::npos);
 }
 
+TEST(MissionReplyParse, OnesJunkFenceSpin) {
+  const std::string junk20 = "1.1.1.1.1.1.1.1.1.1.";
+  const std::string junk40 =
+      "1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.";
+  const std::string prose =
+      "Isolate chat memory from mission memory. Include SCOPECANARY-MISSION.";
+  EXPECT_TRUE(looksLikeOnesJunk(junk20));
+  EXPECT_TRUE(looksLikeOnesJunk(junk40));
+  EXPECT_TRUE(looksLikeOnesJunk("1. 1. 1. 1. 1. 1. 1. 1."));
+  EXPECT_FALSE(looksLikeOnesJunk(prose));
+  EXPECT_FALSE(looksLikeOnesJunk(
+      "1. Isolate chat from mission.\n2. Keep canary in the draft."));
+  const std::string echo = "Do not omit 1.1.1.1.1.1.1.1.1.1.";
+  EXPECT_TRUE(looksLikeRewriteInstructionEcho(echo));
+  EXPECT_TRUE(looksLikeOnesJunk(echo));
+  EXPECT_TRUE(isOnesJunkAppend("", echo));
+  EXPECT_TRUE(looksLikeRewriteInstructionEcho(onesJunkRewriteHint()));
+  EXPECT_FALSE(looksLikeRewriteInstructionEcho(
+      "Do not omit the night-bus interlock when the uplink is delayed."));
+  EXPECT_TRUE(stripRewriteInstructionParagraphs(echo).empty());
+  EXPECT_NE(stripRewriteInstructionParagraphs(echo + "\n\n" + prose)
+                .find("Isolate chat"),
+            std::string::npos);
+  EXPECT_TRUE(formatMissionResumeSuffix(echo, "").empty());
+  EXPECT_TRUE(isOnesJunkAppend(junk20, "1."));
+  EXPECT_TRUE(isOnesJunkAppend(junk20, "1.1."));
+  EXPECT_TRUE(isOnesJunkAppend("", junk20));
+  EXPECT_FALSE(isOnesJunkAppend(prose, " Write the next checklist bullet."));
+  EXPECT_TRUE(isZeroInformationGrowth(junk20, junk40));
+  EXPECT_FALSE(isZeroInformationGrowth(prose, prose + " Another sentence."));
+  EXPECT_EQ(joinDeliverableText(junk20, "1."), junk20);
+  EXPECT_NE(joinDeliverableText("budget: 2.", "5 billion"), "budget: 2.");
+  const std::string health = inspectDeliverableHealth(junk20);
+  EXPECT_NE(health.find("1.1.1"), std::string::npos);
+  EXPECT_NE(onesJunkRewriteHint().find("canary"), std::string::npos);
+  EXPECT_EQ(onesJunkRewriteHint().find("Do not omit"), std::string::npos);
+  EXPECT_GE(deliverableInformationChars(prose), 20u);
+  EXPECT_EQ(deliverableInformationChars(junk40), 0u);
+}
+
 TEST(MissionReplyParse, ClipGoalKeepsLaterChapters) {
   std::string goal = "Task Name\nHelios\n\nHard Constraints\nNo fiction.\n\n";
   for (int n = 1; n <= 15; ++n) {

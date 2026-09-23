@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <numeric>
 #include <sstream>
+#include <unordered_map>
 
 namespace phoenix {
 namespace graph {
@@ -33,64 +35,107 @@ DiffusionSummary GraphDiffusionSummarizer::summarize(
 
   const size_t n = ids.size();
   std::vector<double> scores(n, 0.0);
-  if (!seedScores.empty() && seedScores.size() == n) {
+  const bool explicitSeeds = !seedScores.empty() && seedScores.size() == n;
+  if (explicitSeeds)
     scores = seedScores;
-  } else {
+  else
     std::fill(scores.begin(), scores.end(), 1.0 / static_cast<double>(n));
-  }
 
-  // Normalize seed scores to a probability distribution (the teleport/personalization).
+  // Normalize seed scores to a probability distribution (the teleport).
+  // Explicit all-zero seeds stay zero: do not fall back to uniform activation,
+  // which would light up every memory and look like a global variable.
   double total = std::accumulate(scores.begin(), scores.end(), 0.0);
   std::vector<double> seedDist = scores;
   if (total > 0.0) {
     for (auto &s : seedDist)
       s /= total;
-  } else {
+  } else if (!explicitSeeds) {
     std::fill(seedDist.begin(), seedDist.end(), 1.0 / static_cast<double>(n));
+  } else {
+    std::fill(seedDist.begin(), seedDist.end(), 0.0);
   }
 
-  // Pre-normalize adjacency weights per source node. The direction-weighted
-  // magnitude is computed once per edge and reused for both the wsum
-  // accumulation and the final normalized weight (previously recomputed).
-  std::vector<std::vector<std::pair<size_t, double>>> normalized(n);
+  // Raw unsigned weights (direction-scaled) plus two transitions:
+  // random-walk (row-normalized) and GCN (symmetric D^{-1/2} A D^{-1/2}
+  // with a self-loop). Dense / high-degree graphs mix toward GCN so
+  // hubs absorb less query mass. Teleport grows with seed entropy:
+  // a flat query-conditioned seed walks less.
+  std::vector<std::vector<std::pair<size_t, double>>> raw(n);
+  std::vector<double> deg(n, 1.0);
+  double edgeSum = 0.0;
+  int edgeN = 0;
   for (size_t i = 0; i < n; ++i) {
     if (i >= adjacency.size())
       continue;
-    std::vector<std::pair<size_t, double>> weighted;
-    weighted.reserve(adjacency[i].size());
-    double wsum = 0.0;
+    raw[i].reserve(adjacency[i].size());
     for (const auto &edge : adjacency[i]) {
       size_t to = std::get<0>(edge);
+      if (to >= n)
+        continue;
       double w = std::get<1>(edge);
       int direction = std::get<2>(edge);
       if (direction == 1)
-        w *= 0.85;  // inbound
+        w *= 0.85;
       else if (direction == 2)
-        w *= 1.15;  // outbound
+        w *= 1.15;
       w = std::abs(w);
-      if (w > 0.0) {
-        wsum += w;
-        weighted.emplace_back(to, w);
-      }
-    }
-    if (wsum <= 0.0)
-      continue;
-    normalized[i].reserve(weighted.size());
-    for (const auto &wp : weighted) {
-      if (wp.first < n)
-        normalized[i].push_back({wp.first, wp.second / wsum});
+      if (w <= 0.0)
+        continue;
+      raw[i].push_back({to, w});
+      deg[i] += w;
+      edgeSum += w;
+      ++edgeN;
     }
   }
+  std::vector<std::vector<std::pair<size_t, double>>> walk(n);
+  std::vector<std::vector<std::pair<size_t, double>>> gcn(n);
+  for (size_t i = 0; i < n; ++i) {
+    double wsum = deg[i] - 1.0;
+    walk[i].reserve(raw[i].size());
+    gcn[i].reserve(raw[i].size());
+    for (const auto &wp : raw[i]) {
+      if (wsum > 0.0)
+        walk[i].push_back({wp.first, wp.second / wsum});
+      const double den = std::sqrt(deg[i] * deg[wp.first]);
+      if (den > 0.0)
+        gcn[i].push_back({wp.first, wp.second / den});
+    }
+  }
+  const double meanDeg =
+      edgeN > 0 ? edgeSum / static_cast<double>(n) : 0.0;
+  const double hubMix = meanDeg / (meanDeg + 4.0);
+  double entropy = 0.0;
+  for (double s : seedDist) {
+    if (s > 1e-15)
+      entropy -= s * std::log(s);
+  }
+  const double hNorm =
+      n > 1 ? entropy / std::log(static_cast<double>(n)) : 0.0;
+  double teleport = 1.0 - damping;
+  if (teleport < 0.05)
+    teleport = 0.05;
+  if (teleport > 0.50)
+    teleport = 0.50;
+  teleport *= 1.0 + std::max(0.0, std::min(1.0, hNorm));
+  if (teleport > 0.40)
+    teleport = 0.40;
+  const double walkKeep = 1.0 - teleport;
 
   scores = seedDist;
   const double kConvergenceTol = 1e-9;
   for (int r = 0; r < rounds; ++r) {
     std::vector<double> next(n, 0.0);
     for (size_t i = 0; i < n; ++i) {
-      next[i] = (1.0 - damping) * seedDist[i];
-      for (const auto &edge : normalized[i]) {
-        next[edge.first] += damping * scores[i] * edge.second;
-      }
+      next[i] = teleport * seedDist[i];
+      next[i] += walkKeep * hubMix * (scores[i] / deg[i]);
+    }
+    for (size_t i = 0; i < n; ++i) {
+      const double rwScale = walkKeep * (1.0 - hubMix) * scores[i];
+      for (const auto &edge : walk[i])
+        next[edge.first] += rwScale * edge.second;
+      const double gcnScale = walkKeep * hubMix * scores[i];
+      for (const auto &edge : gcn[i])
+        next[edge.first] += gcnScale * edge.second;
     }
     // Power iteration converges geometrically; stop early when the L1 step is
     // negligible so lightly-connected graphs skip the remaining rounds.

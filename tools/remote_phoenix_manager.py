@@ -20,7 +20,15 @@ Requirements on the remote (will try to auto-install if internet is available):
   torch, transformers, accelerate, datasets, sentence-transformers,
   Pillow, librosa / soundfile, scipy, psutil, numpy, requests
 
-Image training (pretrain --modality image):
+LEGACY WARNING
+--------------
+This manager's ViT / wav2vec contrastive path is HISTORICAL.  For the current
+Phoenix multimodal stack (LLaVA-1.5 + Qwen2-Audio + llama3.1 unit-query align)
+use tools/remote_training_orchestrator.py (default --pipeline multimodal) and
+README_REMOTE_TRAINING.md instead.  Do not treat vit-g / ViT-base as the active
+encoder.
+
+Image training (pretrain --modality image) [LEGACY]:
   - Streams image+caption datasets from HuggingFace (default: COCO, Flickr30k,
     WikiArt via datasets if available).
   - Loads a compact vision encoder (default: google/vit-base-patch16-224 or
@@ -29,7 +37,7 @@ Image training (pretrain --modality image):
     matches --target-dim.
   - Saves checkpoints to runtime_store/models/phoenix_remote/image/
 
-Speech training (pretrain --modality speech):
+Speech training (pretrain --modality speech) [LEGACY]:
   - Streams audio+transcript datasets from HuggingFace (default: librispeech_asr,
     common_voice_11_0, voxpopuli) and trains a contrastive audio-text pipeline.
   - Base audio encoder: facebook/wav2vec2-base-960h or facebook/wav2vec2-base.

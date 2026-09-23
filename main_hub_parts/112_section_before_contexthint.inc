@@ -314,6 +314,18 @@
         inferenceOptions["timeoutMs"].is_number_integer()) {
       timeoutMs = std::max(1000, inferenceOptions["timeoutMs"].get<int>());
     }
+    /* Short user ask (≤32 tokens) must not inherit the 90 min mission
+       llama timeout. Long generate (mission / autonomy / maxTokens>32 /
+       deliberateMaxTokens≥64) keeps the caller budget. */
+    if (!phoenix::v7::keepCallerGenerateBudget(maxTokens, inferenceOptions)) {
+      int cap = phoenix::v7::shortGenerateTimeoutMs(maxTokens);
+      try {
+        cap = phoenix::cfgOr<int>("chat.generateTimeoutMs", cap);
+      } catch (...) {
+      }
+      cap = std::max(15000, std::min(cap, 120000));
+      timeoutMs = std::min(timeoutMs, cap);
+    }
     if (config_.llamaCppBaseUrl.empty()) {
       return json{{"ok", false}, {"error", "llamaCppBaseUrl not configured"},
                   {"provider", "llamacpp"}};
@@ -337,7 +349,19 @@
     const bool lowPriority =
         inferenceOptions.is_object() &&
         inferenceOptions.value("lowPriority", false);
-    const uint64_t llamaEpoch = phoenix::inference::currentAbortEpoch();
+    /* Interactive chat snapshots AFTER last-tick abort drains: inFlight=0,
+       /phx/cancel idle, and the llama slot free. Snapshotting first let
+       the leftover mission-deliberate abort empty the first ask.
+       Mission ticks keep the pre-call epoch so requestAbort still
+       unblocks them. */
+    uint64_t llamaEpoch = phoenix::inference::currentAbortEpoch();
+    if (lowPriority &&
+        phoenix::inference::blockLowPriorityGenerates().load(
+            std::memory_order_acquire)) {
+      return json{{"ok", false},
+                  {"error", "mission-complete"},
+                  {"provider", "llamacpp"}};
+    }
     if (!lowPriority)
       llamaChatWaiters_.fetch_add(1, std::memory_order_relaxed);
     struct NotifyOnExit {
@@ -348,37 +372,94 @@
       std::unique_lock<std::mutex> slotLock(llamaSlotMu_);
       if (!lowPriority)
         llamaChatWaiters_.fetch_sub(1, std::memory_order_relaxed);
+      if (lowPriority &&
+          phoenix::inference::blockLowPriorityGenerates().load(
+              std::memory_order_acquire)) {
+        return json{{"ok", false},
+                    {"error", "mission-complete"},
+                    {"provider", "llamacpp"}};
+      }
       if (lowPriority) {
-        while (!llamaSlotCv_.wait_for(
-            slotLock, std::chrono::milliseconds(250), [this, llamaEpoch] {
-              return phoenix::inference::shouldAbort(llamaEpoch) ||
-                     llamaChatWaiters_.load(std::memory_order_relaxed) == 0;
-            })) {
+        int waited = 0;
+        while (waited < 60000 &&
+               !llamaSlotCv_.wait_for(
+                   slotLock, std::chrono::milliseconds(250),
+                   [this, llamaEpoch] {
+                     return phoenix::inference::shouldAbort(llamaEpoch) ||
+                            llamaChatWaiters_.load(std::memory_order_relaxed) ==
+                                0;
+                   })) {
+          waited += 250;
         }
         if (phoenix::inference::shouldAbort(llamaEpoch)) {
           return json{{"ok", false},
                       {"error", "aborted"},
                       {"provider", "llamacpp"}};
         }
+      } else {
+        /* Only drain leftover /phx/cancel. Waiting for inFlight=0 here
+           ate the 180s client timeout while the last tick (or another
+           chat) still generated, so report→ask returned empty. Queue
+           for the slot instead; snapshot after acquire. */
+        int drainWaited = 0;
+        while (drainWaited < 8000 &&
+               phoenix::inference::pendingCancelNotifies().load(
+                   std::memory_order_acquire) > 0) {
+          llamaSlotCv_.wait_for(slotLock, std::chrono::milliseconds(50));
+          drainWaited += 50;
+        }
       }
       const int maxSlots = llamaMaxParallelSlots();
-      while (!llamaSlotCv_.wait_for(
-          slotLock, std::chrono::milliseconds(250),
-          [this, maxSlots, llamaEpoch] {
-            return phoenix::inference::shouldAbort(llamaEpoch) ||
-                   llamaSlotsInUse_.load(std::memory_order_relaxed) < maxSlots;
-          })) {
+      const int slotWaitCap = lowPriority ? 60000 : 180000;
+      int slotWaited = 0;
+      while (slotWaited < slotWaitCap &&
+             !llamaSlotCv_.wait_for(
+                 slotLock, std::chrono::milliseconds(250),
+                 [this, maxSlots, llamaEpoch, lowPriority] {
+                   if (lowPriority &&
+                       phoenix::inference::shouldAbort(llamaEpoch))
+                     return true;
+                   return llamaSlotsInUse_.load(std::memory_order_relaxed) <
+                          maxSlots;
+                 })) {
+        slotWaited += 250;
       }
-      if (phoenix::inference::shouldAbort(llamaEpoch)) {
+      if (lowPriority && phoenix::inference::shouldAbort(llamaEpoch)) {
         return json{{"ok", false},
                     {"error", "aborted"},
                     {"provider", "llamacpp"}};
       }
+      if (lowPriority &&
+          phoenix::inference::blockLowPriorityGenerates().load(
+              std::memory_order_acquire)) {
+        return json{{"ok", false},
+                    {"error", "mission-complete"},
+                    {"provider", "llamacpp"}};
+      }
+      if (llamaSlotsInUse_.load(std::memory_order_relaxed) >= maxSlots) {
+        return json{{"ok", false},
+                    {"error", "llama-slot-busy"},
+                    {"retryAfterMs", 2000},
+                    {"provider", "llamacpp"}};
+      }
       llamaSlotsInUse_.fetch_add(1, std::memory_order_relaxed);
+      phoenix::inference::llamaSlotsHeld().fetch_add(1,
+                                                     std::memory_order_acq_rel);
+      if (!lowPriority)
+        llamaEpoch = phoenix::inference::currentAbortEpoch();
     }
+    /* Only settle after a leftover /phx/cancel. Report no longer
+       aborts the last tick; sleeping 2s here used to pile onto the
+       180s ask while llama was still owned by that generate. */
+    if (!lowPriority &&
+        phoenix::inference::pendingCancelNotifies().load(
+            std::memory_order_acquire) > 0)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2000));
     struct ReleaseSlot {
       GatewayServer *self;
       ~ReleaseSlot() {
+        phoenix::inference::llamaSlotsHeld().fetch_sub(
+            1, std::memory_order_acq_rel);
         self->llamaSlotsInUse_.fetch_sub(1, std::memory_order_relaxed);
         self->llamaSlotCv_.notify_all();
       }

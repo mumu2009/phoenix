@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -140,20 +141,142 @@ inline void ccmRemember(const std::string &storePath,
     ccmRememberUnit(storePath, sourceTag, text, "text", {});
 }
 
-/* Recall the top-k most similar entries for a query (excludes nothing -
-   cross-context by design; the caller decides how to frame it). */
+inline std::string chatSourceTag(const std::string &sessionId) {
+    if (sessionId.empty())
+        return {};
+    if (sessionId.rfind("chat:", 0) == 0)
+        return sessionId;
+    return std::string("chat:") + sessionId;
+}
+
+/* Live chat increments stay in their own session. Mission / corpus /
+   finished-mission tags may still cross. An empty callerTag is a
+   mission-style recall: skip every chat:* deposit. */
+inline bool ccmAllowForCaller(const CcmEntry &e, const std::string &callerTag) {
+    if (e.sourceTag.rfind("chat:", 0) != 0)
+        return true;
+    if (callerTag.rfind("chat:", 0) != 0)
+        return false;
+    return e.sourceTag == callerTag;
+}
+
+inline constexpr const char kScopeCanaryPrefix[] = "SCOPECANARY-";
+inline constexpr size_t kScopeCanaryPrefixLen = 12;
+
+inline size_t scopeCanaryTokenEnd(const std::string &s, size_t pos) {
+    size_t end = pos + kScopeCanaryPrefixLen;
+    while (end < s.size()) {
+        const unsigned char c = static_cast<unsigned char>(s[end]);
+        if (!(std::isalnum(c) || c == '-' || c == '_'))
+            break;
+        ++end;
+    }
+    return end;
+}
+
+inline bool isMissionScopeCanary(const std::string &tok) {
+    return tok.rfind("SCOPECANARY-MISSION-", 0) == 0;
+}
+
+inline bool isChatScopeCanary(const std::string &tok) {
+    return tok.rfind("SCOPECANARY-CHAT-", 0) == 0;
+}
+
+/* Chat must not inject or echo a just-finished mission canary.
+   SCOPECANARY-MISSION-* is always foreign on the chat path.
+   SCOPECANARY-CHAT-* stays only when the current user text asked for it. */
+inline bool isForeignScopeCanary(const std::string &tok,
+                                 const std::string &ownUserText) {
+    if (tok.size() < kScopeCanaryPrefixLen ||
+        tok.compare(0, kScopeCanaryPrefixLen, kScopeCanaryPrefix) != 0)
+        return false;
+    if (isMissionScopeCanary(tok))
+        return true;
+    if (isChatScopeCanary(tok))
+        return ownUserText.find(tok) == std::string::npos;
+    return ownUserText.find(tok) == std::string::npos;
+}
+
+/* Drop dialog increments that belong to another chat session, and any
+   line that still carries SCOPECANARY-MISSION-*. Used on contextHint /
+   graph leftovers so a stale frontend dump cannot put B/C or a finished
+   mission canary into the next generate context. */
+inline std::string retainOwnChatIncrements(const std::string &text,
+                                           const std::string &ownUserText) {
+    if (text.empty())
+        return text;
+    std::istringstream in(text);
+    std::ostringstream out;
+    std::string line;
+    bool wrote = false;
+    while (std::getline(in, line)) {
+        if (line.find("[Cross-session history]") != std::string::npos)
+            continue;
+        bool dropForeign = false;
+        for (size_t pos = line.find(kScopeCanaryPrefix);
+             pos != std::string::npos;
+             pos = line.find(kScopeCanaryPrefix, pos + kScopeCanaryPrefixLen)) {
+            const size_t end = scopeCanaryTokenEnd(line, pos);
+            const std::string tok = line.substr(pos, end - pos);
+            if (isForeignScopeCanary(tok, ownUserText)) {
+                dropForeign = true;
+                break;
+            }
+        }
+        if (dropForeign)
+            continue;
+        if (wrote)
+            out << '\n';
+        out << line;
+        wrote = true;
+    }
+    return out.str();
+}
+
+/* Remove foreign SCOPECANARY-* tokens. Covers CHAT and MISSION: prompt,
+   CCM captions, units, and the visible reply. Mission canaries are
+   always erased on the chat path. */
+inline std::string eraseForeignChatCanaries(const std::string &text,
+                                            const std::string &ownUserText) {
+    if (text.empty())
+        return text;
+    std::string out = text;
+    for (size_t pos = 0; (pos = out.find(kScopeCanaryPrefix, pos)) !=
+                         std::string::npos;) {
+        const size_t end = scopeCanaryTokenEnd(out, pos);
+        const std::string tok = out.substr(pos, end - pos);
+        if (isForeignScopeCanary(tok, ownUserText)) {
+            out.erase(pos, end - pos);
+            continue;
+        }
+        pos = end;
+    }
+    return out;
+}
+
+/* Recall the top-k most similar entries. callerTag isolates chat↔chat:
+   chat:A never receives chat:B/C dialog increments (the soak canary hole).
+   Chat callers also lose SCOPECANARY-MISSION-* from mission deposits. */
 inline std::vector<CcmEntry> ccmRecall(const std::string &storePath,
-                                       const std::string &query, size_t k = 3) {
+                                       const std::string &query, size_t k = 3,
+                                       const std::string &callerTag = {}) {
     const auto entries = ccmLoad(storePath);
     std::vector<std::pair<double, CcmEntry>> scored;
-    for (const auto &e : entries)
+    for (const auto &e : entries) {
+        if (!ccmAllowForCaller(e, callerTag))
+            continue;
         scored.push_back({ccmOverlap(query, e.text), e});
+    }
     std::sort(scored.begin(), scored.end(),
               [](const auto &a, const auto &b) { return a.first > b.first; });
     std::vector<CcmEntry> out;
+    const bool chatCaller = callerTag.rfind("chat:", 0) == 0;
     for (size_t i = 0; i < scored.size() && i < k; ++i) {
         if (scored[i].first <= 0.05) break;
-        out.push_back(scored[i].second);
+        CcmEntry e = scored[i].second;
+        if (chatCaller)
+            e.text = eraseForeignChatCanaries(e.text, query);
+        out.push_back(std::move(e));
     }
     return out;
 }

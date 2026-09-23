@@ -37,6 +37,8 @@ using ioctl_arg_t = unsigned long;
 #include "inference_backend_router.hpp"
 #include "inference_unit_pipeline.hpp"
 #include "instance_isolation.hpp"
+#include "memory_scope.hpp"
+#include "scoped_trainable_memory.hpp"
 #include "mission_reply_parse.hpp"
 #include "mission_unit_workflow.hpp"
 

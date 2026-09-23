@@ -12,11 +12,12 @@
 | | 即时感知（sensation/instinct 评估） | `activeFor(contextTag)`：source 无 `:` = 全局可见；有前缀只对本 context 可见（v8.x 新增） |
 | | 认知迭代输入（pain/novelty/surprise） | source 带 `mission:<id>:` / `chat:<session>:` 前缀（v8.x 新增） |
 | | 输出缓存/循环守卫 | `workspaceCache` 按 scope 键 ✓ |
-| **跨 context 记忆（唯一交流点）** | GNN 图（outline/经验回灌） | 共享（长期不变图）✓ |
+| **可训练热状态（严格分桶）** | RNN/LSTM 隐状态、concat 计数、concept matrix 热更新、GNN 在线边/权重增量、dialog overlay、cognition hier 热路径、graph hint、mission GNN summary | `MemoryScope{Chat\|Mission, id}` → `ScopedTrainableMemory` 一套实例 ✓ |
+| **跨 context 记忆（唯一交流点）** | GNN 图（outline/经验回灌） | 共享（长期不变图，**只读检索**）✓ |
 | | mission_experience（任务级经验） | 共享，检索注入 ✓ |
 | | **cross_context_memory（会话级，v8.x 新增）** | 共享：chat 每轮沉积摘要、mission 完成沉积摘要；任何 context 用 ccmRecall 检索注入 |
 | | world model store | 共享（RAG 证据库）✓ |
-| | AGI 学习器 / episodic / subconscious 人格 | **声明为跨 context 记忆层**：学习到的策略与人格全局共享（不是串扰，是设计） |
+| | AGI 在线更新（observeRewarded / consolidate） | **按 MemoryScope 各一份**（从进程模板 clone）；人格 / 官方经验库仍只读共享 |
 
 ## 2. 已验证的串扰点与修复
 
@@ -25,8 +26,8 @@
    chat 迭代再也看不到任务压力，mission 迭代看不到 chat 噪声。
 2. **novelty/surprise 信号混用**（已修）：`world-uncertainty` →
    `<ctxTag>:novelty`；AGI 前向模型惊喜 → `<ctxTag>:surprise`。
-3. **chat 与 mission 共用 iterate 状态**：AGI 学习器/episodic 保留共享（见上表
-   声明为跨 context 层——策略学习全局受益）；即时评估已隔离。
+3. **chat 与 mission 共用 iterate 状态**（已修）：隐状态 / 在线 AGI 权重按
+   `MemoryScope` 分桶；`/api/chat` 忽略 stray `missionId`（除非 `memoryKind=mission`）。
 4. **deliberator prompt 与 chat graphContext**：各自独立组装（mission 用
    goal/workspace/outline/经验；chat 用 graphContext 管线），互不读取对方活状态 ✓。
 
@@ -52,7 +53,8 @@
   各 context 只评估自己的压力；元心跳（空 contextTag）看全部压力作为跨任务调度信号。
 - **API**：status 返回 `missions` 数组 + `defaultMissionId`；report/replicate/file/lineage
   接受 `missionId`（缺省 = 默认任务）；deliberator 从 scope 解析 missionId 并注入工具上下文。
-- **共享（跨 context 层）**：AGI 学习器、genome 基线、GNN 图、经验库、lineage 审计。
+- **共享（跨 context 层，只读）**：官方 ingest 的长期 GNN、经验库召回、CCM、genome 基线。
+- **可训练热状态**：`MemoryScope` 分桶；mission complete/fail 与 `/context/reset` 释放该桶，禁止泄漏到下一个 goal / 新 chat。
 
 ## 5. 验收要点（测试者）
 

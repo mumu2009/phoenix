@@ -48,8 +48,9 @@ from typing import Any, Dict, Optional
 if not os.environ.get("PYTHONIOENCODING"):
     os.environ["PYTHONIOENCODING"] = "utf-8"
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]  # .../v6.0Alixander
-TOOLS_DIR = Path(__file__).resolve().parent           # .../phoenix/tools
+# phoenix/tools/this_file.py -> parents[1] == phoenix/
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+TOOLS_DIR = Path(__file__).resolve().parent
 
 DEFAULT_IMAGE_DATA = PROJECT_ROOT / "data" / "images"
 DEFAULT_AUDIO_DATA = PROJECT_ROOT / "data" / "audio"
@@ -339,8 +340,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--parallel-train",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Train image and audio decoders in parallel (default: True)",
+        default=False,
+        help="Train image and audio decoders in parallel (default: False; keep False on 6 GB GPUs)",
     )
 
     # Encoder model selection
@@ -391,7 +392,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # Training hyperparameters
-    parser.add_argument("--device", default="cpu", help="PyTorch device (cpu/cuda)")
+    parser.add_argument(
+        "--device",
+        default="cuda",
+        help="PyTorch device (cuda/cpu). On a ~6 GB CUDA GPU use cuda with --no-parallel-train.",
+    )
     parser.add_argument("--encoder-port", type=int, default=DEFAULT_ENCODER_PORT)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=8)

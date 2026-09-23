@@ -491,7 +491,10 @@
     "autoloadDir": "./runtime_store/addons",
     "libraries": [],
     "offerMinScore": 0.35,
-    "offerMax": 6
+    "offerMax": 6,
+    "security": {
+      "enabled": false
+    }
   },
   "plugin": {
     "directory": "plugins",
@@ -677,7 +680,7 @@
       "tinyllamaBaseUrl": "http://192.168.1.104:8086",
       "tinyllamaTimeoutMs": 5000,
       "tinyllamaEnabled": true,
-      "conceptMatrixEnabled": true,
+      "conceptMatrixEnabled": false,
       "conceptMatrixClearPerRequest": true,
       "ggufModelsDir": "GGUF_models",
       "externalBackendStyleSim": false,
@@ -818,6 +821,130 @@
       "emotionEnabled": true,
       "audioVideoEncDecEnabled": true,
       "schedulerName": "ahead_default"
+    }
+  },
+  "runtime_opt": {
+    "enabled": true,
+    "profile": "auto",
+    "boardCapNote": "RDK X5 192.168.1.107 wlan0: 6.9Gi RAM, llama ~4.4Gi RSS + ~1.15Gi swap, ulimit -l ~885MiB, VmLck=0, 8082 bind 127.0.0.1 --parallel 1. mlock only small hot buffers, hard cap 64MiB; llamaServerFlag false (never --mlock a live llama). cgroup v2 needs root/sudo -n; sunrise write fail -> oom_score_adj only; llama not in kill cgroup. Watchdog never LAN-probes :8082.",
+    "process_guard": {
+      "enabled": "auto",
+      "windowsJobObject": true,
+      "linuxCgroupV2": true,
+      "cgroupRequireRoot": true,
+      "cgroupDegradeToOom": true,
+      "killTreeOnClose": false,
+      "neverScoreLlamaAsExpendable": true,
+      "oomScoreAdj": {
+        "llama": -200,
+        "inference": -200,
+        "gateway": 300,
+        "frontend": 400,
+        "helper": 500
+      }
+    },
+    "mlock": {
+      "enabled": "auto",
+      "hotWeights": true,
+      "sharedBuffers": true,
+      "degradeOnFail": true,
+      "maxBytes": 4194304,
+      "hardCapBytes": 67108864,
+      "llamaServerFlag": false
+    },
+    "speculative": {
+      "enabled": false,
+      "mode": "llama_server_draft",
+      "draftModel": "",
+      "draftMax": 4,
+      "draftMin": 2,
+      "draftPMin": 0.6,
+      "forbidSecondServerWhenParallel1": true,
+      "neverCurlHealth": true,
+      "neverRestartLiveLlama": true
+    },
+    "watchdog": {
+      "enabled": true,
+      "restartDeadGateway": true,
+      "restartDeadFrontend": true,
+      "leaveLlamaIfAlive": true,
+      "neverKillLlama": true,
+      "neverCurlLlamaHealth": true,
+      "neverLanProbeLlama": true,
+      "rssFuseGatewayOnly": true
+    },
+    "model_router": {
+      "enabled": false,
+      "infoOnly": true,
+      "neverDualSlot": true,
+      "longTaskChars": 4000,
+      "organBackends": {
+        "caption": "tinyllama",
+        "summary": "tinyllama",
+        "mission": "llama",
+        "chat": "auto"
+      }
+    },
+    "shm_ipc": {
+      "enabled": "auto",
+      "name": "phoenix_runtime_opt",
+      "bytes": 65536,
+      "fallback": "file"
+    },
+    "hooks": {
+      "hierarchicalMemoryReserve": true,
+      "valenceArousalWireOnly": true,
+      "orchestrationHooks": true,
+      "reuseSecurityPlugin": true,
+      "dannLinkIfPresent": true,
+      "noUncontrolledEvolution": true
+    },
+    "survivability": {
+      "enabled": "auto",
+      "diskFreeLowPct": 10,
+      "swapHighPct": 70,
+      "swapCriticalPct": 85,
+      "maxInFlightFloor": 1,
+      "neverTouchLlama": true
+    },
+    "kairos": {
+      "enabled": "auto",
+      "heavySkipPressure": 0.85,
+      "minTickMs": 200,
+      "maxTickMs": 5000
+    },
+    "will_gate": {
+      "enabled": true
+    },
+    "hivemind": {
+      "enabled": "auto",
+      "neverDualSlot": true,
+      "cacheTtlSec": 120
+    },
+    "valence_bias": {
+      "enabled": false,
+      "maxTempDelta": 0.15,
+      "maxTopPDelta": 0.05
+    },
+    "scope_cache": {
+      "enabled": "auto",
+      "maxEntries": 64
+    },
+    "exomem": {
+      "enabled": "auto",
+      "sandboxHelpers": true
+    },
+    "security_agg": {
+      "enabled": true,
+      "maxAlerts": 32
+    },
+    "host_tune": {
+      "enabled": "auto",
+      "cpuAffinity": true,
+      "nice": true,
+      "hugepageProbe": true,
+      "threadCap": 4,
+      "neverTuneLlama": true
     }
   }
 }

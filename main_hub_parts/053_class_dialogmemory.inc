@@ -151,7 +151,8 @@ private:
   static std::string scopeKey(const std::string &sessionId) {
     if (sessionId.empty())
       return std::string();
-    return "s" + sha1Hex(sessionId);
+    const auto scope = phoenix::memory::parseMemoryScope(sessionId);
+    return "s" + sha1Hex(scope.key());
   }
 
   std::shared_ptr<KeyValueStore> store_;

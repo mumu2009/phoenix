@@ -13,6 +13,10 @@ public:
   }
 
   bool reset(const std::string &sessionId) {
+    try {
+      phoenix::memory::ScopedTrainableMemory::instance().releaseChat(sessionId);
+    } catch (...) {
+    }
     std::cout << "[gateway-context] reset: session " << sessionId << std::endl;
     // In a full implementation, this would extract facts and trigger
     // learnUnknownFacts For testing, we just simulate learning

@@ -42,7 +42,7 @@ public:
       for (auto &s : bench) {
         auto res = probe(s.get<std::string>());
         if (res.value("quality", 0.0) < 0.25) {
-          auto words = tokenize(res.value("reply", ""));
+          auto words = tokenizeKeepingStops(res.value("reply", ""));
           auto seeds = pool_->getActive()->runtime()->mapWordsToMemes(words);
           std::vector<std::string> ids;
           for (auto &kv : seeds)

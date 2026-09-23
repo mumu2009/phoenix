@@ -15,6 +15,7 @@
 #include <fstream>
 #include <future>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <unordered_set>
 
@@ -55,6 +56,18 @@ std::string lowerLocal(std::string value) {
 void padActionEmbedding(std::vector<float> &emb, size_t targetDim) {
     while (emb.size() < targetDim) emb.push_back(0.0f);
     if (emb.size() > targetDim) emb.resize(targetDim);
+}
+
+/* Plan / ingest writes go to a MemoryScope bucket.  The process
+   agiController_ is only the clone template — never the live learner. */
+phoenix::memory::MemoryScope resolveAgiWriteScope(const json &payload) {
+    auto s = phoenix::memory::memoryScopeFromPayload(payload);
+    if (s.id != "anonymous")
+        return s;
+    const auto cur = phoenix::memory::currentMemoryScope();
+    if (cur.id != "anonymous")
+        return cur;
+    return s;
 }
 
 std::vector<float> oneHotEmbedding(size_t index, size_t dim) {
@@ -660,8 +673,24 @@ CognitionAutonomyManager::CognitionAutonomyManager()
 CognitionAutonomyManager::~CognitionAutonomyManager() {
     /* never leave the heartbeat thread running */
     loopStop_.store(true, std::memory_order_release);
+    phoenix::inference::requestAbort();
     if (loopThread_.joinable()) loopThread_.join();
     unregisterFromSafetyRegistry();
+}
+
+void CognitionAutonomyManager::retargetDefaultMissionLocked() {
+    if (!defaultMissionId_.empty()) {
+        auto it = missions_.find(defaultMissionId_);
+        if (it != missions_.end() && it->second.active())
+            return;
+    }
+    defaultMissionId_.clear();
+    for (const auto &kv : missions_) {
+        if (kv.second.active()) {
+            defaultMissionId_ = kv.first;
+            return;
+        }
+    }
 }
 
 json CognitionAutonomyManager::status() const {
@@ -704,6 +733,8 @@ json CognitionAutonomyManager::status() const {
                                  {"mixedModalInputSize", inputBuffer_.size()},
                                  {"mixedModalOutputSize", outputQueue_.size()},
                                  {"channels", channelRegistry_.toJson()},
+                                 {"trainableMemory",
+                                  phoenix::memory::ScopedTrainableMemory::instance().status()},
                                  {"sessions", sessions}}}};
 }
 
@@ -951,6 +982,10 @@ json CognitionAutonomyManager::observe(const json &payload, const json &worldSta
         lock.unlock();
         return status();
     }
+    auto obsScope = phoenix::memory::memoryScopeFromPayload(payload);
+    if (obsScope.id == "anonymous")
+        obsScope = phoenix::memory::parseMemoryScope(sessionId);
+    phoenix::memory::MemoryScopeGuard obsGuard(obsScope);
 
     json reasoningAgenda = payload.value("reasoningAgenda", json::object());
     json responsePlan = payload.value("responsePlan", json::object());
@@ -960,10 +995,19 @@ json CognitionAutonomyManager::observe(const json &payload, const json &worldSta
     if (verifyScore <= 0.0 && payload.contains("verify") && payload["verify"].is_object()) {
         verifyScore = payload["verify"].value("score", 0.0);
     }
-    auto &record = sessions_[sessionId];
+    const std::string recordKey = obsScope.key();
+    if (recordKey != sessionId) {
+        auto oldIt = sessions_.find(sessionId);
+        if (oldIt != sessions_.end() && sessions_.find(recordKey) == sessions_.end()) {
+            sessions_[recordKey] = std::move(oldIt->second);
+            sessions_.erase(oldIt);
+        }
+    }
+    auto &record = sessions_[recordKey];
     if (!record.is_object()) {
         record = json::object();
     }
+    record["memoryScope"] = recordKey;
     const int previousObservations = record.value("observations", 0);
     const double previousAverageUncertainty = record.value("avgUncertainty", uncertainty);
 
@@ -1309,14 +1353,43 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
         requestedSessionId = trimLocal(worldState.value("sessionId", std::string()));
     }
 
+    auto iterMemScope = phoenix::memory::memoryScopeFromPayload(payload);
+    if (iterMemScope.id == "anonymous" && requestedSessionId.empty()) {
+        /* loopRun with no session must not train chat:anonymous or the
+           first leftover shouldIterate session (that is how a Helios
+           goal leaked into an unrelated chat).  Bind the current
+           running mission; if none, the heartbeat bucket only. */
+        std::string mid;
+        if (missionEnabled_) {
+            for (const auto &kv : missions_) {
+                if (!kv.second.active())
+                    continue;
+                mid = kv.first;
+                break;
+            }
+        }
+        if (!mid.empty())
+            iterMemScope = phoenix::memory::makeMissionScope(mid);
+        else
+            iterMemScope = phoenix::memory::makeChatScope("__autonomy_heartbeat__");
+    } else if (iterMemScope.id == "anonymous" && !requestedSessionId.empty()) {
+        iterMemScope = phoenix::memory::parseMemoryScope(requestedSessionId);
+    }
+    phoenix::memory::MemoryScopeGuard iterScopeGuard(iterMemScope);
+
     std::vector<std::string> targetSessions;
     if (!requestedSessionId.empty()) {
-        targetSessions.push_back(requestedSessionId);
+        targetSessions.push_back(iterMemScope.key());
+        if (iterMemScope.key() != requestedSessionId)
+            targetSessions.push_back(requestedSessionId);
     } else {
-        for (const auto &entry : sessions_) {
-            if (entry.second.value("shouldIterate", false)) {
-                targetSessions.push_back(entry.first);
-            }
+        targetSessions.push_back(iterMemScope.key());
+        if (iterMemScope.id != iterMemScope.key())
+            targetSessions.push_back(iterMemScope.id);
+        if (iterMemScope.kind == phoenix::memory::MemoryKind::Mission) {
+            const std::string prefixed = std::string("mission:") + iterMemScope.id;
+            if (prefixed != iterMemScope.key())
+                targetSessions.push_back(prefixed);
         }
     }
 
@@ -1500,7 +1573,9 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
        sensations (plus globals).  Mission pain stays out of chat mood and
        chat signals stay out of mission appraisal; the shared cross-context
        layers (AGI learner / graph / experience) are unaffected. */
-    const std::string ctxTag = payload.value("contextTag", std::string());
+    std::string ctxTag = payload.value("contextTag", std::string());
+    if (ctxTag.empty() && iterMemScope.valid() && iterMemScope.id != "anonymous")
+        ctxTag = iterMemScope.key();
     const auto activeSens = sensationEngine_.activeFor(ctxTag);
     /* v7.0 instinct / benefit-harm evaluation and prompt split update */
     instinctEngine_.update(activeSens, dtSec);
@@ -1528,20 +1603,25 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
        3. record the chosen action for the next transition. */
     nlohmann::json agiPlanJson = nlohmann::json::object();
     if (agiEnabled_) {
-        const size_t dim = agiController_.model().dim();
+        auto &scopeHot = phoenix::memory::ScopedTrainableMemory::instance().hot(
+            iterMemScope);
+        auto &scopeLatent = scopeHot.agiLatent;
+        auto &scopeLastAct = scopeHot.lastAgiAction;
+        auto &scopeAgi = phoenix::memory::ScopedTrainableMemory::instance().agiFor(
+            iterMemScope, agiController_);
+        const size_t dim = scopeAgi.model().dim();
         const std::vector<float> zNow =
             phoenix::multimodal::projectToDimension(bh.driveVector, dim, 0x41474955U);
-        const bool havePrev = !agiLatentState_.empty() && !lastAgiAction_.empty();
+        const bool havePrev = !scopeLatent.empty() && !scopeLastAct.empty();
         if (havePrev) {
             std::vector<float> aPrev;
-            for (const auto &act : agiController_.actions()) {
-                if (act.name == lastAgiAction_) { aPrev = act.embedding; break; }
+            for (const auto &act : scopeAgi.actions()) {
+                if (act.name == scopeLastAct) { aPrev = act.embedding; break; }
             }
-            /* Self-evolution: the realised benefit-harm netUtility is the
-               reward; observeRewarded refines the forward model AND runs the
-               TD(0) value-learning step on the preference head. */
-            const double agiSurprise = agiController_.observeRewarded(
-                agiLatentState_, aPrev, zNow, static_cast<double>(bh.netUtility),
+            /* Self-evolution stays inside this MemoryScope.  A Helios
+               observeRewarded must not retune the ops / chat forward model. */
+            const double agiSurprise = scopeAgi.observeRewarded(
+                scopeLatent, aPrev, zNow, static_cast<double>(bh.netUtility),
                 0.01f, agiAlpha_, agiGamma_);
             /* Metacognitive loop: the forward-model prediction error becomes a
                Novelty primal sensation, so Curiosity/Exploration receive a real
@@ -1559,9 +1639,9 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
                 sensationEngine_.add(nov);
             }
         }
-        agiLatentState_ = zNow;
+        scopeLatent = zNow;
         /* Only SEED the preference head once; TD learning owns it afterwards. */
-        agiController_.bootstrapPreferences(zNow);
+        scopeAgi.bootstrapPreferences(zNow);
         /* Allostasis: with a subconscious profile the intrinsic cost is the
            homeostatic deviation (Σ gain·|intensity−setpoint|); otherwise the
            legacy arousal proxy. */
@@ -1571,39 +1651,63 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
         /* Adaptive exploration (VDBE-style): amplify the epistemic term when
            the environment is getting predictable, damp it when chaotic. */
         const double epistW = agiEpistW_ * (agiAdaptiveExploration_
-            ? agiController_.explorationMultiplier() : 1.0);
-        const auto plan = agiController_.plan(agiLatentState_, driveCost, agiPragW_, agiIntrinW_, epistW);
+            ? scopeAgi.explorationMultiplier() : 1.0);
+        const auto plan = scopeAgi.plan(scopeLatent, driveCost, agiPragW_, agiIntrinW_, epistW);
         /* Periodic consolidation: replay episodic memory to refine the forward
            model and the value function (sleep-like). */
-        if (agiConsolidateEvery_ > 0 && agiController_.episodeCount() > 0 &&
-            agiController_.episodeCount() % agiConsolidateEvery_ == 0) {
-            agiController_.consolidate(64, agiAlpha_ * 0.4, agiGamma_);
+        if (agiConsolidateEvery_ > 0 && scopeAgi.episodeCount() > 0 &&
+            scopeAgi.episodeCount() % agiConsolidateEvery_ == 0) {
+            scopeAgi.consolidate(64, agiAlpha_ * 0.4, agiGamma_);
         }
         json executionResult = nullptr;
-        if (plan.bestAction >= 0 && plan.bestAction < static_cast<int>(agiController_.actions().size())) {
-            lastAgiAction_ = agiController_.actions()[static_cast<size_t>(plan.bestAction)].name;
-            if (agiController_.episodeCount() >= 1) {
-                memory.benefitHarmBias = lastAgiAction_;
+        if (plan.bestAction >= 0 && plan.bestAction < static_cast<int>(scopeAgi.actions().size())) {
+            scopeLastAct = scopeAgi.actions()[static_cast<size_t>(plan.bestAction)].name;
+            lastAgiAction_ = scopeLastAct;
+            if (scopeAgi.episodeCount() >= 1) {
+                memory.benefitHarmBias = scopeLastAct;
             }
             /* Execute real capabilities chosen by the planner (tools / goals),
                not just inject the verb into the prompt. */
-            const auto *spec = agiActionRegistry_.find(lastAgiAction_);
-            if (spec && spec->category != "instinct" && agiActionExecutor_) {
+            const auto *spec = agiActionRegistry_.find(scopeLastAct);
+            bool draftStillShort = false;
+            if (missionEnabled_ && payload.contains("missionId")) {
+                auto *msn = missionByIdLocked(
+                    payload.value("missionId", std::string()));
+                if (msn && msn->active()) {
+                    const auto &body = msn->mission().deliverable;
+                    if (body.size() < 1200 ||
+                        phoenix::mission::looksLikeOnesJunk(body) ||
+                        phoenix::mission::looksLikeRewriteInstructionEcho(body))
+                        draftStillShort = true;
+                }
+            }
+            if (spec && spec->category != "instinct" && agiActionExecutor_ &&
+                !draftStillShort) {
                 json execCtx;
                 execCtx["userPrompt"] = payload.value("userPrompt", json(std::string()));
                 if (payload.contains("graphContext")) execCtx["graphContext"] = payload["graphContext"];
                 if (payload.contains("missionId"))
                   execCtx["missionId"] = payload["missionId"];
-                executionResult = agiActionExecutor_(*spec, execCtx);
+                /* Never hold mu_ across a tool/llama call. After the first
+                   file-edit, iterate used the draft as userPrompt and a
+                   synchronous executor could pin the heartbeat for the
+                   rest of the mission hour. */
+                lock.unlock();
+                try {
+                    executionResult = agiActionExecutor_(*spec, execCtx);
+                } catch (...) {
+                    executionResult = json{{"ok", false}, {"error", "executor"}};
+                }
+                lock.lock();
             }
         }
-        agiPlanJson = json{{"bestAction", lastAgiAction_},
+        agiPlanJson = json{{"bestAction", scopeLastAct},
                            {"bestActionIndex", plan.bestAction},
                            {"efe", plan.efe.toJson()},
                            {"driveCost", driveCost},
-                           {"episodes", agiController_.episodeCount()},
-                           {"surpriseEma", agiController_.surpriseEma()},
-                           {"explorationMultiplier", agiController_.explorationMultiplier()},
+                           {"episodes", scopeAgi.episodeCount()},
+                           {"surpriseEma", scopeAgi.surpriseEma()},
+                           {"explorationMultiplier", scopeAgi.explorationMultiplier()},
                            {"execution", executionResult}};
     }
     if (memory.benefitHarmBias.empty())
@@ -1692,6 +1796,7 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
                                  {"mixedModalOutputs", mixedModalOutputs},
                                  {"composedPrompt", composedPrompt},
                                  {"agiPlan", agiPlanJson},
+                                 {"memoryScope", iterMemScope.key()},
                                  {"mission", missionInfo},
                                  {"interjectionsConsumed", consumedInterjections.size()}}}};
 }
@@ -1785,6 +1890,7 @@ json CognitionAutonomyManager::importState(const json &state) {
             if (m.contains("state") && m["state"].is_object()) it->second.fromJson(m["state"]);
         }
         defaultMissionId_ = state.value("defaultMissionId", defaultMissionId_);
+        retargetDefaultMissionLocked();
     } else if (state.contains("mission") && state["mission"].is_object()) {
         const auto &mj = state["mission"];
         std::string id = mj.value("id", std::string());
@@ -1793,6 +1899,7 @@ json CognitionAutonomyManager::importState(const json &state) {
         if (it == missions_.end()) it = missions_.try_emplace(id).first;
         it->second.fromJson(mj);
         defaultMissionId_ = id;
+        retargetDefaultMissionLocked();
     }
     missionEnabled_ = state.value("missionEnabled", missionEnabled_);
     if (state.contains("missionGenome") && state["missionGenome"].is_object()) {
@@ -1941,30 +2048,35 @@ json CognitionAutonomyManager::configureAgi(const json &payload) {
     return json{{"ok", true}, {"result", agiController_.status()}};
 }
 
-json CognitionAutonomyManager::agiPlan() {
+json CognitionAutonomyManager::agiPlan(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!agiEnabled_) return json{{"ok", false}, {"error", "agi disabled"}};
+    const auto scope = resolveAgiWriteScope(payload);
+    auto &scopeAgi = phoenix::memory::ScopedTrainableMemory::instance().agiFor(
+        scope, agiController_);
+    auto &hot = phoenix::memory::ScopedTrainableMemory::instance().hot(scope);
     auto bh = instinctEngine_.evaluate(sensationEngine_.active());
-    const size_t dim = agiController_.model().dim();
-    std::vector<float> z = agiLatentState_;
+    const size_t dim = scopeAgi.model().dim();
+    std::vector<float> z = hot.agiLatent;
     if (z.empty()) {
         z = phoenix::multimodal::projectToDimension(bh.driveVector, dim, 0x41474955U);
-        agiLatentState_ = z;
+        hot.agiLatent = z;
     }
-    agiController_.bootstrapPreferences(
+    scopeAgi.bootstrapPreferences(
         phoenix::multimodal::projectToDimension(bh.driveVector, dim, 0x41474955U));
     const double driveCost = static_cast<double>(sensationEngine_.netArousal());
-    const auto plan = agiController_.plan(z, driveCost, agiPragW_, agiIntrinW_, agiEpistW_);
+    const auto plan = scopeAgi.plan(z, driveCost, agiPragW_, agiIntrinW_, agiEpistW_);
     json out;
     out["ok"] = true;
     out["result"]["bestActionIndex"] = plan.bestAction;
     out["result"]["bestAction"] =
-        (plan.bestAction >= 0 && plan.bestAction < static_cast<int>(agiController_.actions().size()))
-            ? agiController_.actions()[static_cast<size_t>(plan.bestAction)].name
+        (plan.bestAction >= 0 && plan.bestAction < static_cast<int>(scopeAgi.actions().size()))
+            ? scopeAgi.actions()[static_cast<size_t>(plan.bestAction)].name
             : std::string();
     out["result"]["efe"] = plan.efe.toJson();
     out["result"]["driveCost"] = driveCost;
-    out["result"]["model"] = agiController_.model().status();
+    out["result"]["model"] = scopeAgi.model().status();
+    out["result"]["memoryScope"] = scope.key();
     return out;
 }
 
@@ -1980,11 +2092,16 @@ json CognitionAutonomyManager::ingestAgiTransition(const json &payload) {
     std::vector<float> a = toVec(payload.value("a", json::array()));
     std::vector<float> zNext = toVec(payload.value("zNext", json::array()));
     if (z.empty() || zNext.empty()) return json{{"ok", false}, {"error", "z and zNext required"}};
-    const double surprise = agiController_.observe(z, a, zNext);
-    agiLatentState_ = zNext;
+    const auto scope = resolveAgiWriteScope(payload);
+    auto &scopeAgi = phoenix::memory::ScopedTrainableMemory::instance().agiFor(
+        scope, agiController_);
+    auto &hot = phoenix::memory::ScopedTrainableMemory::instance().hot(scope);
+    const double surprise = scopeAgi.observe(z, a, zNext);
+    hot.agiLatent = zNext;
     return json{{"ok", true},
                 {"result", json{{"surprise", surprise},
-                                {"episodes", agiController_.episodeCount()}}}};
+                                {"episodes", scopeAgi.episodeCount()},
+                                {"memoryScope", scope.key()}}}};
 }
 
 json CognitionAutonomyManager::registerAgiAction(const json &payload) {
@@ -2113,14 +2230,32 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
         return json{{"ok", true}, {"result", missionsStatusLocked()}};
     }
     /* Fresh lifecycle counters BEFORE id allocation so a new goal never
-       inherits a stale iteration (~1007) from autonomy_state.json. */
-    iteration_ = 0;
-    loopTickCount_.store(0, std::memory_order_relaxed);
-    loopLastTickAtMs_.store(0, std::memory_order_relaxed);
+       inherits a stale iteration (~1007) from autonomy_state.json.
+       Do not reset while another mission is still Running — that is how
+       dual-mission Helios+ops ticks stole each other's iteration. */
     if (m.id.empty()) {
         m.id = "mission-" +
                std::to_string(static_cast<unsigned long long>(nowMs() % 10000000ULL));
     }
+    bool othersRunning = false;
+    for (const auto &kv : missions_) {
+        if (kv.first != m.id && kv.second.active()) {
+            othersRunning = true;
+            break;
+        }
+    }
+    if (!othersRunning) {
+        iteration_ = 0;
+        loopTickCount_.store(0, std::memory_order_relaxed);
+        loopLastTickAtMs_.store(0, std::memory_order_relaxed);
+    }
+    try {
+        phoenix::memory::ScopedTrainableMemory::instance().releaseMission(m.id);
+    } catch (...) {
+    }
+    missionGnnSummaries_.erase(m.id);
+    if (defaultMissionId_ == m.id)
+        missionGnnSummary_.clear();
     if (p.contains("genome") && p["genome"].is_object()) {
         missionGenome_ = phoenix::mission::MissionGenome::fromJson(p["genome"]);
     }
@@ -2142,6 +2277,8 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
     it->second.setMaxReplicaDepth(missionMaxReplicaDepth_);
     it->second.setEvolutionEnabled(missionEvolutionEnabled_);
     it->second.assign(m, missionGenome_);
+    phoenix::inference::blockLowPriorityGenerates().store(
+        false, std::memory_order_release);
     return json{{"ok", true}, {"result", it->second.stats()}};
 }
 
@@ -2184,10 +2321,52 @@ json CognitionAutonomyManager::missionContextOptions() const {
 }
 
 void CognitionAutonomyManager::setMissionGnnSummary(const std::string &summary) {
+    std::string id;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        id = defaultMissionId_;
+    }
+    if (!id.empty())
+        setMissionGnnSummaryFor(id, summary);
+    else {
+        std::lock_guard<std::mutex> lock(mu_);
+        missionGnnSummary_ = summary;
+        if (missionGnnSummary_.size() > 4096)
+            missionGnnSummary_.resize(4096);
+    }
+}
+
+void CognitionAutonomyManager::setMissionGnnSummaryFor(
+    const std::string &missionId, const std::string &summary) {
+    std::string id = phoenix::memory::sanitizeScopeId(missionId);
+    if (id.rfind("mission:", 0) == 0)
+        id = id.substr(8);
+    if (id.empty())
+        return;
+    std::string s = summary;
+    if (s.size() > 4096)
+        s.resize(4096);
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        missionGnnSummaries_[id] = s;
+        if (id == defaultMissionId_)
+            missionGnnSummary_ = s;
+    }
+    auto &hot = phoenix::memory::ScopedTrainableMemory::instance().hot(
+        phoenix::memory::makeMissionScope(id));
+    hot.gnnSummary = s;
+}
+
+std::string CognitionAutonomyManager::missionGnnSummaryFor(
+    const std::string &missionId) const {
+    std::string id = phoenix::memory::sanitizeScopeId(missionId);
+    if (id.rfind("mission:", 0) == 0)
+        id = id.substr(8);
     std::lock_guard<std::mutex> lock(mu_);
-    missionGnnSummary_ = summary;
-    if (missionGnnSummary_.size() > 4096)
-        missionGnnSummary_.resize(4096);
+    auto it = missionGnnSummaries_.find(id);
+    if (it != missionGnnSummaries_.end())
+        return it->second;
+    return std::string();
 }
 
 json CognitionAutonomyManager::reportMissionOutcome(const json &payload) {
@@ -2204,6 +2383,7 @@ json CognitionAutonomyManager::reportMissionOutcome(const json &payload) {
             missionByIdLocked(p.value("missionId", std::string()));
         if (!msn)
             return json{{"ok", false}, {"error", "no such mission"}};
+        const std::string doneId = msn->mission().id;
         /* No hand-off: before the goal completes, pressure only grows and this
            instance keeps going.  Successors replicated by this instance stay in
            the children list (observability); judgement stays with the caller. */
@@ -2213,6 +2393,15 @@ json CognitionAutonomyManager::reportMissionOutcome(const json &payload) {
             msn->markFailed();
         }
         stats = msn->stats();
+        missionGnnSummaries_.erase(doneId);
+        missionPauseTicks_.erase(doneId);
+        if (defaultMissionId_ == doneId)
+            missionGnnSummary_.clear();
+        try {
+            phoenix::memory::ScopedTrainableMemory::instance().releaseMission(
+                doneId);
+        } catch (...) {
+        }
         persistPath = loopPersistPath_;
         bool anyActive = false;
         for (const auto &kv : missions_) {
@@ -2221,15 +2410,52 @@ json CognitionAutonomyManager::reportMissionOutcome(const json &payload) {
                 break;
             }
         }
+        retargetDefaultMissionLocked();
         if (!anyActive) {
             loopStop_.store(true, std::memory_order_release);
             stopLoop = true;
+            /* Close the report→next-tick race: file-edit already set
+               inFlight=0, wait returned in ~150ms (retest8 reportMs=182),
+               then the already-snapshotted next 256-token tick leased
+               --parallel 1 and complete-ask hit llama-slot-busy. */
+            phoenix::inference::blockLowPriorityGenerates().store(
+                true, std::memory_order_release);
         }
     }
-    /* Cancel the in-flight deliberator so completed/failed take effect now,
-       not after the current 20–90 min llama recv.  Do not join here: this
-       runs on a Drogon worker. */
-    phoenix::inference::requestAbort();
+    /* Wait last-tick out. If the n_predict budget expires and the slot
+       is still held, cancel via drain+FIN /phx/cancel (no RST), then
+       wait until inFlight=0 AND slotsHeld=0 before returning so the
+       following ask cannot inherit llama-slot-busy or this abort epoch. */
+    const int nPredict = std::max(
+        256, phoenix::cfgOr<int>("mission.deliberateMaxTokens", 256));
+    const int waitBudget =
+        phoenix::inference::effectiveLastTickIdleWaitMs(nPredict);
+    const int drainBudget =
+        phoenix::inference::effectiveLastTickCancelDrainWaitMs();
+    const int settleBudget =
+        phoenix::inference::effectiveLastTickCancelSettleMs();
+    const auto rel = phoenix::inference::waitThenCancelLastTickIfBusy(
+        waitBudget, drainBudget, settleBudget);
+    std::cout << "[mission-report] wait-idle sec="
+              << (static_cast<double>(rel.waitMs) / 1000.0)
+              << " budgetSec=" << (static_cast<double>(waitBudget) / 1000.0)
+              << " idle=" << ((rel.idle && !rel.cancelled) ? 1 : 0)
+              << " inFlight=" << rel.waitInFlight
+              << " slots=" << rel.waitSlots
+              << std::endl;
+    if (rel.cancelled) {
+        std::cout << "[mission-report] last-tick still busy; cancel drain+FIN "
+                     "/phx/cancel"
+                  << std::endl;
+        std::cout << "[mission-report] cancel-drain sec="
+                  << (static_cast<double>(rel.drainMs) / 1000.0)
+                  << " settleSec="
+                  << (static_cast<double>(settleBudget) / 1000.0)
+                  << " idle=" << (rel.idle ? 1 : 0)
+                  << " inFlight=" << rel.inFlight
+                  << " slots=" << rel.slots
+                  << std::endl;
+    }
     if (stopLoop || !persistPath.empty()) {
         try {
             nlohmann::json state = exportState();
@@ -2451,10 +2677,7 @@ void CognitionAutonomyManager::registerWithSafetyRegistry() {
             loopStop_.store(true, std::memory_order_release);
             phoenix::inference::requestShutdownAbort();
             mcpManager_.stopAll();
-            if (loopThread_.joinable() &&
-                loopThread_.get_id() != std::this_thread::get_id()) {
-                loopThread_.join();
-            }
+            /* Do not join here: E-stop can run on a Drogon worker. */
         });
 }
 
@@ -2531,6 +2754,7 @@ json CognitionAutonomyManager::configureAutonomyLoop(const json &payload) {
 
 json CognitionAutonomyManager::startAutonomyLoop(const json &opts) {
     const bool restoreState = opts.value("restoreState", true);
+    uint64_t gen = 0;
     {
         std::lock_guard<std::mutex> lock(mu_);
         if (phoenix::safety::EmergencyStop::instance().latched()) {
@@ -2540,12 +2764,18 @@ json CognitionAutonomyManager::startAutonomyLoop(const json &opts) {
             return json{{"ok", false}, {"error", "autonomy loop not enabled (configure first)"}};
         }
         registerWithSafetyRegistry(); /* lifecycle begins: register with the system */
-        if (loopRunning_.load(std::memory_order_acquire)) {
+        if (loopRunning_.load(std::memory_order_acquire) &&
+            !loopStop_.load(std::memory_order_acquire)) {
             return json{{"ok", true}, {"result", json{{"running", true}}}};
         }
+        /* Never join: a leftover smoke iterate can sit in llama recv for
+           minutes and would pin this Drogon worker (assign 60s timeout). */
         if (loopThread_.joinable()) {
-            loopThread_.join();
+            loopStop_.store(true, std::memory_order_release);
+            phoenix::inference::requestAbort();
+            loopThread_.detach();
         }
+        gen = loopGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
         loopStop_.store(false, std::memory_order_release);
         loopRunning_.store(true, std::memory_order_release);
     }
@@ -2569,8 +2799,8 @@ json CognitionAutonomyManager::startAutonomyLoop(const json &opts) {
     }
     {
         std::lock_guard<std::mutex> lock(mu_);
-        if (loopThread_.joinable()) loopThread_.join();
-        loopThread_ = std::thread([this] { loopRun(); });
+        if (loopThread_.joinable()) loopThread_.detach();
+        loopThread_ = std::thread([this, gen] { loopRun(gen); });
     }
     /* Assign starts the loop with restoreState=false. Persist now so a later
        start_loop / restart does not revive an older defaultMissionId. */
@@ -2592,10 +2822,13 @@ json CognitionAutonomyManager::startAutonomyLoop(const json &opts) {
 json CognitionAutonomyManager::stopAutonomyLoop() {
     loopStop_.store(true, std::memory_order_release);
     phoenix::inference::requestAbort();
-    if (loopThread_.joinable()) loopThread_.join();
-    std::lock_guard<std::mutex> lock(mu_);
+    /* Never join: the loop thread may be inside a 90 min llama recv.
+       requestAbort() unblocks the client and notifies /phx/cancel.
+       startAutonomyLoop detaches leftovers; only dtor joins. */
     return json{{"ok", true},
-                {"result", json{{"running", false}, {"ticks", loopTickCount_.load()}}}};
+                {"result", json{{"running", loopRunning_.load(std::memory_order_acquire)},
+                                {"stopping", true},
+                                {"ticks", loopTickCount_.load()}}}};
 }
 
 json CognitionAutonomyManager::autonomyLoopStatus() const {
@@ -2622,27 +2855,41 @@ void CognitionAutonomyManager::ensureHeartbeatSession() {
     nlohmann::json rec;
     rec["sessionId"] = id;
     rec["observations"] = 1;
-    /* v8.x concurrent: seed with the default mission's goal when present */
-    const std::string goal =
-        missionByIdLocked("") ? missionByIdLocked("")->mission().goal
-                              : std::string();
-    rec["seedMission"] = goal.empty() ? "autonomous loop" : goal;
+    /* Heartbeat is not a mission and must not inherit another goal. */
+    rec["seedMission"] = "autonomous loop";
     rec["lastObservedAtMs"] = nowMs();
     rec["shouldIterate"] = true;
     sessions_[id] = std::move(rec);
 }
 
-void CognitionAutonomyManager::loopRun() {
+void CognitionAutonomyManager::loopRun(uint64_t gen) {
     /* Heartbeat: the REAL autonomous loop.  Each tick runs the full
        plan/act/observe/learn cycle through iterate() - no external message
        required - and periodically persists the evolved state to disk so
        evolution is long-term. */
+    if (loopGeneration_.load(std::memory_order_acquire) != gen)
+        return;
     loopRunning_.store(true, std::memory_order_release);
     struct LoopRunningGuard {
-        std::atomic<bool> &flag;
-        ~LoopRunningGuard() { flag.store(false, std::memory_order_release); }
-    } runningGuard{loopRunning_};
-    while (!loopStop_.load(std::memory_order_acquire)) {
+        CognitionAutonomyManager *self;
+        uint64_t gen;
+        ~LoopRunningGuard() {
+            if (self->loopGeneration_.load(std::memory_order_acquire) == gen)
+                self->loopRunning_.store(false, std::memory_order_release);
+        }
+    } runningGuard{this, gen};
+    /* Assign→report can finish in <50ms. If the first tick starts
+       deliberating immediately it occupies --parallel 1 and the next
+       ask black-holes in August main.o (slot/mutex, 90 min timeout).
+       Yield so a fast complete can empty snaps and stop before any LLM. */
+    for (int i = 0; i < 8; ++i) {
+        if (loopStop_.load(std::memory_order_acquire) ||
+            loopGeneration_.load(std::memory_order_acquire) != gen)
+            return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    while (!loopStop_.load(std::memory_order_acquire) &&
+           loopGeneration_.load(std::memory_order_acquire) == gen) {
         if (phoenix::safety::EmergencyStop::instance().latched()) break;
         const int64_t tickStart = nowMs();
         try {
@@ -2668,8 +2915,10 @@ void CognitionAutonomyManager::loopRun() {
                     std::vector<phoenix::mission::MissionChild> helpers;
                 };
                 std::vector<MissionSnap> snaps;
+                bool catalogedMissions = false;
                 {
                     std::lock_guard<std::mutex> lock(mu_);
+                    catalogedMissions = !missions_.empty();
                     if (missionEnabled_) {
                         for (const auto &kv : missions_) {
                             if (!kv.second.active()) continue;
@@ -2688,10 +2937,30 @@ void CognitionAutonomyManager::loopRun() {
                         }
                     }
                 }
+                /* Last mission completed: stop instead of heartbeat-iterating
+                   into llama and occupying --parallel 1. Pure heartbeat
+                   (no missions ever assigned) still ticks for unit tests. */
+                if (catalogedMissions && snaps.empty()) {
+                    bool stillRunning = false;
+                    {
+                        std::lock_guard<std::mutex> lock(mu_);
+                        for (const auto &kv : missions_) {
+                            if (kv.second.active()) {
+                                stillRunning = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!stillRunning) {
+                        loopStop_.store(true, std::memory_order_release);
+                        break;
+                    }
+                }
                 const bool parallelMissions =
                     phoenix::cfgOr<bool>("autonomyLoop.parallelMissions", true);
-                auto processParentTick = [this](MissionSnap sn) {
+                auto processParentTick = [this, gen](MissionSnap sn) {
                     if (loopStop_.load(std::memory_order_acquire) ||
+                        loopGeneration_.load(std::memory_order_acquire) != gen ||
                         phoenix::safety::EmergencyStop::instance().latched() ||
                         phoenix::inference::shutdownRequested())
                         return;
@@ -2710,6 +2979,16 @@ void CognitionAutonomyManager::loopRun() {
                         }
                     }
                     if (paused) return;
+                    {
+                        std::lock_guard<std::mutex> lock(mu_);
+                        auto live = missions_.find(sn.id);
+                        if (live == missions_.end() || !live->second.active())
+                            return;
+                    }
+                    if (loopStop_.load(std::memory_order_acquire) ||
+                        phoenix::inference::blockLowPriorityGenerates().load(
+                            std::memory_order_acquire))
+                        return;
                     std::string work;
                     try {
                         work = missionDeliberator_(
@@ -2737,7 +3016,7 @@ void CognitionAutonomyManager::loopRun() {
                             nlohmann::json{{"text", work}, {"missionId", sn.id}});
                     }
                 };
-                auto processHelperBoxes = [this](MissionSnap &sn) {
+                auto processHelperBoxes = [this, gen](MissionSnap &sn) {
                     if (sn.helpers.empty()) return;
                     sn.helpers.erase(
                         std::remove_if(
@@ -2752,7 +3031,10 @@ void CognitionAutonomyManager::loopRun() {
                                           static_cast<size_t>(loopMaxChildrenPerTick_));
                     for (size_t n = 0; n < budget; ++n) {
                         if (loopStop_.load(std::memory_order_acquire) ||
-                            phoenix::inference::shutdownRequested())
+                            loopGeneration_.load(std::memory_order_acquire) != gen ||
+                            phoenix::inference::shutdownRequested() ||
+                            phoenix::inference::blockLowPriorityGenerates().load(
+                                std::memory_order_acquire))
                             break;
                         const size_t idx = (childRoundRobin_ + n) % sn.helpers.size();
                         const auto &box = sn.helpers[idx];
@@ -2826,6 +3108,28 @@ void CognitionAutonomyManager::loopRun() {
                 }
             }
             ensureHeartbeatSession();
+            /* Short draft: skip observe/iterate so the next deliberator
+               tick is not pinned behind AGI/tool work. File-edit already
+               wrote; the heartbeat must come back for a second body. */
+            bool skipIterateForDraft = false;
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                if (missionEnabled_) {
+                    for (const auto &kv : missions_) {
+                        if (!kv.second.active())
+                            continue;
+                        const auto &body = kv.second.mission().deliverable;
+                        if (body.size() < 1200 ||
+                            phoenix::mission::looksLikeOnesJunk(body) ||
+                            phoenix::mission::looksLikeRewriteInstructionEcho(
+                                body)) {
+                            skipIterateForDraft = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!skipIterateForDraft) {
             /* While a mission is producing text, keep iterate() light so the
                RDK CPU stays available for llama-server.  Pure autonomy (no
                mission) still uses the configured maxStepsPerTick. */
@@ -2900,11 +3204,22 @@ void CognitionAutonomyManager::loopRun() {
                     }
                 }
             }
+            if (!doObserve) {
+                /* No running mission this tick: stay on the heartbeat
+                   bucket.  An empty iterate used to train chat:anonymous
+                   or the first shouldIterate session (foreign goal/chat). */
+                iterPayload["sessionId"] = "__autonomy_heartbeat__";
+                iterPayload["contextTag"] = "chat:__autonomy_heartbeat__";
+                iterPayload["memoryKind"] = "chat";
+            }
             if (doObserve)
                 observe(observePayload, observeWorld);
             for (int step = 0; step < steps; ++step) {
-                if (loopStop_.load(std::memory_order_acquire)) break;
+                if (loopStop_.load(std::memory_order_acquire) ||
+                    loopGeneration_.load(std::memory_order_acquire) != gen)
+                    break;
                 iterate(iterPayload, world);
+            }
             }
         } catch (...) {
             /* the loop must never die from one bad tick */
@@ -2925,10 +3240,33 @@ void CognitionAutonomyManager::loopRun() {
             }
         }
         const int64_t elapsed = nowMs() - tickStart;
-        const int64_t sleepMs =
-            std::max<int64_t>(50, static_cast<int64_t>(loopIntervalSec_) * 1000 - elapsed);
+        /* 150-char closer-cut / file-edit is not "written". Keep ticking
+           until report/complete; deliv>=80 is not a health signal. */
+        bool draftIncomplete = false;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (missionEnabled_) {
+                for (const auto &kv : missions_) {
+                    if (!kv.second.active())
+                        continue;
+                    const auto &body = kv.second.mission().deliverable;
+                    if (body.size() < 1200 ||
+                        phoenix::mission::looksLikeOnesJunk(body) ||
+                        phoenix::mission::looksLikeRewriteInstructionEcho(
+                            body)) {
+                        draftIncomplete = true;
+                        break;
+                    }
+                }
+            }
+        }
+        const int64_t intervalMs = draftIncomplete
+            ? std::min<int64_t>(1000, static_cast<int64_t>(loopIntervalSec_) * 1000)
+            : static_cast<int64_t>(loopIntervalSec_) * 1000;
+        const int64_t sleepMs = std::max<int64_t>(50, intervalMs - elapsed);
         for (int64_t slept = 0;
-             slept < sleepMs && !loopStop_.load(std::memory_order_acquire);
+             slept < sleepMs && !loopStop_.load(std::memory_order_acquire) &&
+             loopGeneration_.load(std::memory_order_acquire) == gen;
              slept += 50) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }

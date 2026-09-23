@@ -5,8 +5,11 @@
    that single llama-server process (queue, never overlap).  Spawning a
    second 8B process is a host-only option.
 
-   Shared across instances: cross_context_memory + mission experience.
-   Not shared: KV / unit-query buffers / workspace / sensations. */
+   Shared across instances: cross_context_memory + mission experience
+   (read-only recall) and the official long-term GNN ingest graph.
+   Not shared: KV / unit-query buffers / workspace / sensations, or any
+   writable RNN/LSTM/GNN-online/concept-matrix/dialog hot state — those
+   are bucketed by MemoryScope (chat session vs mission id). */
 #pragma once
 
 #include <algorithm>

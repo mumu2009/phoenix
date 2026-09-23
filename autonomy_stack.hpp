@@ -13,6 +13,8 @@
 #include "mission_workspace.hpp"
 #include "mission_experience.hpp"
 #include "cross_context_memory.hpp"
+#include "memory_scope.hpp"
+#include "scoped_trainable_memory.hpp"
 #include "mcp_client.hpp"
 #include "emergency_stop.hpp"
 #include "instance_registry.hpp"
@@ -23,6 +25,7 @@
 #include <mutex>
 #include <string>
 #include <map>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -134,9 +137,9 @@ public:
     json evaluateInstincts(); /* Run benefit-harm evaluation */
 
     /* v7.0 active inference / MPC (optional, config agi.*) */
-    json configureAgi(const json &payload);        /* Configure the AGI controller. */
-    json agiPlan();                                /* MPC action selection. */
-    json ingestAgiTransition(const json &payload); /* Feed a real (z,a,z') transition. */
+    json configureAgi(const json &payload);        /* Configure the AGI template. */
+    json agiPlan(const json &payload = json::object()); /* MPC; scoped hot path. */
+    json ingestAgiTransition(const json &payload); /* Feed a scoped (z,a,z') transition. */
     json registerAgiAction(const json &payload);     /* Register an executable capability. */
     json listAgiActions() const;                     /* List registered actions. */
     void setAgiActionExecutor(AgiActionExecutor executor); /* C++ hook for real dispatch. */
@@ -183,6 +186,9 @@ public:
     /** Snapshot of mission context-packing options (ctx / summary mode / GNN). */
     json missionContextOptions() const;
     void setMissionGnnSummary(const std::string &summary);
+    void setMissionGnnSummaryFor(const std::string &missionId,
+                                 const std::string &summary);
+    std::string missionGnnSummaryFor(const std::string &missionId) const;
 
     /* v7.0 MCP compatibility (optional, config mcp.*): launch external MCP
        servers (JSON-RPC over stdio) and expose their tools to the planner as
@@ -203,8 +209,8 @@ public:
        WITHOUT external messages, and persists the evolved state to disk so
        evolution survives restarts. */
     json configureAutonomyLoop(const json &payload); /* {enabled, intervalSec, ...} */
-    json startAutonomyLoop(const json &opts = json::object()); /* spawn heartbeat */
-    json stopAutonomyLoop();                        /* stop and join */
+    json startAutonomyLoop(const json &opts = json::object()); /* spawn; never join */
+    json stopAutonomyLoop(); /* flag+abort only; never join a long iterate */
     json autonomyLoopStatus() const;
 
     /* v7.0 external mixed-modal I/O */
@@ -262,6 +268,9 @@ size_t missionMaxReplicas_{4};            /* guardrail on free replication */
        stays true after the thread exits until join(); never use joinable()
        alone as "running". */
     std::atomic<bool> loopRunning_{false};
+    /* Bumped on every start. A detached leftover iterate must not keep
+       ticking after a replacement thread is spawned. */
+    std::atomic<uint64_t> loopGeneration_{0};
     int loopIntervalSec_{10};
     int loopMaxStepsPerTick_{8};
     int loopPersistEveryTicks_{5};
@@ -270,10 +279,13 @@ size_t missionMaxReplicas_{4};            /* guardrail on free replication */
     std::atomic<int64_t> loopLastTickAtMs_{0};
     uint64_t safetyRegId_{0}; /* entry in the system instance registry */
     bool safetyRegistered_{false};
-    void loopRun();
+    void loopRun(uint64_t gen);
     void ensureHeartbeatSession();
     void registerWithSafetyRegistry();
     void unregisterFromSafetyRegistry();
+    /* Caller holds mu_. Point defaultMissionId_ at a Running mission,
+       or clear it so observe/file do not keep reading a completed draft. */
+    void retargetDefaultMissionLocked();
     /* v8.x concurrent missions: independent lifecycles keyed by mission id.
        Each task owns its state machine / deliverable / children / lineage;
        the ONLY shared layers are cross-context ones (AGI learner, genome
@@ -299,7 +311,8 @@ size_t missionMaxReplicas_{4};            /* guardrail on free replication */
   int missionCtxTokens_{4096};                 /* 4096 or 16384 typical */
   std::string missionContextPack_{"full_and_summary"}; /* summary | full_and_summary */
   bool missionIncludeGnnSummary_{false};
-  std::string missionGnnSummary_;              /* last known GNN/graph summary text */
+  std::string missionGnnSummary_;              /* legacy: default mission only */
+  std::map<std::string, std::string> missionGnnSummaries_; /* per mission id */
     phoenix::mission::MissionGenome missionGenome_;
 
     /* v7.0 MCP compatibility (optional) */

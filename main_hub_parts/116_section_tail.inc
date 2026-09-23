@@ -76,20 +76,52 @@
     }
     out.align = tokenOverlapJaccard(out.keywords, hintTokens);
 
-    if (!out.keywords.empty()) {
+    if (!out.keywords.empty() ||
+        (graphResult.contains("gnnTrace") && graphResult["gnnTrace"].is_object())) {
       double w = std::max(0.15, std::min(1.0, 0.2 + 0.8 * out.align));
       std::ostringstream oss;
       oss << "gnn_stage2|align=" << std::fixed << std::setprecision(2)
-          << out.align << "|w=" << std::fixed << std::setprecision(2) << w
-          << ":";
-      for (size_t i = 0; i < out.keywords.size(); i++) {
-        if (i)
-          oss << " ";
-        oss << out.keywords[i];
+          << out.align << "|w=" << std::fixed << std::setprecision(2) << w;
+      if (graphResult.contains("gnnTrace") && graphResult["gnnTrace"].is_object()) {
+        const auto &tr = graphResult["gnnTrace"];
+        if (tr.contains("id") && tr["id"].is_string())
+          oss << "|id=" << tr["id"].get<std::string>();
+        oss << "|src=";
+        int srcN = 0;
+        if (tr.contains("seeds") && tr["seeds"].is_array()) {
+          std::unordered_map<std::string, std::string> fromByMeme;
+          for (auto &s : tr["seeds"]) {
+            if (!s.is_object() || !s.contains("meme"))
+              continue;
+            fromByMeme[s.value("meme", "")] = s.value("from", std::string());
+          }
+          for (auto &m : memes) {
+            if (srcN)
+              oss << ";";
+            oss << m.first << "<-";
+            auto it = fromByMeme.find(m.first);
+            if (it != fromByMeme.end() && !it->second.empty())
+              oss << it->second;
+            else
+              oss << "via=walk";
+            if (++srcN >= 3)
+              break;
+          }
+        }
+        if (srcN == 0)
+          oss << "none";
+      }
+      if (!out.keywords.empty()) {
+        oss << "|kw:";
+        for (size_t i = 0; i < out.keywords.size(); i++) {
+          if (i)
+            oss << " ";
+          oss << out.keywords[i];
+        }
       }
       out.annotation = oss.str();
-      if (out.annotation.size() > 512)
-        out.annotation.resize(512);
+      if (out.annotation.size() > 768)
+        out.annotation.resize(768);
     }
     return out;
   }
@@ -550,6 +582,24 @@
     opts["lowPriority"] = lowPriority;
     opts["id_slot"] = 0;
     opts["skipGraphContext"] = true;
+    if (!lowPriority) {
+      /* Shared leftover tokens on --parallel 1 carried the previous
+         session's canary into the next chat. Interactive asks start clean.
+         cache_prompt must also be off: leftover_beta=0 only disables
+         intra-generate softmax mix; slot0 KV reuse is what leaked
+         SCOPECANARY-CHAT-* at soak maxTokens=80. */
+      opts["leftover_beta"] = 0.0;
+      opts["leftover_k"] = 0;
+      opts["cache_prompt"] = false;
+      /* Cognition RAG mix still carried foreign canaries into the
+         80-token path after leftover_beta=0. Interactive asks do not
+         share the previous session's memory/GNN residual. */
+      opts["rag_beta"] = 0.0;
+      opts.erase("memory_units");
+      opts.erase("gnn_units");
+      opts["memoryEnabled"] = false;
+      opts["gnnEnabled"] = false;
+    }
     /* Memory/GNN stay off the causal stream. llama /phx/generate mixes
        them as a second RAG stream (residual on embeddings). */
     opts.erase("memory_units");
@@ -562,7 +612,7 @@
       if (!gr.empty())
         phoenix::inference::appendUnitQueriesFromParagraphs(gnn, gr, "text");
     }
-    if (memArmed) {
+    if (memArmed && lowPriority) {
       const auto arr = phoenix::inference::unitQueryListToJson(mem);
       if (!arr.empty())
         opts["context_units"] = arr;
@@ -571,7 +621,7 @@
     } else {
       opts.erase("context_units");
     }
-    if (gnnArmed) {
+    if (gnnArmed && lowPriority) {
       const auto arr = phoenix::inference::unitQueryListToJson(gnn);
       if (!arr.empty())
         opts["gnn_units"] = arr;
@@ -663,7 +713,7 @@
     if (!runtime)
       return out;
 
-    auto words = tokenize(text);
+    auto words = tokenizeKeepingStops(text);
     if (words.empty())
       return out;
 
@@ -1900,6 +1950,8 @@
             (void)jsonStringOrEmpty;
             std::string text = body.value("text", body.value("message", ""));
             std::string prelimSessionId = body.value("sessionId", "");
+            phoenix::memory::MemoryScopeGuard chatMemGuard(
+                phoenix::memory::memoryScopeForChatRoute(body));
             ingestWorldEvidence(prelimSessionId, text, "");
             bool cleanedText = false;
             text = sanitizeInputText(text, cleanedText);
@@ -1918,13 +1970,15 @@
                 std::cout << "[gateway] /api/chat stage=concept_matrix_start" << std::endl;
               int activeCount = 0;
               {
-                std::lock_guard<std::mutex> lock(chatMu_);
+                auto &cm = phoenix::memory::ScopedTrainableMemory::instance()
+                               .hot(phoenix::memory::currentMemoryScope())
+                               .conceptMatrix;
                 if (config_.conceptMatrixClearPerRequest)
-                  conceptMatrix_.clear();
-                conceptMatrix_.encodeText(text);
-                conceptMatrix_.propagate(0);
-                matrixContext = conceptMatrix_.toContextString(32, 0.15f);
-                activeCount = conceptMatrix_.activeCount();
+                  cm.clear();
+                cm.encodeText(text);
+                cm.propagate(0);
+                matrixContext = cm.toContextString(32, 0.15f);
+                activeCount = static_cast<int>(cm.activeCount());
               }
               if (config_.httpLog) {
                 auto cmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2036,7 +2090,7 @@
             maxTokens = std::min(maxTokens, 2048);
             if (longQuerySafeMode)
               maxTokens = std::min(maxTokens, 32);
-            if (maxTokens <= 0) maxTokens = 16;
+            maxTokens = std::max(16, maxTokens);
             auto hint = extractContextHint(body);
 
             // The frontend proxy already runs prepareChatContext and injects
@@ -2103,7 +2157,8 @@
             std::vector<phoenix::inference::UnitQueryIO> instanceGnn;
             try {
               const auto ccms = phoenix::memory::ccmRecall(
-                  phoenix::instance::ccmStorePath(), text, 3);
+                  phoenix::instance::ccmStorePath(), text, 3,
+                  phoenix::memory::chatSourceTag(prelimSessionId));
               for (const auto &e : ccms)
                 appendCcmEntryAsUnits(instanceMemory, e);
               if (!usingLlamaCpp && !instanceMemory.empty()) {
@@ -2133,9 +2188,14 @@
             std::string userText = text;
 
             if (usingLlamaCpp) {
-              if (!hint.text.empty() && hint.weight > 0.0)
-                phoenix::inference::appendUnitQueriesFromParagraphs(
-                    instanceMemory, hint.text);
+              if (!hint.text.empty() && hint.weight > 0.0) {
+                const std::string ownHint =
+                    phoenix::memory::retainOwnChatIncrements(hint.text,
+                                                             userText);
+                if (!ownHint.empty())
+                  phoenix::inference::appendUnitQueriesFromParagraphs(
+                      instanceMemory, ownHint);
+              }
               if (contextModuleDisabled)
                 graphContext.clear();
             } else if (!contextModuleDisabled) {
@@ -2179,6 +2239,9 @@
                 pkt.source = "gateway-chat";
                 auto ahead = aheadModule_->processBatch({pkt}, sessionId);
                 if (ahead.memoryReady) {
+                  ahead.memoryForBackend.content =
+                      phoenix::memory::retainOwnChatIncrements(
+                          ahead.memoryForBackend.content, userText);
                   appendSemanticUnitAsUnits(instanceMemory,
                                             ahead.memoryForBackend);
                   if (!usingLlamaCpp) {
@@ -2212,10 +2275,16 @@
             // context + inference options.
             try {
               auto pack = runCognitionAutonomy(body, userText, graphContext);
-              graphContext = pack.context;
-              if (!pack.instanceMemoryText.empty())
-                phoenix::inference::appendUnitQueriesFromParagraphs(
-                    instanceMemory, pack.instanceMemoryText);
+              graphContext = phoenix::memory::retainOwnChatIncrements(
+                  pack.context, userText);
+              if (!pack.instanceMemoryText.empty()) {
+                const std::string ownMem =
+                    phoenix::memory::retainOwnChatIncrements(
+                        pack.instanceMemoryText, userText);
+                if (!ownMem.empty())
+                  phoenix::inference::appendUnitQueriesFromParagraphs(
+                      instanceMemory, ownMem);
+              }
               if (pack.inferenceOptions.is_object()) {
                 for (auto &el : pack.inferenceOptions.items())
                   inferenceOptions[el.key()] = el.value();
@@ -2277,7 +2346,9 @@
               if (usingLlamaCpp || usingBitNet)
                 dispatchExternalStyleTrainStep(backendMode, body, text,
                                                gnnHint.align);
-              std::string modelGraphContext = graphContext;
+              std::string modelGraphContext =
+                  phoenix::memory::retainOwnChatIncrements(graphContext,
+                                                           userText);
               if (usingOllama) {
                 auto t0 = std::chrono::steady_clock::now();
                 if (config_.httpLog)
@@ -2312,12 +2383,28 @@
                       instanceGnn, phoenix::inference::unitQueryFromRows(
                                        std::move(imageRows), "image"));
                 }
+                for (auto &u : instanceMemory)
+                  u.content = phoenix::memory::eraseForeignChatCanaries(
+                      u.content, userText);
                 llamaOpts = buildUnitPipelineOptions(
                     graphResult, instanceMemory, instanceGnn,
                     sessionId.empty() ? std::string("chat") : sessionId, false,
                     llamaOpts);
-                tReply = chatWithLlamaCpp(text, modelGraphContext, maxTokens,
-                                          llamaOpts);
+                /* Unique causal prefix so --parallel 1 slot0 cannot reuse
+                   another session's KV even if cache_prompt is ignored. */
+                std::string llamaText =
+                    phoenix::memory::eraseForeignChatCanaries(
+                        phoenix::memory::retainOwnChatIncrements(text,
+                                                                 userText),
+                        userText);
+                if (!sessionId.empty())
+                  llamaText = std::string("[chat-session:") + sessionId +
+                              "]\n" + llamaText;
+                modelGraphContext =
+                    phoenix::memory::eraseForeignChatCanaries(
+                        modelGraphContext, userText);
+                tReply = chatWithLlamaCpp(llamaText, modelGraphContext,
+                                          maxTokens, llamaOpts);
                 modelElapsedMs =
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0)
@@ -2406,6 +2493,9 @@
               }
             }
             std::string transformerReplyRaw = tReply.value("reply", "");
+            transformerReplyRaw =
+                phoenix::memory::eraseForeignChatCanaries(
+                    transformerReplyRaw, userText);
             std::string reply = stripAddonToolDirective(transformerReplyRaw);
             addon::AddonResult addonExec;
             AddonToolCall addonCall;
@@ -2582,7 +2672,75 @@
                                 " verifyMs=" + std::to_string(verifyElapsedMs) +
                                 " totalMs=" + std::to_string(totalElapsedMs) +
                                 " provider=" + backendMode);
-            respondJson(cb, json{{"ok", true}, {"result", result}});
+            if (reply.empty() && tReply.is_object() &&
+                !tReply.value("ok", true)) {
+              const std::string err =
+                  tReply.value("error", std::string("generate-failed"));
+              result["error"] = err;
+              result["stage"] = "llama-generate";
+              respondJson(cb, json{{"ok", false},
+                                   {"error", err},
+                                   {"result", json{{"reply", ""},
+                                                   {"error", err}}}});
+              finalizeMetric(false);
+              return;
+            }
+            /* Slim + sanitize: invalid UTF-8 in reply/graph makes dump
+               throw; a second respondJson(500) then RSTs the client
+               after llama already wrote a body. */
+            {
+              auto sanitizeUtf8 = [](const std::string &s) -> std::string {
+                std::string out;
+                out.reserve(s.size());
+                for (size_t i = 0; i < s.size();) {
+                  const unsigned char c =
+                      static_cast<unsigned char>(s[i]);
+                  size_t len = 1;
+                  if (c >= 0xC0 && c <= 0xDF)
+                    len = 2;
+                  else if (c >= 0xE0 && c <= 0xEF)
+                    len = 3;
+                  else if (c >= 0xF0 && c <= 0xF7)
+                    len = 4;
+                  else if (c >= 0x80) {
+                    out.push_back('?');
+                    ++i;
+                    continue;
+                  }
+                  if (i + len > s.size()) {
+                    out.push_back('?');
+                    ++i;
+                    continue;
+                  }
+                  bool valid = true;
+                  for (size_t j = 1; j < len; ++j) {
+                    const unsigned char cb =
+                        static_cast<unsigned char>(s[i + j]);
+                    if ((cb & 0xC0) != 0x80) {
+                      valid = false;
+                      break;
+                    }
+                  }
+                  if (valid) {
+                    out.append(s, i, len);
+                    i += len;
+                  } else {
+                    out.push_back('?');
+                    ++i;
+                  }
+                }
+                return out;
+              };
+              json wire = json::object();
+              wire["reply"] =
+                  sanitizeUtf8(result.value("reply", ""));
+              wire["transformerReply"] =
+                  sanitizeUtf8(result.value("transformerReply", ""));
+              if (result.contains("provider"))
+                wire["provider"] = result["provider"];
+              respondJson(cb, json{{"ok", true}, {"result", wire}});
+            }
+            try {
             onDialogCompleted(result, body);
             // Record assistant reply back to frontend context service for next turn compression.
             // If the frontend already provided a contextHint, it will record the assistant reply itself.
@@ -2608,6 +2766,9 @@
               }
             }
             finalizeMetric(true);
+            } catch (...) {
+              finalizeMetric(true);
+            }
           } catch (const std::exception &e) {
             logRouteError("/api/chat", e.what());
             respondJson(cb, json{{"ok", false}, {"error", e.what()}},
@@ -2672,6 +2833,8 @@
             }
             std::string text = body.value("text", body.value("message", ""));
             std::string prelimSessionId = body.value("sessionId", "");
+            phoenix::memory::MemoryScopeGuard chatMemGuard(
+                phoenix::memory::memoryScopeForChatRoute(body));
             ingestWorldEvidence(prelimSessionId, text, "");
             bool cleanedText = false;
             text = sanitizeInputText(text, cleanedText);
@@ -2690,13 +2853,15 @@
                 std::cout << "[gateway] /api/chat stage=concept_matrix_start" << std::endl;
               int activeCount = 0;
               {
-                std::lock_guard<std::mutex> lock(chatMu_);
+                auto &cm = phoenix::memory::ScopedTrainableMemory::instance()
+                               .hot(phoenix::memory::currentMemoryScope())
+                               .conceptMatrix;
                 if (config_.conceptMatrixClearPerRequest)
-                  conceptMatrix_.clear();
-                conceptMatrix_.encodeText(text);
-                conceptMatrix_.propagate(0);
-                matrixContext = conceptMatrix_.toContextString(32, 0.15f);
-                activeCount = conceptMatrix_.activeCount();
+                  cm.clear();
+                cm.encodeText(text);
+                cm.propagate(0);
+                matrixContext = cm.toContextString(32, 0.15f);
+                activeCount = static_cast<int>(cm.activeCount());
               }
               if (config_.httpLog) {
                 auto cmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2837,7 +3002,8 @@
             std::vector<phoenix::inference::UnitQueryIO> instanceGnn;
             try {
               const auto ccms = phoenix::memory::ccmRecall(
-                  phoenix::instance::ccmStorePath(), text, 3);
+                  phoenix::instance::ccmStorePath(), text, 3,
+                  phoenix::memory::chatSourceTag(prelimSessionId));
               for (const auto &e : ccms)
                 appendCcmEntryAsUnits(instanceMemory, e);
               if (!usingLlamaCpp && !instanceMemory.empty()) {
@@ -2863,9 +3029,13 @@
               phoenix::inference::appendUnitQueriesFromParagraphs(
                   instanceGnn, sparkAnn);
             if (usingLlamaCpp) {
-              if (!hint.text.empty() && hint.weight > 0.0)
-                phoenix::inference::appendUnitQueriesFromParagraphs(
-                    instanceMemory, hint.text);
+              if (!hint.text.empty() && hint.weight > 0.0) {
+                const std::string ownHint =
+                    phoenix::memory::retainOwnChatIncrements(hint.text, text);
+                if (!ownHint.empty())
+                  phoenix::inference::appendUnitQueriesFromParagraphs(
+                      instanceMemory, ownHint);
+              }
               if (contextModuleDisabled)
                 graphContext.clear();
             } else if (!contextModuleDisabled) {
@@ -2892,7 +3062,7 @@
                 "maxTokens", phoenix::cfgOr<int>("context.maxTokens", 8192));
             if (longQuerySafeMode)
               maxTokens = std::min(maxTokens, 32);
-            if (maxTokens <= 0) maxTokens = 16;
+            maxTokens = std::max(16, maxTokens);
             std::string sessionId = body.value("sessionId", "");
 
             ingestWorldEvidence(sessionId, text, graphContext);
@@ -2909,6 +3079,9 @@
                 pkt.source = "gateway-chat";
                 auto ahead = aheadModule_->processBatch({pkt}, sessionId);
                 if (ahead.memoryReady) {
+                  ahead.memoryForBackend.content =
+                      phoenix::memory::retainOwnChatIncrements(
+                          ahead.memoryForBackend.content, text);
                   appendSemanticUnitAsUnits(instanceMemory,
                                             ahead.memoryForBackend);
                   if (!usingLlamaCpp) {
@@ -2928,10 +3101,16 @@
             std::vector<nlohmann::json> cognitionMixedModalOutputs;
             try {
               auto pack = runCognitionAutonomy(body, text, graphContext);
-              graphContext = pack.context;
-              if (!pack.instanceMemoryText.empty())
-                phoenix::inference::appendUnitQueriesFromParagraphs(
-                    instanceMemory, pack.instanceMemoryText);
+              graphContext = phoenix::memory::retainOwnChatIncrements(
+                  pack.context, text);
+              if (!pack.instanceMemoryText.empty()) {
+                const std::string ownMem =
+                    phoenix::memory::retainOwnChatIncrements(
+                        pack.instanceMemoryText, text);
+                if (!ownMem.empty())
+                  phoenix::inference::appendUnitQueriesFromParagraphs(
+                      instanceMemory, ownMem);
+              }
               if (pack.inferenceOptions.is_object()) {
                 for (auto &el : pack.inferenceOptions.items())
                   inferenceOptions[el.key()] = el.value();
@@ -2990,7 +3169,8 @@
               if (usingLlamaCpp || usingBitNet)
                 dispatchExternalStyleTrainStep(backendMode, body, text,
                                                gnnHint.align);
-              std::string modelGraphContext = graphContext;
+              std::string modelGraphContext =
+                  phoenix::memory::retainOwnChatIncrements(graphContext, text);
               if (usingOllama) {
                 tReply = chatWithOllama(text, modelGraphContext, maxTokens,
                         inferenceOptions);
@@ -3007,12 +3187,27 @@
                       instanceGnn, phoenix::inference::unitQueryFromRows(
                                        std::move(imageRows), "image"));
                 }
+                for (auto &u : instanceMemory)
+                  u.content = phoenix::memory::eraseForeignChatCanaries(
+                      u.content, text);
                 llamaOpts = buildUnitPipelineOptions(
                     graphResult, instanceMemory, instanceGnn,
                     sessionId.empty() ? std::string("chat") : sessionId, false,
                     llamaOpts);
-                tReply = chatWithLlamaCpp(text, modelGraphContext, maxTokens,
-                                          llamaOpts);
+                /* Unique causal prefix so --parallel 1 slot0 cannot reuse
+                   another session's KV even if cache_prompt is ignored. */
+                std::string llamaText =
+                    phoenix::memory::eraseForeignChatCanaries(
+                        phoenix::memory::retainOwnChatIncrements(text, text),
+                        text);
+                if (!sessionId.empty())
+                  llamaText = std::string("[chat-session:") + sessionId +
+                              "]\n" + llamaText;
+                modelGraphContext =
+                    phoenix::memory::eraseForeignChatCanaries(
+                        modelGraphContext, text);
+                tReply = chatWithLlamaCpp(llamaText, modelGraphContext,
+                                          maxTokens, llamaOpts);
               } else if (usingBitNet) {
                 tReply = chatWithBitNet(text, modelGraphContext, maxTokens,
                         inferenceOptions);
@@ -3059,6 +3254,9 @@
             }
             std::string transformerReplyRaw =
                 jsonStringOrEmpty(tReply, "reply");
+            transformerReplyRaw =
+                phoenix::memory::eraseForeignChatCanaries(
+                    transformerReplyRaw, text);
             std::string finalReply =
                 stripAddonToolDirective(transformerReplyRaw);
             addon::AddonResult addonExec;
@@ -3164,6 +3362,8 @@
             result["gnnAlign"] = gnnHint.align;
             if (!gnnHint.annotation.empty())
               result["gnnStage2"] = gnnHint.annotation;
+            if (graphResult.contains("gnnTrace"))
+              result["gnnTrace"] = graphResult["gnnTrace"];
             if (!sparkAnn.empty())
               result["sparkGnnStage2"] = sparkAnn;
             if (!hint.text.empty()) {
@@ -6964,6 +7164,11 @@
               return;
             }
             const std::string sessionId = (*jsonObj)["sessionId"].asString();
+            try {
+              phoenix::memory::ScopedTrainableMemory::instance().releaseChat(
+                  sessionId);
+            } catch (...) {
+            }
             bool removed = contextService_.reset(sessionId);
             respondJson(cb,
                         nlohmann::json{{"ok", true},
@@ -8000,11 +8205,71 @@ static int runGroupWorker(const Config &config) {
   return 0;
 }
 
+static bool frontendPortAlreadyListening(int port) {
+  if (port <= 0)
+    return false;
+#ifdef _WIN32
+  WSADATA wsa{};
+  WSAStartup(MAKEWORD(2, 2), &wsa);
+  SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (s == INVALID_SOCKET)
+    return false;
+  struct sockaddr_in addr {};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(static_cast<unsigned short>(port));
+  inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+  u_long nonblk = 1;
+  ioctlsocket(s, FIONBIO, &nonblk);
+  const int cr = connect(s, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr));
+  bool busy = (cr == 0);
+  if (cr == SOCKET_ERROR) {
+    const int err = WSAGetLastError();
+    if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS) {
+      fd_set wfds;
+      FD_ZERO(&wfds);
+      FD_SET(s, &wfds);
+      struct timeval tv;
+      tv.tv_sec = 0;
+      tv.tv_usec = 200000;
+      if (select(0, nullptr, &wfds, nullptr, &tv) == 1) {
+        int so = 0;
+        int sl = sizeof(so);
+        getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char *>(&so), &sl);
+        busy = (so == 0);
+      }
+    } else if (err == WSAECONNREFUSED) {
+      busy = false;
+    }
+  }
+  closesocket(s);
+  return busy;
+#else
+  int s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (s < 0)
+    return false;
+  struct sockaddr_in addr {};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(static_cast<unsigned short>(port));
+  inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+  const int cr = connect(s, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr));
+  const bool busy = (cr == 0);
+  close(s);
+  return busy;
+#endif
+}
+
 static bool spawnFrontendProcess() {
   int spawnDepth =
       std::max(0, phoenix::resolveConfig<int>("main.frontendSpawnDepth", 0, "AI_FRONTEND_SPAWN_DEPTH"));
   if (spawnDepth >= 2)
     return false;
+  const int fePort =
+      phoenix::resolveConfig<int>("frontend_server.port", 5081, "FRONTEND_PORT");
+  if (frontendPortAlreadyListening(fePort)) {
+    std::cerr << "frontend already listening on :" << fePort
+              << "; skip second spawn" << std::endl;
+    return true;
+  }
   std::string nextDepth = std::to_string(spawnDepth + 1);
   std::string projectRoot = getProjectRoot().string();
 #ifdef _WIN32

@@ -20,7 +20,9 @@
 #include <cstdlib>
 #include <type_traits>
 #include "frontend_server.hpp"
+#include "memory_scope.hpp"
 #include "phoenix_config.hpp"
+#include "scoped_trainable_memory.hpp"
 #include "emotion_system.hpp"
 #include "mechanical_mind.hpp"
 #include "transformer.hpp"
@@ -3236,13 +3238,36 @@ namespace
             submitToStage(contextStage_, std::move(task));
         }
 
-        Json::Value ingest(const std::string &sessionId, const std::string &text, const std::string &modeHint)
+        static phoenix::memory::MemoryScope frontendScope(
+            const std::string &sessionId, const std::string &missionId = {})
+        {
+            return phoenix::memory::memoryScopeFromIds(sessionId, missionId);
+        }
+
+        static void syncRecurrent(const phoenix::memory::MemoryScope &scope,
+                                  const SessionState &state)
+        {
+            auto &hot = phoenix::memory::ScopedTrainableMemory::instance().hot(scope);
+            hot.recurrent.rnnHidden = state.rnnHidden;
+            hot.recurrent.lstmHidden = state.lstmHidden;
+            hot.recurrent.lstmCell = state.lstmCell;
+            hot.recurrent.messageCount = state.messageCount;
+            hot.recurrent.lastMode = state.lastMode;
+        }
+
+        Json::Value ingest(const std::string &sessionId, const std::string &text, const std::string &modeHint,
+                           const std::string &missionId = {})
         {
             // Torch model warm-up can be expensive; do it before taking the session mutex
             // so one cold-start does not block all context sessions.
             ensureTorchReady();
+            const auto scope = frontendScope(sessionId, missionId);
+            phoenix::memory::MemoryScopeGuard scopeGuard(scope);
+            const std::string bucket = scope.key();
             std::lock_guard<std::mutex> lock(mu_);
-            auto &state = sessions_[sessionId];
+            if (!phoenix::memory::ScopedTrainableMemory::instance().hasLive(scope))
+                sessions_.erase(bucket);
+            auto &state = sessions_[bucket];
             state.messageCount += 1;
 
             const auto tokens = Tokenizer::tokenize(text);
@@ -3271,7 +3296,7 @@ namespace
             // 阶段2: RNN/LSTM上下文计算（异步，依赖embedding）
             std::promise<std::string> rnnPromise;
             std::future<std::string> rnnFuture = rnnPromise.get_future();
-            std::string sessionIdCopy = sessionId;
+            std::string sessionIdCopy = bucket;
             submitToStage(rnnStage_, [this, &embFuture, tokens, sessionIdCopy, &rnnPromise, mode]() {
                 auto embedding = embFuture.get(); // 等待embedding完成
                 std::string ctx;
@@ -3368,6 +3393,7 @@ namespace
             auto context = contextFuture.get();
 
             state.lastMode = mode;
+            syncRecurrent(scope, state);
             Json::Value out;
             out["sessionId"] = sessionId;
             out["mode"] = mode;
@@ -3395,16 +3421,25 @@ namespace
                 v.resize((size_t)dim);
         }
 
-        std::string prepareChatContext(const std::string &sessionId, const std::string &text, const std::string &modeHint, float latencyMs = 0.0f)
+        std::string prepareChatContext(const std::string &sessionId, const std::string &text, const std::string &modeHint, float latencyMs = 0.0f,
+                                       const std::string &missionId = {})
         {
             ensureTorchReady();
+            const auto scope = frontendScope(sessionId, missionId);
+            phoenix::memory::MemoryScopeGuard scopeGuard(scope);
+            const std::string bucket = scope.key();
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                if (!phoenix::memory::ScopedTrainableMemory::instance().hasLive(scope))
+                    sessions_.erase(bucket);
+            }
             const auto tokens = Tokenizer::tokenize(text);
             const int tokenCount = static_cast<int>(tokens.size());
             std::string mode;
             bool needEmbed = false;
             {
                 std::lock_guard<std::mutex> lock(mu_);
-                auto &state = sessions_[sessionId];
+                auto &state = sessions_[bucket];
                 state.messageCount += 1;
                 if (state.adaptive.maxMessages > 0)
                     state.shortWindow.maxMessages = static_cast<size_t>(state.adaptive.maxMessages);
@@ -3424,7 +3459,7 @@ namespace
                 fitVectorDim(embedding, want);
             }
             std::lock_guard<std::mutex> lock(mu_);
-            auto &state = sessions_[sessionId];
+            auto &state = sessions_[bucket];
 
             std::string adaptiveHint;
             if (mode == "rnn")
@@ -3443,6 +3478,7 @@ namespace
                 adaptiveHint = buildTextHint(state.lstmHidden, tokens, "lstm");
             }
             state.lastMode = mode;
+            syncRecurrent(scope, state);
             // 用实测延迟更新 AdaptiveController（下轮生效）
             if (latencyMs > 0.0f)
                 state.adaptive.update(latencyMs);
@@ -3451,7 +3487,7 @@ namespace
             std::string episodicHint;
             if (state.messageCount == 1) // 仅在会话首次检索，避免重复
             {
-                episodicHint = retrieveEpisodicMemory(text);
+                episodicHint = retrieveEpisodicMemory(text, sessionId);
             }
 
             // 渲染 "用户:/助手:" 多轮历史（applyContextHintToText 会整体前置给 LLM；
@@ -3513,12 +3549,16 @@ namespace
         // 调用方式：前端代理收到上游回复后调用，使下一轮能看到本轮回答。
         // 实现思路：把回复推入 shortWindow（assistant 角色）和 concat。
         // 注意事项：仅当会话已存在（prepareChatContext 创建过）时才记录。
-        void recordAssistantReply(const std::string &sessionId, const std::string &reply)
+        void recordAssistantReply(const std::string &sessionId, const std::string &reply,
+                                  const std::string &missionId = {})
         {
             if (reply.empty())
                 return;
+            const std::string bucket = frontendScope(sessionId, missionId).key();
             std::lock_guard<std::mutex> lock(mu_);
-            auto it = sessions_.find(sessionId);
+            auto it = sessions_.find(bucket);
+            if (it == sessions_.end())
+                it = sessions_.find(sessionId);
             if (it == sessions_.end())
                 return;
             it->second.shortWindow.pushAssistant(reply);
@@ -3715,7 +3755,8 @@ namespace
             return total > 0 ? static_cast<float>(hit) / static_cast<float>(total) : 0.0f;
         }
 
-        std::string retrieveEpisodicMemory(const std::string &query)
+        std::string retrieveEpisodicMemory(const std::string &query,
+                                           const std::string &sessionId = {})
         {
             if (episodicMemory_.empty())
                 return std::string();
@@ -3723,9 +3764,13 @@ namespace
             auto queryEmbedding = embeddings_.embedText(query);
 
             // 综合评分：embedding 余弦 与 词面重叠 取较大者，再乘时间衰减。
+            // Chat↔chat isolation: never inject another session's dialog increment.
             std::vector<std::pair<float, size_t>> scored;
             for (size_t i = 0; i < episodicMemory_.size(); ++i)
             {
+                if (episodicMemory_[i].sessionId.empty() ||
+                    episodicMemory_[i].sessionId != sessionId)
+                    continue;
                 float cosSim = queryEmbedding.empty() ? 0.0f : episodicMemory_[i].cosineSimilarity(queryEmbedding);
                 // 词面重叠：对 summary 与每条 fact 取最大重叠
                 float lex = lexicalOverlap(query, episodicMemory_[i].summary);
@@ -3764,11 +3809,18 @@ namespace
 
         bool reset(const std::string &sessionId)
         {
+            try {
+                phoenix::memory::ScopedTrainableMemory::instance().releaseChat(sessionId);
+            } catch (...) {
+            }
             std::vector<std::string> candidateFacts;
             int messageCount = 0;
             {
                 std::lock_guard<std::mutex> lock(mu_);
-                auto it = sessions_.find(sessionId);
+                const std::string bucket = frontendScope(sessionId).key();
+                auto it = sessions_.find(bucket);
+                if (it == sessions_.end())
+                    it = sessions_.find(sessionId);
                 if (it == sessions_.end())
                 {
                     std::cout << "[cross-session] reset: session not found: " << sessionId << std::endl;
@@ -3832,7 +3884,10 @@ namespace
         {
             std::lock_guard<std::mutex> lock(mu_);
             Json::Value out;
-            auto it = sessions_.find(sessionId);
+            const std::string bucket = frontendScope(sessionId).key();
+            auto it = sessions_.find(bucket);
+            if (it == sessions_.end())
+                it = sessions_.find(sessionId);
             if (it == sessions_.end())
             {
                 out["exists"] = false;
@@ -4741,7 +4796,7 @@ void setupFrontendServer()
             return fallback;
         }
     };
-    const int chatUpstreamTimeoutMs = std::max(5000, resolveConfig<int>("chat.upstreamTimeoutMs", 360000, "FRONTEND_CHAT_UPSTREAM_TIMEOUT_MS"));
+    const int chatUpstreamTimeoutMs = std::max(5000, resolveConfig<int>("chat.upstreamTimeoutMs", 25000, "FRONTEND_CHAT_UPSTREAM_TIMEOUT_MS"));
     const int apiUpstreamTimeoutMs = std::max(3000, resolveConfig<int>("api.upstreamTimeoutMs", 45000, "FRONTEND_API_UPSTREAM_TIMEOUT_MS"));
     const int chatMaxInFlight = std::max(1, std::min(16, resolveConfig<int>("chat.maxInFlight", 1, "FRONTEND_CHAT_MAX_INFLIGHT")));
     const bool frontendHttpLog = resolveConfig<bool>("frontend_server.httpLog", false, "FRONTEND_HTTP_LOG");
@@ -4989,7 +5044,15 @@ void setupFrontendServer()
                     {
                         try
                         {
-                            std::string routedHint = contextService.prepareChatContext(sid, userText, modeHint);
+                            std::string missionId;
+                            const bool explicitMission =
+                                chatJson->isMember("memoryKind") &&
+                                (*chatJson)["memoryKind"].isString() &&
+                                (*chatJson)["memoryKind"].asString() == "mission";
+                            if (explicitMission && chatJson->isMember("missionId") &&
+                                (*chatJson)["missionId"].isString())
+                                missionId = (*chatJson)["missionId"].asString();
+                            std::string routedHint = contextService.prepareChatContext(sid, userText, modeHint, 0.0f, missionId);
                             bool frontendHint = chatJson->isMember("contextHint") && (*chatJson)["contextHint"].isString() && !(*chatJson)["contextHint"].asString().empty();
                             if (frontendHttpLog)
                             {
@@ -5060,7 +5123,7 @@ void setupFrontendServer()
                         {
                             releaseChatSlot();
                             auto resp = drogon::HttpResponse::newHttpResponse();
-                            resp->setStatusCode(chatPath ? drogon::k200OK : drogon::k503ServiceUnavailable);
+                            resp->setStatusCode(chatPath ? drogon::k200OK : drogon::k504GatewayTimeout);
                             resp->setContentTypeString("application/json");
                             Json::Value out;
                             if (chatPath)
@@ -5076,7 +5139,11 @@ void setupFrontendServer()
                             else
                             {
                                 out["ok"] = false;
-                                out["error"] = "disconnected";
+                                out["error"] = "upstream-timeout";
+                                out["connected"] = false;
+                                out["stage"] = "frontend-upstream";
+                                out["elapsedMs"] = (Json::Int64)elapsedMs;
+                                out["reqResult"] = static_cast<int>(result);
                             }
                             resp->setBody(out.toStyledString());
                             if (frontendHttpLog)
@@ -6165,7 +6232,10 @@ void setupFrontendServer()
                 mode = (*json)["mode"].asString();
             }
             const std::string text = (*json)["text"].asString();
-            auto result = contextService.ingest(sessionId, text, mode);
+            std::string missionId;
+            if (json->isMember("missionId") && (*json)["missionId"].isString())
+                missionId = (*json)["missionId"].asString();
+            auto result = contextService.ingest(sessionId, text, mode, missionId);
             Json::Value out;
             out["ok"] = true;
             out["context"] = result;
@@ -7701,6 +7771,7 @@ drogon::app().registerHandler("/world/ingest", [&worldModel](const drogon::HttpR
         cb(resp);
     }, {drogon::Post});
 
+    drogon::app().setIdleConnectionTimeout(3600);
     drogon::app().addListener(host, port);
 
     std::cout << "[frontend_server] Listening on http://" << host << ":" << port << std::endl;

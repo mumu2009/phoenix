@@ -49,7 +49,8 @@ import torch.nn as nn
 
 from multimodal_model_loader import resolve_model_path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# phoenix/tools/this_file.py -> parents[1] == phoenix/
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT_DIR = PROJECT_ROOT / "runtime_store" / "models" / "multimodal_enc"
 
 

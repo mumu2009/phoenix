@@ -19,7 +19,7 @@
           words.push_back(t.get<std::string>());
       }
     } else if (payload.contains("text") && payload["text"].is_string()) {
-      words = tokenize(payload["text"].get<std::string>());
+      words = tokenizeKeepingStops(payload["text"].get<std::string>());
     }
 
     std::vector<std::pair<std::string, double>> memes;
@@ -131,6 +131,23 @@
       }
     }
 
+    {
+      const auto overlay =
+          phoenix::memory::ScopedTrainableMemory::instance()
+              .hot(phoenix::memory::currentMemoryScope())
+              .gnn.all();
+      for (const auto &e : overlay) {
+        if (!memeSet.count(e.from) && !memeSet.count(e.to))
+          continue;
+        if (edgeCount++)
+          oss << " ; ";
+        oss << e.from << "->" << e.to << "|w=" << std::fixed
+            << std::setprecision(2) << e.weight << "|d=" << e.direction
+            << "|online=1";
+        if (edgeCount >= 20)
+          break;
+      }
+    }
     oss << "\nsummary:n=" << memes.size() << " e=" << edgeCount;
     std::string out = oss.str();
     if (out.size() > 4096)
