@@ -227,6 +227,9 @@ public:
   struct SeedMapping {
     std::unordered_map<std::string, double> seeds;
     std::vector<std::string> order;
+    std::string queryId;
+    std::vector<std::string> tokens;
+    phoenix::memetic::MappingMassFrom fromWords;
   };
 
   SeedMapping mapWordsToMemesOrdered(const std::vector<std::string> &words) {
@@ -260,7 +263,6 @@ public:
         rawTokens.push_back(t);
     }
 
-    const auto &stop = getStopWords();
     std::vector<std::string> tokens;
     tokens.reserve(rawTokens.size());
     for (auto &t : rawTokens) {
@@ -271,16 +273,14 @@ public:
           break;
         }
       }
-      if (!hasNonAscii) {
-        if (t.size() <= 1)
-          continue;
-        if (stop.count(t))
-          continue;
-      }
+      if (!hasNonAscii && t.size() <= 1)
+        continue;
       tokens.push_back(t);
     }
     if (tokens.empty())
       tokens = rawTokens;
+    out.queryId = phoenix::memetic::mappingNewQueryId();
+    out.tokens = tokens;
 
     std::unordered_map<std::string, int> tokenFreq;
     for (const auto &t : tokens)
@@ -292,7 +292,8 @@ public:
       return posDecay * freqBoost;
     };
 
-    auto addSeed = [&](const std::string &memeId, double delta) {
+    auto addSeed = [&](const std::string &memeId, double delta,
+                       const std::string &src = std::string()) {
       if (memeId.empty())
         return;
       auto it = out.seeds.find(memeId);
@@ -302,8 +303,14 @@ public:
       } else {
         it->second += delta;
       }
+      if (!src.empty() && delta > 0.0)
+        out.fromWords[memeId][src] += delta;
     };
 
+    const int memeCount = std::max(1, (int)graph_.nodeCount());
+    std::unordered_map<std::string, double> queryMass;
+    std::unordered_map<std::string, std::vector<phoenix::memetic::MappingWordHit>>
+        hits;
     for (size_t wi = 0; wi < tokens.size(); ++wi) {
       const auto &word = tokens[wi];
       auto memes = kvm_.getWordMemeSet(word);
@@ -311,11 +318,31 @@ public:
         std::string memeId = "meme_" + sha1Hex(word);
         graph_.ensureNode(memeId);
         kvm_.link(word, memeId);
-        addSeed(memeId, tokenWeight(word, wi));
-      } else {
-        for (auto &mid : memes)
-          addSeed(mid, tokenWeight(word, wi));
+        addSeed(memeId,
+                phoenix::memetic::mappingDegreeSeed(tokenWeight(word, wi), 1),
+                word);
+        continue;
       }
+      queryMass[word] += tokenWeight(word, wi);
+      const int df = (int)memes.size();
+      auto &row = hits[word];
+      if (row.empty()) {
+        row.reserve(memes.size());
+        for (auto &mid : memes) {
+          const int tfm = std::max(1, kvm_.wordTf(mid, word));
+          row.push_back({mid, phoenix::memetic::mappingWordAlpha(tfm, df)});
+        }
+      }
+    }
+    std::unordered_map<std::string, double> allocated;
+    phoenix::memetic::MappingMassFrom allocatedFrom;
+    phoenix::memetic::mappingAddConditionedSeeds(queryMass, hits, &allocated,
+                                                &allocatedFrom, memeCount);
+    for (auto &kv : allocated)
+      addSeed(kv.first, kv.second);
+    for (auto &mk : allocatedFrom) {
+      for (auto &wk : mk.second)
+        out.fromWords[mk.first][wk.first] += wk.second;
     }
 
     int nMin = std::max(2, params_.memeNgramMin);
@@ -326,8 +353,11 @@ public:
     int maxUnits = 128;
     std::unordered_set<std::string> seenNgram;
 
-    auto resolveOrCreate =
-        [&](const std::vector<std::string> &tokenSet) -> std::string {
+    /* Query n-grams only retrieve. Creating meme_p_* here used to dump
+       ~1.9 mass onto a new isolated node and, worse, the accompanying
+       stopword seeds opened a radius-2 window on the whole graph. */
+    auto resolveExistingAll =
+        [&](const std::vector<std::string> &tokenSet) -> std::vector<std::string> {
       std::vector<std::string> uniq;
       std::unordered_set<std::string> seen;
       for (auto &t : tokenSet) {
@@ -336,45 +366,11 @@ public:
         if (seen.insert(t).second)
           uniq.push_back(t);
       }
-      if ((int)uniq.size() > maxWordSet)
-        uniq.resize(maxWordSet);
-      if (uniq.size() <= 1)
-        return uniq.empty() ? "" : ("meme_" + sha1Hex(uniq[0]));
-
-      std::unordered_map<std::string, int> counts;
-      for (auto &w : uniq) {
-        for (auto &mid : kvm_.getWordMemeSet(w))
-          counts[mid]++;
-      }
-      std::string best;
-      int bestOverlap = 0;
-      for (auto &kv : counts) {
-        if (kv.second > bestOverlap) {
-          bestOverlap = kv.second;
-          best = kv.first;
-        }
-      }
-      if (!best.empty() && bestOverlap >= minOverlap) {
-        for (auto &w : uniq)
-          kvm_.link(w, best);
-        graph_.ensureNode(best);
-        return best;
-      }
-      std::vector<std::string> sorted = uniq;
-      std::sort(sorted.begin(), sorted.end());
-      std::string memeId = "meme_p_" + sha1Hex([&]() {
-                             std::string join;
-                             for (size_t i = 0; i < sorted.size(); i++) {
-                               if (i)
-                                 join += "|";
-                               join += sorted[i];
-                             }
-                             return join;
-                           }());
-      graph_.ensureNode(memeId);
-      for (auto &w : sorted)
-        kvm_.link(w, memeId);
-      return memeId;
+      return phoenix::memetic::mappingCollectExistingMemes(
+          uniq,
+          [&](const std::string &w) { return kvm_.getWordMemeSet(w); },
+          [&](const std::string &id) { return kvm_.getMemeWords(id); },
+          minOverlap, maxWordSet, true);
     };
 
     for (size_t i = 0; i < tokens.size() && units < maxUnits; i++) {
@@ -392,18 +388,40 @@ public:
         }
         if (!seenNgram.insert(gramKey).second)
           continue;
-        std::string memeId = resolveOrCreate(gram);
-        if (memeId.empty())
+        auto memeIds = resolveExistingAll(gram);
+        if (memeIds.empty())
           continue;
         std::unordered_set<std::string> uniq(gram.begin(), gram.end());
         double uniqRatio = (double)uniq.size() / std::max(1, n);
         double w = (1.0 + 0.45 * (n - 1)) * uniqRatio;
         w *= 1.0 / (1.0 + 0.02 * (double)i);
-        addSeed(memeId, w);
+        double idfMean = 0.0;
+        int idfN = 0;
+        for (auto &t : uniq) {
+          const int df = std::max(1, (int)kvm_.getWordMemeSet(t).size());
+          idfMean += phoenix::memetic::mappingIdfScale(df, memeCount);
+          idfN++;
+        }
+        if (idfN > 0)
+          w *= idfMean / (double)idfN;
+        if (w <= 0.0)
+          continue;
+        std::string ng = "ng:";
+        for (size_t gi = 0; gi < gram.size(); ++gi) {
+          if (gi)
+            ng += "|";
+          ng += gram[gi];
+        }
+        for (auto &memeId : memeIds) {
+          graph_.ensureNode(memeId);
+          addSeed(memeId, w, ng);
+        }
         units++;
       }
     }
 
+    phoenix::memetic::mappingConcentrateSeeds(&out.seeds, &out.order,
+                                              &out.fromWords);
     return out;
   }
 
@@ -494,7 +512,7 @@ public:
         words.push_back(jsStringValue(w));
       }
     } else {
-      words = tokenize(text);
+      words = tokenizeKeepingStops(text);
     }
     auto jsTruthy = [&](const json &v) -> bool {
       if (v.is_null())
@@ -517,6 +535,12 @@ public:
       sessionId = sessionManager_->ensure(sessionId);
     if (sessionId.empty())
       sessionId = randomSessionId();
+    const auto memScope = phoenix::memory::memoryScopeForChatRoute(payload);
+    phoenix::memory::MemoryScopeGuard memGuard(
+        memScope.id == "anonymous" && !sessionId.empty()
+            ? phoenix::memory::parseMemoryScope(sessionId)
+            : memScope);
+    const std::string dialogScopeKey = phoenix::memory::currentMemoryScope().key();
 
     json budget = payload.contains("budget") && payload["budget"].is_object()
                       ? payload["budget"]
@@ -606,6 +630,7 @@ public:
     auto mapping = mapWordsToMemesOrdered(words);
     auto seeds = mapping.seeds;
     auto seedOrder = mapping.order;
+    int hopsUsed = 0;
     PropagationResult result;
     if (depth > 1) {
       for (int hop = 1; hop < depth; hop++) {
@@ -645,15 +670,16 @@ public:
             dedup.insert(w);
             final.push_back(w);
           }
-        auto nextMapping = mapWordsToMemesOrdered(final);
-        seeds = nextMapping.seeds;
-        seedOrder = nextMapping.order;
+        mapping = mapWordsToMemesOrdered(final);
+        seeds = mapping.seeds;
+        seedOrder = mapping.order;
+        hopsUsed = hop;
       }
     }
     result = runPropagation(seeds, json{{"iteration", iteration},
                                         {"radius", radius},
                                         {"seedOrder", seedOrder}});
-    std::string reply = composeReply(sessionId, result, words, seeds);
+    std::string reply = composeReply(dialogScopeKey, result, words, seeds);
     auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::steady_clock::now() - started)
                        .count();
@@ -669,6 +695,50 @@ public:
       auto it = seeds.find(id);
       if (it != seeds.end())
         out["seeds"].push_back({id, it->second});
+    }
+    {
+      json tr;
+      tr["id"] = mapping.queryId;
+      tr["hops"] = hopsUsed;
+      tr["tokens"] = json::array();
+      for (size_t i = 0; i < mapping.tokens.size(); ++i) {
+        tr["tokens"].push_back(
+            {{"id", phoenix::memetic::mappingTokenId(mapping.queryId,
+                                                     (int)i)},
+             {"w", mapping.tokens[i]}});
+      }
+      std::vector<std::pair<std::string, double>> ranked;
+      ranked.reserve(seedOrder.size());
+      for (auto &id : seedOrder) {
+        auto it = seeds.find(id);
+        if (it != seeds.end())
+          ranked.push_back({id, it->second});
+      }
+      std::sort(ranked.begin(), ranked.end(),
+                [](auto &a, auto &b) { return a.second > b.second; });
+      tr["seeds"] = json::array();
+      const int cap = std::min(16, (int)ranked.size());
+      for (int i = 0; i < cap; ++i) {
+        json row;
+        row["id"] = phoenix::memetic::mappingSeedId(mapping.queryId, i);
+        row["meme"] = ranked[(size_t)i].first;
+        row["mass"] = ranked[(size_t)i].second;
+        row["from"] = phoenix::memetic::mappingFormatFrom(
+            ranked[(size_t)i].first, mapping.fromWords);
+        json fromArr = json::array();
+        auto fit = mapping.fromWords.find(ranked[(size_t)i].first);
+        if (fit != mapping.fromWords.end()) {
+          std::vector<std::pair<std::string, double>> parts(fit->second.begin(),
+                                                            fit->second.end());
+          std::sort(parts.begin(), parts.end(),
+                    [](auto &a, auto &b) { return a.second > b.second; });
+          for (size_t k = 0; k < parts.size() && k < 8; ++k)
+            fromArr.push_back({{"w", parts[k].first}, {"mass", parts[k].second}});
+        }
+        row["fromParts"] = fromArr;
+        tr["seeds"].push_back(std::move(row));
+      }
+      out["gnnTrace"] = std::move(tr);
     }
     out["activation"] = result.activation;
     out["memes"] = result.windowInfo.ids;
@@ -729,7 +799,11 @@ public:
 
   void graphLink(const std::string &fromId, const std::string &toId,
                  double weight, int direction) override {
-    graph_.link(fromId, toId, weight, direction);
+    /* Online / adversarial increments stay in the current MemoryScope
+       overlay.  Official ingest writes graph_.link directly (cold share). */
+    auto &hot = phoenix::memory::ScopedTrainableMemory::instance().hot(
+        phoenix::memory::currentMemoryScope());
+    hot.gnn.add(fromId, toId, weight, direction);
   }
 
 private:
@@ -906,7 +980,7 @@ public:
       }
     }
     if (tokens.empty() && !text.empty())
-      tokens = tokenize(text);
+      tokens = tokenizeKeepingStops(text);
     if (text.empty() && tokens.empty())
       return json{{"ok", false}, {"reason", "empty-text"}};
     if (tokens.empty())
@@ -1334,6 +1408,18 @@ public:
         return json{{"ok", false}, {"reason", "gibberish-reply-skipped"}};
       }
 
+      /* Resolve the memory scope FIRST: the residual EMA, GNN overlay and
+         dialog increments below all land in this scope's bucket.  Binding
+         late used to write the per-scope residual into whatever TLS scope
+         was left over on this thread. */
+      auto learnScope = phoenix::memory::memoryScopeFromPayload(actualPayload);
+      if (!learnScope.valid() ||
+          (learnScope.id == "anonymous" &&
+           !actualPayload.contains("sessionId") &&
+           !actualPayload.contains("missionId")))
+        return json{{"ok", false}, {"reason", "missing-session"}};
+      phoenix::memory::MemoryScopeGuard learnGuard(learnScope);
+
       double residual = 0.0;
       double residualGate = 1.0;
       try {
@@ -1352,17 +1438,17 @@ public:
               residualStats_.ema * (1.0 - residualStats_.alpha) +
               residual * residualStats_.alpha;
         }
-        if (residualStats_.count % std::max(1, residualStats_.adjustEvery) ==
-            0) {
-          if (residualStats_.ema > 0.55) {
-            params_.iteration =
-                std::min(12, std::max(3, params_.iteration) + 1);
-            params_.decayK = std::max(0.5, params_.decayK - 0.05);
-          } else if (residualStats_.ema < 0.30) {
-            params_.iteration = std::max(3, std::max(3, params_.iteration) - 1);
-            params_.decayK = std::min(2.0, params_.decayK + 0.05);
-          }
-        }
+        /* Per-scope residual only.  Do not retune the shared params_
+           from one chat/mission — that leaked Helios residuals into ops. */
+        auto &hotRes = phoenix::memory::ScopedTrainableMemory::instance()
+                           .hot(phoenix::memory::currentMemoryScope())
+                           .residual;
+        hotRes.count += 1;
+        hotRes.last = residual;
+        if (hotRes.count == 1)
+          hotRes.ema = residual;
+        else
+          hotRes.ema = hotRes.ema * 0.95 + residual * 0.05;
       } catch (...) {
         residual = 0.0;
         residualGate = 1.0;
@@ -1404,7 +1490,7 @@ public:
           }
         }
       } else {
-        auto mapping = mapWordsToMemesOrdered(tokenize(question));
+        auto mapping = mapWordsToMemesOrdered(tokenizeKeepingStops(question));
         seeds = mapping.seeds;
         seedOrder = mapping.order;
       }
@@ -1432,19 +1518,24 @@ public:
       for (auto &m : topMemes)
         memeIds.push_back(m.memeId);
 
+      auto &hot = phoenix::memory::ScopedTrainableMemory::instance().hot(
+          learnScope);
       for (size_t i = 0; i < topMemes.size() && i < 10; i++) {
         double w = std::max(0.5, std::min(3.0, topMemes[i].score));
         w = std::max(0.2, w * residualGate);
-        surfaceLexicon_->learn(topMemes[i].memeId, reply, w);
+        /* Surface lexicon is a shared vocabulary store; keep official
+           ingest on it.  Dialog-time phrase weights stay in the overlay. */
+        (void)w;
       }
-      std::string sessionId;
-      if (actualPayload.contains("sessionId") &&
-          actualPayload["sessionId"].is_string())
-        sessionId = actualPayload["sessionId"].get<std::string>();
-      if (sessionId.empty())
-        return json{{"ok", false}, {"reason", "missing-session"}};
+      for (size_t i = 0; i + 1 < memeIds.size() && i < 8; ++i) {
+        double w = std::max(0.2, residualGate);
+        hot.gnn.add(memeIds[i], memeIds[i + 1], w, 0);
+      }
+      const std::string sessionId = learnScope.key();
 
       double hint = topMemes.empty() ? 0.0 : topMemes.front().score;
+      hot.dialog.remember(signature, question, reply, memeIds,
+                          hint * residualGate);
       dialogMemory_->remember(sessionId, signature, memeIds, question, reply,
                               hint * residualGate);
       int sigLen = 0;
@@ -1454,11 +1545,14 @@ public:
           if (c == '|')
             sigLen++;
       }
+      /* residualEma is the CALLER'S scope EMA — a per-goal variable.  The
+         process-wide aggregate stays available as residualEmaProcess. */
       return json{{"ok", true},
                   {"memes", (int)memeIds.size()},
                   {"signatureLen", sigLen},
                   {"residual", residual},
-                  {"residualEma", residualStats_.ema},
+                  {"residualEma", hot.residual.ema},
+                  {"residualEmaProcess", residualStats_.ema},
                   {"residualGate", residualGate}};
     } catch (const std::exception &e) {
       return json{{"ok", false}, {"error", e.what()}};
@@ -1657,98 +1751,35 @@ private:
 
   std::vector<std::string>
   buildMemeSequenceFromTokens(const std::vector<std::string> &tokens) {
-    std::vector<std::string> list;
-    auto trim = [](const std::string &s) {
-      auto start = s.find_first_not_of(" \n\r\t");
-      if (start == std::string::npos)
-        return std::string();
-      auto end = s.find_last_not_of(" \n\r\t");
-      return s.substr(start, end - start + 1);
-    };
-    for (auto &t : tokens) {
-      std::string s = trim(t);
-      if (!s.empty())
-        list.push_back(s);
-    }
-    int nMin = std::max(2, params_.memeNgramMin);
-    int nMax = std::max(nMin, params_.memeNgramMax);
-    int minOverlap = std::max(1, params_.minOverlapThreshold);
-    int maxWordSet = std::max(4, params_.maxMemeWords);
-
-    auto resolveOrCreate =
-        [&](const std::vector<std::string> &tokenSet) -> std::string {
-      std::vector<std::string> uniq;
-      std::unordered_set<std::string> seen;
-      for (auto &t : tokenSet) {
-        if (t.empty())
-          continue;
-        if (seen.insert(t).second)
-          uniq.push_back(t);
+    phoenix::memetic::Params p;
+    p.ngramMin = params_.memeNgramMin;
+    p.ngramMax = params_.memeNgramMax;
+    p.minOverlap = params_.minOverlapThreshold;
+    p.maxMemeWords = params_.maxMemeWords;
+    struct Adapt final : phoenix::memetic::MemeClusterStore {
+      KVMStore &kvm;
+      MemeGraph &graph;
+      Adapt(KVMStore &k, MemeGraph &g) : kvm(k), graph(g) {}
+      std::vector<std::string>
+      memesOfWord(const std::string &word) const override {
+        return kvm.getWordMemeSet(word);
       }
-      if ((int)uniq.size() > maxWordSet)
-        uniq.resize(maxWordSet);
-      if (uniq.size() <= 1)
-        return uniq.empty() ? "" : ("meme_" + sha1Hex(uniq[0]));
-
-      std::unordered_map<std::string, int> counts;
-      for (auto &w : uniq) {
-        for (auto &mid : kvm_.getWordMemeSet(w))
-          counts[mid]++;
+      std::vector<std::string>
+      wordsOfMeme(const std::string &memeId) const override {
+        return kvm.getMemeWords(memeId);
       }
-      std::string best;
-      int bestOverlap = 0;
-      for (auto &kv : counts) {
-        if (kv.second > bestOverlap) {
-          bestOverlap = kv.second;
-          best = kv.first;
-        }
+      void bind(const std::string &word, const std::string &memeId) override {
+        kvm.link(word, memeId, true);
       }
-      if (!best.empty() && bestOverlap >= minOverlap) {
-        for (auto &w : uniq)
-          kvm_.link(w, best);
-        graph_.ensureNode(best);
-        return best;
+      int wordTf(const std::string &memeId,
+                 const std::string &word) const override {
+        return kvm.wordTf(memeId, word);
       }
-      std::vector<std::string> sorted = uniq;
-      std::sort(sorted.begin(), sorted.end());
-      std::string memeId = "meme_p_" + sha1Hex([&]() {
-                             std::string join;
-                             for (size_t i = 0; i < sorted.size(); i++) {
-                               if (i)
-                                 join += "|";
-                               join += sorted[i];
-                             }
-                             return join;
-                           }());
-      graph_.ensureNode(memeId);
-      for (auto &w : sorted)
-        kvm_.link(w, memeId);
-      return memeId;
-    };
-
-    std::vector<std::string> seq;
-    for (size_t i = 0; i < list.size(); i++) {
-      std::string picked;
-      for (int n = nMax; n >= nMin; n--) {
-        if (i + n > list.size())
-          continue;
-        picked = resolveOrCreate(
-            std::vector<std::string>(list.begin() + i, list.begin() + i + n));
-        if (!picked.empty())
-          break;
+      void ensureNode(const std::string &memeId) override {
+        graph.ensureNode(memeId);
       }
-      if (picked.empty()) {
-        auto &w = list[i];
-        if (!w.empty()) {
-          picked = "meme_" + sha1Hex(w);
-          graph_.ensureNode(picked);
-          kvm_.link(w, picked);
-        }
-      }
-      if (!picked.empty() && (seq.empty() || seq.back() != picked))
-        seq.push_back(picked);
-    }
-    return seq;
+    } store(kvm_, graph_);
+    return phoenix::memetic::buildMemeSequence(store, tokens, p);
   }
 
   std::string

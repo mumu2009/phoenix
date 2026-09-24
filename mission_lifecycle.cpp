@@ -55,6 +55,7 @@ nlohmann::json Mission::toJson() const {
           {"pressureHorizonSec", pressureHorizonSec},
           {"pressureTauSec", pressureTauSec},
           {"pressureExpr", pressureExpr},
+          {"pressureFloor", pressureFloor},
           {"deliverable", deliverable},
           {"state", static_cast<int>(state)},
           {"startMs", startMs},
@@ -84,6 +85,8 @@ Mission Mission::fromJson(const nlohmann::json &j) {
     m.pressureTauSec = j["pressureTauSec"].get<double>();
   if (j.contains("pressureExpr") && j["pressureExpr"].is_string())
     m.pressureExpr = j["pressureExpr"].get<std::string>();
+  if (j.contains("pressureFloor") && j["pressureFloor"].is_number())
+    m.pressureFloor = j["pressureFloor"].get<float>();
   if (j.contains("deliverable") && j["deliverable"].is_string())
     m.deliverable = j["deliverable"].get<std::string>();
   if (j.contains("state") && j["state"].is_number_integer()) {

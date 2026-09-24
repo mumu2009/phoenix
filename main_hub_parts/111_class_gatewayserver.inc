@@ -53,8 +53,13 @@ public:
       /* Chat must not inherit the default running mission.  Only an
          explicit mission MemoryScope tags evidence with missionId. */
       const auto scope = phoenix::memory::currentMemoryScope();
-      if (scope.kind == phoenix::memory::MemoryKind::Mission && scope.valid())
+      if (scope.kind == phoenix::memory::MemoryKind::Mission && scope.valid()) {
         evidence["metadata"]["missionId"] = scope.id;
+        /* Mission scene state lives under "mission:<id>", never under the
+           chat session key — a chat turn must not read back mission
+           evidence via sessionState(sessionId). */
+        evidence["sessionId"] = scope.key();
+      }
       worldModel_->ingestEvidence(evidence);
     } catch (...) {
     }
@@ -159,6 +164,7 @@ public:
       missionCfg["pressureHorizonSec"] = phoenix::resolveConfig<double>("mission.pressureHorizonSec", 3600.0, "AI_MISSION_PRESSURE_HORIZON_SEC");
       missionCfg["pressureTauSec"] = phoenix::resolveConfig<double>("mission.pressureTauSec", 86400.0, "AI_MISSION_PRESSURE_TAU_SEC");
       missionCfg["pressureExpr"] = phoenix::resolveConfig<std::string>("mission.pressureExpr", std::string("Pmax*tanh(t/tau)"), "AI_MISSION_PRESSURE_EXPR");
+      missionCfg["pressureFloor"] = phoenix::resolveConfig<double>("mission.pressureFloor", 0.05, "AI_MISSION_PRESSURE_FLOOR");
       missionCfg["mutationRate"] = phoenix::cfgOr<double>("mission.mutationRate", 0.05);
       missionCfg["maxReplicas"] = phoenix::cfgOr<int>("mission.maxReplicas", 4);
       /* 0 = UNLIMITED task-tree depth (boxes may summon their own boxes);
@@ -253,6 +259,12 @@ public:
                   phoenix::mission::looksLikeOnesJunk(currentFile) ||
                   phoenix::mission::looksLikeRewriteInstructionEcho(
                       currentFile);
+              if (config_.httpLog)
+                std::cout << "[mission-deliberate] stage=enter deliv="
+                          << currentFile.size()
+                          << " minChars=" << minDeliverableChars
+                          << " stillDrafting=" << (stillDrafting ? 1 : 0)
+                          << std::endl;
               /* GNN pretrain gap: empty meme graph => empty diffusion prior.
                  Graph the same recent window infer sees, not a 2k tail and
                  not the human assignment. Pin-only is not a draft to graph.
@@ -260,6 +272,9 @@ public:
                  pin the heartbeat (no second tokBudget for minutes). */
               if (!pinOnly && !stillDrafting &&
                   (packOpt.includeGnnSummary || unitPipelineEnabled)) {
+                if (config_.httpLog)
+                  std::cout << "[mission-deliberate] stage=gnn-pretrain"
+                            << std::endl;
                 try {
                   const int lim =
                       phoenix::cfgOr<int>("mission.gnnPretrainDocs", 48);
@@ -370,14 +385,24 @@ public:
                 /* Pin-only / empty draft: do not recall prior missions.
                    Assign writes the seed before tick 1; treating that
                    as a real window pulled tutorial/game-review RAG. */
-                if (!pinOnly && !stillDrafting && !recallDraft.empty())
+                if (!pinOnly && !stillDrafting && !recallDraft.empty()) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] stage=recall"
+                              << std::endl;
+                  /* callerTag buckets the read path: other missions'
+                     deposits must clear a goal-relevance bar before they
+                     may enter THIS mission's prompt. */
                   phoenix::mission::appendRecalledMemory(
                       missionMemorySnippets, phoenix::instance::ccmStorePath(),
-                      expPath, goal, recallDraft, 3, 3);
+                      expPath, goal, recallDraft, 3, 3, "mission:" + scope);
+                }
                 /* Pretrain wrote HierarchicalMemory under corpus:* and
                    never read it back on mission ticks. Same recall query
                    as CCM — not a second causal stream. */
                 if (!pinOnly && !stillDrafting) {
+                if (config_.httpLog)
+                  std::cout << "[mission-deliberate] stage=corpus-query"
+                            << std::endl;
                 try {
                   const std::string q = phoenix::mission::buildMemoryRecallQuery(
                       goalClip, recallDraft);
@@ -414,9 +439,18 @@ public:
                    off the RAG stream until there is real prose. */
                 if (phoenix::cfgOr<bool>("mission.outlineEnabled", true) &&
                     !stillDrafting && !onesJunkDraft) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] stage=outline"
+                              << std::endl;
                   try {
                     const std::string outline = buildMissionOutline(goalClip);
-                    if (outline.find("\n1. ") != std::string::npos)
+                    /* The outline is a GLOBAL meme skeleton, not
+                       goal-scoped: a graph dominated by the previous
+                       mission's theme would bleed those keywords into
+                       this mission's prompt. Skip it when it shares no
+                       vocabulary with the goal at all. */
+                    if (outline.find("\n1. ") != std::string::npos &&
+                        phoenix::memory::ccmOverlap(goalClip, outline) > 0.0)
                       phoenix::inference::appendUnitQuery(
                           missionMemorySnippets,
                           phoenix::inference::unitQueryFromText(outline,
@@ -451,6 +485,9 @@ public:
                    they are not concatenated onto the causal prefix. */
                 if (phoenix::cfgOr<bool>("mission.pluginOffers", true) &&
                     !goal.empty() && !stillDrafting) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] stage=plugin-offers"
+                              << std::endl;
                   try {
                     auto rt = activeRuntime();
                     auto st =
@@ -624,6 +661,9 @@ public:
                 nlohmann::json esOpts = nlohmann::json::object();
                 nlohmann::json esTensor = nlohmann::json::object();
                 if (!pinOnly && !stillDrafting && !emoSrc.empty()) {
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] stage=emotion"
+                              << std::endl;
                   try {
                     cognitionManager_.ingestSensation(nlohmann::json{
                         {"type", "novelty"},
@@ -1459,12 +1499,16 @@ public:
                             goal, expSum);
                         /* v8.x cross-context memory: the finished mission
                            deposits its summary so OTHER contexts (chat,
-                           future missions) can recall it. */
-                        phoenix::memory::ccmRemember(
-                            phoenix::resolveConfig<std::string>(
-                                "crossContextMemory.path",
-                                "./runtime_store/cross_context_memory.json"),
-                            "mission:" + scope, expSum);
+                           future missions) can recall it. Gated: an
+                           off-goal summary is a bled-in foreign theme and
+                           must not be stored under this mission's tag. */
+                        if (phoenix::memory::ccmMissionTextRelevant(goal,
+                                                                    expSum))
+                          phoenix::memory::ccmRemember(
+                              phoenix::resolveConfig<std::string>(
+                                  "crossContextMemory.path",
+                                  "./runtime_store/cross_context_memory.json"),
+                              "mission:" + scope, expSum);
                         /* v8.x B3 GNN graph evolution: feed the finished
                            mission back through the EXISTING learning
                            pipeline (learnFromDialog extracts memes and
@@ -1856,7 +1900,14 @@ public:
                           << currentFile.size() << std::endl;
               return std::string(); /* file + memory synced; loop must not re-append */
               }
+            } catch (const std::exception &ex) {
+              /* A throwing tick used to return "" here with zero trace -
+                 indistinguishable from a dead loop in the gateway log. */
+              std::cout << "[mission-deliberate] EXCEPTION: "
+                        << ex.what() << std::endl;
             } catch (...) {
+              std::cout << "[mission-deliberate] EXCEPTION (unknown)"
+                        << std::endl;
             }
             return std::string();
           });

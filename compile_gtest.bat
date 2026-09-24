@@ -122,7 +122,7 @@ for %%a in (%COMMON_SOURCES%) do (
     echo !src! >> "%ALL_TEST_SOURCES_FILE%"
 )
 
-"%GXX_EXE%" -o gtest_runner.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% -I"%CD%\tests\gtest" -I"%CD%\test\gtest" @"%ALL_TEST_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 -O0 -g
+"%GXX_EXE%" -o gtest_runner.exe -std=c++20 -Wa,-mbig-obj -DAI_EXTERNAL_BACKEND_COMPAT=1 -DAI_EXTERNAL_LEARNER_BRIDGE=1 -DHAVE_SQLITE %EDGE_CFLAGS% @"%CONAN_CFLAGS_FILE%" -I"%CD%" -I"%CD%\poppler-25.12.0\Library\include" -I"%PY_INC%" %OUTSIDES_CFLAGS% -I"%CD%\tests\gtest" -I"%CD%\test\gtest" @"%ALL_TEST_SOURCES_FILE%" -Wl,--start-group @"%CONAN_LIBS_FILE%" -Wl,--end-group "%CD%\poppler-25.12.0\Library\lib\poppler-cpp.lib" "%CD%\poppler-25.12.0\Library\lib\poppler.lib" -L"%PY_LIB%" -l%PY_LINK_NAME% -lws2_32 -O0 -g1 -Wl,--no-keep-memory
 
 if errorlevel 1 (
   echo [ERROR] GTest compilation failed.

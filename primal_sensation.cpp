@@ -154,6 +154,41 @@ float PrimalSensationEngine::homeostaticCost() const {
     return cost;
 }
 
+float PrimalSensationEngine::netValenceFor(const std::string &contextTag) const {
+    if (contextTag.empty()) return netValence();
+    const auto sens = activeFor(contextTag);
+    if (sens.empty()) return 0.0f;
+    float total = 0.0f;
+    float weight = 0.0f;
+    for (const auto &s : sens) {
+        total += s.valence * s.intensity;
+        weight += s.intensity;
+    }
+    if (weight <= 0.0f) return 0.0f;
+    return std::clamp(total / weight, -1.0f, 1.0f);
+}
+
+float PrimalSensationEngine::netArousalFor(const std::string &contextTag) const {
+    if (contextTag.empty()) return netArousal();
+    float arousal = 0.0f;
+    for (const auto &s : activeFor(contextTag)) {
+        arousal = std::max(arousal, s.intensity);
+    }
+    return std::clamp(arousal, 0.0f, 1.0f);
+}
+
+float PrimalSensationEngine::homeostaticCostFor(const std::string &contextTag) const {
+    if (contextTag.empty()) return homeostaticCost();
+    float cost = 0.0f;
+    for (const auto &s : activeFor(contextTag)) {
+        const auto it = tuning_.find(s.type);
+        const float gain = (it != tuning_.end()) ? it->second.gain : 1.0f;
+        const float setpoint = (it != tuning_.end()) ? it->second.setpoint : 0.0f;
+        cost += gain * std::abs(s.intensity - setpoint);
+    }
+    return cost;
+}
+
 std::optional<PrimalSensation> PrimalSensationEngine::dominant() const {
     if (sensations_.empty()) return std::nullopt;
     auto it = std::max_element(sensations_.begin(), sensations_.end(),

@@ -132,6 +132,13 @@ public:
     /** Net arousal: how strongly the body is activated, range [0, 1]. */
     float netArousal() const;
 
+    /* Context-scoped aggregates: same metric, computed over activeFor(tag)
+       only, so one goal's Pain/Novelty never inflates another goal's drive
+       cost.  Empty tag -> whole-engine value (legacy callers unchanged). */
+    float netValenceFor(const std::string &contextTag) const;
+    float netArousalFor(const std::string &contextTag) const;
+    float homeostaticCostFor(const std::string &contextTag) const;
+
     /** Dominant sensation by intensity. */
     std::optional<PrimalSensation> dominant() const;
 

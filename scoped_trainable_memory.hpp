@@ -136,6 +136,10 @@ struct TrainableMemoryBucket {
   std::unique_ptr<phoenix::agi::ActiveInferenceController> agi;
   ResidualStats residual;
   std::string lastPressureSource;
+  /* Last benefit/harm action bias produced by an iterate() under this scope.
+     The manager-level lastBenefitHarmBias_ is only a process-wide mirror of
+     the most recent tick; per-scope history lives here. */
+  std::string lastBenefitHarmBias;
   uint64_t createdAtMs{0};
   uint64_t lastAccessMs{0};
 };

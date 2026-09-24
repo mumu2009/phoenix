@@ -46,6 +46,12 @@ struct Mission {
   double deadlineSec{300.0};     /*!< time budget. */
   float painGainPerSec{0.01f};   /*!< urgency: pain growth rate (linear mode). */
   float maxPain{1.0f};
+  /* Starvation floor: while the mission is Running and t>0, pressure never
+     drops below this value (clamped to [0, Pmax)).  A near-zero pressure
+     (e.g. asymptotic with tau=86400) made the first mission hours
+     indistinguishable from "no mission" downstream (sampling weights and
+     the Pain sensation both scale with pressure). */
+  float pressureFloor{0.05f};
   /* pressureMode:
        "asymptotic" (default) = Pmax * tanh(t/tau) — approaches Pmax, never hits
        "linear"               = min(g*t, Pmax)
@@ -109,6 +115,12 @@ struct Mission {
       if (p >= Pmax) p = std::nextafter(Pmax, 0.0);
     }
     if (p < 0.0) p = 0.0;
+    /* Starvation floor: an unfinished mission must keep a non-zero urgency
+       floor so downstream modulation never decays to "no mission". */
+    double floor = static_cast<double>(pressureFloor);
+    if (floor < 0.0) floor = 0.0;
+    if (floor >= Pmax) floor = std::nextafter(Pmax, 0.0);
+    if (p < floor) p = floor;
     return static_cast<float>(p);
   }
 

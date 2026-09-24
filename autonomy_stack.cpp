@@ -675,6 +675,8 @@ CognitionAutonomyManager::~CognitionAutonomyManager() {
     loopStop_.store(true, std::memory_order_release);
     phoenix::inference::requestAbort();
     if (loopThread_.joinable()) loopThread_.join();
+    loopWatchdogStop_.store(true, std::memory_order_release);
+    if (loopWatchdogThread_.joinable()) loopWatchdogThread_.join();
     unregisterFromSafetyRegistry();
 }
 
@@ -1584,7 +1586,14 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
     /* v7.0 affect signal: export the emotion operation weight vector as a
        numeric matrix rather than an explicit action word or emotional label. */
     std::string driveWeights = json(bh.driveVector).dump();
-    lastBenefitHarmBias_ = driveWeights;
+    lastBenefitHarmBias_ = driveWeights;  /* process mirror of the latest tick */
+    /* Per-scope copy: A's appraisal must not overwrite the bias B reads back. */
+    try {
+        phoenix::memory::ScopedTrainableMemory::instance()
+            .hot(iterMemScope)
+            .lastBenefitHarmBias = driveWeights;
+    } catch (...) {
+    }
 
     phoenix::prompt::MemoryPrompt memory;
     memory.driveVector = bh.driveVector;
@@ -1644,10 +1653,11 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
         scopeAgi.bootstrapPreferences(zNow);
         /* Allostasis: with a subconscious profile the intrinsic cost is the
            homeostatic deviation (Σ gain·|intensity−setpoint|); otherwise the
-           legacy arousal proxy. */
+           legacy arousal proxy.  Context-scoped: another goal's Pain must not
+           inflate THIS scope's drive cost. */
         const double driveCost = subconsciousEnabled_
-            ? static_cast<double>(sensationEngine_.homeostaticCost())
-            : static_cast<double>(sensationEngine_.netArousal());
+            ? static_cast<double>(sensationEngine_.homeostaticCostFor(ctxTag))
+            : static_cast<double>(sensationEngine_.netArousalFor(ctxTag));
         /* Adaptive exploration (VDBE-style): amplify the epistemic term when
            the environment is getting predictable, damp it when chaotic. */
         const double epistW = agiEpistW_ * (agiAdaptiveExploration_
@@ -1719,10 +1729,22 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
 
     std::string composedPrompt;
     std::string cognitionModulation;
-    /* drain human interjections: delivered once, on the next tick/turn */
+    /* drain human interjections: delivered once, on the next tick/turn OF THE
+       SAME SCOPE.  Tagged entries wait for their own context; untagged
+       (legacy) entries are global and drain on any tick. */
     std::vector<std::string> consumedInterjections;
-    for (const auto &inj : interjections_) consumedInterjections.push_back(inj.second);
-    interjections_.clear();
+    {
+        const std::string myKey = iterMemScope.key();
+        std::vector<Interjection> kept;
+        kept.reserve(interjections_.size());
+        for (const auto &inj : interjections_) {
+            if (inj.scopeKey.empty() || inj.scopeKey == myKey)
+                consumedInterjections.push_back(inj.text);
+            else
+                kept.push_back(inj);
+        }
+        interjections_.swap(kept);
+    }
     std::string userText;
     if (payload.contains("userPrompt") && payload["userPrompt"].is_string()) {
         userText = payload["userPrompt"].get<std::string>();
@@ -2032,6 +2054,9 @@ json CognitionAutonomyManager::configureAgi(const json &payload) {
     agiController_.setActions(std::move(actions));
 
     // Preferences track the current benefit-harm drive direction.
+    // update() before evaluate(): currentActivations_ is a recomputed scratch,
+    // never read what an earlier unrelated context left behind.
+    instinctEngine_.update(sensationEngine_.active(), 1.0f);
     auto bh = instinctEngine_.evaluate(sensationEngine_.active());
     agiController_.bootstrapPreferences(
         phoenix::multimodal::projectToDimension(bh.driveVector, static_cast<size_t>(dim), 0x41474955U));
@@ -2055,7 +2080,14 @@ json CognitionAutonomyManager::agiPlan(const json &payload) {
     auto &scopeAgi = phoenix::memory::ScopedTrainableMemory::instance().agiFor(
         scope, agiController_);
     auto &hot = phoenix::memory::ScopedTrainableMemory::instance().hot(scope);
-    auto bh = instinctEngine_.evaluate(sensationEngine_.active());
+    /* Context isolation: plan from THIS scope's sensations only, and never
+       read instinct scratch activations left by another context's update. */
+    const std::string ctxTag =
+        payload.value("contextTag", std::string()).empty() ? scope.key()
+                           : payload.value("contextTag", std::string());
+    const auto planSens = sensationEngine_.activeFor(ctxTag);
+    instinctEngine_.update(planSens, 1.0f);
+    auto bh = instinctEngine_.evaluate(planSens);
     const size_t dim = scopeAgi.model().dim();
     std::vector<float> z = hot.agiLatent;
     if (z.empty()) {
@@ -2064,7 +2096,7 @@ json CognitionAutonomyManager::agiPlan(const json &payload) {
     }
     scopeAgi.bootstrapPreferences(
         phoenix::multimodal::projectToDimension(bh.driveVector, dim, 0x41474955U));
-    const double driveCost = static_cast<double>(sensationEngine_.netArousal());
+    const double driveCost = static_cast<double>(sensationEngine_.netArousalFor(ctxTag));
     const auto plan = scopeAgi.plan(z, driveCost, agiPragW_, agiIntrinW_, agiEpistW_);
     json out;
     out["ok"] = true;
@@ -2223,6 +2255,11 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
     if (!p.contains("pressureTauSec"))
       m.pressureTauSec =
           phoenix::mission::inferPressureTauSec(m.goal, m.pressureTauSec);
+    /* Starvation floor (default 0.05): an unfinished mission keeps at least
+       this much pressure so the loop never starves on a near-zero
+       asymptotic tau. */
+    m.pressureFloor = static_cast<float>(
+        clampDouble(p.value("pressureFloor", 0.05), 0.0, 1.0));
     m.pressureExpr = p.value("pressureExpr", std::string("Pmax*tanh(t/tau)"));
     if (m.pressureExpr.empty()) m.pressureExpr = "Pmax*tanh(t/tau)";
     /* A mission without a goal is a no-op (config-only enable). */
@@ -2699,9 +2736,19 @@ json CognitionAutonomyManager::interject(const json &payload) {
     if (text.empty()) {
         return json{{"ok", false}, {"error", "interjection text required"}};
     }
-    interjections_.push_back({nowMs(), text});
+    /* Scope-tag the interjection when the caller names a session/mission, so
+       a note for mission A is never consumed by chat B's tick.  No id in the
+       payload keeps the legacy global delivery. */
+    std::string scopeKey;
+    {
+        const auto injScope = phoenix::memory::memoryScopeFromPayload(p);
+        if (injScope.valid() && injScope.id != "anonymous")
+            scopeKey = injScope.key();
+    }
+    interjections_.push_back(Interjection{nowMs(), scopeKey, text});
     if (interjections_.size() > 64) interjections_.erase(interjections_.begin());
     nlohmann::json out = json{{"ok", true}, {"queued", interjections_.size()}};
+    if (!scopeKey.empty()) out["memoryScope"] = scopeKey;
     /* optional mid-flight goal amendment: the mission is REDIRECTED, not
        restarted (start time and pressure are preserved).  v8.x concurrent:
        targets payload.missionId (default = last assigned). */
@@ -2742,6 +2789,9 @@ json CognitionAutonomyManager::configureAutonomyLoop(const json &payload) {
     if (p.contains("persistPath") && p["persistPath"].is_string()) {
         loopPersistPath_ = p["persistPath"].get<std::string>();
     }
+    loopStallWarnSec_ = clampInt(
+        p.value("stallWarnSec", phoenix::cfgOr<int>("autonomyLoop.stallWarnSec", 180)),
+        30, 3600);
     return json{{"ok", true},
                 {"result", json{{"enabled", loopEnabled_},
                                 {"intervalSec", loopIntervalSec_},
@@ -2862,6 +2912,55 @@ void CognitionAutonomyManager::ensureHeartbeatSession() {
     sessions_[id] = std::move(rec);
 }
 
+void CognitionAutonomyManager::setLoopStage(int stage) {
+    loopStage_.store(stage, std::memory_order_release);
+    loopStageAtMs_.store(nowMs(), std::memory_order_release);
+    loopStageTick_.store(loopTickCount_.load(std::memory_order_relaxed),
+                         std::memory_order_release);
+}
+
+const char *CognitionAutonomyManager::loopStageName(int stage) {
+    switch (stage) {
+    case 0: return "idle/sleep";
+    case 1: return "deliberate";
+    case 2: return "heartbeat-session";
+    case 3: return "observe";
+    case 4: return "iterate";
+    case 5: return "persist";
+    default: return "?";
+    }
+}
+
+void CognitionAutonomyManager::ensureLoopWatchdog() {
+    if (loopWatchdogThread_.joinable())
+        return; /* already running */
+    loopWatchdogStop_.store(false, std::memory_order_release);
+    loopWatchdogThread_ = std::thread([this] {
+        int64_t lastWarnAtMs = 0;
+        while (!loopWatchdogStop_.load(std::memory_order_acquire)) {
+            for (int i = 0; i < 30; ++i) {
+                if (loopWatchdogStop_.load(std::memory_order_acquire)) return;
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            if (!loopRunning_.load(std::memory_order_acquire)) continue;
+            const int stage = loopStage_.load(std::memory_order_acquire);
+            if (stage == 0) continue; /* sleeping between ticks is healthy */
+            const int64_t entered = loopStageAtMs_.load(std::memory_order_acquire);
+            const int64_t stuckMs = nowMs() - entered;
+            const int64_t warnMs =
+                static_cast<int64_t>(std::max(30, loopStallWarnSec_)) * 1000;
+            if (stuckMs < warnMs) continue;
+            if (lastWarnAtMs != 0 && nowMs() - lastWarnAtMs < 60000) continue;
+            lastWarnAtMs = nowMs();
+            std::cout << "[mission-stall] loop stuck in stage="
+                      << loopStageName(stage) << " tick="
+                      << loopStageTick_.load(std::memory_order_relaxed)
+                      << " for " << (stuckMs / 1000) << "s (warn at "
+                      << loopStallWarnSec_ << "s)" << std::endl;
+        }
+    });
+}
+
 void CognitionAutonomyManager::loopRun(uint64_t gen) {
     /* Heartbeat: the REAL autonomous loop.  Each tick runs the full
        plan/act/observe/learn cycle through iterate() - no external message
@@ -2870,6 +2969,7 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
     if (loopGeneration_.load(std::memory_order_acquire) != gen)
         return;
     loopRunning_.store(true, std::memory_order_release);
+    ensureLoopWatchdog();
     struct LoopRunningGuard {
         CognitionAutonomyManager *self;
         uint64_t gen;
@@ -2892,6 +2992,10 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
            loopGeneration_.load(std::memory_order_acquire) == gen) {
         if (phoenix::safety::EmergencyStop::instance().latched()) break;
         const int64_t tickStart = nowMs();
+        setLoopStage(1);
+        std::cout << "[mission-loop] tick="
+                  << loopTickCount_.load(std::memory_order_relaxed)
+                  << " start" << std::endl;
         try {
             /* v8.0 mission worker: actually WORK on a Running mission via the
                gateway-registered LLM deliberator.  Runs BEFORE the iterate
@@ -2994,6 +3098,10 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
                         work = missionDeliberator_(
                             sn.goal, sn.prior, loopDeliberateMaxTokens_, sn.id);
                     } catch (...) {
+                        /* A throwing deliberator used to vanish into this
+                           catch and looked exactly like a dead loop. */
+                        std::cout << "[mission-loop] deliberator EXCEPTION id="
+                                  << sn.id << std::endl;
                         work.clear();
                     }
                     if (work.empty()) return;
@@ -3107,6 +3215,7 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
                     }
                 }
             }
+            setLoopStage(2);
             ensureHeartbeatSession();
             /* Short draft: skip observe/iterate so the next deliberator
                tick is not pinned behind AGI/tool work. File-edit already
@@ -3212,8 +3321,11 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
                 iterPayload["contextTag"] = "chat:__autonomy_heartbeat__";
                 iterPayload["memoryKind"] = "chat";
             }
-            if (doObserve)
+            if (doObserve) {
+                setLoopStage(3);
                 observe(observePayload, observeWorld);
+            }
+            setLoopStage(4);
             for (int step = 0; step < steps; ++step) {
                 if (loopStop_.load(std::memory_order_acquire) ||
                     loopGeneration_.load(std::memory_order_acquire) != gen)
@@ -3222,10 +3334,15 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
             }
             }
         } catch (...) {
-            /* the loop must never die from one bad tick */
+            /* the loop must never die from one bad tick - but it must SAY
+               so; a silent catch here cost a 4h baseline once. */
+            std::cout << "[mission-loop] tick EXCEPTION at stage="
+                      << loopStageName(loopStage_.load(std::memory_order_acquire))
+                      << std::endl;
         }
         loopTickCount_.fetch_add(1, std::memory_order_relaxed);
         loopLastTickAtMs_.store(nowMs(), std::memory_order_relaxed);
+        setLoopStage(5);
         if (loopTickCount_.load(std::memory_order_relaxed) % loopPersistEveryTicks_ == 0) {
             try {
                 nlohmann::json state = exportState();
@@ -3264,6 +3381,12 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
             ? std::min<int64_t>(1000, static_cast<int64_t>(loopIntervalSec_) * 1000)
             : static_cast<int64_t>(loopIntervalSec_) * 1000;
         const int64_t sleepMs = std::max<int64_t>(50, intervalMs - elapsed);
+        std::cout << "[mission-loop] tick="
+                  << (loopTickCount_.load(std::memory_order_relaxed) - 1)
+                  << " done elapsed=" << elapsed << "ms sleep=" << sleepMs
+                  << "ms draftIncomplete=" << (draftIncomplete ? 1 : 0)
+                  << std::endl;
+        setLoopStage(0);
         for (int64_t slept = 0;
              slept < sleepMs && !loopStop_.load(std::memory_order_acquire) &&
              loopGeneration_.load(std::memory_order_acquire) == gen;

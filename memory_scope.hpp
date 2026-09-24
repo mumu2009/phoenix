@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -148,6 +150,37 @@ inline std::string pressureSourceFor(const MemoryScope &s) {
   if (s.kind == MemoryKind::Mission)
     return "mission:" + s.id + ":pressure";
   return "chat:" + s.id + ":sensation";
+}
+
+/**
+ * Scoped FIFO eviction for shared append-only buffers (e.g. the frontend
+ * episodic memory vector).  Each owner (scope key) keeps at most
+ * perScopeCap entries: a busy scope evicts ITS OWN oldest entry, never
+ * another scope's.  globalCap is only a memory guard across all owners.
+ * `ownerOf(entry)` must return the entry's scope key.
+ */
+template <typename EntryT, typename FOwner>
+inline void evictScopedFifoForInsert(std::vector<EntryT> &entries,
+                                     const std::string &ownerKey,
+                                     std::size_t perScopeCap,
+                                     std::size_t globalCap,
+                                     FOwner ownerOf) {
+  if (perScopeCap > 0) {
+    std::size_t own = 0;
+    for (const auto &e : entries)
+      if (ownerOf(e) == ownerKey)
+        ++own;
+    if (own >= perScopeCap) {
+      for (auto it = entries.begin(); it != entries.end(); ++it) {
+        if (ownerOf(*it) == ownerKey) {
+          entries.erase(it);
+          break;
+        }
+      }
+    }
+  }
+  if (globalCap > 0 && entries.size() >= globalCap)
+    entries.erase(entries.begin());
 }
 
 inline MemoryScope &tlsCurrentMemoryScope() {

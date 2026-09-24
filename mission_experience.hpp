@@ -32,7 +32,12 @@ inline std::vector<ExperienceEntry> experienceLoad(const std::string &storePath)
     std::ifstream in(storePath);
     if (!in) return out;
     nlohmann::json j;
-    in >> j;
+    /* Same empty-file guard as ccmLoad: never throw out of a mission tick. */
+    try {
+        in >> j;
+    } catch (const std::exception &) {
+        return out;
+    }
     if (!j.is_array()) return out;
     for (const auto &e : j) {
         if (!e.is_object()) continue;
@@ -91,9 +96,22 @@ inline double experienceOverlap(const std::string &a, const std::string &b) {
     return un == 0 ? 0.0 : static_cast<double>(inter) / static_cast<double>(un);
 }
 
-/* Append one experience (cap 200, newest kept). */
+/* Recall-contamination guard (eng_fix_recall_contamination): a deposit
+   whose summary shares NO vocabulary with its own goal is a foreign
+   theme bled in from another mission's recall (the "goal B + mission-A
+   theme" rows that filled the store during the 4h speed probe). Refuse
+   to store it — the write path is the bucket boundary. */
+inline bool experienceRelevantToGoal(const std::string &goal,
+                                     const std::string &summary) {
+    if (goal.empty() || summary.empty()) return false;
+    return experienceOverlap(goal, summary) > 0.0;
+}
+
+/* Append one experience (cap 200, newest kept). Off-goal summaries are
+   rejected so a contaminated draft cannot self-deposit under this goal. */
 inline void experienceAdd(const std::string &storePath, const std::string &goal,
                           const std::string &summary) {
+    if (!experienceRelevantToGoal(goal, summary)) return;
     static std::mutex mu;
     std::lock_guard<std::mutex> lock(mu);
     auto entries = experienceLoad(storePath);
@@ -102,10 +120,20 @@ inline void experienceAdd(const std::string &storePath, const std::string &goal,
     experienceSave(storePath, entries);
 }
 
-/* Top-k most similar past missions for a new goal. */
+/* Top-k most similar past missions for a new goal. Two gates:
+   1) goal-goal overlap >= 0.12 — the same sentence shape with a
+      different theme ("Write a Markdown checklist ..." about a search
+      engine vs about memory isolation scores ~0.07) must NOT qualify,
+      while a genuinely same-theme goal scores ~0.18;
+   2) the injected summary must share vocabulary with the goal — a
+      self-deposited row whose summary drifted off-goal (contamination
+      feedback: "goal B + mission-A theme") is skipped even though its
+      goal matches exactly. The write path already gates new rows, so
+      gate 2 only filters legacy/contaminated stores. */
 inline std::vector<ExperienceEntry> experienceTop(const std::string &storePath,
                                                   const std::string &goal,
                                                   size_t k = 3) {
+    constexpr double kMinGoalOverlap = 0.12;
     const auto entries = experienceLoad(storePath);
     std::vector<std::pair<double, ExperienceEntry>> scored;
     for (const auto &e : entries)
@@ -113,9 +141,12 @@ inline std::vector<ExperienceEntry> experienceTop(const std::string &storePath,
     std::sort(scored.begin(), scored.end(),
               [](const auto &a, const auto &b) { return a.first > b.first; });
     std::vector<ExperienceEntry> out;
-    for (size_t i = 0; i < scored.size() && i < k; ++i) {
-        if (scored[i].first <= 0.05) break;
-        out.push_back(scored[i].second);
+    for (const auto &s : scored) {
+        if (out.size() >= k) break;
+        if (s.first < kMinGoalOverlap) break;
+        if (!experienceRelevantToGoal(goal, s.second.summary))
+            continue;
+        out.push_back(s.second);
     }
     return out;
 }

@@ -3130,6 +3130,8 @@ namespace
             probeTimeoutMs_ = std::max(2000, resolveConfig<int>("knowledge_probe.probeTimeoutMs", 60000, "FRONTEND_KNOWLEDGE_PROBE_TIMEOUT_MS"));
             knownSimThreshold_ = resolveConfig<float>("knowledge_probe.knownSimThreshold", 0.5f, "FRONTEND_KNOWLEDGE_KNOWN_SIM");
             crossSessionLearnEnabled_ = resolveConfig<bool>("knowledge_probe.crossSessionLearnEnabled", false, "FRONTEND_CROSS_SESSION_LEARN");
+            episodicPerScopeCap_ = static_cast<size_t>(std::max(1, resolveConfig<int>("knowledge_probe.episodicPerScopeCap", 32, "FRONTEND_EPISODIC_PER_SCOPE_CAP")));
+            episodicGlobalCap_ = static_cast<size_t>(std::max(8, resolveConfig<int>("knowledge_probe.episodicGlobalCap", 512, "FRONTEND_EPISODIC_GLOBAL_CAP")));
 
             embeddings_.dim = std::max(32, resolveConfig<int>("context.embeddings.dim", 128, "FRONTEND_EMB_DIM"));
             embeddings_.window = std::max(1, resolveConfig<int>("context.embeddings.window", 4, "FRONTEND_EMB_WINDOW"));
@@ -3483,11 +3485,11 @@ namespace
             if (latencyMs > 0.0f)
                 state.adaptive.update(latencyMs);
 
-            // 检索 Episodic Memory（跨 session 相关摘要）
+            // 检索 Episodic Memory（仅本 scope 的归档；别的 goal 的条目不可见）
             std::string episodicHint;
             if (state.messageCount == 1) // 仅在会话首次检索，避免重复
             {
-                episodicHint = retrieveEpisodicMemory(text, sessionId);
+                episodicHint = retrieveEpisodicMemory(text, scope.key());
             }
 
             // 渲染 "用户:/助手:" 多轮历史（applyContextHintToText 会整体前置给 LLM；
@@ -3701,6 +3703,9 @@ namespace
                         summary += stripFactPrefix(f);
                     }
                     EpisodicMemoryEntry entry;
+                    /* sessionId here is the MemoryScope key (chat:<sid> /
+                       mission:<id>) — reads filter on the same key, so one
+                       goal's archived facts never surface in another goal. */
                     entry.sessionId = sessionId;
                     entry.summary = summary;
                     entry.facts = unknownFacts;
@@ -3711,8 +3716,12 @@ namespace
                         try
                         {
                             entry.embedding = embeddings_.embedText(summary);
-                            if (episodicMemory_.size() >= 100)
-                                episodicMemory_.erase(episodicMemory_.begin());
+                            phoenix::memory::evictScopedFifoForInsert(
+                                episodicMemory_, entry.sessionId,
+                                episodicPerScopeCap_, episodicGlobalCap_,
+                                [](const EpisodicMemoryEntry &e) -> const std::string & {
+                                    return e.sessionId;
+                                });
                             episodicMemory_.push_back(std::move(entry));
                         }
                         catch (...)
@@ -3755,6 +3764,8 @@ namespace
             return total > 0 ? static_cast<float>(hit) / static_cast<float>(total) : 0.0f;
         }
 
+        /* sessionId 参数为 MemoryScope key（chat:<sid> / mission:<id>）：
+           只召回本 scope 自己归档的条目，chat↔chat、mission↔chat 均不互见。 */
         std::string retrieveEpisodicMemory(const std::string &query,
                                            const std::string &sessionId = {})
         {
@@ -3764,7 +3775,7 @@ namespace
             auto queryEmbedding = embeddings_.embedText(query);
 
             // 综合评分：embedding 余弦 与 词面重叠 取较大者，再乘时间衰减。
-            // Chat↔chat isolation: never inject another session's dialog increment.
+            // Scope isolation: never inject another scope's archived increment.
             std::vector<std::pair<float, size_t>> scored;
             for (size_t i = 0; i < episodicMemory_.size(); ++i)
             {
@@ -3871,7 +3882,10 @@ namespace
             if (crossSessionLearnEnabled_ && messageCount >= 1 && !candidateFacts.empty())
             {
                 std::cout << "[cross-session] reset: launching learnUnknownFacts thread" << std::endl;
-                std::thread(&ContextService::learnUnknownFacts, this, sessionId, candidateFacts).detach();
+                /* Archive under the scope key so retrieval (which filters by
+                   scope key) only ever returns this scope's own facts. */
+                std::thread(&ContextService::learnUnknownFacts, this,
+                            frontendScope(sessionId).key(), candidateFacts).detach();
             }
             else
             {
@@ -4406,7 +4420,12 @@ namespace
         RNNModel rnn_;
         LSTMModel lstm_;
         std::unordered_map<std::string, SessionState> sessions_;
-        std::vector<EpisodicMemoryEntry> episodicMemory_; // Episodic Memory 层：跨 session 对话摘要
+        /* Episodic Memory 层：条目按 MemoryScope key（chat:<sid> /
+           mission:<id>）归属。淘汰按 scope 分桶——一个繁忙 scope 只挤掉
+           自己的最旧条目，不会把别的 goal 的条目顶出全局队列。 */
+        std::vector<EpisodicMemoryEntry> episodicMemory_;
+        size_t episodicPerScopeCap_{32};  // 每 scope 自有 FIFO 上限
+        size_t episodicGlobalCap_{512};   // 全局内存保护上限
         // 跨 session 学习配置：探测基座 LLM 判定事实"已知/未知"，仅持久化未知事实。
         std::string probeBaseUrl_{"http://127.0.0.1:8082"};
         std::string probeModel_;
@@ -6240,7 +6259,15 @@ void setupFrontendServer()
             out["ok"] = true;
             out["context"] = result;
             out["sessionId"] = sessionId;
-            auto worldResult = worldModel.ingestEvidence(nlohmann::json{{"sessionId", sessionId},
+            /* World-model writes are keyed by the MemoryScope key when a
+               missionId rides along: mission scene state never mixes into
+               the chat session's world state.  Plain chat keeps the raw
+               sessionId (legacy /world/* readers unchanged). */
+            const std::string worldSessionId =
+                missionId.empty()
+                    ? sessionId
+                    : phoenix::memory::memoryScopeFromIds(sessionId, missionId).key();
+            auto worldResult = worldModel.ingestEvidence(nlohmann::json{{"sessionId", worldSessionId},
                                                                         {"modality", "text"},
                                                                         {"text", text},
                                                                         {"graphSummary", result.isMember("context") ? result["context"].asString() : std::string()},
@@ -6256,7 +6283,7 @@ void setupFrontendServer()
                 const std::string contextValue = (*json)[fieldName].asString();
                 if (contextValue.empty())
                     return;
-                auto contextIngest = worldModel.ingestEvidence(nlohmann::json{{"sessionId", sessionId},
+                auto contextIngest = worldModel.ingestEvidence(nlohmann::json{{"sessionId", worldSessionId},
                                                                                {"modality", modality},
                                                                                {"graphSummary", contextValue},
                                                                                {"text", contextValue},
@@ -6307,7 +6334,7 @@ void setupFrontendServer()
                 else if (vjepa2.contains("coarse") && vjepa2["coarse"].is_string())
                     summary = vjepa2["coarse"].get<std::string>();
 
-                auto contextIngest = worldModel.ingestEvidence(nlohmann::json{{"sessionId", sessionId},
+                auto contextIngest = worldModel.ingestEvidence(nlohmann::json{{"sessionId", worldSessionId},
                                                                                {"modality", "video"},
                                                                                {"graphSummary", summary},
                                                                                {"text", summary},
@@ -6418,8 +6445,17 @@ void setupFrontendServer()
                 return;
             }
             const std::string sessionId = (*json)["sessionId"].asString();
+            std::string missionId;
+            if (json->isMember("missionId") && (*json)["missionId"].isString())
+                missionId = (*json)["missionId"].asString();
             bool removed = contextService.reset(sessionId);
-            bool worldRemoved = worldModel.resetSession(sessionId);
+            /* Mission traffic lives under the scope key; plain chat under the
+               raw sessionId.  Reset whichever store this caller means. */
+            const std::string worldSessionId =
+                missionId.empty()
+                    ? sessionId
+                    : phoenix::memory::memoryScopeFromIds(sessionId, missionId).key();
+            bool worldRemoved = worldModel.resetSession(worldSessionId);
             Json::Value out;
             out["sessionId"] = sessionId;
             out["removed"] = removed;

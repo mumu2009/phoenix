@@ -134,15 +134,41 @@ inline bool draftTailLooksCollapsed(const std::string &draft,
   return looksLikeCollapsedProse(tail);
 }
 
-/** Recall CCM + experience. Prefer stored E-space rows; text is enc payload. */
+/** Recall CCM + experience. Prefer stored E-space rows; text is enc payload.
+    callerTag buckets the read path (eng_fix_recall_contamination): entries
+    deposited by OTHER missions must clear a goal-relevance bar — the old
+    mission's "plan.md / search engine" captions scored ~0.04-0.07 against
+    an unrelated checklist goal and still bled in through the 0.05 query
+    threshold once the draft carried a few shared words. Own deposits pass
+    unconditionally (the write path already gated them). Foreign mission
+    canaries are stripped so the old marker cannot echo into the new
+    deliverable. */
 inline void appendRecalledMemory(
     std::vector<phoenix::inference::UnitQueryIO> &dst,
     const std::string &ccmPath, const std::string &expPath,
     const std::string &goal, const std::string &draft, size_t kCcm = 3,
-    size_t kExp = 3) {
+    size_t kExp = 3, const std::string &callerTag = {}) {
+  constexpr double kForeignGoalOverlap = 0.08;
   const std::string query = buildMemoryRecallQuery(goal, draft);
   if (query.empty()) return;
-  for (const auto &e : phoenix::memory::ccmRecall(ccmPath, query, kCcm)) {
+  std::string ownMissionId;
+  if (callerTag.rfind("mission:", 0) == 0) {
+    ownMissionId = callerTag.substr(8);
+    const auto sp = ownMissionId.find("/children/");
+    if (sp != std::string::npos) ownMissionId.resize(sp);
+  }
+  for (auto e : phoenix::memory::ccmRecall(ccmPath, query, kCcm, callerTag)) {
+    const bool foreign =
+        !callerTag.empty() && e.sourceTag != callerTag &&
+        e.sourceTag.rfind("mission:", 0) == 0;
+    if (foreign) {
+      if (phoenix::memory::ccmOverlap(goal, e.text) < kForeignGoalOverlap)
+        continue;
+      e.text =
+          phoenix::memory::eraseForeignMissionCanaries(e.text, ownMissionId);
+      if (e.text.empty())
+        continue;
+    }
     if (looksLikeCollapsedProse(e.text))
       continue;
     if (!e.unitQuery.empty()) {
@@ -170,13 +196,18 @@ inline void depositMissionProgress(const std::string &ccmPath,
                                    const std::string &newSpan) {
   if (looksLikeCollapsedProse(newSpan) || draftTailLooksCollapsed(draft))
     return;
+  /* Write-path bucketing: experienceAdd rejects off-goal summaries
+     itself; the CCM span is gated here so a contaminated draft cannot
+     self-deposit a foreign theme under THIS mission's tag (the feedback
+     loop that filled both stores during the 4h speed probe). */
   const std::string sum = draftExperienceSummary(draft);
   if (!sum.empty() && !looksLikeCollapsedProse(sum))
     experienceAdd(expPath, goal, sum);
   std::string remember = trimCopy(newSpan);
   if (remember.size() > 480) remember.resize(480);
   if (remember.empty()) remember = sum;
-  if (!remember.empty() && !looksLikeCollapsedProse(remember))
+  if (!remember.empty() && !looksLikeCollapsedProse(remember) &&
+      phoenix::memory::ccmMissionTextRelevant(goal, remember))
     phoenix::memory::ccmRemember(ccmPath, sourceTag, remember);
 }
 

@@ -78,6 +78,8 @@
 #include "../mission_workspace.hpp"
 #include "../context_window_pack.hpp"
 #include "../instance_isolation.hpp"
+#include "../memory_scope.hpp"
+#include "../scoped_trainable_memory.hpp"
 
 #ifndef AI_OUTSIDES_LINK_MODE
 #define AI_OUTSIDES_LINK_MODE "headers-only"

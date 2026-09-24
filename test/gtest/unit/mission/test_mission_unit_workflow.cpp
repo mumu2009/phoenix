@@ -100,21 +100,135 @@ TEST(MissionUnitWorkflow, DepositThenRecallSameMission) {
   const std::string exp = (dir / "exp.json").string();
   std::filesystem::remove(ccm);
   std::filesystem::remove(exp);
+  /* Goal must share vocabulary with the draft: the write path now rejects
+     zero-overlap deposits (recall-contamination guard). */
+  const std::string goal =
+      "Helios station: keep the isolator shedding noncritical loads for "
+      "1000 sols";
   const std::string draft =
       "### Night bus\n\nThe isolator sheds noncritical loads before dawn.";
-  depositMissionProgress(ccm, exp, "mission:t1",
-                         "Helios uncrewed science station 1000 sols", draft,
+  depositMissionProgress(ccm, exp, "mission:t1", goal, draft,
                          "The isolator sheds noncritical loads before dawn.");
   std::vector<phoenix::inference::UnitQueryIO> pkts;
-  appendRecalledMemory(pkts, ccm, exp,
-                       "Helios uncrewed science station 1000 sols", draft, 3,
-                       3);
+  appendRecalledMemory(pkts, ccm, exp, goal, draft, 3, 3, "mission:t1");
   ASSERT_FALSE(pkts.empty());
   bool saw = false;
   for (const auto &p : pkts) {
     if (p.content.find("isolator") != std::string::npos) saw = true;
   }
   EXPECT_TRUE(saw);
+}
+
+TEST(MissionUnitWorkflow, DepositRejectsOffGoalSpan) {
+  /* A contaminated draft (foreign theme under THIS goal) must not be
+     stored: zero shared vocabulary with the goal => no experience row,
+     no CCM row. This is the write-path half of the contamination fix. */
+  const auto dir = std::filesystem::current_path() / "build" /
+                   "phoenix_unit_workflow_test";
+  std::filesystem::create_directories(dir);
+  const std::string ccm = (dir / "ccm.json").string();
+  const std::string exp = (dir / "exp.json").string();
+  std::filesystem::remove(ccm);
+  std::filesystem::remove(exp);
+  const std::string goalB =
+      "Write a 120-word Markdown checklist on isolating chat memory from "
+      "mission memory. Three bullets. Include this exact token once: "
+      "SCOPECANARY-MISSION-bbbb.";
+  const std::string contaminatedDraft =
+      "# plan.md\n\n1. indexing, query processing, search, ranking";
+  depositMissionProgress(ccm, exp, "mission:bbbb", goalB, contaminatedDraft,
+                         "1. indexing, query processing, search, ranking");
+  EXPECT_TRUE(experienceLoad(exp).empty());
+  EXPECT_TRUE(phoenix::memory::ccmLoad(ccm).empty());
+}
+
+TEST(MissionUnitWorkflow, NoCrossMissionThemeBleed) {
+  /* Regression for the 4h-speed-probe contamination: mission A deposits
+     "plan.md / search engine" captions; mission B (unrelated checklist
+     goal) must not recall ANY of A's theme — not via CCM, not via the
+     experience store, and not via A's mission canary. */
+  const auto dir = std::filesystem::current_path() / "build" /
+                   "phoenix_unit_workflow_test";
+  std::filesystem::create_directories(dir);
+  const std::string ccm = (dir / "ccm.json").string();
+  const std::string exp = (dir / "exp.json").string();
+  std::filesystem::remove(ccm);
+  std::filesystem::remove(exp);
+  const std::string goalA =
+      "Write a Markdown checklist file named plan.md in the workspace. It "
+      "must contain at least 12 numbered items, each item one full sentence "
+      "describing a concrete step to design a small local search engine for "
+      "personal notes. Cover: corpus scan, tokenization, index structure, "
+      "ranking, query parsing, snippet extraction, caching, incremental "
+      "update, deletion handling, query logging, evaluation, and packaging. "
+      "Marker: SCOPECANARY-MISSION-aaaa.";
+  const std::string draftA =
+      "# plan.md\n\n## Local Search Engine for personal notes\n\n"
+      "1. Corpus scan the notes directory to build the index.";
+  const std::string spanA =
+      "# plan.md\n\n1. Corpus scan the notes directory to build the index. "
+      "SCOPECANARY-MISSION-aaaa";
+  depositMissionProgress(ccm, exp, "mission:aaaa", goalA, draftA, spanA);
+  /* A's own deposits are stored (relevant to A's goal). */
+  EXPECT_FALSE(experienceLoad(exp).empty());
+  EXPECT_FALSE(phoenix::memory::ccmLoad(ccm).empty());
+
+  const std::string goalB =
+      "Write a 120-word Markdown checklist on isolating chat memory from "
+      "mission memory. Three bullets. Include this exact token once: "
+      "SCOPECANARY-MISSION-bbbb.";
+  const std::string draftB =
+      "# Checklist\n\n* Isolate chat memory from mission memory.";
+  std::vector<phoenix::inference::UnitQueryIO> pkts;
+  appendRecalledMemory(pkts, ccm, exp, goalB, draftB, 3, 3, "mission:bbbb");
+  for (const auto &p : pkts) {
+    EXPECT_EQ(p.content.find("plan.md"), std::string::npos);
+    EXPECT_EQ(p.content.find("Search Engine"), std::string::npos);
+    EXPECT_EQ(p.content.find("search engine"), std::string::npos);
+    EXPECT_EQ(p.content.find("SCOPECANARY-MISSION-aaaa"), std::string::npos);
+  }
+}
+
+TEST(MissionUnitWorkflow, CrossMissionSameThemeStillRecalled) {
+  /* Guard against over-blocking: a genuinely same-theme goal (overlap
+     ~0.18) still reuses mission A's experience. */
+  const auto dir = std::filesystem::current_path() / "build" /
+                   "phoenix_unit_workflow_test";
+  std::filesystem::create_directories(dir);
+  const std::string ccm = (dir / "ccm.json").string();
+  const std::string exp = (dir / "exp.json").string();
+  std::filesystem::remove(ccm);
+  std::filesystem::remove(exp);
+  const std::string goalA =
+      "Write a Markdown checklist file named plan.md in the workspace. It "
+      "must contain at least 12 numbered items, each item one full sentence "
+      "describing a concrete step to design a small local search engine for "
+      "personal notes. Cover: corpus scan, tokenization, index structure, "
+      "ranking, query parsing, snippet extraction, caching, incremental "
+      "update, deletion handling, query logging, evaluation, and packaging. "
+      "Marker: SCOPECANARY-MISSION-aaaa.";
+  const std::string draftA =
+      "# plan.md\n\n## Local Search Engine for personal notes\n\n"
+      "1. Corpus scan the notes directory to build the index.";
+  const std::string spanA =
+      "# plan.md\n\n1. Corpus scan for the local search engine: scan the "
+      "personal notes directory to build the index and ranking.";
+  depositMissionProgress(ccm, exp, "mission:aaaa", goalA, draftA, spanA);
+
+  const std::string goalC =
+      "Write a plan for a local search engine over personal notes, "
+      "covering indexing and ranking. Marker: SCOPECANARY-MISSION-cccc.";
+  std::vector<phoenix::inference::UnitQueryIO> pkts;
+  appendRecalledMemory(pkts, ccm, exp, goalC, "", 3, 3, "mission:cccc");
+  bool sawSearchEngine = false;
+  for (const auto &p : pkts) {
+    if (p.content.find("search engine") != std::string::npos ||
+        p.content.find("Search Engine") != std::string::npos)
+      sawSearchEngine = true;
+    /* A's canary must never ride along into C's prompt. */
+    EXPECT_EQ(p.content.find("SCOPECANARY-MISSION-aaaa"), std::string::npos);
+  }
+  EXPECT_TRUE(sawSearchEngine);
 }
 
 TEST(MissionUnitWorkflow, IoEncSplitsParagraphsToUnits) {

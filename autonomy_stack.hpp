@@ -257,8 +257,15 @@ private:
 bool missionEvolutionEnabled_{false};      /* v8.x C3 gate (applied on assign) */
 size_t missionMaxReplicas_{4};            /* guardrail on free replication */
 
-    /* v7.0 human interjection queue (插话) */
-    std::vector<std::pair<uint64_t, std::string>> interjections_;
+    /* v7.0 human interjection queue (插话).  scopeKey isolates delivery: a
+       tagged interjection is consumed only by an iterate() running under the
+       same MemoryScope; an empty scopeKey is legacy-global (any tick). */
+    struct Interjection {
+        uint64_t atMs{0};
+        std::string scopeKey;   /* "chat:<sid>" / "mission:<id>" / "" = global */
+        std::string text;
+    };
+    std::vector<Interjection> interjections_;
 
     /* v7.0 long-term autonomous loop (heartbeat + persistence) */
     bool loopEnabled_{false};
@@ -277,6 +284,20 @@ size_t missionMaxReplicas_{4};            /* guardrail on free replication */
     std::string loopPersistPath_{"runtime_store/autonomy_state.json"};
     std::atomic<uint64_t> loopTickCount_{0};
     std::atomic<int64_t> loopLastTickAtMs_{0};
+    /* Stall watchdog: the loop thread publishes its current stage + the time
+       it entered it; a separate watchdog thread logs [mission-stall] when a
+       stage exceeds autonomyLoop.stallWarnSec (default 180s).  The 4h speed
+       baseline froze silently right after the deliverable crossed
+       minDeliverableChars - stage markers make the next hang self-naming. */
+    std::atomic<int> loopStage_{0};
+    std::atomic<int64_t> loopStageAtMs_{0};
+    std::atomic<uint64_t> loopStageTick_{0};
+    std::thread loopWatchdogThread_;
+    std::atomic<bool> loopWatchdogStop_{false};
+    int loopStallWarnSec_{180};
+    void setLoopStage(int stage);
+    static const char *loopStageName(int stage);
+    void ensureLoopWatchdog();
     uint64_t safetyRegId_{0}; /* entry in the system instance registry */
     bool safetyRegistered_{false};
     void loopRun(uint64_t gen);

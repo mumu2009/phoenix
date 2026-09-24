@@ -41,7 +41,14 @@ inline std::vector<CcmEntry> ccmLoad(const std::string &storePath) {
     std::ifstream in(storePath);
     if (!in) return out;
     nlohmann::json j;
-    in >> j;
+    /* A 0-byte / truncated store (interrupted save) used to throw
+       parse_error.101 out of every post-draft mission tick, starving the
+       loop before any LLM call.  Recall nothing instead. */
+    try {
+        in >> j;
+    } catch (const std::exception &) {
+        return out;
+    }
     if (!j.is_array()) return out;
     for (const auto &e : j) {
         if (!e.is_object()) continue;
@@ -141,6 +148,16 @@ inline void ccmRemember(const std::string &storePath,
     ccmRememberUnit(storePath, sourceTag, text, "text", {});
 }
 
+/* Mission write-path gate (eng_fix_recall_contamination): mission text
+   that shares no vocabulary with the mission goal is a foreign theme
+   bled in from another mission's recall. Refuse to store it under this
+   mission's tag. Chat deposits have no goal and never use this gate. */
+inline bool ccmMissionTextRelevant(const std::string &goal,
+                                   const std::string &text) {
+    if (goal.empty() || text.empty()) return false;
+    return ccmOverlap(goal, text) > 0.0;
+}
+
 inline std::string chatSourceTag(const std::string &sessionId) {
     if (sessionId.empty())
         return {};
@@ -231,6 +248,31 @@ inline std::string retainOwnChatIncrements(const std::string &text,
         wrote = true;
     }
     return out.str();
+}
+
+/* Strip SCOPECANARY-MISSION-<id> tokens that belong to OTHER missions.
+   A recalled foreign deposit must not carry its mission canary into the
+   new mission's prompt — the model echoes it and the old mission's
+   marker pollutes the new deliverable. ownMissionId is the bare id
+   (no "mission:" prefix); children share the parent id. */
+inline std::string eraseForeignMissionCanaries(const std::string &text,
+                                               const std::string &ownMissionId) {
+    if (text.empty() || ownMissionId.empty())
+        return text;
+    const std::string ownCanary =
+        std::string("SCOPECANARY-MISSION-") + ownMissionId;
+    std::string out = text;
+    for (size_t pos = 0;
+         (pos = out.find(kScopeCanaryPrefix, pos)) != std::string::npos;) {
+        const size_t end = scopeCanaryTokenEnd(out, pos);
+        const std::string tok = out.substr(pos, end - pos);
+        if (isMissionScopeCanary(tok) && tok != ownCanary) {
+            out.erase(pos, end - pos);
+            continue;
+        }
+        pos = end;
+    }
+    return out;
 }
 
 /* Remove foreign SCOPECANARY-* tokens. Covers CHAT and MISSION: prompt,
