@@ -881,6 +881,35 @@ double jaccard(const std::vector<std::string> &a,
   return static_cast<double>(inter) / static_cast<double>(uni);
 }
 
+phoenix::secamp::MemeTensorSpace tensorSpaceOf(const InMemoryStore &store) {
+  const auto ids = store.nodeIds();
+  std::vector<std::vector<std::string>> words;
+  std::vector<std::vector<double>> alpha;
+  words.reserve(ids.size());
+  alpha.reserve(ids.size());
+  for (const auto &id : ids) {
+    const auto wts = store.weightsOfMeme(id);
+    std::vector<std::string> ws;
+    std::vector<double> a;
+    double z = 0.0;
+    ws.reserve(wts.size());
+    a.reserve(wts.size());
+    for (const auto &p : wts)
+      z += p.second;
+    for (const auto &p : wts) {
+      ws.push_back(p.first);
+      a.push_back(z > 1e-18 ? p.second / z : 0.0);
+    }
+    words.push_back(std::move(ws));
+    alpha.push_back(std::move(a));
+  }
+  return phoenix::secamp::buildMemeTensorSpace(ids, words, alpha);
+}
+
+} // namespace
+
+/* Exported (declared in memetic_existence.hpp): lab instruments slice
+   corpora by unit offset with this same split. */
 std::vector<std::string> splitCorpusUnits(const std::string &text) {
   std::vector<std::string> units;
   std::string para;
@@ -913,33 +942,6 @@ std::vector<std::string> splitCorpusUnits(const std::string &text) {
   flushPara();
   return units;
 }
-
-phoenix::secamp::MemeTensorSpace tensorSpaceOf(const InMemoryStore &store) {
-  const auto ids = store.nodeIds();
-  std::vector<std::vector<std::string>> words;
-  std::vector<std::vector<double>> alpha;
-  words.reserve(ids.size());
-  alpha.reserve(ids.size());
-  for (const auto &id : ids) {
-    const auto wts = store.weightsOfMeme(id);
-    std::vector<std::string> ws;
-    std::vector<double> a;
-    double z = 0.0;
-    ws.reserve(wts.size());
-    a.reserve(wts.size());
-    for (const auto &p : wts)
-      z += p.second;
-    for (const auto &p : wts) {
-      ws.push_back(p.first);
-      a.push_back(z > 1e-18 ? p.second / z : 0.0);
-    }
-    words.push_back(std::move(ws));
-    alpha.push_back(std::move(a));
-  }
-  return phoenix::secamp::buildMemeTensorSpace(ids, words, alpha);
-}
-
-} // namespace
 
 std::vector<std::string> highDfPriorTokens(const InMemoryStore &store) {
   std::unordered_map<std::string, int> df;
@@ -1006,7 +1008,24 @@ RagCarrier composeCarrierRag(const InMemoryStore &store,
       content.insert(w);
   }
 
-  const auto units = splitCorpusUnits(corpusText);
+  /* Screening probes many memes against the same corpus; splitting a
+     half-GB text per probe dominated the instrument screen (page-fault
+     bound). Cache the last split, keyed on pointer + size + head sample;
+     lab callers either reuse one corpus string (hit) or pass small texts
+     (cheap re-split on miss). */
+  static const void *unitsCachePtr = nullptr;
+  static size_t unitsCacheSize = 0;
+  static std::string unitsCacheHead;
+  static std::vector<std::string> unitsCache;
+  const std::string headSample = corpusText.substr(0, 4096);
+  if (unitsCachePtr != static_cast<const void *>(corpusText.data()) ||
+      unitsCacheSize != corpusText.size() || unitsCacheHead != headSample) {
+    unitsCache = splitCorpusUnits(corpusText);
+    unitsCachePtr = static_cast<const void *>(corpusText.data());
+    unitsCacheSize = corpusText.size();
+    unitsCacheHead = headSample;
+  }
+  const auto &units = unitsCache;
   const int cap = std::max(1, maxUnits);
   const int take = std::max(1, maxSents);
   std::unordered_map<std::string, int> df;

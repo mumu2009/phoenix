@@ -8,7 +8,8 @@ param(
   [string]$SnapFile = '',
   [string]$ScreenFile = '',
   [int]$Rounds = 6,
-  [int]$JudgeAfter = 3
+  [int]$JudgeAfter = 3,
+  [int]$ApiPort = 8082
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,7 +26,7 @@ if (-not (Test-Path -LiteralPath $Corpus)) {
 }
 $ResultFile = Join-Path $Phoenix ("runtime_store\{0}.json" -f $OutName)
 $Journal = Join-Path $Phoenix ("runtime_store\{0}.jsonl" -f $OutName)
-$Api = 'http://127.0.0.1:8082/completion'
+$Api = "http://127.0.0.1:$ApiPort/completion"
 $TimeoutMs = 300000
 $Units = 256
 
@@ -93,8 +94,22 @@ function Get-Detect([string]$memeId, [string]$text) {
 
 function Get-Compose([string]$memeId) {
   $raw = & $Exe compose --snap $SnapFile --corpus $Corpus --units $Units --meme $memeId --require-exclusive
+  $excl = $true
+  if ($LASTEXITCODE -eq 4) {
+    # Eligible-pool meme without an exclusive corpus sentence: fall back to
+    # the best non-exclusive carrier. The present gate below still applies;
+    # composeExclusive is recorded on the row for the batch report.
+    $raw = & $Exe compose --snap $SnapFile --corpus $Corpus --units $Units --meme $memeId
+    $excl = $false
+  }
+  if ($LASTEXITCODE -eq 4) {
+    # No carrier sentence in the corpus at all (screen-stage unignitable).
+    return [pscustomobject]@{ text = ''; composeExclusive = $false }
+  }
   if ($LASTEXITCODE -ne 0) { throw ("compose exit " + $LASTEXITCODE + ": " + $raw) }
-  return ($raw | ConvertFrom-Json)
+  $obj = $raw | ConvertFrom-Json
+  Add-Member -InputObject $obj -NotePropertyName composeExclusive -NotePropertyValue $excl -Force
+  return $obj
 }
 
 function Get-WipeIngest([string]$memeId, [string]$text) {
@@ -292,6 +307,23 @@ foreach ($m in $memes) {
       $doc.groups += $row
       Save-JsonAtomic $ResultFile $doc
       break
+    }
+    if ($r -eq 2 -and -not $judge) {
+      # Early stop: 41/41 historical groups with typicalHit=0 in both r1 and
+      # r2 never regrew the typical set later (seedbudget10 + batch32 +
+      # relax178). Skips the foregone r3 generation; not a present gate.
+      $h1 = 0
+      if ($row.rounds.Count -ge 1 -and $row.rounds[0].wipe) {
+        $h1 = [int]$row.rounds[0].wipe.typicalHit
+      }
+      $h2 = [int]$wipe.typicalHit
+      if ($h1 -eq 0 -and $h2 -eq 0) {
+        Write-Host ("  stop {0}: hopeless-00 - no typical word reingested in r1/r2 (41/41 historical never recovered)" -f $m.id)
+        $rec.hopeless00 = $true
+        $doc.groups += $row
+        Save-JsonAtomic $ResultFile $doc
+        break
+      }
     }
     $current = $next
     $snapDoc = [ordered]@{}

@@ -213,9 +213,12 @@ int main(int argc, char **argv) {
   std::string corpus;
   std::string snap;
   std::string memeId;
+  std::string poolMode;
   int maxUnits = 256;
   int takeN = 3;
+  int skipUnits = 0;
   bool requireExclusive = false;
+  bool relaxFilter = false;
   for (int i = 2; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--corpus" && i + 1 < argc)
@@ -228,6 +231,12 @@ int main(int argc, char **argv) {
       maxUnits = std::atoi(argv[++i]);
     else if (a == "--take" && i + 1 < argc)
       takeN = std::atoi(argv[++i]);
+    else if (a == "--pool" && i + 1 < argc)
+      poolMode = argv[++i];
+    else if (a == "--skip" && i + 1 < argc)
+      skipUnits = std::atoi(argv[++i]);
+    else if (a == "--relax")
+      relaxFilter = true;
     else if (a == "--require-exclusive")
       requireExclusive = true;
   }
@@ -243,7 +252,29 @@ int main(int argc, char **argv) {
       std::cerr << "need --corpus or --snap\n";
       return 2;
     }
-    ingested = ingestCorpusFile(store, corpus, maxUnits, {});
+    if (skipUnits > 0) {
+      /* Second-instrument slicing: skip the first K corpus units so a new
+         frozen snap can be built from a disjoint slice of the same corpus
+         (the 761-node reference snap holds units 0..255 of wikitext-103). */
+      std::ifstream in(corpus, std::ios::binary);
+      if (!in) {
+        std::cerr << "cannot read corpus\n";
+        return 2;
+      }
+      std::ostringstream raw;
+      raw << in.rdbuf();
+      const auto units =
+          phoenix::memetic::splitCorpusUnits(raw.str());
+      std::string sliced;
+      for (size_t i = static_cast<size_t>(skipUnits); i < units.size(); ++i) {
+        sliced += units[i];
+        sliced += "\n\n";
+      }
+      ingested = phoenix::memetic::ingestCorpusText(store, sliced, maxUnits,
+                                                    {});
+    } else {
+      ingested = ingestCorpusFile(store, corpus, maxUnits, {});
+    }
     if (!snap.empty() && !store.empty())
       store.saveText(snap);
   }
@@ -550,6 +581,22 @@ int main(int argc, char **argv) {
     eligible = fillEligible(false);
   if (eligible.empty())
     eligible = phrase;
+  if (relaxFilter) {
+    /* Batch hunting beyond the median-filtered pool: keep a mild quality
+       floor (half the content-spec median, at least one content word) so
+       pure stop-bags stay out, but admit the rest of the phrase memes.
+       The field prior and the serial posterior do the real ranking. */
+    std::vector<const phoenix::secamp::NodeInfluence *> wide;
+    for (const auto *n : phrase) {
+      const double spec = specOf[n->id];
+      const int cn = contentNOf[n->id];
+      if (spec + 1e-15 < 0.5 * specMed || cn < 1)
+        continue;
+      wide.push_back(n);
+    }
+    if (!wide.empty())
+      eligible = std::move(wide);
+  }
   std::sort(eligible.begin(), eligible.end(),
             [](const phoenix::secamp::NodeInfluence *a,
                const phoenix::secamp::NodeInfluence *b) {
@@ -583,8 +630,15 @@ int main(int argc, char **argv) {
   std::unordered_map<std::string, double> carrierEntropyOf;
   std::unordered_map<std::string, double> typicalCoverOf;
   for (const auto *n : eligible) {
-    const auto rag = phoenix::memetic::composeCarrierRag(store, n->id, rawCorpus,
-                                                         maxUnits, 1, true);
+    auto rag = phoenix::memetic::composeCarrierRag(store, n->id, rawCorpus,
+                                                   maxUnits, 1, true);
+    if (rag.text.empty()) {
+      /* Prior-only probe: a non-exclusive carrier still feeds the field
+         score (entropy x typical cover); the exclusive pool test below
+         keeps using the rank/exclusivity thresholds either way. */
+      rag = phoenix::memetic::composeCarrierRag(store, n->id, rawCorpus,
+                                                maxUnits, 1, false);
+    }
     if (!rag.text.empty()) {
       carrierEntropyOf[n->id] = textStatsOf(rag.text).entropy;
       typicalCoverOf[n->id] = rag.typicalCover;
@@ -592,7 +646,12 @@ int main(int argc, char **argv) {
         exclusive.push_back(n);
     }
   }
-  const auto &pool = exclusive.empty() ? eligible : exclusive;
+  /* --pool eligible screens the whole typical-set-filtered pool (the
+     exclusive pool is small and may already be exhausted by earlier
+     batches); default keeps the exclusive preference. */
+  const auto &pool = (poolMode == "eligible")
+                         ? eligible
+                         : (exclusive.empty() ? eligible : exclusive);
   const int take = std::min(takeN, static_cast<int>(pool.size()) / 2);
   for (int i = 0; i < take; ++i)
     add(pool[static_cast<size_t>(i)], "most");

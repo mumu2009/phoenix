@@ -863,5 +863,9 @@ int ingestCorpusText(InMemoryStore &store, const std::string &text, int maxUnits
 int ingestCorpusFile(InMemoryStore &store, const std::string &path, int maxUnits,
                      const Params &p = {});
 
+/* Paragraph/sentence unit split shared by ingestion and carrier compose;
+   exported so lab instruments can slice a corpus by unit offset. */
+std::vector<std::string> splitCorpusUnits(const std::string &text);
+
 } // namespace memetic
 } // namespace phoenix

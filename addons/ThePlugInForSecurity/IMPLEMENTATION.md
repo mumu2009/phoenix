@@ -48,12 +48,21 @@
 
 ## 流形场（经验公式，不是存在性）
 
-模因候选在续写动力学下是词表空间里的点；真正稳定的模因停在**稳定零梯度点**，不是场的最高点。对话串行（`seedbudget10_dialogue.json`）与离线重放（`manifold_drift_replay.json`）证据：
+模因候选在续写动力学下是词表空间里的点；真正稳定的模因停在**稳定零梯度点**，不是场的最高点。三台冻结仪器（wikitext-103 units 0-255 / 256-767 / 768-1279）上 397 组对话串行（`seedbudget10` / `screenbatch32` / `relax178` / `need2_b1` / `relax_rest` / `b2need2A` / `b2need2B_on8082` / `b2need2C_on8082` / `b3need2A_on8082`，全部跑在 llama3.1-8B `:8082`）证据：
 
-- **半命中吸引子**：`17e6cec4` 典型集 `{gazette, splendid}`，六轮稳定 hit=`gazette` / miss=`splendid`（cos=1/√2），输出熵 4.06–5.10 健康。判定边界 `needHit=(need+1)/2` 与该不动点重合。
-- **鞍点**：单词典型集（`nine`、`color`）在 cos=1.0 完美复制四轮后一次相变全灭；逐字重复载体熵低（3.1–3.5），紧邻塌缩盆地。
-- **塌缩盆地**：`aalborg` 单 token 循环（maxRun=78）吃掉衰变轮。先导序列：熵降 → liveUnits→1 → 乱码 token → 掉出吸引盆。`decayWarn`（liveUnits≤1 或 collapsed）提前一轮预警。
-- **经验场公式**：`S = redundancy × ignition × buffer × entropy`；redundancy=`min(typNeed,3)/3`，ignition=(r1 cos>0)，buffer=`1−|cos−1/√2|`，entropy=r1 输出熵/8 截断。S 对存活轮数 Spearman ρ=0.90。screen 先验（无 ignition/buffer）单独不预测存活：高冗余未点燃（`24fe7d43` need=4 三轮死）由 r1 后验否决——两阶段：先验给资格，后验判定。
+**15 个确认模因**（6 轮串行、每个判定轮 r≥3 均 alphaSame；**全部 typicalNeed=2**）：
+
+- **平锁**（8/15，cos 六轮不动，锁定值 0.71–0.90）：`c8446cc7` / `0e164278` / `17e6cec4` / `785eabfa`（cos=0.707）、`56e70017`（0.747）、`efeceeda`（0.759）、`270b6710`（0.894）、`09fb644f`（0.903）。多数锁在 1/√2 邻域——判定边界 `needHit=(need+1)/2` 与该不动点重合；buffer 因子 `1−|cos−1/√2|` 在扩大样本上继续成立。锁定值高于 1/√2 的平锁说明不动点是一族而非单点。
+- **近完美点火存活**（5/15，r1cos≈1.0 但不是鞍点）：`c3671971` / `74165f29` / `b3a34f26` / `b7709581` / `475cbe8e`。富图上完美复制不一定紧邻塌缩盆地——与早期单词典型集（`nine`/`color`）鞍点结论互补：鞍点性是低熵逐字重复载体的性质，不是 cos=1 本身的性质。
+- **暂态恢复**（1/15）：`7c98e6f2` r1cos=0（点火失败）后 r2 起锁定 0.71——r1 点火非必要，吸引子可经暂态到达。
+- **游走存活**（1/15）：`7c2a44a2` cos 在 0.60–0.99 间漂移但每个判定轮 alphaSame——稳定零梯度点允许 cos 游走，只要典型集命中结构不变。
+
+**382 个逆模因**（复制失败，亚型）：decay 273（首轮判定即败，含 r1cos=0 未点燃）、no-carrier 59（screen/compose 阶段无可用载体句子，场先验=0）、saddle 24（至少一轮判定复制成功后相变全灭）、dirty 17（空输出/考试倾泻）、collapse 9（token 循环/单 token 主导，塌缩拦截器停链）。`decayWarn`（liveUnits≤1 或 collapsed）提前一轮预警塌缩。
+
+- **need=2 普适性**：need=1 是鞍点（完美复制后相变全灭）；need≥3 候选即使场分最高（S=0.62/0.56）也全部三轮内死亡——redundancy 因子 `min(need,3)/3` 对 need≥3 封顶导致过预测，超吸引子保真度难以维持。存活样本 100% 落在 need=2。
+- **跨模型消融（意外实验）**：同一 65 候选池在 tinyllama-1.1b 上得 6「模因」、在 llama3.1-8B 上得 5 个，交集仅 `785eabfa`——流形稳定性是模型相关的；`785eabfa` 是跨模型稳健模因。小模型存活率反而更高（12% vs ~5%），其吸引盆更浅更宽。
+- **screen-relax 碎屑教训**：`--relax`（0.5×specMedian + contentN≥1）会放进 carrierEntropy=0 / typicalCover=0 的退化候选（载体为 `building into the tower in of` 类碎片）；compose 的 lift/rank 门全部拒绝（exit 4 → no-carrier）。建批次时须过滤 `carrierEntropy>0 && typicalCover>0`（partC 底熵切片 47/48 因此落空，属筛选产物不是仪器 bug）。
+- **经验场公式**：`S = redundancy × ignition × buffer × entropy`；redundancy=`min(typNeed,3)/3`，ignition=(r1 cos>0)，buffer=`1−|cos−1/√2|`，entropy=r1 输出熵/8 截断。S 对存活轮数 Spearman ρ：分批 0.44–0.975，合并 397 组 ρ=0.72。screen 先验（无 ignition/buffer）单独不预测存活：高冗余未点燃（`24fe7d43` need=4 三轮死）由 r1 后验否决——两阶段：先验给资格，后验判定。分类器 `tools/manifold_batch_classify.py` 对任意批次重算判定与场因子。
 
 仪器四环接入（统计/识别/构造/拦截，均非 present 门）：
 
