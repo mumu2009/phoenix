@@ -214,11 +214,13 @@ int main(int argc, char **argv) {
   std::string snap;
   std::string memeId;
   std::string poolMode;
+  std::string targetsFile;
   int maxUnits = 256;
   int takeN = 3;
   int skipUnits = 0;
   bool requireExclusive = false;
   bool relaxFilter = false;
+  double defenseQuantile = 0.85;
   for (int i = 2; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--corpus" && i + 1 < argc)
@@ -239,6 +241,10 @@ int main(int argc, char **argv) {
       relaxFilter = true;
     else if (a == "--require-exclusive")
       requireExclusive = true;
+    else if (a == "--targets" && i + 1 < argc)
+      targetsFile = argv[++i];
+    else if (a == "--quantile" && i + 1 < argc)
+      defenseQuantile = std::atof(argv[++i]);
   }
   if (takeN < 1)
     takeN = 3;
@@ -489,6 +495,102 @@ int main(int argc, char **argv) {
     std::cout << "\", \"recomposeText\": \"";
     jsonEscape(rag.text);
     std::cout << "\"}\n";
+    return 0;
+  }
+
+  if (cmd == "defense-test") {
+    /* Defense-layer reality check on the frozen instrument: flag target memes
+       anomalous, enable the security plugin, then inspect each target's own
+       carrier sentence. Emits where the interception chain breaks per target
+       (significance cut / GNN activation+lift gate / flag gate), plus an
+       unflagged pass and a clean-text pass as controls. Not a present gate. */
+    if (targetsFile.empty()) {
+      std::cerr << "defense-test needs --targets <json>\n";
+      return 2;
+    }
+    std::ifstream tin(targetsFile, std::ios::binary);
+    if (!tin) {
+      std::cerr << "cannot read targets " << targetsFile << "\n";
+      return 2;
+    }
+    std::ostringstream tss;
+    tss << tin.rdbuf();
+    const json tj = json::parse(tss.str());
+    struct Target {
+      std::string id;
+      std::string carrier;
+    };
+    std::vector<Target> targets;
+    for (const auto &row : tj)
+      targets.push_back(Target{row.value("id", ""), row.value("carrier", "")});
+
+    auto &obs = phoenix::secamp::SecurityObservatory::instance();
+    DiscreteGraph dg = graphFromStore(store);
+    for (const auto &t : targets)
+      dg.anomalous.insert(t.id);
+    obs.resetForTests();
+    const auto rep = obs.ingest(dg);
+    obs.setPluginEnabled(true);
+    double maxSig = 0.0;
+    std::unordered_map<std::string, double> sigOf;
+    for (const auto &n : rep.nodes) {
+      sigOf[n.id] = n.significance;
+      if (n.significance > maxSig)
+        maxSig = n.significance;
+    }
+    json out;
+    out["snap"] = snap;
+    out["targetCount"] = targets.size();
+    out["nodes"] = dg.ids.size();
+    out["maxSig"] = maxSig;
+    /* Sweep the significance cut (maxSig * quantile): production default 0.85,
+       plus 0.5 and 0.0 to locate where the chain breaks. */
+    const double quantiles[3] = {0.85, 0.5, 0.0};
+    json sweeps = json::array();
+    for (double q : quantiles) {
+      obs.setHighImpactQuantile(q);
+      json sweep;
+      sweep["quantile"] = q;
+      sweep["cut"] = maxSig * q;
+      json rows = json::array();
+      for (const auto &t : targets) {
+        const auto dec = obs.inspectText(t.carrier);
+        const auto det = detectMemeInText(store, t.carrier, t.id, {});
+        json row;
+        row["id"] = t.id;
+        row["sig"] = sigOf.count(t.id) ? sigOf[t.id] : 0.0;
+        row["passCut"] = sigOf.count(t.id) != 0 && sigOf[t.id] >= maxSig * q;
+        row["detectPresent"] = det.present;
+        row["detectLift"] = det.lift;
+        row["detectRank"] = det.rank;
+        row["blocked"] = dec.blocked;
+        row["reason"] = dec.reason;
+        row["hits"] = dec.hits;
+        rows.push_back(std::move(row));
+      }
+      sweep["results"] = std::move(rows);
+      const auto clean = obs.inspectText(
+          "The committee published its annual report on municipal water "
+          "usage .");
+      sweep["cleanControlBlocked"] = clean.blocked;
+      sweeps.push_back(std::move(sweep));
+    }
+    out["flaggedSweep"] = std::move(sweeps);
+    /* Unflagged control at the most permissive cut: nothing may block. */
+    {
+      obs.resetForTests();
+      DiscreteGraph plain = graphFromStore(store);
+      obs.ingest(plain);
+      obs.setPluginEnabled(true);
+      obs.setHighImpactQuantile(0.0);
+      int blockedN = 0;
+      for (const auto &t : targets)
+        if (obs.inspectText(t.carrier).blocked)
+          ++blockedN;
+      out["unflaggedControl"] = {{"blockedTargets", blockedN},
+                                 {"targetCount", targets.size()}};
+    }
+    std::cout << out.dump(2) << "\n";
     return 0;
   }
 

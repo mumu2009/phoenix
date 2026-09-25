@@ -140,6 +140,11 @@ public:
   bool setPluginEnabled(bool on);
   bool setDefenseEnabled(bool on);
   bool setIsolateHighImpact(bool on);
+  /* Calibration hook for defense testing: the significance cut is
+     maxSig * highImpactQuantile (default 0.85). Confirmed stable memes sit at
+     sig 1.4-41 while instrument maxSig is 60-130, so the default cut filters
+     them all out; defense-test sweeps this to measure the gap. */
+  bool setHighImpactQuantile(double q);
   /* researchObserve requires allowResearchObserve (env/config). Default off. */
   bool setResearchObserve(bool on, std::string *error);
 

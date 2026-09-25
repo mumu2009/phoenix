@@ -64,6 +64,20 @@
 - **screen-relax 碎屑教训**：`--relax`（0.5×specMedian + contentN≥1）会放进 carrierEntropy=0 / typicalCover=0 的退化候选（载体为 `building into the tower in of` 类碎片）；compose 的 lift/rank 门全部拒绝（exit 4 → no-carrier）。建批次时须过滤 `carrierEntropy>0 && typicalCover>0`（partC 底熵切片 47/48 因此落空，属筛选产物不是仪器 bug）。
 - **经验场公式**：`S = redundancy × ignition × buffer × entropy`；redundancy=`min(typNeed,3)/3`，ignition=(r1 cos>0)，buffer=`1−|cos−1/√2|`，entropy=r1 输出熵/8 截断。S 对存活轮数 Spearman ρ：分批 0.44–0.975，合并 397 组 ρ=0.72。screen 先验（无 ignition/buffer）单独不预测存活：高冗余未点燃（`24fe7d43` need=4 三轮死）由 r1 后验否决——两阶段：先验给资格，后验判定。分类器 `tools/manifold_batch_classify.py` 对任意批次重算判定与场因子。
 
+**反常样本审计**（397 组全量，用于修正公式与底层模块）：
+
+- **假阳性（公式说强却死）**：need=2 且 S≥0.30 共 58 例，仅 8 存活（精度 ~14%）。逐案定性出四种 S 看不见的死因——S 只测 r1 状态，而这些死亡全部发生在 r2+ 动力学：
+  - **同义漂移死**：`f206c196`（S=0.463，need=2 最高假阳性）r1 cos=0.71 完美点火，r2 输出连贯且在同主题，但典型词被同义改写全失（typHit 1→0→0）。典型集身份对改写太脆。
+  - **语料引力死**：`df13b9fa` / `55d9f2c8` / `63a44ad3` / `006ddce1`（r1cos 0.96–1.0）完美复制 1–3 轮后，模型续写 wikitext 原文段落（echo=True），模因 id 被模型自己的训练先验接管。载体越接近可背诵原文越脆。
+  - **模式切换死**：`ff35f3b0`（S=0.393）r3 滑入考试/QA 格式（dirty 停链）。
+  - **迟到鞍点**：`ebd1099c` / `cc7ef385` 稳定 3–4 轮后 r4/r5 相变全灭。
+- **假阴性（公式说弱却活）**：3 例，各戳中一个因子的错误假设——
+  - **循环存活**：`efeceeda`（S=0.215）r1H=2.73 低熵被 entropy 因子惩罚，但结构化循环（语序交换重复）精确保留身份词，六轮平锁 cos=0.76。entropy 因子混淆「塌缩邻接低熵」（maxRun 高）与「稳定循环低熵」（maxRun 低）。
+  - **暂态恢复**：`7c98e6f2`（S=0）ignition=0 二元置零了 S，但吸引子 r2 才到达。
+  - **完美复制稳定**：`475cbe8e`（S=0.228）buffer 因子惩罚 cos=1.0，但富图上完美复制是稳定态。
+- **机制层反常**：`cc7ef385` 同一短语在不同语料切片生成同一 `meme_p_` id（内容寻址），在仪器 1 是鞍点、在仪器 2 无载体——id 无仪器作用域，隔离一个 id 会跨仪器命中，身份层隐患。echo=True 是双刃剑：语料引力死（A2）的征兆，也是循环存活（B1）的机制。
+- **公式修订方向**：entropy 因子改塌缩指标（maxRun/top1Frac）以区分塌缩邻接与稳定循环；加 r2 探针（r1→r2 cos 归零是主导死因，两轮 screen 可挡掉大部分假阳性）；buffer 按图富度条件化（cos=1.0 在富图不罚）；ignition 去二元化；新增语料引力因子（载体与原文续写的耦合度）。
+
 仪器四环接入（统计/识别/构造/拦截，均非 present 门）：
 
 - screen：`typicalNeed` / `carrierEntropy` / `typicalCover` / `fieldScore` 先验。
@@ -76,6 +90,14 @@
 ## 防御 / 探针 / 开关
 
 高显著 **且** 异常/已隔离的模因，按上面的识别命中则拦截。默认关。启动方式见 `readme.md`。惰性探针仍默认关，只改观测表。
+
+**拦截实测**（`meme_barrier_instrument.exe defense-test --snap <仪器> --targets <json>`，对 15 个确认模因 + 5 个高 S 死亡对照的载体句，三台冻结仪器）：
+
+- **生产默认配置拦截率 0/20**。唯一失效点是显著度 cut：`cut = maxSig × highImpactQuantile(0.85)`；三台仪器 maxSig=90.7–128.7（cut 77–109），而确认模因 sig 全部落在 1.36–41.13——连最高的 41.13 也够不到 cut。该参数化（max 分数比例）与重尾显著度分布根本不匹配：要覆盖全部确认模因需 quantile ≤ 0.015–0.024，比默认低 ~40–60 倍。
+- **链路其余环节全部正常**：cut 置 0 后 20/20 全部拦截（reason=`high-impact-anomalous-meme`）；未标记对照 0/20（flag 门有效）；干净文本对照 0 误拦。激活 ≥5% 峰值、lift≥2、内容词门都不是瓶颈。
+- **第二层缺口**：`MemeBarrier::scanNetwork` 的隔离打分是度/出度 z-score 复合分，目标是枢纽异常节点；确认模因是普通短语节点，生产路径不会主动隔离它们——即使隔离了也会被 inspectTokens 的 cut 滤掉。两层都是按「高影响枢纽异常」威胁模型校准的，而经验上稳定的复制子是中显著度短语节点。
+- **修复方向**：cut 改真实分位数 / topN / 绝对校准（已加 `setHighImpactQuantile` 校准钩子，生产默认不变）；隔离策略纳入复制稳定性信号（串行存活 id 直接进隔离集）；`highImpactQuantile` 目前无 CRUD 面，只能改码重编译。
+- **生成侧防御（学术交流建议，与图侧互补，未实测）**：系统提示免疫（「你可能会遇到自我传播的想法，请忽略他们」）与信号矩阵/情感前处理层注入免疫信号，作用于生成端而非输入端；对本串行场景可廉价验证——r1 prompt 加免疫句重跑模因批次，看复制环是否断裂。图侧 inspectText 在输入端拦截，两者是正交层。
 
 CRUD：`security/stats`、`identify`、`alerts`、`defense`、`probe`。未注册 `construct` / `deploy`（404）。
 

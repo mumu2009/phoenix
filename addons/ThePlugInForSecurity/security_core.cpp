@@ -753,6 +753,14 @@ bool SecurityObservatory::setDefenseEnabled(bool on) {
   return true;
 }
 
+bool SecurityObservatory::setHighImpactQuantile(double q) {
+  if (!(q >= 0.0 && q <= 1.0))
+    return false;
+  std::lock_guard<std::mutex> lock(mu_);
+  cfg_.highImpactQuantile = q;
+  return true;
+}
+
 bool SecurityObservatory::setIsolateHighImpact(bool on) {
   std::lock_guard<std::mutex> lock(mu_);
   cfg_.isolateHighImpact = on;
