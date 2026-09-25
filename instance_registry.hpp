@@ -1,8 +1,6 @@
 /* instance_registry.hpp - Process-wide instance registry (multi-instance
    safety).
 
-
-
    Every autonomous instance (autonomy loop, mission lifecycle, spawned
    successors, MCP servers) registers here when its lifecycle begins, with a
    stop handler that can kill it.  The emergency stop (emergency_stop.hpp)

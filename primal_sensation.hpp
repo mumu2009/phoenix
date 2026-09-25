@@ -1,4 +1,5 @@
-/* primal_sensation.hpp - Primal sensation layer for Phoenix v7.0 "Arthur" */
+/* primal_sensation.hpp - Primal sensation layer for Phoenix v7.0 "Arthur"
+ */
 
 #pragma once
 

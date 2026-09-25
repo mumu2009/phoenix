@@ -93,7 +93,8 @@ $benchmarkArgs = @(
 if ($DryRun) {
   Write-Host "llama-server: outsides\llamacpp\build-gcc\bin\llama-server.exe $($llamaServerArgs -join ' ')"
   Write-Host ".\phoenix_main.exe $($phoenixArgs -join ' ')"
-  Write-Host "python.exe $($benchmarkArgs -join ' ')"
+  $repoPy = Join-Path (Split-Path $PSScriptRoot -Parent) 'Python314\python.exe'
+  Write-Host "$repoPy $($benchmarkArgs -join ' ')"
   exit 0
 }
 
@@ -125,7 +126,7 @@ try {
   }
 
   Write-Host '[phase] running memory benchmark'
-  & 'python.exe' @benchmarkArgs
+  & $repoPy @benchmarkArgs
   $exitCode = $LASTEXITCODE
   if ($exitCode -ne 0) {
     exit $exitCode

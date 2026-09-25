@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-root = Path(r"<repo>")
+root = Path(__file__).resolve().parents[1]
 files = [
     "model_lifecycle.cpp",
     "autonomy_stack.cpp",

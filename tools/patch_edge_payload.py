@@ -1,7 +1,7 @@
 import re
 import sys
 
-path = r"<repo>\edge_platform.cpp"
+path = str(Path(__file__).resolve().parents[1] / "edge_platform.cpp")
 with open(path, "r", encoding="utf-8") as f:
     text = f.read()
 

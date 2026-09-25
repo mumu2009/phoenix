@@ -1,4 +1,5 @@
-/* ahead_module.hpp - Pre-GNN "ahead" processing module for Phoenix v7.0 "Arthur" */
+/* ahead_module.hpp - Pre-GNN "ahead" processing module for Phoenix v7.0 "Arthur"
+ */
 
 #pragma once
 

@@ -122,3 +122,10 @@ hacktests/
 # the robots/ dir's file is all seen as input during the training process of tiny transformer model,which serve the context module.
 # the  hacktests folder provide the input for security module.It is a must for the running of security module.
 # The patterns above only exclude generated/binary/runtime content.
+
+# local runtime config (sanitized example: config/phoenix.example.json)
+config/phoenix.json
+
+# local build scratch
+_tmp_*
+compile_keep_llama_next*.rsp

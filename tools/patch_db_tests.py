@@ -1,6 +1,6 @@
 import re
 
-path = r"<repo>\tests\gtest\module\test_database_079.cpp"
+path = str(Path(__file__).resolve().parents[1] / "tests" / "gtest" / "module" / "test_database_079.cpp")
 with open(path, "r", encoding="utf-8") as f:
     lines = f.readlines()
 

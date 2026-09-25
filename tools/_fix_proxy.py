@@ -1,6 +1,6 @@
 import pathlib
 
-target = pathlib.Path("<repo>/tools/llama_proxy.py")
+target = pathlib.Path(__file__).resolve().with_name("llama_proxy.py")
 content = target.read_text(encoding="utf-8")
 
 start = content.find("        def build_chat_prompt(messages):")

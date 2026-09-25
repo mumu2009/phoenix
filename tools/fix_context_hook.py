@@ -1,6 +1,6 @@
 import sys
 
-p = r"<repo>\main_hub_parts\116_section_tail.inc"
+p = str(Path(__file__).resolve().parents[1] / "main_hub_parts" / "116_section_tail.inc")
 with open(p, "rb") as f:
     s = f.read().decode("utf-8")
 

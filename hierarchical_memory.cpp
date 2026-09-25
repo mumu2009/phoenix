@@ -1,4 +1,5 @@
-/* hierarchical_memory.cpp - Hierarchical memory tier wrapper */
+/* hierarchical_memory.cpp - Hierarchical memory tier wrapper
+ */
 
 #include "hierarchical_memory.hpp"
 

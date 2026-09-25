@@ -2,7 +2,7 @@ import pathlib
 import textwrap
 import math
 
-root = pathlib.Path(r'<repo-v5>')
+root = pathlib.Path(__file__).resolve().parents[1]
 
 baseline = {
     'reinforcement': 6135,

@@ -1,6 +1,5 @@
 /* web_search_engine.hpp - Dependency-free online search engine.
 
-
    Purpose: give the evolving agent a *material source* (web search) that
     works out of the box with no API key and no external SDK:
     - built-in backend "bing": Bing HTML (HTTPS). Reachable on networks

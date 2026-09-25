@@ -1,4 +1,5 @@
-/* concept_matrix.cpp - Unified sparse concept matrix implementation */
+/* concept_matrix.cpp - Unified sparse concept matrix implementation
+ */
 
 #include "concept_matrix.hpp"
 

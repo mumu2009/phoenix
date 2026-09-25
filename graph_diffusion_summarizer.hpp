@@ -1,4 +1,5 @@
-/* graph_diffusion_summarizer.hpp - Graph-diffusion summarization for MemeGraph */
+/* graph_diffusion_summarizer.hpp - Graph-diffusion summarization for MemeGraph
+ */
 
 #pragma once
 

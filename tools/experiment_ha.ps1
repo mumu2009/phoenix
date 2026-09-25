@@ -1,13 +1,14 @@
 # Shared backup / atomic save / dual-write. Dot-source from experiment scripts.
 $script:HaPhoenix = Split-Path -Parent $PSScriptRoot
 $script:HaStore = Join-Path $script:HaPhoenix 'runtime_store'
-$script:HaMirror = '<ollama-models>\experiment_work'
+$script:HaMirror = if ($env:PHOENIX_OLLAMA_WORK) { $env:PHOENIX_OLLAMA_WORK } else { Join-Path $env:LOCALAPPDATA 'phoenix\ollama_experiment_work' }
 
 function Backup-ExperimentSnapshot([string]$label) {
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     if ($label) { $stamp = $stamp + '_' + $label }
     $a = Join-Path $script:HaStore ("experiment_backups\" + $stamp)
-    $b = Join-Path '<ollama-models>\experiment_backups' $stamp
+    $backupRoot = if ($env:PHOENIX_OLLAMA_BACKUPS) { $env:PHOENIX_OLLAMA_BACKUPS } else { Join-Path $env:LOCALAPPDATA 'phoenix\ollama_experiment_backups' }
+    $b = Join-Path $backupRoot $stamp
     New-Item -ItemType Directory -Force -Path $a | Out-Null
     New-Item -ItemType Directory -Force -Path $b | Out-Null
     return @{ a = $a; b = $b }

@@ -51,9 +51,9 @@ BULLET3_SOURCES = [
 
 
 def find_gxx():
-    gcc_bin = Path(r"<gcc-bin>")
-    if gcc_bin.exists():
-        os.environ["PATH"] = str(gcc_bin) + os.pathsep + os.environ.get("PATH", "")
+    gcc_bin = os.environ.get("PHOENIX_GCC_BIN", "")
+    if gcc_bin and Path(gcc_bin).exists():
+        os.environ["PATH"] = gcc_bin + os.pathsep + os.environ.get("PATH", "")
     gxx = shutil.which("g++")
     if not gxx:
         print("[ERROR] g++ not found")

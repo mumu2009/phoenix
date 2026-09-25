@@ -1,4 +1,5 @@
-/* external_mixed_modal_io.hpp - Mixed-modal external I/O for Phoenix v7.0 "Arthur" */
+/* external_mixed_modal_io.hpp - Mixed-modal external I/O for Phoenix v7.0 "Arthur"
+ */
 
 #pragma once
 

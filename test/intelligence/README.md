@@ -35,6 +35,6 @@
 
 ## 5. 执行入口
 
-1. Python 直接运行：`<repo-v5>/.venv/Scripts/python.exe test/intelligence/main.py --system-url http://127.0.0.1:5080/api/chat --system-token local-dev`
+1. Python 直接运行：`.venv/Scripts/python.exe test/intelligence/main.py --system-url http://127.0.0.1:5080/api/chat --system-token local-dev`
 2. 批处理入口：`test/intelligence/runtest.bat`
 3. 默认输出：`build/intelligence_eval_report.json` 和 `build/intelligence_eval_report.md`

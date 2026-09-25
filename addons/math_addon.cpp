@@ -1,6 +1,5 @@
 /* math_addon.cpp - Math addon: exact arithmetic + scientific evaluator.
 
-
    Evaluator design (two modes, no silent rounding):
     - EXACT mode: expressions built from integers and the exact operators
       (+ - * / % ^ ! gcd lcm abs min max floor ceil round trunc) evaluate

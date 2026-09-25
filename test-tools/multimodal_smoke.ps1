@@ -24,8 +24,8 @@ with wave.open('build/tmp/smoke_16000.wav', 'w') as f:
 "@
 $genPy | Out-File -Encoding utf8 "build\tmp\gen_smoke.py"
 & ".\Python314\python.exe" "build\tmp\gen_smoke.py"
-$imgPath = "<repo>\build\tmp\smoke_image.png"
-$wavPath = "<repo>\build\tmp\smoke_16000.wav"
+$imgPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'build\tmp\smoke_image.png'
+$wavPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'build\tmp\smoke_16000.wav'
 if (-not (Test-Path $imgPath)) { throw "failed to generate image" }
 if (-not (Test-Path $wavPath)) { throw "failed to generate audio" }
 $wavB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($wavPath))

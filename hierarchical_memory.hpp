@@ -1,4 +1,5 @@
-/* hierarchical_memory.hpp - Hierarchical memory tier wrapper */
+/* hierarchical_memory.hpp - Hierarchical memory tier wrapper
+ */
 
 #pragma once
 

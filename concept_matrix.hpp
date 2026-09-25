@@ -1,4 +1,5 @@
-/* concept_matrix.hpp - Unified sparse concept matrix (text-first, multimodal stubs) */
+/* concept_matrix.hpp - Unified sparse concept matrix (text-first, multimodal stubs)
+ */
 
 #pragma once
 

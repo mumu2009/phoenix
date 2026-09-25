@@ -3,7 +3,7 @@
 # Uses Phoenix /api/chat (the backend endpoint the web UI also calls), so it
 # tests the augmented llama-3.1, not the raw llama-server.
 param(
-    [string]$Root = "<repo>",
+    [string]$Root = (Split-Path $PSScriptRoot -Parent),
     [int]$PerSubject = 1
 )
 $ErrorActionPreference = "Stop"

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-path = Path(r"<repo>\tests\gtest\unit\emotion\test_llamacpp_emotion_adjuster.cpp")
+path = Path(__file__).resolve().parents[1] / "tests" / "gtest" / "unit" / "emotion" / "test_llamacpp_emotion_adjuster.cpp"
 text = path.read_text(encoding="utf-8")
 
 text = text.replace("TEST(EmotionWeightCacheTest,", "TEST(EmotionWeightCacheFunctions,")

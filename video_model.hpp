@@ -1,4 +1,5 @@
-/* video_model.hpp - Semantic interface for image world models */
+/* video_model.hpp - Semantic interface for image world models
+ */
 
 #pragma once
 

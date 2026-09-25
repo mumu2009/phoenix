@@ -1,4 +1,5 @@
-/* graph_diffusion_summarizer.cpp - Graph-diffusion summarization for MemeGraph */
+/* graph_diffusion_summarizer.cpp - Graph-diffusion summarization for MemeGraph
+ */
 
 #include "graph_diffusion_summarizer.hpp"
 

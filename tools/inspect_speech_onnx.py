@@ -37,5 +37,5 @@ def inspect(path, name):
         print(n.op_type, [i for i in n.input[:2]], [o for o in n.output], attrs, ws)
 
 
-inspect(r'<repo>\runtime_store\models\ijepa\speech_16k\model_encoder.onnx', 'encoder')
-inspect(r'<repo>\runtime_store\models\ijepa\speech_16k\model_decoder.onnx', 'decoder')
+inspect(str(Path(__file__).resolve().parents[1] / 'runtime_store' / 'models' / 'ijepa' / 'speech_16k' / 'model_encoder.onnx'), 'encoder')
+inspect(str(Path(__file__).resolve().parents[1] / 'runtime_store' / 'models' / 'ijepa' / 'speech_16k' / 'model_decoder.onnx'), 'decoder')

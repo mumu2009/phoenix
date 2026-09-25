@@ -1,4 +1,5 @@
-/* transformer.hpp - Transformer neural network implementation */
+/* transformer.hpp - Transformer neural network implementation
+ */
 
 #pragma once
 

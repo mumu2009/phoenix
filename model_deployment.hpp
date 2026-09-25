@@ -1,4 +1,5 @@
-/* model_deployment.hpp - Runtime model placement topology for Phoenix v7.0 "Arthur" */
+/* model_deployment.hpp - Runtime model placement topology for Phoenix v7.0 "Arthur"
+ */
 
 #pragma once
 

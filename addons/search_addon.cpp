@@ -1,6 +1,5 @@
 /* search_addon.cpp - Search addon: web material source for the evolving agent.
 
-
    Enhanced search pipeline:
     1. live web (Bing first; DDG only if that network can reach it);
     2. local inverted index of previously ingested pages (not the assignment

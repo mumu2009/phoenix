@@ -1,4 +1,5 @@
-/* emotion_influence.hpp - Evidence-based emotion influence on LLM generation */
+/* emotion_influence.hpp - Evidence-based emotion influence on LLM generation
+ */
 
 #pragma once
 

@@ -1,6 +1,5 @@
 /* subprocess.hpp - One-shot subprocess runner with timeout and capture.
 
-
    Used by the cli-json addon to run whitelisted command templates (the
    "any software becomes a plugin" bridge).  Direct exec, no shell, so
    arguments never go through an interpreter - the config whitelist is the

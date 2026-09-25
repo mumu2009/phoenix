@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-path = Path(r"<repo>\tests\gtest\integration\test_end_to_end.cpp")
+path = Path(__file__).resolve().parents[1] / "tests" / "gtest" / "integration" / "test_end_to_end.cpp"
 text = path.read_text(encoding="utf-8")
 
 def process_block(block):

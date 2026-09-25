@@ -1,4 +1,5 @@
-/* multimodal_world_model.hpp - LLaVA / Qwen2-Audio based encoders */
+/* multimodal_world_model.hpp - LLaVA / Qwen2-Audio based encoders
+ */
 
 #pragma once
 

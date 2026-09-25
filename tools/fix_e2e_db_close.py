@@ -1,6 +1,6 @@
 from pathlib import Path
 
-path = Path(r"<repo>\tests\gtest\integration\test_end_to_end.cpp")
+path = Path(__file__).resolve().parents[1] / "tests" / "gtest" / "integration" / "test_end_to_end.cpp"
 lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
 
 out = []

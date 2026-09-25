@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-root = Path(r"<repo>\tests\gtest")
+root = Path(__file__).resolve().parents[1] / "tests" / "gtest"
 for path in root.rglob("*.cpp"):
     text = path.read_text(encoding="utf-8", errors="ignore")
     orig = text

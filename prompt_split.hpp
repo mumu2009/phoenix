@@ -1,4 +1,5 @@
-/* prompt_split.hpp - Prompt split (system vs memory) for Phoenix v7.0 "Arthur" */
+/* prompt_split.hpp - Prompt split (system vs memory) for Phoenix v7.0 "Arthur"
+ */
 
 #pragma once
 

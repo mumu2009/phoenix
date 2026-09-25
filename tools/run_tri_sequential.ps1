@@ -70,7 +70,7 @@ try {
 }
 
 Write-Host '[phase1] running benchmark script'
-& 'python.exe' -u tools\investor_benchmark_v3_tri.py `
+& (Join-Path (Split-Path $PSScriptRoot -Parent) 'Python314\python.exe') -u tools\investor_benchmark_v3_tri.py `
   --instruction-samples 50 `
   --window-samples 50 `
   --context-window 4096 `
@@ -95,7 +95,7 @@ $llamaProc = Start-Process -FilePath 'outsides\llamacpp\build-gcc\bin\llama-serv
 Start-Sleep -Seconds 8
 
 Write-Host '[phase2] running benchmark script'
-& 'python.exe' -u tools\investor_benchmark_v3_tri.py `
+& (Join-Path (Split-Path $PSScriptRoot -Parent) 'Python314\python.exe') -u tools\investor_benchmark_v3_tri.py `
   --instruction-samples 50 `
   --window-samples 50 `
   --context-window 4096 `
@@ -114,7 +114,7 @@ $mergeCode = @'
 import json
 from pathlib import Path
 
-root = Path(r"<repo>")
+root = Path.cwd()
 phase1 = json.loads((root / "build/investor_advantage_report_v3_phase_ollama_phoenix.json").read_text(encoding="utf-8"))
 phase2 = json.loads((root / "build/investor_advantage_report_v3_phase_llama_server.json").read_text(encoding="utf-8"))
 
@@ -138,4 +138,4 @@ print(f"[OK] merged -> {out_json}")
 
 $mergeTmp = 'build\\_merge_tri.py'
 Set-Content -Path $mergeTmp -Value $mergeCode -Encoding UTF8
-& 'python.exe' $mergeTmp
+& (Join-Path (Split-Path $PSScriptRoot -Parent) 'Python314\python.exe') $mergeTmp

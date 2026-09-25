@@ -1,4 +1,5 @@
-/* async_task_system.hpp - Work-stealing async task system for Phoenix v7.0 */
+/* async_task_system.hpp - Work-stealing async task system for Phoenix v7.0
+ */
 
 #pragma once
 

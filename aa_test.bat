@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
 
-cd /d "<repo>"
+cd /d "%~dp0"
 
 echo ============================================
 echo  AA TEST SUITE - Phoenix v6.0 Alixander

@@ -122,7 +122,7 @@ def setup(prefix: Path) -> int:
     runner_cpp = src_dir / "x5_onnx_runner.cpp"
     runner_local = Path(__file__).with_name("x5_onnx_runner.cpp")
     if not runner_local.exists():
-        runner_local = Path("%USERPROFILE%/AppData/Local/Temp/x5_onnx_runner.cpp")
+        runner_local = Path(tempfile.gettempdir()) / "x5_onnx_runner.cpp"
     scp_to(runner_local, x5_path(runner_cpp))
 
     # Write Makefile

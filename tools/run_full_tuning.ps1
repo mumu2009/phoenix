@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$root = "<repo>"
+$root = Split-Path $PSScriptRoot -Parent
 
 $simArgs = @(
     "-u", "tools\auto_tune_phoenix_params.py",

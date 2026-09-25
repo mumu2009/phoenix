@@ -6,7 +6,7 @@ import soundfile as sf
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data-dir', default=r'<repo>\runtime_store\datasets\musan_16k')
+    parser.add_argument('--data-dir', default=str(Path(__file__).resolve().parents[1] / 'runtime_store' / 'datasets' / 'musan_16k'))
     args = parser.parse_args()
     d = Path(args.data_dir)
     out = d / 'manifest.json'

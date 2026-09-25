@@ -1,4 +1,5 @@
-/* audio_model.cpp - Factory and HBDNN/fallback for 1D audio world model interface */
+/* audio_model.cpp - Factory and HBDNN/fallback for 1D audio world model interface
+ */
 
 #include "audio_model.hpp"
 #include "local_onnx.hpp"

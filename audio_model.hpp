@@ -1,4 +1,5 @@
-/* audio_model.hpp - Semantic interface for 1D speech world models */
+/* audio_model.hpp - Semantic interface for 1D speech world models
+ */
 
 #pragma once
 

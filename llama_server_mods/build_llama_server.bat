@@ -54,16 +54,16 @@ REM compiler-sanity-check link fails. GCC (mingw-w64) is the toolchain this
 REM build-gcc directory is named after and was originally configured with.
 set "PHX_GCC_EXE="
 set "PHX_GXX_EXE="
-if exist "gcc.exe" set "PHX_GCC_EXE=gcc.exe"
-if exist "g++.exe" set "PHX_GXX_EXE=g++.exe"
+if defined PHOENIX_GCC_BIN if exist "%PHOENIX_GCC_BIN%\gcc.exe" set "PHX_GCC_EXE=%PHOENIX_GCC_BIN%\gcc.exe"
+if defined PHOENIX_GCC_BIN if exist "%PHOENIX_GCC_BIN%\g++.exe" set "PHX_GXX_EXE=%PHOENIX_GCC_BIN%\g++.exe"
 if not defined PHX_GCC_EXE for /f "delims=" %%I in ('where gcc 2^>nul') do if not defined PHX_GCC_EXE set "PHX_GCC_EXE=%%I"
 if not defined PHX_GXX_EXE for /f "delims=" %%I in ('where g++ 2^>nul') do if not defined PHX_GXX_EXE set "PHX_GXX_EXE=%%I"
 if not defined PHX_GCC_EXE (
-  echo [build_llama_server][ERROR] gcc not found ^(checked <gcc-bin> and PATH^).
+  echo [build_llama_server][ERROR] gcc not found ^(checked PHOENIX_GCC_BIN and PATH^).
   exit /b 1
 )
 if not defined PHX_GXX_EXE (
-  echo [build_llama_server][ERROR] g++ not found ^(checked <gcc-bin> and PATH^).
+  echo [build_llama_server][ERROR] g++ not found ^(checked PHOENIX_GCC_BIN and PATH^).
   exit /b 1
 )
 echo [build_llama_server] Using CC=%PHX_GCC_EXE% CXX=%PHX_GXX_EXE%

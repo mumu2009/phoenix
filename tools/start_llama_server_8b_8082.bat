@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-cd /d "<repo>"
+cd /d "%~dp0.."
 
 set "MODEL=GGUF_models\blobs\sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29"
 set "PORT=8082"

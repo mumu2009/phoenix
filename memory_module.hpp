@@ -1,4 +1,5 @@
-/* memory_module.hpp - Explicit memory branch with dual-summary design */
+/* memory_module.hpp - Explicit memory branch with dual-summary design
+ */
 
 #pragma once
 

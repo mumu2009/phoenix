@@ -62,9 +62,7 @@ KALI_DATASET = PurePosixPath("/home/kali/phoenix/datasets/musan_16k")
 
 X5_WORK = PurePosixPath("/home/sunrise/phoenix/evolve")
 
-WIN_TEMP = Path(os.environ.get("TEMP", r"C:\Users\%USERNAME%\AppData\Local\Temp"))
-if "%USERNAME%" in str(WIN_TEMP):
-    WIN_TEMP = Path(r"%USERPROFILE%\AppData\Local\Temp")
+WIN_TEMP = Path(os.environ.get("TEMP") or os.environ.get("TMP") or r"C:\Windows\Temp")
 WIN_BRIDGE = WIN_TEMP / "bpu_evolve_bridge"
 
 CHUNK = 16000

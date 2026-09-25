@@ -1,6 +1,5 @@
 /* mcp_client.hpp - Model Context Protocol (MCP) client.
 
-
    MCP compatibility layer: launches external MCP servers (JSON-RPC 2.0 over
    newline-delimited stdio, per the MCP specification) as subprocesses and
    exposes their tools so the planner can use the mainstream plugin market.

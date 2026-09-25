@@ -9,8 +9,8 @@ del /q "build\tmp\cc*" 2>nul
 
 echo [STEP] Compile GTest Tests
 
-if not exist "gcc.exe" (
-  set "PATH=<gcc-bin>;%PATH%"
+if defined PHOENIX_GCC_BIN if exist "%PHOENIX_GCC_BIN%\gcc.exe" (
+  set "PATH=%PHOENIX_GCC_BIN%;%PATH%"
 )
 
 set "GCC_EXE="

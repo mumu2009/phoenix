@@ -1,4 +1,5 @@
-/* video_model.cpp - video world model factory and fallbacks */
+/* video_model.cpp - video world model factory and fallbacks
+ */
 
 #include "video_model.hpp"
 #include "local_onnx.hpp"

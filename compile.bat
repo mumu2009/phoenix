@@ -17,8 +17,8 @@ REM Quick check: if phoenix_main.exe exists and is recent, skip compilation
 set "BUILD_STATUS=FAILED"
 set "FINAL_EXIT_CODE=1"
 
-if exist "gcc.exe" (
-  set "PATH=<gcc-bin>;%PATH%"
+if defined PHOENIX_GCC_BIN if exist "%PHOENIX_GCC_BIN%\gcc.exe" (
+  set "PATH=%PHOENIX_GCC_BIN%;%PATH%"
 )
 
 set "GCC_EXE="

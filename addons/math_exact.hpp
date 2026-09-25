@@ -1,6 +1,5 @@
 /* math_exact.hpp - Exact arbitrary-precision arithmetic for the math addon.
 
-
    Rationale: a reasoning agent must be able to trust arithmetic.  IEEE-754
    doubles silently round (0.1 + 0.2 != 0.3), and a "dumb" model can never
    learn its way out of a numerically wrong evaluator.  This header provides

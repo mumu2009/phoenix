@@ -1,4 +1,5 @@
-/* instinct.hpp - Instinct/benefit-harm layer for Phoenix v7.0 "Arthur" */
+/* instinct.hpp - Instinct/benefit-harm layer for Phoenix v7.0 "Arthur"
+ */
 
 #pragma once
 

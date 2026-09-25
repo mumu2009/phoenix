@@ -1,6 +1,5 @@
 /* emergency_stop.hpp - System-level E-stop (multi-instance kill switch).
 
-
    Industrial E-stop semantics, applied to the multi-instance system:
 
    1. LATCHING: press() latches permanently - it cannot be un-pressed from

@@ -6,7 +6,7 @@ for the RDK X5.
 
 ## Files to copy to the remote Windows box
 
-From `<repo>`:
+From the repository root:
 
 ```
 tools/train_audio.py
@@ -21,7 +21,7 @@ doc/remote_training_package.md
 ```
 
 Also copy `/home/kali/decoder_trained.pt` from Kali to the remote box and put it
-in the same directory you will use for vision training (e.g. `<repo>\decoder_trained.pt`).
+in the same directory you will use for vision training (e.g. `<repo-root>/decoder_trained.pt`).
 
 ## Prerequisites (remote Windows)
 

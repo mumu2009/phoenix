@@ -1,4 +1,5 @@
-/* model_deployment.cpp - Runtime model placement topology for Phoenix v7.0 "Arthur" */
+/* model_deployment.cpp - Runtime model placement topology for Phoenix v7.0 "Arthur"
+ */
 
 #include "model_deployment.hpp"
 #include "phoenix_config.hpp"

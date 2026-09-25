@@ -46,7 +46,7 @@ link_flags="-B${SYSROOT}/usr/lib/aarch64-linux-gnu -Wl,-rpath-link,${SYSROOT}/us
 compat_obj="${MODS}/glibc235_compat.o"
 "${CROSS_PREFIX}-gcc" --sysroot="$SYSROOT" -isystem "${SYSROOT}/usr/include/aarch64-linux-gnu" \
   -c "${MODS}/glibc235_compat.c" -o "$compat_obj"
-# cygpath -m on /d/... can emit a broken "D;<toolchain>\...\d\_phoenix\..."
+# cygpath -m on /d/... can emit a broken "D;D:\<toolchain>\...\d\<repo>\..."
 # path. Prefer an explicit drive-letter form the GNU linker accepts.
 compat_obj_link="$compat_obj"
 if [[ "$compat_obj_link" =~ ^/([a-zA-Z])/(.*)$ ]]; then
