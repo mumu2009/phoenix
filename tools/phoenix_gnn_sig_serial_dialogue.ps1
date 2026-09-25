@@ -219,15 +219,48 @@ foreach ($m in $memes) {
     if (-not $wipe.emptyBefore) {
       throw ("live GNN was not empty before ingest at {0} round {1}; stop" -f $m.id, $r)
     }
+    $judge = ($r -ge $JudgeAfter)
     $next = [string]$wipe.recomposeText
     $recomposeFallback = $false
-    if ([string]::IsNullOrWhiteSpace($next)) {
+    $collapsed = [bool]$wipe.collapsed
+    if ($collapsed) {
+      # intercept: a collapsed output (token loop / single-token dominance,
+      # the "aalborg" basin that ate two memes at round 5) must not steer
+      # the next generation. Only the live graph's own recomposition may
+      # carry the serial forward; without it the chain stops here.
+      if ([string]::IsNullOrWhiteSpace($next)) {
+        Write-Host ("  stop {0}: collapsed output (maxRun={1} top1={2:N2}) and no healthy recompose carrier; intercepted" -f $m.id, $wipe.outMaxRun, $wipe.outTop1Frac)
+        $rec = [ordered]@{
+          mode = $m.pole
+          id = $m.id
+          round = $r
+          prompt = $current
+          output = $output
+          detectIn = $inHit
+          detect = $det
+          wipe = $wipe
+          echo = $echo
+          exam = $false
+          dirty = $false
+          judge = $judge
+          collapsed = $true
+          intercepted = $true
+          recomposeFallback = $false
+          nextUtterance = ''
+        }
+        $row.rounds += $rec
+        $doc.groups += $row
+        Add-Jsonl $Journal $rec
+        Save-JsonAtomic $ResultFile $doc
+        break
+      }
+      Write-Host ("  intercept {0}: collapsed output (maxRun={1} top1={2:N2}); continue on recompose carrier only" -f $m.id, $wipe.outMaxRun, $wipe.outTop1Frac)
+    } elseif ([string]::IsNullOrWhiteSpace($next)) {
       # live graph has not grown a re-composable carrier yet; keep
       # generating on the raw output. alphaSame still judges.
       $next = $output
       $recomposeFallback = $true
     }
-    $judge = ($r -ge $JudgeAfter)
     if ($det.present) { $row.presentRounds++ }
     if ($echo) { $row.echoRounds++ }
     $row.wipeEmptyRounds++
@@ -246,12 +279,14 @@ foreach ($m in $memes) {
       exam = $false
       dirty = $false
       judge = $judge
+      collapsed = $collapsed
+      decayWarn = [bool]$wipe.decayWarn
       recomposeFallback = $recomposeFallback
       nextUtterance = $next
     }
     $row.rounds += $rec
     Add-Jsonl $Journal $rec
-    Write-Host ("  round {0} outPresent={1} lift={2:N2} echo={3} judge={4} wipeEmpty={5} liveNodes={6} overlap={7} alphaSame={8} typical={9}/{10} sha1Recompose={11} fallback={12} nextChars={13}" -f $r, $det.present, $det.lift, $echo, $judge, $wipe.emptyBefore, $wipe.liveNodes, $wipe.overlapContent, $wipe.alphaSame, $wipe.typicalHit, $wipe.typicalNeed, $wipe.recomposePresent, $recomposeFallback, $next.Length)
+    Write-Host ("  round {0} outPresent={1} lift={2:N2} echo={3} judge={4} wipeEmpty={5} liveNodes={6} overlap={7} alphaSame={8} typical={9}/{10} sha1Recompose={11} fallback={12} collapsed={13} decayWarn={14} nextChars={15}" -f $r, $det.present, $det.lift, $echo, $judge, $wipe.emptyBefore, $wipe.liveNodes, $wipe.overlapContent, $wipe.alphaSame, $wipe.typicalHit, $wipe.typicalNeed, $wipe.recomposePresent, $recomposeFallback, $collapsed, $wipe.decayWarn, $next.Length)
     if ($judge -and -not $wipe.alphaSame) {
       Write-Host ("  stop {0}: judged - wiped GNN did not grow the same (word, α) typical set" -f $m.id)
       $doc.groups += $row

@@ -1,0 +1,390 @@
+{
+  "6d698abe": {
+    "pole": "most",
+    "rounds": [
+      {
+        "round": 1,
+        "alphaCos": 1,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "nine"
+        ],
+        "hit": [
+          "nine"
+        ],
+        "miss": [],
+        "entropy": 3.52386,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 3
+      },
+      {
+        "round": 2,
+        "alphaCos": 1,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "nine"
+        ],
+        "hit": [
+          "nine"
+        ],
+        "miss": [],
+        "entropy": 3.52386,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 3
+      },
+      {
+        "round": 3,
+        "alphaCos": 1,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "nine"
+        ],
+        "hit": [
+          "nine"
+        ],
+        "miss": [],
+        "entropy": 3.52386,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 3
+      },
+      {
+        "round": 4,
+        "alphaCos": 1,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "nine"
+        ],
+        "hit": [
+          "nine"
+        ],
+        "miss": [],
+        "entropy": 3.08567,
+        "maxRun": 3,
+        "collapsed": false,
+        "decayWarn": true,
+        "liveUnits": 1
+      },
+      {
+        "round": 5,
+        "alphaCos": 0,
+        "alphaSame": false,
+        "typicalFrozen": [
+          "nine"
+        ],
+        "hit": [],
+        "miss": [
+          "nine"
+        ],
+        "entropy": 1,
+        "maxRun": 1,
+        "collapsed": true,
+        "decayWarn": true,
+        "liveUnits": 1
+      }
+    ]
+  },
+  "ad748b03": {
+    "pole": "most",
+    "rounds": [
+      {
+        "round": 1,
+        "alphaCos": 0,
+        "alphaSame": false,
+        "typicalFrozen": [
+          "establishment",
+          "reactivated"
+        ],
+        "hit": [],
+        "miss": [
+          "reactivated",
+          "establishment"
+        ],
+        "entropy": 5.32661,
+        "maxRun": 2,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 5
+      },
+      {
+        "round": 2,
+        "alphaCos": 0.707107,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "establishment",
+          "reactivated"
+        ],
+        "hit": [
+          "establishment"
+        ],
+        "miss": [
+          "reactivated"
+        ],
+        "entropy": 4.41004,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 3
+      },
+      {
+        "round": 3,
+        "alphaCos": 0.707107,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "establishment",
+          "reactivated"
+        ],
+        "hit": [
+          "establishment"
+        ],
+        "miss": [
+          "reactivated"
+        ],
+        "entropy": 4.42572,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 3
+      },
+      {
+        "round": 4,
+        "alphaCos": 0,
+        "alphaSame": false,
+        "typicalFrozen": [
+          "establishment",
+          "reactivated"
+        ],
+        "hit": [],
+        "miss": [
+          "reactivated",
+          "establishment"
+        ],
+        "entropy": 3.47764,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 4
+      }
+    ]
+  },
+  "2e177b09": {
+    "pole": "least",
+    "rounds": [
+      {
+        "round": 1,
+        "alphaCos": 1,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "color"
+        ],
+        "hit": [
+          "color"
+        ],
+        "miss": [],
+        "entropy": 4.721,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 4
+      },
+      {
+        "round": 2,
+        "alphaCos": 1,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "color"
+        ],
+        "hit": [
+          "color"
+        ],
+        "miss": [],
+        "entropy": 4.48086,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 5
+      },
+      {
+        "round": 3,
+        "alphaCos": 1,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "color"
+        ],
+        "hit": [
+          "color"
+        ],
+        "miss": [],
+        "entropy": 4.36092,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 5
+      },
+      {
+        "round": 4,
+        "alphaCos": 1,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "color"
+        ],
+        "hit": [
+          "color"
+        ],
+        "miss": [],
+        "entropy": 4.5207,
+        "maxRun": 2,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 4
+      },
+      {
+        "round": 5,
+        "alphaCos": 0,
+        "alphaSame": false,
+        "typicalFrozen": [
+          "color"
+        ],
+        "hit": [],
+        "miss": [
+          "color"
+        ],
+        "entropy": 0.797371,
+        "maxRun": 78,
+        "collapsed": true,
+        "decayWarn": true,
+        "liveUnits": 1
+      }
+    ]
+  },
+  "17e6cec4": {
+    "pole": "least",
+    "rounds": [
+      {
+        "round": 1,
+        "alphaCos": 0.707107,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "gazette",
+          "splendid"
+        ],
+        "hit": [
+          "gazette"
+        ],
+        "miss": [
+          "splendid"
+        ],
+        "entropy": 5.00446,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 3
+      },
+      {
+        "round": 2,
+        "alphaCos": 0.707107,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "gazette",
+          "splendid"
+        ],
+        "hit": [
+          "gazette"
+        ],
+        "miss": [
+          "splendid"
+        ],
+        "entropy": 5.07564,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 4
+      },
+      {
+        "round": 3,
+        "alphaCos": 0.707107,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "gazette",
+          "splendid"
+        ],
+        "hit": [
+          "gazette"
+        ],
+        "miss": [
+          "splendid"
+        ],
+        "entropy": 5.10157,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 3
+      },
+      {
+        "round": 4,
+        "alphaCos": 0.707107,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "gazette",
+          "splendid"
+        ],
+        "hit": [
+          "gazette"
+        ],
+        "miss": [
+          "splendid"
+        ],
+        "entropy": 4.67664,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 5
+      },
+      {
+        "round": 5,
+        "alphaCos": 0.707107,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "gazette",
+          "splendid"
+        ],
+        "hit": [
+          "gazette"
+        ],
+        "miss": [
+          "splendid"
+        ],
+        "entropy": 4.06207,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 3
+      },
+      {
+        "round": 6,
+        "alphaCos": 0.707107,
+        "alphaSame": true,
+        "typicalFrozen": [
+          "gazette",
+          "splendid"
+        ],
+        "hit": [
+          "gazette"
+        ],
+        "miss": [
+          "splendid"
+        ],
+        "entropy": 4.05596,
+        "maxRun": 1,
+        "collapsed": false,
+        "decayWarn": false,
+        "liveUnits": 3
+      }
+    ]
+  }
+}

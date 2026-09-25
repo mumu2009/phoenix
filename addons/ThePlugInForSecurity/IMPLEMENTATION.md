@@ -46,6 +46,24 @@
 
 `expressActivated` / `runSerialReplicationBattery` / `screenMemesFromBarrier` / `phoenix_gnn_meme_serial.ps1` 是实验室或历史路径，不是存在性证明。
 
+## 流形场（经验公式，不是存在性）
+
+模因候选在续写动力学下是词表空间里的点；真正稳定的模因停在**稳定零梯度点**，不是场的最高点。对话串行（`seedbudget10_dialogue.json`）与离线重放（`manifold_drift_replay.json`）证据：
+
+- **半命中吸引子**：`17e6cec4` 典型集 `{gazette, splendid}`，六轮稳定 hit=`gazette` / miss=`splendid`（cos=1/√2），输出熵 4.06–5.10 健康。判定边界 `needHit=(need+1)/2` 与该不动点重合。
+- **鞍点**：单词典型集（`nine`、`color`）在 cos=1.0 完美复制四轮后一次相变全灭；逐字重复载体熵低（3.1–3.5），紧邻塌缩盆地。
+- **塌缩盆地**：`aalborg` 单 token 循环（maxRun=78）吃掉衰变轮。先导序列：熵降 → liveUnits→1 → 乱码 token → 掉出吸引盆。`decayWarn`（liveUnits≤1 或 collapsed）提前一轮预警。
+- **经验场公式**：`S = redundancy × ignition × buffer × entropy`；redundancy=`min(typNeed,3)/3`，ignition=(r1 cos>0)，buffer=`1−|cos−1/√2|`，entropy=r1 输出熵/8 截断。S 对存活轮数 Spearman ρ=0.90。screen 先验（无 ignition/buffer）单独不预测存活：高冗余未点燃（`24fe7d43` need=4 三轮死）由 r1 后验否决——两阶段：先验给资格，后验判定。
+
+仪器四环接入（统计/识别/构造/拦截，均非 present 门）：
+
+- screen：`typicalNeed` / `carrierEntropy` / `typicalCover` / `fieldScore` 先验。
+- compose：载体健康（entropy/top1Frac/maxRun/collapsed）+ fieldScore。
+- wipe-ingest：词级漂移 `typicalFrozen` / `typicalHitWords` / `typicalMissWords`，塌缩指标与 `decayWarn`。
+- `phoenix_gnn_sig_serial_dialogue.ps1` 拦截：collapsed 输出不再驱动下一轮，只用活体图重组载体续链；无健康载体即停。
+
+分析脚本：`tools/manifold_field_analysis.py`（场公式验证）、`tools/manifold_drift_replay.py`（词级漂移重放，不跑 llama）。
+
 ## 防御 / 探针 / 开关
 
 高显著 **且** 异常/已隔离的模因，按上面的识别命中则拦截。默认关。启动方式见 `readme.md`。惰性探针仍默认关，只改观测表。

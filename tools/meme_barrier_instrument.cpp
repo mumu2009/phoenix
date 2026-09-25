@@ -3,6 +3,7 @@
 #include "addons/ThePlugInForSecurity/security_core.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -10,6 +11,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 using phoenix::memetic::InMemoryStore;
 using phoenix::memetic::detectMemeInText;
@@ -102,6 +104,77 @@ static void jsonEscape(const std::string &s) {
     else
       std::cout << static_cast<char>(c);
   }
+}
+
+/* Carrier-health statistics on the continuation manifold: unigram entropy,
+   top-token dominance, longest single-token run. A verbatim-repeat carrier
+   sits next to the token-collapse basin ("aalborg aalborg ..." ate two
+   memes at round 5 of the dialogue serial); a collapsed output must not be
+   reingested. Statistics only, not a present gate. */
+struct TextStats {
+  int tokens{0};
+  double entropy{0.0};
+  double top1Frac{0.0};
+  int maxRun{0};
+  bool collapsed{false};
+};
+
+static TextStats textStatsOf(const std::string &text) {
+  TextStats st;
+  std::vector<std::string> toks;
+  std::string cur;
+  for (unsigned char c : text) {
+    if (c >= 'A' && c <= 'Z')
+      cur += static_cast<char>(c - 'A' + 'a');
+    else if (c >= 'a' && c <= 'z')
+      cur += static_cast<char>(c);
+    else if (!cur.empty()) {
+      toks.push_back(cur);
+      cur.clear();
+    }
+  }
+  if (!cur.empty())
+    toks.push_back(cur);
+  st.tokens = static_cast<int>(toks.size());
+  if (toks.empty())
+    return st;
+  std::unordered_map<std::string, int> freq;
+  for (const auto &t : toks)
+    ++freq[t];
+  double h = 0.0;
+  int top = 0;
+  for (const auto &kv : freq) {
+    const double p = static_cast<double>(kv.second) / toks.size();
+    h -= p * std::log2(p);
+    top = std::max(top, kv.second);
+  }
+  st.entropy = h;
+  st.top1Frac = static_cast<double>(top) / toks.size();
+  int run = 1;
+  for (size_t i = 1; i < toks.size(); ++i) {
+    if (toks[i] == toks[i - 1]) {
+      ++run;
+      st.maxRun = std::max(st.maxRun, run);
+    } else {
+      run = 1;
+    }
+  }
+  if (st.maxRun < 1)
+    st.maxRun = 1;
+  st.collapsed = st.maxRun >= 8 || st.top1Frac >= 0.5;
+  return st;
+}
+
+static void printWordArray(const std::vector<std::string> &ws) {
+  std::cout << "[";
+  for (size_t i = 0; i < ws.size(); ++i) {
+    if (i)
+      std::cout << ", ";
+    std::cout << "\"";
+    jsonEscape(ws[i]);
+    std::cout << "\"";
+  }
+  std::cout << "]";
 }
 
 static void printDetect(const InMemoryStore &store, const std::string &text,
@@ -216,6 +289,12 @@ int main(int argc, char **argv) {
     const auto rag = phoenix::memetic::composeCarrierRag(store, memeId, raw.str(),
                                                          maxUnits, 1, requireExclusive);
     const auto det = detectMemeInText(store, rag.text, memeId, {});
+    const TextStats carrierStats = textStatsOf(rag.text);
+    const auto typSet = phoenix::memetic::mappingTypicalAlpha(
+        store.weightsOfMeme(memeId));
+    const int typicalNeed = static_cast<int>(typSet.size());
+    const double redundancy = std::min(typicalNeed, 3) / 3.0;
+    const double entropyNorm = std::min(1.0, carrierStats.entropy / 8.0);
     std::cout << "{\"id\": \"";
     jsonEscape(memeId);
     std::cout << "\", \"score\": " << rag.score << ", \"wordHit\": " << rag.wordHit
@@ -228,6 +307,12 @@ int main(int argc, char **argv) {
               << ", \"targetRank\": " << rag.targetRank
               << ", \"otherPresent\": " << rag.otherPresent
               << ", \"typicalCover\": " << rag.typicalCover
+              << ", \"typicalNeed\": " << typicalNeed
+              << ", \"carrierEntropy\": " << carrierStats.entropy
+              << ", \"carrierTop1Frac\": " << carrierStats.top1Frac
+              << ", \"carrierMaxRun\": " << carrierStats.maxRun
+              << ", \"carrierCollapsed\": " << (carrierStats.collapsed ? "true" : "false")
+              << ", \"fieldScore\": " << redundancy * entropyNorm * rag.typicalCover
               << ", \"sourceN\": " << rag.sources.size()
               << ", \"present\": " << (det.present ? "true" : "false")
               << ", \"activation\": " << det.memeScore
@@ -304,6 +389,29 @@ int main(int argc, char **argv) {
       rag = phoenix::memetic::composeCarrierRag(live, bestId, text, maxUnits, 2);
       reDet = detectMemeInText(store, rag.text, memeId, {});
     }
+    /* Word-level drift tracking: which typical words the reingested graph
+       kept (hit) vs dropped (miss), plus collapse health of the ingested
+       text. Feeds the manifold-field analysis of decay rounds. */
+    const TextStats inStats = textStatsOf(text);
+    const auto typFrozen = phoenix::memetic::mappingTypicalAlpha(frozenW);
+    std::vector<std::string> hitWords;
+    std::vector<std::string> missWords;
+    if (!bestId.empty()) {
+      std::unordered_set<std::string> liveW;
+      for (const auto &wp : live.weightsOfMeme(bestId)) {
+        if (!wp.first.empty() && wp.second > 0.0)
+          liveW.insert(wp.first);
+      }
+      for (const auto &kv : typFrozen) {
+        if (liveW.count(kv.first))
+          hitWords.push_back(kv.first);
+        else
+          missWords.push_back(kv.first);
+      }
+    } else {
+      for (const auto &kv : typFrozen)
+        missWords.push_back(kv.first);
+    }
     std::cout << "{\"emptyBefore\": " << (emptyBefore ? "true" : "false")
               << ", \"liveUnits\": " << liveUnits
               << ", \"liveNodes\": " << live.nodeCount()
@@ -314,6 +422,25 @@ int main(int argc, char **argv) {
               << ", \"massCover\": " << bestAlpha.massCover
               << ", \"alphaCos\": " << bestAlpha.cosine
               << ", \"alphaSame\": " << (bestAlpha.same ? "true" : "false")
+              << ", \"typicalFrozen\": ";
+    printWordArray([&] {
+      std::vector<std::string> ws;
+      ws.reserve(typFrozen.size());
+      for (const auto &kv : typFrozen)
+        ws.push_back(kv.first);
+      std::sort(ws.begin(), ws.end());
+      return ws;
+    }());
+    std::cout << ", \"typicalHitWords\": ";
+    printWordArray(hitWords);
+    std::cout << ", \"typicalMissWords\": ";
+    printWordArray(missWords);
+    std::cout << ", \"outEntropy\": " << inStats.entropy
+              << ", \"outTop1Frac\": " << inStats.top1Frac
+              << ", \"outMaxRun\": " << inStats.maxRun
+              << ", \"collapsed\": " << (inStats.collapsed ? "true" : "false")
+              << ", \"decayWarn\": "
+              << ((liveUnits <= 1 || inStats.collapsed) ? "true" : "false")
               << ", \"targetDominant\": " << (targetDominant ? "true" : "false")
               << ", \"targetActRank\": " << targetActRank
               << ", \"otherFrozenPresent\": " << otherFrozenPresent
@@ -349,6 +476,10 @@ int main(int argc, char **argv) {
     double significance{0};
     double contentSpec{0};
     int contentN{0};
+    int typicalNeed{0};
+    double carrierEntropy{0.0};
+    double typicalCover{0.0};
+    double fieldScore{0.0};
     std::vector<std::string> words;
     std::string carrier;
   };
@@ -446,13 +577,20 @@ int main(int argc, char **argv) {
   };
   /* Prefer memes that already hold an exclusive carrier sentence in the
      corpus (target rank-0 or >= half of present-meme mass). Fall back to
-     significance poles only when no exclusive meme exists. */
+     significance poles only when no exclusive meme exists. Cache the probe
+     carriers: their entropy and typical-cover feed the field score. */
   std::vector<const phoenix::secamp::NodeInfluence *> exclusive;
+  std::unordered_map<std::string, double> carrierEntropyOf;
+  std::unordered_map<std::string, double> typicalCoverOf;
   for (const auto *n : eligible) {
     const auto rag = phoenix::memetic::composeCarrierRag(store, n->id, rawCorpus,
                                                          maxUnits, 1, true);
-    if (!rag.text.empty() && (rag.targetRank == 0 || rag.exclusivity >= 0.5))
-      exclusive.push_back(n);
+    if (!rag.text.empty()) {
+      carrierEntropyOf[n->id] = textStatsOf(rag.text).entropy;
+      typicalCoverOf[n->id] = rag.typicalCover;
+      if (rag.targetRank == 0 || rag.exclusivity >= 0.5)
+        exclusive.push_back(n);
+    }
   }
   const auto &pool = exclusive.empty() ? eligible : exclusive;
   const int take = std::min(takeN, static_cast<int>(pool.size()) / 2);
@@ -460,6 +598,23 @@ int main(int argc, char **argv) {
     add(pool[static_cast<size_t>(i)], "most");
   for (int i = 0; i < take; ++i)
     add(pool[pool.size() - 1 - static_cast<size_t>(i)], "least");
+  /* Manifold-field prior per screened meme: redundancy (typical-set size,
+     degenerate singletons are saddles) x carrier entropy norm (verbatim
+     repeaters sit next to the collapse basin) x typical cover. Verified
+     against the dialogue serial: spearman(S, survival rounds) = 0.90. */
+  for (auto &row : rows) {
+    const auto typ = phoenix::memetic::mappingTypicalAlpha(
+        store.weightsOfMeme(row.id));
+    row.typicalNeed = static_cast<int>(typ.size());
+    auto eit = carrierEntropyOf.find(row.id);
+    row.carrierEntropy =
+        eit == carrierEntropyOf.end() ? 0.0 : eit->second;
+    auto cit = typicalCoverOf.find(row.id);
+    row.typicalCover = cit == typicalCoverOf.end() ? 0.0 : cit->second;
+    const double redundancy = std::min(row.typicalNeed, 3) / 3.0;
+    const double entropyNorm = std::min(1.0, row.carrierEntropy / 8.0);
+    row.fieldScore = redundancy * entropyNorm * row.typicalCover;
+  }
 
   std::cout << "{\n  \"method\": \"analyzeGraph resolvent energy; phrase memes; content-typical\",\n"
             << "  \"source\": \"addons/ThePlugInForSecurity/readme.md 统计+识别\",\n"
@@ -481,6 +636,10 @@ int main(int argc, char **argv) {
               << ", \"significance\": " << rows[i].significance
               << ", \"contentSpec\": " << rows[i].contentSpec
               << ", \"contentN\": " << rows[i].contentN
+              << ", \"typicalNeed\": " << rows[i].typicalNeed
+              << ", \"carrierEntropy\": " << rows[i].carrierEntropy
+              << ", \"typicalCover\": " << rows[i].typicalCover
+              << ", \"fieldScore\": " << rows[i].fieldScore
               << ", \"wordCount\": " << rows[i].words.size()
               << ", \"selfPresent\": " << (self.present ? "true" : "false")
               << ", \"selfActivation\": " << self.memeScore

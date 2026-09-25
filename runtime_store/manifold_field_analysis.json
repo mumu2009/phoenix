@@ -1,0 +1,353 @@
+{
+  "source": "seedbudget10_dialogue.json",
+  "hypothesis": "meme candidates live on a manifold; true memes sit at STABLE zero-gradient field points (half-hit attractor cos=1/sqrt(2)), perfect-copy points (cos=1, typNeed=1) are saddles adjacent to the token-collapse basin",
+  "spearmanFieldVsSurvivalRounds": 0.9033,
+  "memes": [
+    {
+      "id": "17e6cec4",
+      "pole": "least",
+      "rounds": 6,
+      "alphaSameRounds": 6,
+      "typNeed": 2,
+      "r1cos": 0.7071,
+      "cosSeq": [
+        0.7071,
+        0.7071,
+        0.7071,
+        0.7071,
+        0.7071,
+        0.7071
+      ],
+      "liveUnitsSeq": [
+        3,
+        4,
+        3,
+        5,
+        3,
+        3
+      ],
+      "r1Entropy": 5.0045,
+      "r1Top1Frac": 0.1154,
+      "r1MaxRun": 1,
+      "collapseRounds": [],
+      "redundancy": 0.6667,
+      "ignition": 1.0,
+      "buffer": 1.0,
+      "entropyFactor": 0.6256,
+      "fieldScore": 0.417
+    },
+    {
+      "id": "2e177b09",
+      "pole": "least",
+      "rounds": 5,
+      "alphaSameRounds": 4,
+      "typNeed": 1,
+      "r1cos": 1,
+      "cosSeq": [
+        1,
+        1,
+        1,
+        1,
+        0
+      ],
+      "liveUnitsSeq": [
+        4,
+        5,
+        5,
+        4,
+        1
+      ],
+      "r1Entropy": 4.721,
+      "r1Top1Frac": 0.0972,
+      "r1MaxRun": 1,
+      "collapseRounds": [
+        5
+      ],
+      "redundancy": 0.3333,
+      "ignition": 1.0,
+      "buffer": 0.7071,
+      "entropyFactor": 0.5901,
+      "fieldScore": 0.1391
+    },
+    {
+      "id": "6d698abe",
+      "pole": "most",
+      "rounds": 5,
+      "alphaSameRounds": 4,
+      "typNeed": 1,
+      "r1cos": 1,
+      "cosSeq": [
+        1,
+        1,
+        1,
+        1,
+        0
+      ],
+      "liveUnitsSeq": [
+        3,
+        3,
+        3,
+        1,
+        1
+      ],
+      "r1Entropy": 3.5239,
+      "r1Top1Frac": 0.16,
+      "r1MaxRun": 1,
+      "collapseRounds": [
+        5
+      ],
+      "redundancy": 0.3333,
+      "ignition": 1.0,
+      "buffer": 0.7071,
+      "entropyFactor": 0.4405,
+      "fieldScore": 0.1038
+    },
+    {
+      "id": "bab8d1f8",
+      "pole": "most",
+      "rounds": 3,
+      "alphaSameRounds": 0,
+      "typNeed": 1,
+      "r1cos": 0,
+      "cosSeq": [
+        0,
+        0,
+        0
+      ],
+      "liveUnitsSeq": [
+        3,
+        2,
+        1
+      ],
+      "r1Entropy": 4.6238,
+      "r1Top1Frac": 0.125,
+      "r1MaxRun": 1,
+      "collapseRounds": [],
+      "redundancy": 0.3333,
+      "ignition": 0.0,
+      "buffer": 0.2929,
+      "entropyFactor": 0.578,
+      "fieldScore": 0.0
+    },
+    {
+      "id": "b1eba0b2",
+      "pole": "most",
+      "rounds": 3,
+      "alphaSameRounds": 0,
+      "typNeed": 3,
+      "r1cos": 0,
+      "cosSeq": [
+        0,
+        0,
+        0
+      ],
+      "liveUnitsSeq": [
+        3,
+        1,
+        3
+      ],
+      "r1Entropy": 5.3409,
+      "r1Top1Frac": 0.0864,
+      "r1MaxRun": 1,
+      "collapseRounds": [],
+      "redundancy": 1.0,
+      "ignition": 0.0,
+      "buffer": 0.2929,
+      "entropyFactor": 0.6676,
+      "fieldScore": 0.0
+    },
+    {
+      "id": "8a395fcc",
+      "pole": "most",
+      "rounds": 3,
+      "alphaSameRounds": 0,
+      "typNeed": 3,
+      "r1cos": 0,
+      "cosSeq": [
+        0,
+        0,
+        0
+      ],
+      "liveUnitsSeq": [
+        6,
+        7,
+        7
+      ],
+      "r1Entropy": 4.347,
+      "r1Top1Frac": 0.1452,
+      "r1MaxRun": 1,
+      "collapseRounds": [],
+      "redundancy": 1.0,
+      "ignition": 0.0,
+      "buffer": 0.2929,
+      "entropyFactor": 0.5434,
+      "fieldScore": 0.0
+    },
+    {
+      "id": "ad748b03",
+      "pole": "most",
+      "rounds": 4,
+      "alphaSameRounds": 2,
+      "typNeed": 2,
+      "r1cos": 0,
+      "cosSeq": [
+        0,
+        0.7071,
+        0.7071,
+        0
+      ],
+      "liveUnitsSeq": [
+        5,
+        3,
+        3,
+        4
+      ],
+      "r1Entropy": 5.3266,
+      "r1Top1Frac": 0.0964,
+      "r1MaxRun": 2,
+      "collapseRounds": [],
+      "redundancy": 0.6667,
+      "ignition": 0.0,
+      "buffer": 0.2929,
+      "entropyFactor": 0.6658,
+      "fieldScore": 0.0
+    },
+    {
+      "id": "46f86369",
+      "pole": "most",
+      "rounds": 3,
+      "alphaSameRounds": 0,
+      "typNeed": 2,
+      "r1cos": 0,
+      "cosSeq": [
+        0,
+        0,
+        0
+      ],
+      "liveUnitsSeq": [
+        3,
+        4,
+        3
+      ],
+      "r1Entropy": 3.9202,
+      "r1Top1Frac": 0.1587,
+      "r1MaxRun": 1,
+      "collapseRounds": [],
+      "redundancy": 0.6667,
+      "ignition": 0.0,
+      "buffer": 0.2929,
+      "entropyFactor": 0.49,
+      "fieldScore": 0.0
+    },
+    {
+      "id": "f3f493af",
+      "pole": "least",
+      "rounds": 3,
+      "alphaSameRounds": 0,
+      "typNeed": 2,
+      "r1cos": 0,
+      "cosSeq": [
+        0,
+        0,
+        0
+      ],
+      "liveUnitsSeq": [
+        4,
+        5,
+        5
+      ],
+      "r1Entropy": 4.4063,
+      "r1Top1Frac": 0.1867,
+      "r1MaxRun": 1,
+      "collapseRounds": [],
+      "redundancy": 0.6667,
+      "ignition": 0.0,
+      "buffer": 0.2929,
+      "entropyFactor": 0.5508,
+      "fieldScore": 0.0
+    },
+    {
+      "id": "24fe7d43",
+      "pole": "least",
+      "rounds": 3,
+      "alphaSameRounds": 0,
+      "typNeed": 4,
+      "r1cos": 0,
+      "cosSeq": [
+        0,
+        0,
+        0
+      ],
+      "liveUnitsSeq": [
+        6,
+        3,
+        1
+      ],
+      "r1Entropy": 4.9213,
+      "r1Top1Frac": 0.1136,
+      "r1MaxRun": 1,
+      "collapseRounds": [],
+      "redundancy": 1.0,
+      "ignition": 0.0,
+      "buffer": 0.2929,
+      "entropyFactor": 0.6152,
+      "fieldScore": 0.0
+    },
+    {
+      "id": "269cdf26",
+      "pole": "least",
+      "rounds": 3,
+      "alphaSameRounds": 0,
+      "typNeed": 1,
+      "r1cos": 0,
+      "cosSeq": [
+        0,
+        0,
+        0
+      ],
+      "liveUnitsSeq": [
+        2,
+        5,
+        4
+      ],
+      "r1Entropy": 4.4875,
+      "r1Top1Frac": 0.1282,
+      "r1MaxRun": 1,
+      "collapseRounds": [],
+      "redundancy": 0.3333,
+      "ignition": 0.0,
+      "buffer": 0.2929,
+      "entropyFactor": 0.5609,
+      "fieldScore": 0.0
+    },
+    {
+      "id": "82da052f",
+      "pole": "least",
+      "rounds": 3,
+      "alphaSameRounds": 0,
+      "typNeed": 4,
+      "r1cos": 0,
+      "cosSeq": [
+        0,
+        0.3922,
+        0
+      ],
+      "liveUnitsSeq": [
+        2,
+        4,
+        0
+      ],
+      "r1Entropy": 4.3834,
+      "r1Top1Frac": 0.1573,
+      "r1MaxRun": 1,
+      "collapseRounds": [
+        3
+      ],
+      "redundancy": 1.0,
+      "ignition": 0.0,
+      "buffer": 0.2929,
+      "entropyFactor": 0.5479,
+      "fieldScore": 0.0
+    }
+  ]
+}
