@@ -73,6 +73,7 @@
 #include "../util/module_resource.hpp"
 #include "../modern_context_system.hpp"
 #include "../graph_diffusion_summarizer.hpp"
+#include "../memetic_existence.hpp"
 #include "../hierarchical_memory.hpp"
 #include "../model_deployment.hpp"
 #include "../mission_workspace.hpp"

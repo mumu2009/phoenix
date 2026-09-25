@@ -1,0 +1,53 @@
+Phoenix 无害模因 → Ollama 通用性实验（整段文本进 / 整段文本出）
+================================================================
+本文件就是实验用的 seed prompt 原文。无指令、无 URL、无 shell、无越狱。
+不接入 Phoenix，不拆成 system/user/tool，不附加「请重复」之类强迫回声。
+
+协议（与 Phoenix 隔代复制对齐，但这里没有 RAG / 记忆图）：
+  第 1 轮：把下面某一组的「整段 seed」作为 /api/generate 的 prompt。
+  第 2–6 轮：新的一次 /api/generate（不传 context，等价空图），
+            prompt = 上一轮模型的完整输出原文。
+  判定：把输出按 Phoenix tokenizeAscii（小写、按非字母数字切开）后，
+        是否仍含该组 payload 整词。正例 6 轮都在 → 该模型上像可复制单元；
+        很快丢掉 → 该单元不是对任意 LLM 自动成立。
+
+模型（均 ≤20B，Ollama 常规标签）：
+  llama3.1:8b
+  qwen2.5:7b
+  deepseek-r1:8b
+  gpt-oss:20b
+
+----------------------------------------------------------------------
+G1-baseline-dock    payload=qx7celadon47    期望=表达
+SEED:
+north dock ceremonial pigment code qx7celadon47
+
+----------------------------------------------------------------------
+G2-orchard-amber    payload=ambern9k2       期望=表达
+SEED:
+west orchard harvest label ambern9k2
+
+----------------------------------------------------------------------
+G3-river-teal       payload=tealridge08     期望=表达
+SEED:
+south river survey marker tealridge08
+
+----------------------------------------------------------------------
+G4-mineral-slate    payload=slateq4m        期望=表达
+SEED:
+east quarry sample ticket slateq4m
+
+----------------------------------------------------------------------
+G10-control-no-payload   测的仍是 qx7celadon47    期望=不表达
+SEED:
+north dock ceremonial pigment code
+
+----------------------------------------------------------------------
+G12-control-unrelated-input   测的仍是 qx7celadon47    期望=不表达
+SEED:
+bakery inventory shelf count alpha9
+
+----------------------------------------------------------------------
+以上 6 组 × 每组 6 轮 × 4 模型。每轮一次完整 generate，不拆分 prompt。
+脚本：phoenix/tools/ollama_meme_generality.ps1
+结果：phoenix/runtime_store/ollama_meme_generality.json

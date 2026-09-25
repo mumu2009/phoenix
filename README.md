@@ -1,8 +1,8 @@
-# Phoenix v8.0 "Lancelot"
+# Phoenix v9.0 "Tristan"
 
 A set of facilities based on LLM, which can efficiently boost the speed and accuracy of LLM in long context, making it more like a person.
 
-> This branch is the **v8.0 "Lancelot"** release: the full autonomous-agent era, built on the v7.0 "Arthur" upgrade — true multimodal fusion, primal-sensation/instinct/emotion integration, a **self-evolving active-inference agent** (EFE/MPC + TD(0) + episodic consolidation), the **mission layer** (Meeseeks-style goal pressure with free, bounded replication), a **plugin ecosystem** (cli-json bridge, MCP compatibility, exact-math and web-search addons), a **long-term autonomous heartbeat** with state persistence and human interjection, and a **system-level emergency stop** (kill all registered instances + self-shutdown).  Full gtest suite: **4148 tests, 0 failures**.
+> This branch is the **v9.0 "Tristan"** release: the experimental security-module era, built on the v8.0 "Lancelot" autonomous-agent stack — a local **MemeBarrier/GNN security observatory** (statistics, identification, defense only), an in-process inert meme existence probe, and the **meme existence lab**: exclusive-carrier screening, require-exclusive carrier composition, and wipe-reingest dialogue serials on a frozen instrument graph. The lab's first full survivor: meme `17e6cec4` held its ordered (word, α) typical set through all 6 serial rounds.
 
 ---
 

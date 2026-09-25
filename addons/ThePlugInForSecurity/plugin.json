@@ -3,6 +3,8 @@
   "type": "security",
   "version": "1.0.0",
   "defaultEnabled": false,
+  "pluginEnabledDefault": false,
+  "pluginEnabledRequires": "PHOENIX_SECURITY_ENABLED=1 or addons.security.enabled or addBuiltin(security) or security/defense pluginEnabled",
   "publish": false,
   "github": false,
   "surfaces": ["stats", "identify", "alerts", "defense", "probe"],

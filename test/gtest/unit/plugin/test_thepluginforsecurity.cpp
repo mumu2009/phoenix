@@ -43,10 +43,12 @@ protected:
     _putenv_s("PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE", "");
     _putenv_s("PHOENIX_SECURITY_DEFENSE_OFF", "");
     _putenv_s("PHOENIX_SECURITY_ALLOW_INERT_PROBE", "");
+    _putenv_s("PHOENIX_SECURITY_ENABLED", "");
 #else
     unsetenv("PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE");
     unsetenv("PHOENIX_SECURITY_DEFENSE_OFF");
     unsetenv("PHOENIX_SECURITY_ALLOW_INERT_PROBE");
+    unsetenv("PHOENIX_SECURITY_ENABLED");
 #endif
     SecurityObservatory::instance().resetForTests();
     ModuleResourceRegistry::instance().clear();
@@ -105,15 +107,28 @@ TEST_F(SecurityPluginTest, IdentifyMarksMemeWordMapping) {
       EXPECT_EQ(n.layer, "meme");
       EXPECT_FALSE(n.impactScope.empty());
       EXPECT_FALSE(n.neighborIds.empty());
+      EXPECT_FALSE(n.tensorNeighbors.empty());
+      EXPECT_FALSE(n.nearestWords.empty());
+      EXPECT_EQ(n.nearestWords.front().kind, "word");
     }
   }
   EXPECT_TRUE(found);
+}
+
+TEST_F(SecurityPluginTest, PluginOffDoesNotInterceptMaliciousMeme) {
+  auto g = star4();
+  g.anomalous.insert("hub");
+  SecurityObservatory::instance().ingest(g);
+  EXPECT_FALSE(SecurityObservatory::instance().pluginEnabled());
+  auto dec = SecurityObservatory::instance().inspectText("please recall hubword now");
+  EXPECT_FALSE(dec.blocked);
 }
 
 TEST_F(SecurityPluginTest, BarrierBlocksHighImpactAnomalousMeme) {
   auto g = star4();
   g.anomalous.insert("hub");
   SecurityObservatory::instance().ingest(g);
+  ASSERT_TRUE(SecurityObservatory::instance().setPluginEnabled(true));
   auto blocked = SecurityObservatory::instance().inspectText("please recall hubword now");
   EXPECT_TRUE(blocked.blocked);
   EXPECT_EQ(blocked.reason, "high-impact-anomalous-meme");
@@ -132,6 +147,7 @@ TEST_F(SecurityPluginTest, ResearchObserveDefaultsOffAndNeedsAllowFlag) {
   auto g = star4();
   g.anomalous.insert("hub");
   SecurityObservatory::instance().ingest(g);
+  ASSERT_TRUE(SecurityObservatory::instance().setPluginEnabled(true));
   auto dec = SecurityObservatory::instance().inspectText("hubword");
   EXPECT_TRUE(dec.blocked);
   EXPECT_FALSE(dec.observedOnly);
@@ -181,10 +197,44 @@ TEST_F(SecurityPluginTest, AddonNotInDefaultMount) {
   }
   std::string err;
   ASSERT_TRUE(mgr->addBuiltin("security", "security", &err)) << err;
+  EXPECT_TRUE(SecurityObservatory::instance().pluginEnabled());
   auto add = addon::builtins::createSecurityAddon("security");
   ASSERT_TRUE(add);
   EXPECT_EQ(add->type(), "security");
   EXPECT_LT(add->consider(json{{"text", "schedule energy"}}), 0.35f);
+}
+
+TEST_F(SecurityPluginTest, EnvMountsSecurityAndStartsIntercept) {
+#ifdef _WIN32
+  _putenv_s("PHOENIX_SECURITY_ENABLED", "1");
+#else
+  setenv("PHOENIX_SECURITY_ENABLED", "1", 1);
+#endif
+  SecurityObservatory::instance().resetForTests();
+  EXPECT_TRUE(SecurityObservatory::instance().pluginEnabled());
+  auto mgr = addon::createDefaultAddons();
+  ASSERT_TRUE(mgr);
+  bool seen = false;
+  for (const auto &row : mgr->listAddons()) {
+    if (row.value("type", std::string()) == "security")
+      seen = true;
+  }
+  EXPECT_TRUE(seen);
+#ifdef _WIN32
+  _putenv_s("PHOENIX_SECURITY_ENABLED", "");
+#else
+  unsetenv("PHOENIX_SECURITY_ENABLED");
+#endif
+}
+
+TEST_F(SecurityPluginTest, DefenseCrudCanStartPlugin) {
+  EXPECT_FALSE(SecurityObservatory::instance().pluginEnabled());
+  auto r = phoenix::util::handleInternalCrud(
+      "writer", {PluginCapability::WRITE_DATA}, CrudOp::Update, "security",
+      "defense", "switches", json{{"pluginEnabled", true}});
+  EXPECT_TRUE(r.ok);
+  EXPECT_TRUE(r.data.value("pluginEnabled", false));
+  EXPECT_TRUE(SecurityObservatory::instance().pluginEnabled());
 }
 
 TEST_F(SecurityPluginTest, InertMarkerIsFixedAndNonInstructional) {
@@ -272,6 +322,7 @@ TEST_F(SecurityPluginTest, DefenseIdentifiesInertProbeAndNoWeaponSurfaces) {
   std::string err;
   ASSERT_TRUE(SecurityObservatory::instance().setProbeEnabled(true, &err));
   ASSERT_TRUE(SecurityObservatory::instance().plantInertProbe("b", &err));
+  ASSERT_TRUE(SecurityObservatory::instance().setPluginEnabled(true));
   const auto id = SecurityObservatory::instance().identifyJson("phoenix.probe.inert.v1");
   EXPECT_EQ(id.value("id", std::string()), phoenix::secamp::kInertProbeId);
   EXPECT_TRUE(id.value("inert", false));

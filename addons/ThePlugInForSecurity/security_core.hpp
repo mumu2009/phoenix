@@ -1,6 +1,6 @@
 /* security_core.hpp - Phoenix-local MemeBarrier/GNN defensive observatory
 
-   Statistics + identification + defense + in-graph inert existence probe.
+   Statistics + identification + defense + in-graph hop sandbox (not a meme).
    No construct / deploy / human-target / cross-process surfaces. */
 
 #pragma once
@@ -17,6 +17,7 @@
 
 #include "../../plugin_system.hpp"
 #include "../../util/module_resource.hpp"
+#include "meme_tensor.hpp"
 
 namespace phoenix {
 namespace secamp {
@@ -55,6 +56,8 @@ struct DiscreteGraph {
   std::vector<std::string> layers;
   /* many-to-many: meme -> words or word -> memes */
   std::vector<std::vector<std::string>> mapped;
+  /* Optional parallel tf(w|m). Empty or short rows load as tf=1. */
+  std::vector<std::vector<int>> mappedTf;
   std::unordered_set<std::string> isolated;
   std::unordered_set<std::string> anomalous;
 };
@@ -71,6 +74,8 @@ struct NodeInfluence {
   int rankLeast{0};
   std::vector<std::string> mappedIds;
   std::vector<std::string> neighborIds;
+  std::vector<TensorNeighbor> tensorNeighbors;
+  std::vector<TensorNeighbor> nearestWords;
   std::string impactScope;
 };
 
@@ -92,6 +97,7 @@ struct InspectDecision {
 };
 
 struct DefenseConfig {
+  bool pluginEnabled{false};
   bool defenseEnabled{true};
   bool isolateHighImpact{true};
   bool researchObserve{false};
@@ -130,6 +136,8 @@ public:
   void loadProcessFlags();
 
   DefenseConfig config() const;
+  bool pluginEnabled() const;
+  bool setPluginEnabled(bool on);
   bool setDefenseEnabled(bool on);
   bool setIsolateHighImpact(bool on);
   /* researchObserve requires allowResearchObserve (env/config). Default off. */

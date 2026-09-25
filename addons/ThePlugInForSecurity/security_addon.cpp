@@ -15,6 +15,7 @@ class SecurityAddon final : public Addon {
 public:
   explicit SecurityAddon(std::string name) : name_(std::move(name)) {
     phoenix::secamp::installSecurityModuleResources();
+    phoenix::secamp::SecurityObservatory::instance().setPluginEnabled(true);
   }
 
   std::string name() const override { return name_; }

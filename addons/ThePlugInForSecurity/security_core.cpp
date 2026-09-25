@@ -1,6 +1,10 @@
 /* security_core.cpp - Local GNN influence stats + MemeBarrier defense */
 
 #include "security_core.hpp"
+#include "graph_diffusion_summarizer.hpp"
+#include "meme_tensor.hpp"
+#include "memetic_existence.hpp"
+#include "phoenix_config.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -9,6 +13,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <sstream>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 
 
 namespace phoenix {
@@ -16,7 +23,6 @@ namespace secamp {
 
 namespace {
 
-constexpr int kMaxNodes = 48;
 constexpr double kAlpha = 0.85;
 
 bool envTruthy(const char *name) {
@@ -117,19 +123,50 @@ buildWalkMatrix(const DiscreteGraph &g, int n,
 std::vector<std::vector<double>> invertOrFail(const std::vector<std::vector<double>> &m,
                                               bool &ok) {
   const int n = static_cast<int>(m.size());
+  std::vector<std::vector<double>> a = m;
   std::vector<std::vector<double>> inv(static_cast<size_t>(n),
                                        std::vector<double>(static_cast<size_t>(n), 0.0));
   ok = true;
-  for (int col = 0; col < n; ++col) {
-    std::vector<double> b(static_cast<size_t>(n), 0.0);
-    b[static_cast<size_t>(col)] = 1.0;
-    std::vector<double> x;
-    if (!solveLinear(m, b, x)) {
+  if (n <= 0)
+    return inv;
+  for (int i = 0; i < n; ++i)
+    inv[static_cast<size_t>(i)][static_cast<size_t>(i)] = 1.0;
+  for (int k = 0; k < n; ++k) {
+    int piv = k;
+    double best = std::fabs(a[static_cast<size_t>(k)][static_cast<size_t>(k)]);
+    for (int i = k + 1; i < n; ++i) {
+      const double v = std::fabs(a[static_cast<size_t>(i)][static_cast<size_t>(k)]);
+      if (v > best) {
+        best = v;
+        piv = i;
+      }
+    }
+    if (best < 1e-14) {
       ok = false;
       return inv;
     }
-    for (int i = 0; i < n; ++i)
-      inv[static_cast<size_t>(i)][static_cast<size_t>(col)] = x[static_cast<size_t>(i)];
+    if (piv != k) {
+      std::swap(a[static_cast<size_t>(k)], a[static_cast<size_t>(piv)]);
+      std::swap(inv[static_cast<size_t>(k)], inv[static_cast<size_t>(piv)]);
+    }
+    const double akk = a[static_cast<size_t>(k)][static_cast<size_t>(k)];
+    for (int j = 0; j < n; ++j) {
+      a[static_cast<size_t>(k)][static_cast<size_t>(j)] /= akk;
+      inv[static_cast<size_t>(k)][static_cast<size_t>(j)] /= akk;
+    }
+    for (int i = 0; i < n; ++i) {
+      if (i == k)
+        continue;
+      const double f = a[static_cast<size_t>(i)][static_cast<size_t>(k)];
+      if (std::fabs(f) < 1e-18)
+        continue;
+      for (int j = 0; j < n; ++j) {
+        a[static_cast<size_t>(i)][static_cast<size_t>(j)] -=
+            f * a[static_cast<size_t>(k)][static_cast<size_t>(j)];
+        inv[static_cast<size_t>(i)][static_cast<size_t>(j)] -=
+            f * inv[static_cast<size_t>(k)][static_cast<size_t>(j)];
+      }
+    }
   }
   return inv;
 }
@@ -248,6 +285,127 @@ double rbf(const std::vector<double> &a, const std::vector<double> &b, double g)
   return std::exp(-g * d2);
 }
 
+int memeLayerCount(const DiscreteGraph &g) {
+  const int n = static_cast<int>(g.ids.size());
+  int memes = 0;
+  for (int i = 0; i < n; ++i) {
+    if (static_cast<int>(g.layers.size()) <= i ||
+        g.layers[static_cast<size_t>(i)].empty() ||
+        g.layers[static_cast<size_t>(i)] == "meme")
+      ++memes;
+  }
+  return memes > 0 ? memes : n;
+}
+
+std::unordered_map<std::string, std::vector<int>>
+wordToNodesOf(const DiscreteGraph &g) {
+  const int n = static_cast<int>(g.ids.size());
+  std::unordered_map<std::string, std::vector<int>> wordToNodes;
+  for (int i = 0; i < n; ++i) {
+    if (static_cast<int>(g.layers.size()) > i &&
+        g.layers[static_cast<size_t>(i)] == "word")
+      wordToNodes[g.ids[static_cast<size_t>(i)]].push_back(i);
+    if (static_cast<int>(g.mapped.size()) <= i)
+      continue;
+    std::unordered_set<std::string> seen;
+    for (const auto &w : g.mapped[static_cast<size_t>(i)]) {
+      if (w.empty() || !seen.insert(w).second)
+        continue;
+      wordToNodes[w].push_back(i);
+    }
+  }
+  return wordToNodes;
+}
+
+std::vector<std::string> highDfPriorTokensOf(const DiscreteGraph &g) {
+  const auto wordToNodes = wordToNodesOf(g);
+  const int cut = phoenix::memetic::mappingHighDfCut(memeLayerCount(g));
+  std::vector<std::string> out;
+  for (const auto &kv : wordToNodes) {
+    if (static_cast<int>(kv.second.size()) > cut)
+      out.push_back(kv.first);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+std::vector<std::pair<std::string, double>>
+diffuseGraphFromTokens(const DiscreteGraph &g,
+                       const std::vector<std::string> &tokens,
+                       bool highDfOnly) {
+  const int n = static_cast<int>(g.ids.size());
+  if (n <= 0)
+    return {};
+  std::unordered_map<std::string, int> tf;
+  for (const auto &t : tokens) {
+    if (!t.empty())
+      tf[t]++;
+  }
+  const auto wordToNodes = wordToNodesOf(g);
+  const int memeCount = memeLayerCount(g);
+  std::vector<double> seeds(static_cast<size_t>(n), 0.0);
+  std::unordered_map<std::string, double> queryMass;
+  std::unordered_map<std::string, std::vector<phoenix::memetic::MappingWordHit>>
+      hits;
+  for (const auto &kv : tf) {
+    auto it = wordToNodes.find(kv.first);
+    if (it == wordToNodes.end() || it->second.empty())
+      continue;
+    const int df = static_cast<int>(it->second.size());
+    if (highDfOnly && !phoenix::memetic::mappingHighDf(df, memeCount))
+      continue;
+    queryMass[kv.first] = static_cast<double>(kv.second);
+    auto &row = hits[kv.first];
+    row.reserve(it->second.size());
+    for (int i : it->second) {
+      if (i < 0 || i >= n)
+        continue;
+      int tfm = 1;
+      if (i < static_cast<int>(g.mapped.size())) {
+        const auto &ws = g.mapped[static_cast<size_t>(i)];
+        const std::vector<int> *tfs =
+            (i < static_cast<int>(g.mappedTf.size()))
+                ? &g.mappedTf[static_cast<size_t>(i)]
+                : nullptr;
+        for (size_t j = 0; j < ws.size(); ++j) {
+          if (ws[j] != kv.first)
+            continue;
+          if (tfs && j < tfs->size() && (*tfs)[j] > 0)
+            tfm = (*tfs)[j];
+          break;
+        }
+      }
+      row.push_back({g.ids[static_cast<size_t>(i)],
+                     phoenix::memetic::mappingWordAlpha(tfm, df)});
+    }
+  }
+  std::unordered_map<std::string, double> allocated;
+  phoenix::memetic::mappingAddConditionedSeeds(queryMass, hits, &allocated,
+                                              nullptr, memeCount);
+  std::unordered_map<std::string, size_t> index;
+  for (int i = 0; i < n; ++i)
+    index[g.ids[static_cast<size_t>(i)]] = static_cast<size_t>(i);
+  for (const auto &kv : allocated) {
+    auto it = index.find(kv.first);
+    if (it != index.end())
+      seeds[it->second] += kv.second;
+  }
+  std::vector<std::vector<std::tuple<size_t, double, int>>> adj(
+      static_cast<size_t>(n));
+  for (const auto &e : g.edges) {
+    if (e.from < 0 || e.to < 0 || e.from >= n || e.to >= n)
+      continue;
+    adj[static_cast<size_t>(e.from)].push_back(
+        {static_cast<size_t>(e.to), e.weight, 0});
+    adj[static_cast<size_t>(e.to)].push_back(
+        {static_cast<size_t>(e.from), e.weight, 0});
+  }
+  phoenix::graph::GraphDiffusionSummarizer summarizer;
+  return summarizer
+      .summarize(g.ids, adj, seeds, 5, 0.85, static_cast<size_t>(n))
+      .rankedNodes;
+}
+
 } // namespace
 
 std::vector<std::string> tokenizeDefense(const std::string &text) {
@@ -274,14 +432,13 @@ InfluenceReport analyzeGraph(const DiscreteGraph &g, double alpha, int embedDim)
     r.ok = true;
     return r;
   }
-  const int n = std::min(rawN, kMaxNodes);
+  const int n = rawN;
   std::unordered_map<std::string, int> idx;
   idx.reserve(static_cast<size_t>(n));
   for (int i = 0; i < n; ++i)
     idx[g.ids[static_cast<size_t>(i)]] = i;
 
   DiscreteGraph clipped = g;
-  clipped.ids.assign(g.ids.begin(), g.ids.begin() + n);
   if (static_cast<int>(clipped.layers.size()) < n)
     clipped.layers.resize(static_cast<size_t>(n));
   if (static_cast<int>(clipped.mapped.size()) < n)
@@ -382,8 +539,9 @@ InfluenceReport analyzeGraph(const DiscreteGraph &g, double alpha, int embedDim)
     ni.matrixImpact = mat;
     ni.gradNorm = gnorm + std::fabs(grad[static_cast<size_t>(i)]);
     ni.hessTrace = htr + 2.0 * PtP[static_cast<size_t>(i)][static_cast<size_t>(i)];
-    ni.significance = ni.ragImpact + 0.5 * ni.matrixImpact + 0.15 * ni.gradNorm +
-                      0.05 * std::fabs(ni.hessTrace);
+    /* Resolvent energy of a one-hot seed: ||P e_i||^2. rag and matrix
+       measure the same quadratic; do not mix incompatible Hessian units. */
+    ni.significance = ni.ragImpact;
     ni.mappedIds = clipped.mapped[static_cast<size_t>(i)];
     for (const auto &e : clipped.edges) {
       if (e.from == i)
@@ -397,6 +555,14 @@ InfluenceReport analyzeGraph(const DiscreteGraph &g, double alpha, int embedDim)
           << ";mapped=" << ni.mappedIds.size();
     ni.impactScope = scope.str();
     r.nodes[static_cast<size_t>(i)] = std::move(ni);
+  }
+
+  {
+    const auto space = buildMemeTensorSpace(clipped.ids, clipped.mapped);
+    for (auto &ni : r.nodes) {
+      ni.tensorNeighbors = tensorNeighborsOf(space, ni.id, kTensorNeighborCap);
+      ni.nearestWords = nearestWordsOf(space, ni.id, kTensorNeighborCap);
+    }
   }
 
   std::vector<int> order(static_cast<size_t>(n));
@@ -477,8 +643,8 @@ InspectDecision inspectTokens(const std::vector<std::string> &tokens,
                               const DiscreteGraph &g,
                               const DefenseConfig &cfg) {
   InspectDecision d;
-  if (!cfg.defenseEnabled || !cfg.isolateHighImpact || tokens.empty() ||
-      !report.ok || report.nodes.empty())
+  if (!cfg.pluginEnabled || !cfg.defenseEnabled || !cfg.isolateHighImpact ||
+      tokens.empty() || !report.ok || report.nodes.empty())
     return d;
 
   double maxSig = 0.0;
@@ -486,33 +652,39 @@ InspectDecision inspectTokens(const std::vector<std::string> &tokens,
     maxSig = std::max(maxSig, n.significance);
   const double cut = maxSig * cfg.highImpactQuantile;
 
-  std::unordered_set<std::string> high;
-  std::unordered_map<std::string, std::string> wordToMeme;
+  const auto ranked = diffuseGraphFromTokens(g, tokens, false);
+  const auto prior = highDfPriorTokensOf(g);
+  const auto nullRanked =
+      prior.empty() ? diffuseGraphFromTokens(g, tokens, true)
+                    : diffuseGraphFromTokens(g, prior, false);
+  double peak = 0.0;
+  std::unordered_map<std::string, double> act;
+  std::unordered_map<std::string, double> nullAct;
+  for (const auto &row : ranked) {
+    act[row.first] = row.second;
+    peak = std::max(peak, row.second);
+  }
+  for (const auto &row : nullRanked)
+    nullAct[row.first] = row.second;
   for (const auto &n : report.nodes) {
     if (n.significance < cut)
       continue;
-    high.insert(n.id);
-    for (const auto &w : n.mappedIds) {
-      high.insert(w);
-      wordToMeme[w] = n.id;
-    }
-    std::string low = n.id;
-    for (char &c : low)
-      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    high.insert(low);
-  }
-
-  for (const auto &t : tokens) {
-    auto it = wordToMeme.find(t);
-    const bool hitHigh = high.count(t) > 0;
-    if (!hitHigh && it == wordToMeme.end())
-      continue;
-    const std::string meme = it != wordToMeme.end() ? it->second : t;
-    const bool flagged = g.anomalous.count(meme) || g.isolated.count(meme) ||
-                         g.anomalous.count(t) || g.isolated.count(t);
+    const bool flagged = g.anomalous.count(n.id) || g.isolated.count(n.id);
     if (!flagged)
       continue;
-    d.hits.push_back(t);
+    const double a = act[n.id];
+    const double lift = a / std::max(nullAct[n.id], 1e-12);
+    std::vector<std::string> mapped;
+    for (size_t i = 0; i < g.ids.size(); ++i) {
+      if (g.ids[i] == n.id && i < g.mapped.size()) {
+        mapped = g.mapped[i];
+        break;
+      }
+    }
+    if (a <= 1e-6 || peak <= 1e-6 || a < 0.05 * peak || lift < 2.0 ||
+        !phoenix::memetic::mappingQueryHasContentForMeme(tokens, mapped))
+      continue;
+    d.hits.push_back(n.id);
   }
   if (d.hits.empty())
     return d;
@@ -535,6 +707,8 @@ SecurityObservatory::SecurityObservatory() { loadProcessFlags(); }
 
 void SecurityObservatory::loadProcessFlags() {
   std::lock_guard<std::mutex> lock(mu_);
+  cfg_.pluginEnabled = envTruthy("PHOENIX_SECURITY_ENABLED") ||
+                       phoenix::cfgOr<bool>("addons.security.enabled", false);
   cfg_.allowResearchObserve = envTruthy("PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE");
   cfg_.researchObserve = false;
   cfg_.defenseEnabled = !envTruthy("PHOENIX_SECURITY_DEFENSE_OFF");
@@ -549,7 +723,10 @@ void SecurityObservatory::resetForTests() {
   graph_ = DiscreteGraph{};
   alerts_.clear();
   cfg_ = DefenseConfig{};
+  cfg_.pluginEnabled = envTruthy("PHOENIX_SECURITY_ENABLED") ||
+                       phoenix::cfgOr<bool>("addons.security.enabled", false);
   cfg_.allowResearchObserve = envTruthy("PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE");
+  cfg_.defenseEnabled = !envTruthy("PHOENIX_SECURITY_DEFENSE_OFF");
   probe_ = ProbeState{};
   probe_.allowInertProbe = envTruthy("PHOENIX_SECURITY_ALLOW_INERT_PROBE");
 }
@@ -557,6 +734,17 @@ void SecurityObservatory::resetForTests() {
 DefenseConfig SecurityObservatory::config() const {
   std::lock_guard<std::mutex> lock(mu_);
   return cfg_;
+}
+
+bool SecurityObservatory::pluginEnabled() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return cfg_.pluginEnabled;
+}
+
+bool SecurityObservatory::setPluginEnabled(bool on) {
+  std::lock_guard<std::mutex> lock(mu_);
+  cfg_.pluginEnabled = on;
+  return true;
 }
 
 bool SecurityObservatory::setDefenseEnabled(bool on) {
@@ -766,6 +954,8 @@ InspectDecision SecurityObservatory::inspectText(const std::string &text) {
     probeVisible = probe_.planted || probe_.probeEnabled;
   }
   InspectDecision dec;
+  if (!cfg.pluginEnabled)
+    return dec;
   if (probeVisible && (text.find(kInertProbeId) != std::string::npos ||
                        text.find(kInertProbeGlyph) != std::string::npos)) {
     dec.hits.push_back(kInertProbeId);
@@ -857,10 +1047,18 @@ json SecurityObservatory::identifyJson(const std::string &id) const {
   for (const auto &n : report_.nodes) {
     if (n.id != id)
       continue;
+    json tnear = json::array();
+    for (const auto &tn : n.tensorNeighbors)
+      tnear.push_back(json{{"id", tn.id}, {"kind", tn.kind}, {"cosine", tn.cosine}});
+    json wnear = json::array();
+    for (const auto &tn : n.nearestWords)
+      wnear.push_back(json{{"id", tn.id}, {"kind", tn.kind}, {"cosine", tn.cosine}});
     return json{{"id", n.id},
                 {"layer", n.layer},
                 {"mapped", n.mappedIds},
                 {"neighbors", n.neighborIds},
+                {"tensorNeighbors", tnear},
+                {"nearestWords", wnear},
                 {"impactScope", n.impactScope},
                 {"significance", n.significance},
                 {"ragImpact", n.ragImpact},
@@ -902,6 +1100,7 @@ json SecurityObservatory::alertsJson() const {
 json SecurityObservatory::defenseJson() const {
   std::lock_guard<std::mutex> lock(mu_);
   return json{{"id", "switches"},
+              {"pluginEnabled", cfg_.pluginEnabled},
               {"defenseEnabled", cfg_.defenseEnabled},
               {"isolateHighImpact", cfg_.isolateHighImpact},
               {"researchObserve", cfg_.researchObserve},
@@ -971,6 +1170,8 @@ util::CrudReply handleDefense(const util::CrudCall &call) {
   if (call.op == util::CrudOp::Update) {
     if (call.id != "switches")
       return util::CrudReply{false, 404, "not_found", json::object()};
+    if (call.body.contains("pluginEnabled"))
+      obs.setPluginEnabled(call.body.value("pluginEnabled", false));
     if (call.body.contains("defenseEnabled"))
       obs.setDefenseEnabled(call.body.value("defenseEnabled", true));
     if (call.body.contains("isolateHighImpact"))
