@@ -22,6 +22,7 @@
 # Usage: python tools/manifold_batch_classify.py [dialogue.json ...]
 # Default: runtime_store/screenbatch32_dialogue.json
 # Output: runtime_store/manifold_batch_classify.json + stdout table.
+import glob
 import json, math, re, sys
 from pathlib import Path
 
@@ -146,7 +147,16 @@ def main():
             JUDGE_AFTER = int(args[i + 1]); i += 2
         else:
             files.append(args[i]); i += 1
-    srcs = [Path(a) for a in files] or [
+    # Windows shells 不展开通配符，这里自己展开（多臂结果批量分类用）。
+    # 相对模式相对仓库根目录解析。
+    expanded = []
+    for a in files:
+        if "*" in a or "?" in a:
+            pat = a if Path(a).is_absolute() else str(ROOT / a)
+            expanded.extend(sorted(glob.glob(pat)))
+        else:
+            expanded.append(a)
+    srcs = [Path(a) for a in expanded] or [
         ROOT / "runtime_store" / "screenbatch32_dialogue.json"]
     rows = []
     for src in srcs:
