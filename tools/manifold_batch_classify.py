@@ -135,7 +135,18 @@ def group_factors(g):
 
 
 def main():
-    srcs = [Path(a) for a in sys.argv[1:]] or [
+    global ROUNDS, JUDGE_AFTER
+    args = list(sys.argv[1:])
+    files = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--rounds" and i + 1 < len(args):
+            ROUNDS = int(args[i + 1]); i += 2
+        elif args[i] == "--judge-after" and i + 1 < len(args):
+            JUDGE_AFTER = int(args[i + 1]); i += 2
+        else:
+            files.append(args[i]); i += 1
+    srcs = [Path(a) for a in files] or [
         ROOT / "runtime_store" / "screenbatch32_dialogue.json"]
     rows = []
     for src in srcs:

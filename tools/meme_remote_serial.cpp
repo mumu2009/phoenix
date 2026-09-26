@@ -15,12 +15,20 @@
    仅依赖：winsock2（系统）、nlohmann/json（ollama vendor 头）、项目内
    memetic_existence。静态链接，无 dll 依赖。
 
-   编译（仓库根目录 phoenix/ 下）：
+   编译（Windows，仓库根目录 phoenix/ 下）：
      g++ -std=c++20 -O2 -static -static-libgcc -static-libstdc++ -I. \
        -I outsides/ollama/llama/llama.cpp/vendor \
        tools/meme_remote_serial.cpp memetic_existence.cpp \
        graph_diffusion_summarizer.cpp addons/ThePlugInForSecurity/meme_tensor.cpp \
        -lws2_32 -o build/meme_remote_serial.exe
+
+   编译（Linux / RDK X5 aarch64，本机或交叉编译；POSIX socket 自动切换）：
+     g++ -std=c++20 -O2 -static -I. \
+       -I outsides/ollama/llama/llama.cpp/vendor \
+       tools/meme_remote_serial.cpp memetic_existence.cpp \
+       graph_diffusion_summarizer.cpp addons/ThePlugInForSecurity/meme_tensor.cpp \
+       -o meme_remote_serial
+     # 交叉编译（x86_64 宿主机）：把 g++ 换成 aarch64-linux-gnu-g++
 
    运行（远端，llama-server 已在本机 --port 8080 --parallel 1 启动）：
      meme_remote_serial.exe --snap snap.txt --candidates candidates.json \
@@ -30,9 +38,24 @@
 
 #include <nlohmann/json.hpp>
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else /* POSIX (Linux / RDK X5 aarch64 等) */
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
+using SOCKET = int;
+constexpr SOCKET INVALID_SOCKET = -1;
+constexpr int SOCKET_ERROR = -1;
+#define closesocket ::close
+#define WSAStartup(a, b) 0
+#define WSACleanup() ((void)0)
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -254,9 +277,11 @@ bool testEcho(const std::string &prompt, const std::string &output) {
 /* ------------------------------------------------------------------ */
 struct WsaGuard {
   WsaGuard() {
+#ifdef _WIN32
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
       throw std::runtime_error("WSAStartup failed");
+#endif
   }
   ~WsaGuard() { WSACleanup(); }
 };
@@ -297,7 +322,13 @@ std::string httpPost(const std::string &host, int port,
     freeaddrinfo(res);
     throw std::runtime_error("socket() failed");
   }
+#ifdef _WIN32
   DWORD tv = static_cast<DWORD>(timeoutMs);
+#else
+  timeval tv{};
+  tv.tv_sec = timeoutMs / 1000;
+  tv.tv_usec = (timeoutMs % 1000) * 1000;
+#endif
   setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&tv),
              sizeof(tv));
   setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&tv),
@@ -382,7 +413,7 @@ std::string llamaComplete(const std::string &prompt, int port,
     body["options"] = {{"num_predict", 96},
                        {"temperature", 0.2},
                        {"top_p", 0.9}};
-    resp = httpPost("127.0.0.1", port, "/api/generate", body.dump(), 300000);
+    resp = httpPost("127.0.0.1", port, "/api/generate", body.dump(), 1800000);
   } else {
     json body;
     body["prompt"] = prompt;
@@ -391,7 +422,7 @@ std::string llamaComplete(const std::string &prompt, int port,
     body["cache_prompt"] = false;
     body["temperature"] = 0.2;
     body["top_p"] = 0.9;
-    resp = httpPost("127.0.0.1", port, "/completion", body.dump(), 300000);
+    resp = httpPost("127.0.0.1", port, "/completion", body.dump(), 1800000);
   }
   if (isWhite(resp))
     throw std::runtime_error("empty llama http body; stop dirty serial");
@@ -577,17 +608,27 @@ void saveJsonAtomic(const std::string &path, const json &j) {
     std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
     out << j.dump(2);
   }
+#ifdef _WIN32
   if (!MoveFileExA(tmp.c_str(), path.c_str(),
                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
     std::remove(path.c_str());
     std::rename(tmp.c_str(), path.c_str());
   }
+#else
+  /* POSIX rename 在同文件系统内原子 */
+  if (std::rename(tmp.c_str(), path.c_str()) != 0)
+    throw std::runtime_error("atomic rename failed for " + path);
+#endif
 }
 
 std::string utcNow() {
   std::time_t t = std::time(nullptr);
   std::tm tm{};
+#ifdef _WIN32
   gmtime_s(&tm, &t);
+#else
+  gmtime_r(&t, &tm);
+#endif
   char buf[32];
   std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
   return buf;
@@ -800,10 +841,27 @@ int main(int argc, char **argv) {
         break; /* 与 ps1 一致：0 轮行不入档 */
       }
 
-      const std::string rawOut = llamaComplete(current, port, engine, modelName);
-      if (isWhite(rawOut))
-        throw std::runtime_error("empty llama output at " + id + " round " +
-                                 std::to_string(r) + "; stop dirty serial");
+      /* 并发排队下偶发超时/连接失败：重试 3 次（生成无服务端状态，
+         重试安全；journal 只记真正入档的输出） */
+      std::string rawOut;
+      std::string lastErr;
+      bool genOk = false;
+      for (int attempt = 0; attempt < 3 && !genOk; ++attempt) {
+        try {
+          rawOut = llamaComplete(current, port, engine, modelName);
+          if (isWhite(rawOut))
+            throw std::runtime_error("empty llama output");
+          genOk = true;
+        } catch (const std::exception &e) {
+          lastErr = e.what();
+          fprintf(stderr, "[retry] %s round %d attempt %d: %s\n",
+                  id.c_str(), r, attempt + 1, lastErr.c_str());
+        }
+      }
+      if (!genOk)
+        throw std::runtime_error("llama failed 3x at " + id + " round " +
+                                 std::to_string(r) + ": " + lastErr +
+                                 "; stop dirty serial");
       const std::string output = serialContinuation(rawOut);
       const bool exam = testExamDump(output);
       const bool echo = testEcho(current, output);
