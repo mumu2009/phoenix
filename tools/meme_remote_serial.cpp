@@ -361,24 +361,46 @@ std::string httpPost(const std::string &host, int port,
   return payload;
 }
 
-std::string llamaComplete(const std::string &prompt, int port) {
+/* 两种推理后端：
+   - llama  : llama.cpp llama-server 的 POST /completion（与本地 ps1 完全
+              同协议同参数；随包 exe 即此后端，CPU）
+   - ollama : ollama 的 POST /api/generate（raw=true 绕过 chat 模板，
+              参数映射 num_predict/temperature/top_p；ollama 自动用 GPU，
+              适合远端 1660 Super）。模型必须是同一个 llama3.1:8b。 */
+std::string llamaComplete(const std::string &prompt, int port,
+                          const std::string &engine,
+                          const std::string &modelName) {
   if (isWhite(prompt))
     throw std::runtime_error("empty carrier (do not continue dirty serial)");
-  json body;
-  body["prompt"] = prompt;
-  body["n_predict"] = 96;
-  body["stream"] = false;
-  body["cache_prompt"] = false;
-  body["temperature"] = 0.2;
-  body["top_p"] = 0.9;
-  const std::string resp =
-      httpPost("127.0.0.1", port, "/completion", body.dump(), 300000);
+  std::string resp;
+  if (engine == "ollama") {
+    json body;
+    body["model"] = modelName;
+    body["prompt"] = prompt;
+    body["raw"] = true; /* 不套 chat 模板，与 llama-server /completion 对齐 */
+    body["stream"] = false;
+    body["options"] = {{"num_predict", 96},
+                       {"temperature", 0.2},
+                       {"top_p", 0.9}};
+    resp = httpPost("127.0.0.1", port, "/api/generate", body.dump(), 300000);
+  } else {
+    json body;
+    body["prompt"] = prompt;
+    body["n_predict"] = 96;
+    body["stream"] = false;
+    body["cache_prompt"] = false;
+    body["temperature"] = 0.2;
+    body["top_p"] = 0.9;
+    resp = httpPost("127.0.0.1", port, "/completion", body.dump(), 300000);
+  }
   if (isWhite(resp))
     throw std::runtime_error("empty llama http body; stop dirty serial");
   const auto j = json::parse(resp);
   std::string text;
   if (j.contains("content") && j["content"].is_string())
     text = j["content"].get<std::string>();
+  else if (j.contains("response") && j["response"].is_string())
+    text = j["response"].get<std::string>(); /* ollama /api/generate */
   else if (j.contains("choices") && j["choices"].is_array() &&
            !j["choices"].empty() && j["choices"][0].contains("message") &&
            j["choices"][0]["message"].contains("content"))
@@ -578,6 +600,8 @@ int main(int argc, char **argv) {
   std::string candidatesFile;
   std::string outFile;
   std::string modelNote;
+  std::string engine = "llama"; /* llama | ollama */
+  std::string modelName = "llama3.1:8b"; /* ollama 引擎用 */
   int port = 8080;
   int rounds = 6;
   int judgeAfter = 3;
@@ -593,6 +617,10 @@ int main(int argc, char **argv) {
       outFile = argv[++i];
     else if (a == "--port" && i + 1 < argc)
       port = std::atoi(argv[++i]);
+    else if (a == "--engine" && i + 1 < argc)
+      engine = argv[++i];
+    else if (a == "--model-name" && i + 1 < argc)
+      modelName = argv[++i];
     else if (a == "--rounds" && i + 1 < argc)
       rounds = std::atoi(argv[++i]);
     else if (a == "--judge-after" && i + 1 < argc)
@@ -607,7 +635,8 @@ int main(int argc, char **argv) {
   std::cout.setf(std::ios::unitbuf); /* 重定向下也实时刷进度 */
   if (snapFile.empty() || candidatesFile.empty() || outFile.empty()) {
     std::cerr << "usage: meme_remote_serial --snap SNAP --candidates C.json "
-                 "--out OUT.json [--port 8080] [--rounds 6] [--judge-after 3] "
+                 "--out OUT.json [--port 8080] [--engine llama|ollama] "
+                 "[--model-name llama3.1:8b] [--rounds 6] [--judge-after 3] "
                  "[--units 256] [--limit N] [--model-note TEXT]\n";
     return 2;
   }
@@ -651,7 +680,9 @@ int main(int argc, char **argv) {
   std::cout << "==== remote dialogue serial: wipe GNN, ingest output only, "
                "recompose next utterance ====\n"
             << "snap=" << snapFile << " nodes=" << store.nodeCount()
-            << " memes=" << memes.size() << " port=" << port
+            << " memes=" << memes.size() << " engine=" << engine
+            << " port=" << port
+            << (engine == "ollama" ? (" model=" + modelName) : "")
             << " resumedRounds=" << done.size() << "\n";
 
   json doc;
@@ -665,6 +696,8 @@ int main(int argc, char **argv) {
       "remote run via meme_remote_serial.exe; model note: " + modelNote;
   doc["snap"] = snapFile;
   doc["candidates"] = candidatesFile;
+  doc["engine"] = engine;
+  doc["modelName"] = engine == "ollama" ? modelName : "";
   doc["modelNote"] = modelNote;
   doc["units"] = units;
   doc["rounds"] = rounds;
@@ -767,7 +800,7 @@ int main(int argc, char **argv) {
         break; /* 与 ps1 一致：0 轮行不入档 */
       }
 
-      const std::string rawOut = llamaComplete(current, port);
+      const std::string rawOut = llamaComplete(current, port, engine, modelName);
       if (isWhite(rawOut))
         throw std::runtime_error("empty llama output at " + id + " round " +
                                  std::to_string(r) + "; stop dirty serial");
