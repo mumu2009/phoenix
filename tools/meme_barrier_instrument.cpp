@@ -221,6 +221,9 @@ int main(int argc, char **argv) {
   bool requireExclusive = false;
   bool relaxFilter = false;
   double defenseQuantile = 0.85;
+  std::string quantilesArg;
+  std::string negativesFile;
+  bool flagAll = false;
   for (int i = 2; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--corpus" && i + 1 < argc)
@@ -245,6 +248,12 @@ int main(int argc, char **argv) {
       targetsFile = argv[++i];
     else if (a == "--quantile" && i + 1 < argc)
       defenseQuantile = std::atof(argv[++i]);
+    else if (a == "--quantiles" && i + 1 < argc)
+      quantilesArg = argv[++i];
+    else if (a == "--negatives" && i + 1 < argc)
+      negativesFile = argv[++i];
+    else if (a == "--flag-all")
+      flagAll = true;
   }
   if (takeN < 1)
     takeN = 3;
@@ -525,9 +534,46 @@ int main(int argc, char **argv) {
       targets.push_back(Target{row.value("id", ""), row.value("carrier", "")});
 
     auto &obs = phoenix::secamp::SecurityObservatory::instance();
+    /* Quantile list: --quantiles "0.85,0.3,..." overrides the default. */
+    std::vector<double> quantiles;
+    if (!quantilesArg.empty()) {
+      std::stringstream qs(quantilesArg);
+      std::string tok;
+      while (std::getline(qs, tok, ','))
+        quantiles.push_back(std::atof(tok.c_str()));
+    } else {
+      quantiles = {0.85, 0.5, 0.0};
+    }
+    /* Negatives: clean sentences that must never be blocked. */
+    std::vector<std::string> negatives;
+    if (!negativesFile.empty()) {
+      std::ifstream nin(negativesFile, std::ios::binary);
+      if (nin) {
+        std::ostringstream nss;
+        nss << nin.rdbuf();
+        const json nj = json::parse(nss.str());
+        for (const auto &s : nj)
+          negatives.push_back(s.get<std::string>());
+      }
+    }
+    negatives.push_back(
+        "The committee published its annual report on municipal water "
+        "usage .");
+
     DiscreteGraph dg = graphFromStore(store);
-    for (const auto &t : targets)
-      dg.anomalous.insert(t.id);
+    if (flagAll) {
+      /* Stress test: flag every phrase meme, measuring how much of the graph
+         each cut actually covers and whether clean text stays safe when the
+         isolation policy is maximally aggressive. */
+      for (const auto &id : dg.ids) {
+        const auto words = store.wordsOfMeme(id);
+        if (isPhraseMeme(id, words))
+          dg.anomalous.insert(id);
+      }
+    } else {
+      for (const auto &t : targets)
+        dg.anomalous.insert(t.id);
+    }
     obs.resetForTests();
     const auto rep = obs.ingest(dg);
     obs.setPluginEnabled(true);
@@ -541,41 +587,56 @@ int main(int argc, char **argv) {
     json out;
     out["snap"] = snap;
     out["targetCount"] = targets.size();
+    out["negativeCount"] = negatives.size();
     out["nodes"] = dg.ids.size();
+    out["flaggedNodes"] = dg.anomalous.size();
+    out["flagAll"] = flagAll;
     out["maxSig"] = maxSig;
-    /* Sweep the significance cut (maxSig * quantile): production default 0.85,
-       plus 0.5 and 0.0 to locate where the chain breaks. */
-    const double quantiles[3] = {0.85, 0.5, 0.0};
     json sweeps = json::array();
     for (double q : quantiles) {
       obs.setHighImpactQuantile(q);
+      const double cut = maxSig * q;
       json sweep;
       sweep["quantile"] = q;
-      sweep["cut"] = maxSig * q;
+      sweep["cut"] = cut;
+      int nodesAboveCut = 0;
+      int flaggedAboveCut = 0;
+      for (const auto &n : rep.nodes) {
+        if (n.significance >= cut) {
+          ++nodesAboveCut;
+          if (dg.anomalous.count(n.id))
+            ++flaggedAboveCut;
+        }
+      }
+      sweep["nodesAboveCut"] = nodesAboveCut;
+      sweep["flaggedAboveCut"] = flaggedAboveCut;
       json rows = json::array();
+      int blockedTargets = 0;
       for (const auto &t : targets) {
         const auto dec = obs.inspectText(t.carrier);
         const auto det = detectMemeInText(store, t.carrier, t.id, {});
+        if (dec.blocked)
+          ++blockedTargets;
         json row;
         row["id"] = t.id;
         row["sig"] = sigOf.count(t.id) ? sigOf[t.id] : 0.0;
-        row["passCut"] = sigOf.count(t.id) != 0 && sigOf[t.id] >= maxSig * q;
+        row["passCut"] = sigOf.count(t.id) != 0 && sigOf[t.id] >= cut;
         row["detectPresent"] = det.present;
         row["detectLift"] = det.lift;
-        row["detectRank"] = det.rank;
         row["blocked"] = dec.blocked;
         row["reason"] = dec.reason;
-        row["hits"] = dec.hits;
         rows.push_back(std::move(row));
       }
+      sweep["blockedTargets"] = blockedTargets;
       sweep["results"] = std::move(rows);
-      const auto clean = obs.inspectText(
-          "The committee published its annual report on municipal water "
-          "usage .");
-      sweep["cleanControlBlocked"] = clean.blocked;
+      int blockedNeg = 0;
+      for (const auto &s : negatives)
+        if (obs.inspectText(s).blocked)
+          ++blockedNeg;
+      sweep["blockedNegatives"] = blockedNeg;
       sweeps.push_back(std::move(sweep));
     }
-    out["flaggedSweep"] = std::move(sweeps);
+    out["sweeps"] = std::move(sweeps);
     /* Unflagged control at the most permissive cut: nothing may block. */
     {
       obs.resetForTests();
