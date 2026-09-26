@@ -15,8 +15,12 @@
 
 #include <nlohmann/json.hpp>
 
+#ifndef PHOENIX_INSTRUMENT_LEAN
+/* 精益构建（RDK X5 等精简工具链环境）：裁掉插件系统/模块资源注册，
+   只保留纯图分析（DiscreteGraph/analyzeGraph/inspectTokens 等）。 */
 #include "../../plugin_system.hpp"
 #include "../../util/module_resource.hpp"
+#endif
 #include "meme_tensor.hpp"
 
 namespace phoenix {
@@ -170,7 +174,9 @@ public:
   json alertsJson() const;
   json defenseJson() const;
 
+#ifndef PHOENIX_INSTRUMENT_LEAN
   void registerCrudResources();
+#endif
 
 private:
   SecurityObservatory();
@@ -184,7 +190,9 @@ private:
   mutable std::mutex mu_;
 };
 
+#ifndef PHOENIX_INSTRUMENT_LEAN
 void installSecurityModuleResources();
+#endif
 
 } // namespace secamp
 } // namespace phoenix

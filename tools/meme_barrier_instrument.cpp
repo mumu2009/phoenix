@@ -1,5 +1,7 @@
 /* Official readme 统计/识别 on a frozen instrument. Not llama. No writeback. */
 #include "memetic_existence.hpp"
+/* security_core.hpp 在 PHOENIX_INSTRUMENT_LEAN 下也是安全的（重依赖
+   已在头文件内裁掉）；精益构建只裁掉本文件的 defense-test 子命令。 */
 #include "addons/ThePlugInForSecurity/security_core.hpp"
 
 #include <algorithm>
@@ -507,6 +509,7 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+#ifndef PHOENIX_INSTRUMENT_LEAN
   if (cmd == "defense-test") {
     /* Defense-layer reality check on the frozen instrument: flag target memes
        anomalous, enable the security plugin, then inspect each target's own
@@ -654,6 +657,7 @@ int main(int argc, char **argv) {
     std::cout << out.dump(2) << "\n";
     return 0;
   }
+#endif /* PHOENIX_INSTRUMENT_LEAN */
 
   const auto g = graphFromStore(store);
   const auto report = analyzeGraph(g);

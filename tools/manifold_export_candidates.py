@@ -93,11 +93,17 @@ def main():
     ap.add_argument("--take", type=int, default=0, help="最多导出 N 个")
     ap.add_argument("--only", default="", help="只导出这些 id（逗号分隔）")
     ap.add_argument("--skip-file", action="append", default=[])
+    ap.add_argument("--exe", default=str(EXE),
+                    help="instrument 可执行文件路径（RDK X5 等精益构建时"
+                         "指到 meme_barrier_instrument 精益版）")
     ap.add_argument("--farm-filter", action="store_true",
                     help="应用农场 build_batch 同款过滤：typicalNeed==2 且 "
                          "carrierEntropy>0 且 typicalCover>0，按 "
                          "carrierEntropy 降序")
     args = ap.parse_args()
+
+    global EXE
+    EXE = Path(args.exe)
 
     screen_p = Path(args.screen)
     snap_p = Path(args.snap)

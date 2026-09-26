@@ -4,7 +4,7 @@
 #include "graph_diffusion_summarizer.hpp"
 #include "meme_tensor.hpp"
 #include "memetic_existence.hpp"
-#include "phoenix_config.hpp"
+#include "phoenix_config.hpp" /* 纯头文件配置（std+json），精益构建也可用 */
 
 #include <algorithm>
 #include <cctype>
@@ -1116,6 +1116,7 @@ json SecurityObservatory::defenseJson() const {
               {"highImpactQuantile", cfg_.highImpactQuantile}};
 }
 
+#ifndef PHOENIX_INSTRUMENT_LEAN
 namespace {
 
 util::CrudReply okBody(const json &data, int status = 200) {
@@ -1282,6 +1283,7 @@ void installSecurityModuleResources() {
       "security", "probe", "inert in-graph existence probe (read + internal enable)",
       probeAcl, handleProbe});
 }
+#endif /* PHOENIX_INSTRUMENT_LEAN */
 
 } // namespace secamp
 } // namespace phoenix
