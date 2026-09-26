@@ -94,7 +94,11 @@ def load_state():
 
 
 def save_state(st):
-    STATE.write_text(json.dumps(st, indent=1, ensure_ascii=False),
+    # 下划线前缀的是运行期缓存（set 等不可序列化），一律不写入状态文件。
+    # 批中 save（farm_loop 里的中途保存）也会调到本函数，不能只靠
+    # farm_loop 末尾 pop —— 批 1280 就因 _tested 集合序列化崩溃过。
+    clean = {k: v for k, v in st.items() if not k.startswith("_")}
+    STATE.write_text(json.dumps(clean, indent=1, ensure_ascii=False),
                      encoding="utf-8")
 
 

@@ -189,7 +189,22 @@ foreach ($m in $memes) {
       if ($prev.wipe -and $prev.wipe.alphaSame) { $row.alphaSameRounds++ }
       $current = [string]$prev.nextUtterance
       Write-Host ("  resume round {0} present={1} alphaSame={2}" -f $r, $prev.detect.present, $prev.wipe.alphaSame)
-      if ($prev.judge -and -not $prev.wipe.alphaSame) { break }
+      # 终止记录停重放：dirty / collapse 拦截 / judge 失败 / hopeless-00。
+      # 旧 journal 的 hopeless 记录没有 hopeless00 字段（当时先写 journal
+      # 后打标），按 r==2 且非 judge 且 r1/r2 typicalHit 双零推导。
+      $pw = $prev.wipe
+      $termDirty = ($prev.dirty -eq $true)
+      $termIntercept = ($prev.intercepted -eq $true)
+      $termHopeless = ($prev.hopeless00 -eq $true)
+      $termJudge = ($prev.judge -eq $true) -and $pw -and (-not $pw.alphaSame)
+      if (-not $termHopeless -and $r -eq 2 -and $pw -and $prev.judge -ne $true) {
+        $h1 = 0
+        if ($row.rounds.Count -ge 2 -and $row.rounds[0].wipe) {
+          $h1 = [int]$row.rounds[0].wipe.typicalHit
+        }
+        if ($h1 -eq 0 -and [int]$pw.typicalHit -eq 0) { $termHopeless = $true }
+      }
+      if ($termDirty -or $termIntercept -or $termHopeless -or $termJudge) { break }
       continue
     }
     $inHit = Get-Detect $m.id $current
@@ -299,15 +314,9 @@ foreach ($m in $memes) {
       recomposeFallback = $recomposeFallback
       nextUtterance = $next
     }
-    $row.rounds += $rec
-    Add-Jsonl $Journal $rec
-    Write-Host ("  round {0} outPresent={1} lift={2:N2} echo={3} judge={4} wipeEmpty={5} liveNodes={6} overlap={7} alphaSame={8} typical={9}/{10} sha1Recompose={11} fallback={12} collapsed={13} decayWarn={14} nextChars={15}" -f $r, $det.present, $det.lift, $echo, $judge, $wipe.emptyBefore, $wipe.liveNodes, $wipe.overlapContent, $wipe.alphaSame, $wipe.typicalHit, $wipe.typicalNeed, $wipe.recomposePresent, $recomposeFallback, $collapsed, $wipe.decayWarn, $next.Length)
-    if ($judge -and -not $wipe.alphaSame) {
-      Write-Host ("  stop {0}: judged - wiped GNN did not grow the same (word, α) typical set" -f $m.id)
-      $doc.groups += $row
-      Save-JsonAtomic $ResultFile $doc
-      break
-    }
+    # hopeless-00 判定提前到写 journal 之前：旧逻辑先 Add-Jsonl 后打标，
+    # journal 里的 r2 记录没有 hopeless00，resume 会把已终止的组重跑。
+    $hopeless00 = $false
     if ($r -eq 2 -and -not $judge) {
       # Early stop: 41/41 historical groups with typicalHit=0 in both r1 and
       # r2 never regrew the typical set later (seedbudget10 + batch32 +
@@ -318,12 +327,24 @@ foreach ($m in $memes) {
       }
       $h2 = [int]$wipe.typicalHit
       if ($h1 -eq 0 -and $h2 -eq 0) {
-        Write-Host ("  stop {0}: hopeless-00 - no typical word reingested in r1/r2 (41/41 historical never recovered)" -f $m.id)
+        $hopeless00 = $true
         $rec.hopeless00 = $true
-        $doc.groups += $row
-        Save-JsonAtomic $ResultFile $doc
-        break
       }
+    }
+    $row.rounds += $rec
+    Add-Jsonl $Journal $rec
+    Write-Host ("  round {0} outPresent={1} lift={2:N2} echo={3} judge={4} wipeEmpty={5} liveNodes={6} overlap={7} alphaSame={8} typical={9}/{10} sha1Recompose={11} fallback={12} collapsed={13} decayWarn={14} nextChars={15}" -f $r, $det.present, $det.lift, $echo, $judge, $wipe.emptyBefore, $wipe.liveNodes, $wipe.overlapContent, $wipe.alphaSame, $wipe.typicalHit, $wipe.typicalNeed, $wipe.recomposePresent, $recomposeFallback, $collapsed, $wipe.decayWarn, $next.Length)
+    if ($judge -and -not $wipe.alphaSame) {
+      Write-Host ("  stop {0}: judged - wiped GNN did not grow the same (word, α) typical set" -f $m.id)
+      $doc.groups += $row
+      Save-JsonAtomic $ResultFile $doc
+      break
+    }
+    if ($hopeless00) {
+      Write-Host ("  stop {0}: hopeless-00 - no typical word reingested in r1/r2 (41/41 historical never recovered)" -f $m.id)
+      $doc.groups += $row
+      Save-JsonAtomic $ResultFile $doc
+      break
     }
     $current = $next
     $snapDoc = [ordered]@{}
