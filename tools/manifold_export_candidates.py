@@ -83,6 +83,7 @@ def run_detect(snap, meme_id, text):
 
 
 def main():
+    global EXE  # --exe 默认值引用它，global 声明必须在函数最前
     ap = argparse.ArgumentParser()
     ap.add_argument("--screen", required=True)
     ap.add_argument("--snap", required=True)
@@ -102,7 +103,6 @@ def main():
                          "carrierEntropy 降序")
     args = ap.parse_args()
 
-    global EXE
     EXE = Path(args.exe)
 
     screen_p = Path(args.screen)
