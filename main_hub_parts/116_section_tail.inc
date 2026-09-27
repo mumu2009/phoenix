@@ -5821,7 +5821,14 @@
               stats = json{{"scans", s.scans},
                            {"isolated", s.isolated},
                            {"lastScanTime", s.lastScanTime},
-                           {"lastIsolated", s.lastIsolated}};
+                           {"lastIsolated", s.lastIsolated},
+                           {"evaluated", s.evaluated},
+                           {"candidates", s.candidates},
+                           {"pointCount", s.pointCount},
+                           {"lastScanMs", s.lastScanMs},
+                           {"avgScore", s.avgScore},
+                           {"maxScore", s.maxScore},
+                           {"threshold", s.lastThreshold}};
             }
             respondJson(cb, json{{"ok", true}, {"stats", stats}});
           } catch (const std::exception &e) {

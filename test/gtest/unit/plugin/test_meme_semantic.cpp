@@ -1,6 +1,7 @@
 /* test_meme_semantic.cpp - Semantic slicer + meme annealer unit tests. */
 
 #include <cmath>
+#include <cstdlib>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -248,6 +249,45 @@ TEST(SecuritySemanticSurfaces, SlicesAndAnnealJson) {
   EXPECT_EQ(aj.value("poolSize", 0), 2);
   EXPECT_GE(aj.value("organicMergePairs", -1), 0);
 
+  obs.resetForTests();
+}
+
+/* Ingest caps the O(n^3) dense analysis but stores the full graph. */
+TEST(SecuritySemanticSurfaces, IngestCapsDenseAnalysis) {
+#if defined(_WIN32)
+  _putenv_s("PHOENIX_SECURITY_MAX_ANALYZE_NODES", "64");
+#else
+  setenv("PHOENIX_SECURITY_MAX_ANALYZE_NODES", "64", 1);
+#endif
+  auto &obs = phoenix::secamp::SecurityObservatory::instance();
+  obs.resetForTests();
+
+  phoenix::secamp::DiscreteGraph g;
+  const int n = 200; /* > 64 cap */
+  g.ids.reserve(n);
+  g.layers.assign(n, "meme");
+  g.mapped.resize(n);
+  for (int i = 0; i < n; ++i) {
+    g.ids.push_back("m_" + std::to_string(i));
+    g.mapped[i] = {"w" + std::to_string(i), "shared"};
+    if (i > 0)
+      g.edges.push_back(phoenix::secamp::GraphEdge{i - 1, i, 1.0});
+  }
+  const auto rep = obs.ingest(g);
+  EXPECT_TRUE(rep.analysisCapped);
+  EXPECT_LE(rep.analyzedNodes, 64);
+  EXPECT_EQ(obs.lastGraph().ids.size(), static_cast<size_t>(n));
+
+  const auto stats = obs.statsJson();
+  EXPECT_TRUE(stats.value("analysisCapped", false));
+  EXPECT_LE(stats.value("analyzedNodes", n), 64);
+  EXPECT_EQ(stats.value("memeNodes", 0), n);
+
+#if defined(_WIN32)
+  _putenv_s("PHOENIX_SECURITY_MAX_ANALYZE_NODES", "");
+#else
+  unsetenv("PHOENIX_SECURITY_MAX_ANALYZE_NODES");
+#endif
   obs.resetForTests();
 }
 

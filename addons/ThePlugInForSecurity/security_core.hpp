@@ -88,6 +88,10 @@ struct InfluenceReport {
   std::string error;
   int nodeCount{0};
   int embedDim{0};
+  /* Analysis cap observability: how many nodes the dense analysis
+     actually covered, and whether the full graph was capped. */
+  int analyzedNodes{0};
+  bool analysisCapped{false};
   std::vector<NodeInfluence> nodes;
   std::vector<std::string> mostSignificant;
   std::vector<std::string> leastSignificant;

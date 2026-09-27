@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <numeric>
 #include <sstream>
 #include <tuple>
 #include <unordered_map>
@@ -934,7 +935,85 @@ json SecurityObservatory::probeJson() const {
 }
 
 InfluenceReport SecurityObservatory::ingest(const DiscreteGraph &g) {
-  auto rep = analyzeGraph(g);
+  /* Dense walk-matrix inversion + Laplacian embedding are O(n^3): on a
+     production meme graph (thousands of nodes) a full analysis would take
+     minutes to hours per barrier scan.  Cap the ANALYSIS to the
+     highest-degree nodes; the FULL graph is still stored for the
+     slices/anneal surfaces, which are lock-free snapshot readers. */
+  /* Read per ingest (not a cached static) so tests and ops can change it
+     without a process restart; one getenv per barrier scan is noise. */
+  const int kMaxAnalyzeNodes = [] {
+    const char *v = std::getenv("PHOENIX_SECURITY_MAX_ANALYZE_NODES");
+    if (v && *v) {
+      try {
+        return std::max(64, std::stoi(v));
+      } catch (...) {
+      }
+    }
+    return 1024;
+  }();
+  DiscreteGraph analysis = g;
+  bool capped = false;
+  const int n = static_cast<int>(g.ids.size());
+  if (n > kMaxAnalyzeNodes) {
+    capped = true;
+    std::vector<int> deg(static_cast<size_t>(n), 0);
+    for (const auto &e : g.edges) {
+      if (e.from >= 0 && e.from < n)
+        deg[static_cast<size_t>(e.from)]++;
+      if (e.to >= 0 && e.to < n)
+        deg[static_cast<size_t>(e.to)]++;
+    }
+    std::vector<int> order(static_cast<size_t>(n));
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(),
+                     [&](int a, int b) {
+                       return deg[static_cast<size_t>(a)] >
+                              deg[static_cast<size_t>(b)];
+                     });
+    order.resize(static_cast<size_t>(kMaxAnalyzeNodes));
+    std::vector<int> remap(static_cast<size_t>(n), -1);
+    analysis.ids.clear();
+    analysis.edges.clear();
+    analysis.layers.clear();
+    analysis.mapped.clear();
+    analysis.mappedTf.clear();
+    analysis.isolated.clear();
+    analysis.anomalous.clear();
+    for (size_t ni = 0; ni < order.size(); ++ni) {
+      const int oi = order[ni];
+      remap[static_cast<size_t>(oi)] = static_cast<int>(ni);
+      analysis.ids.push_back(g.ids[static_cast<size_t>(oi)]);
+      analysis.layers.push_back(
+          oi < static_cast<int>(g.layers.size())
+              ? g.layers[static_cast<size_t>(oi)]
+              : std::string());
+      analysis.mapped.push_back(
+          oi < static_cast<int>(g.mapped.size())
+              ? g.mapped[static_cast<size_t>(oi)]
+              : std::vector<std::string>());
+      analysis.mappedTf.push_back(
+          oi < static_cast<int>(g.mappedTf.size())
+              ? g.mappedTf[static_cast<size_t>(oi)]
+              : std::vector<int>());
+      if (g.isolated.count(g.ids[static_cast<size_t>(oi)]))
+        analysis.isolated.insert(g.ids[static_cast<size_t>(oi)]);
+      if (g.anomalous.count(g.ids[static_cast<size_t>(oi)]))
+        analysis.anomalous.insert(g.ids[static_cast<size_t>(oi)]);
+    }
+    for (const auto &e : g.edges) {
+      if (e.from < 0 || e.to < 0 || e.from >= n || e.to >= n)
+        continue;
+      const int nf = remap[static_cast<size_t>(e.from)];
+      const int nt = remap[static_cast<size_t>(e.to)];
+      if (nf < 0 || nt < 0)
+        continue;
+      analysis.edges.push_back(GraphEdge{nf, nt, e.weight});
+    }
+  }
+  auto rep = analyzeGraph(analysis);
+  rep.analyzedNodes = static_cast<int>(analysis.ids.size());
+  rep.analysisCapped = capped;
   std::lock_guard<std::mutex> lock(mu_);
   graph_ = g;
   report_ = rep;
@@ -1276,6 +1355,8 @@ json SecurityObservatory::statsJson() const {
   }
   return json{{"ok", report_.ok},
               {"nodeCount", report_.nodeCount},
+              {"analyzedNodes", report_.analyzedNodes},
+              {"analysisCapped", report_.analysisCapped},
               {"embedDim", report_.embedDim},
               {"mostSignificant", report_.mostSignificant},
               {"leastSignificant", report_.leastSignificant},

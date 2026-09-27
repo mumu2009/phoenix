@@ -118,6 +118,14 @@ public:
     }
   }
 
+  /* Bulk prefix scan for security snapshots: one store query instead of
+     per-meme getMemeWords round-trips.  Additive read-only accessor; the
+     LRU cache is bypassed (callers want the persisted truth) and no
+     existing path changes behavior. */
+  std::vector<std::pair<std::string, nlohmann::json>> memeEntries() {
+    return store_->entries("meme:");
+  }
+
   json exportEntries() {
     std::lock_guard<std::mutex> lock(cacheMu_);
     json out;

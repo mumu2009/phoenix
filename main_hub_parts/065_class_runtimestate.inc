@@ -797,6 +797,20 @@ public:
     return kvm_.getMemeWords(memeId);
   }
 
+  /* Security-barrier bulk snapshot: one graph lock (exportSnapshot) plus
+     one KVM prefix scan, instead of O(N) per-point lock/I/O round-trips.
+     Additive read-only method; existing ingest/query paths untouched.
+     Returned json: {"graph": exportSnapshot(), "words": {id: [w, ...]}}. */
+  json exportSecuritySnapshot() {
+    json graphSnap = graph_.exportSnapshot();
+    json words = json::object();
+    for (auto &kv : kvm_.memeEntries()) {
+      if (kv.second.is_array())
+        words[kv.first] = std::move(kv.second);
+    }
+    return json{{"graph", std::move(graphSnap)}, {"words", std::move(words)}};
+  }
+
   void graphLink(const std::string &fromId, const std::string &toId,
                  double weight, int direction) override {
     /* Online / adversarial increments stay in the current MemoryScope

@@ -11,6 +11,8 @@ public:
     std::vector<json> lastIsolated;
     int evaluated{0};
     int candidates{0};
+    int pointCount{0};
+    int64_t lastScanMs{0};
     double avgScore{0.0};
     double maxScore{0.0};
     double p90Score{0.0};
@@ -718,11 +720,11 @@ private:
 
   double evaluateCompositeScore(const std::string &memeId, const NodeStats &ns,
                                 double avgConn, double avgOut, double stdDeg,
-                                double stdOut) {
+                                double stdOut,
+                                const std::vector<std::string> &wordsIn) {
     double baseScore =
         evaluateMaliciousness(memeId, ns, avgConn, avgOut, stdDeg, stdOut);
-    std::vector<std::string> tokens =
-        runtime_ ? runtime_->getMemeWords(memeId) : std::vector<std::string>();
+    std::vector<std::string> tokens = wordsIn;
     if (tokens.empty())
       tokens = tokenize(memeId);
     if (tokens.empty())
@@ -755,10 +757,10 @@ private:
     return sum / points.size();
   }
 
-  std::string generateReason(const std::string &memeId, double score) {
+  std::string generateReason(const std::string &memeId, double score,
+                             int degree) {
     if (!runtime_)
       return "score=0.000 conn=0";
-    int degree = runtime_->graph().degreeOf(memeId);
     std::ostringstream oss;
     oss << "score=" << std::fixed << std::setprecision(3) << score
         << " conn=" << degree;
@@ -811,11 +813,59 @@ private:
   void scanNetwork() {
     if (!runtime_)
       return;
-    auto points = runtime_->graph().getAllPoints();
+    const auto scanStart = std::chrono::steady_clock::now();
+    /* Bulk snapshot: one graph lock + one KVM prefix scan.  The previous
+       implementation did 3-4 per-point locked round-trips (neighborsOf /
+       getMeta / getMemeWords), which starved on large restored graphs and
+       could tear across concurrent ingest. */
+    const json bulk = runtime_->exportSecuritySnapshot();
+    const json &graphSnap = bulk["graph"];
+    const json &wordsObj = bulk["words"];
+    const json nodesArr = graphSnap.value("nodes", json::array());
+    const json metaObj = graphSnap.value("meta", json::object());
+    std::vector<std::string> points;
+    points.reserve(nodesArr.size());
+    std::unordered_map<std::string,
+                       std::vector<std::pair<std::string, std::pair<double, int>>>>
+        nbr;
+    nbr.reserve(nodesArr.size());
+    for (const auto &n : nodesArr) {
+      std::string id = n.value("id", std::string());
+      if (id.empty())
+        continue;
+      points.push_back(id);
+      auto &vec = nbr[id];
+      for (const auto &e : n.value("neighbors", json::array())) {
+        std::string to = e.value("to", std::string());
+        if (to.empty())
+          continue;
+        vec.push_back({std::move(to),
+                       {e.value("weight", 0.0), e.value("direction", 0)}});
+      }
+    }
+    auto isIsolated = [&](const std::string &id) {
+      auto it = metaObj.find(id);
+      return it != metaObj.end() && it->value("isolated", false);
+    };
+    auto wordsOf = [&](const std::string &id) -> std::vector<std::string> {
+      auto it = wordsObj.find(id);
+      std::vector<std::string> out;
+      if (it != wordsObj.end() && it->is_array()) {
+        for (const auto &w : *it)
+          if (w.is_string())
+            out.push_back(w.get<std::string>());
+      }
+      return out;
+    };
     stats_.scans++;
     stats_.lastScanTime = nowEpochMs();
-    if (points.empty())
+    stats_.pointCount = (int)points.size();
+    if (points.empty()) {
+      stats_.lastScanMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - scanStart)
+                              .count();
       return;
+    }
     struct Scored {
       std::string id;
       double score;
@@ -830,7 +880,7 @@ private:
     double sumDeg2 = 0.0;
     double sumOut2 = 0.0;
     for (auto &id : points) {
-      auto neighbors = runtime_->graph().neighborsOf(id);
+      const auto &neighbors = nbr[id];
       NodeStats ns;
       ns.degree = (int)neighbors.size();
       for (auto &n : neighbors) {
@@ -859,15 +909,12 @@ private:
     std::vector<double> scoreValues;
     scoreValues.reserve(points.size());
     for (auto &id : points) {
-      try {
-        const auto meta = runtime_->graph().getMeta(id);
-        if (meta.value("isolated", false))
-          continue;
-      } catch (...) {
-      }
+      if (isIsolated(id))
+        continue;
       const auto &ns = nodeStats[id];
-      double s = evaluateCompositeScore(id, ns, avgDeg, avgOut, stdDeg, stdOut);
-      scored.push_back(Scored{id, s, generateReason(id, s)});
+      double s = evaluateCompositeScore(id, ns, avgDeg, avgOut, stdDeg, stdOut,
+                                        wordsOf(id));
+      scored.push_back(Scored{id, s, generateReason(id, s, ns.degree)});
       scoreValues.push_back(s);
     }
 
@@ -942,17 +989,12 @@ private:
     std::unordered_map<std::string, int> ix;
     for (size_t i = 0; i < points.size(); ++i) {
       ix[points[i]] = (int)i;
-      if (runtime_)
-        snap.mapped[i] = runtime_->getMemeWords(points[i]);
-      try {
-        if (runtime_->graph().getMeta(points[i]).value("isolated", false))
-          snap.isolated.insert(points[i]);
-      } catch (...) {
-      }
+      snap.mapped[i] = wordsOf(points[i]);
+      if (isIsolated(points[i]))
+        snap.isolated.insert(points[i]);
     }
     for (size_t i = 0; i < points.size(); ++i) {
-      auto neigh = runtime_->graph().neighborsOf(points[i]);
-      for (auto &n : neigh) {
+      for (auto &n : nbr[points[i]]) {
         auto it = ix.find(n.first);
         if (it == ix.end())
           continue;
@@ -962,6 +1004,9 @@ private:
                                                        n.second.first});
       }
     }
+    stats_.lastScanMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - scanStart)
+                            .count();
     phoenix::secamp::SecurityObservatory::instance().ingest(snap);
   }
 };
