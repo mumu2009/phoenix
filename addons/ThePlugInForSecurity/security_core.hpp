@@ -174,6 +174,20 @@ public:
   json alertsJson() const;
   json defenseJson() const;
 
+  /* Semantic dynamic slicing of an inspection text against the last
+     ingested graph snapshot. Units are mapped to memes through
+     DiscreteGraph.mapped (word->meme inversion); seams follow the GNN's
+     own shared-meme flow. The snapshot is copied under mu_ and slicing
+     runs unlocked, so a stale-but-consistent view is guaranteed. */
+  json semanticSlicesJson(const std::string &text, int minUnits = 4,
+                          int maxUnits = 64) const;
+
+  /* Simulated-annealing meme integration preview over the last snapshot's
+     minimal meme pool (2..softWords). Read-only: pool is built from a
+     copied snapshot, annealing runs unlocked, the graph is never
+     mutated. Deterministic for a fixed seed. */
+  json annealPreviewJson(int steps = 4000, std::uint64_t seed = 42) const;
+
 #ifndef PHOENIX_INSTRUMENT_LEAN
   void registerCrudResources();
 #endif

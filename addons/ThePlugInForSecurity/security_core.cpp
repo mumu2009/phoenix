@@ -2,6 +2,8 @@
 
 #include "security_core.hpp"
 #include "graph_diffusion_summarizer.hpp"
+#include "meme_annealer.hpp"
+#include "meme_semantic_slicer.hpp"
 #include "meme_tensor.hpp"
 #include "memetic_existence.hpp"
 #include "phoenix_config.hpp" /* 纯头文件配置（std+json），精益构建也可用 */
@@ -949,6 +951,235 @@ DiscreteGraph SecurityObservatory::lastGraph() const {
   return graph_;
 }
 
+json SecurityObservatory::semanticSlicesJson(const std::string &text,
+                                             int minUnits,
+                                             int maxUnits) const {
+  DiscreteGraph g;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    g = graph_;
+  }
+  if (g.ids.empty())
+    return json{{"ok", false}, {"reason", "no-graph"}};
+  /* External-facing: clamp inputs so the analysis stays cheap. */
+  const std::string textCapped = text.substr(0, 1u << 20);
+  minUnits = std::max(1, std::min(minUnits, 4096));
+  maxUnits = std::max(minUnits, std::min(maxUnits, 8192));
+
+  /* word -> meme ids, from the snapshot's meme->words mapping. */
+  std::unordered_map<std::string, std::vector<std::string>> wordToMemes;
+  for (size_t i = 0; i < g.ids.size(); ++i) {
+    const std::string layer = i < g.layers.size() ? g.layers[i] : "meme";
+    if (layer != "meme" || i >= g.mapped.size())
+      continue;
+    for (const auto &w : g.mapped[i])
+      if (!w.empty())
+        wordToMemes[w].push_back(g.ids[i]);
+  }
+
+  /* Blank-line units; a text without blank lines is one unit. */
+  std::vector<std::string> rawUnits;
+  {
+    std::string cur;
+    std::istringstream in(textCapped);
+    std::string line;
+    bool prevBlank = false;
+    while (std::getline(in, line)) {
+      const bool blank =
+          line.find_first_not_of(" \t\r") == std::string::npos;
+      if (blank && !prevBlank && !cur.empty()) {
+        rawUnits.push_back(cur);
+        cur.clear();
+      }
+      if (!blank) {
+        cur += line;
+        cur += '\n';
+      }
+      prevBlank = blank;
+    }
+    if (!cur.empty())
+      rawUnits.push_back(cur);
+  }
+
+  /* Footprint: memes sharing >= 2 content words with the unit
+     (query-face overlap; the graph is only read, never grown). */
+  std::vector<SliceUnitFootprint> units;
+  units.reserve(rawUnits.size());
+  for (size_t i = 0; i < rawUnits.size(); ++i) {
+    SliceUnitFootprint fp;
+    fp.unitIndex = static_cast<int>(i);
+    std::unordered_map<std::string, int> hits;
+    int contentWords = 0;
+    for (const auto &tok : tokenizeDefense(rawUnits[i])) {
+      if (tok.empty() ||
+          phoenix::memetic::mappingMergeStopWord(tok))
+        continue;
+      ++contentWords;
+      auto it = wordToMemes.find(tok);
+      if (it == wordToMemes.end())
+        continue;
+      for (const auto &mid : it->second)
+        hits[mid]++;
+    }
+    if (contentWords >= 2) {
+      std::vector<std::pair<int, std::string>> ranked;
+      ranked.reserve(hits.size());
+      for (const auto &kv : hits)
+        ranked.push_back({kv.second, kv.first});
+      std::sort(ranked.begin(), ranked.end(),
+                [](const auto &a, const auto &b) {
+                  if (a.first != b.first)
+                    return a.first > b.first;
+                  return a.second < b.second;
+                });
+      for (const auto &kv : ranked) {
+        if (kv.first < 2)
+          break;
+        fp.memeSeq.push_back(kv.second);
+      }
+    }
+    units.push_back(std::move(fp));
+  }
+
+  SemanticSliceConfig cfg;
+  cfg.minUnits = std::max(1, minUnits);
+  cfg.maxUnits = std::max(cfg.minUnits, maxUnits);
+  cfg.targetUnits = (cfg.minUnits + cfg.maxUnits) / 2;
+  const auto flows = SemanticSlicer::gapFlows(units, cfg.lookahead);
+  const auto slices = SemanticSlicer::slice(units, cfg);
+
+  double flowMin = 0.0;
+  double flowMean = 0.0;
+  if (!flows.empty()) {
+    flowMin = *std::min_element(flows.begin(), flows.end());
+    for (const double f : flows)
+      flowMean += f;
+    flowMean /= static_cast<double>(flows.size());
+  }
+  json rows = json::array();
+  for (const auto &s : slices) {
+    rows.push_back(json{{"beginUnit", s.beginUnit},
+                        {"endUnit", s.endUnit},
+                        {"seamAfter", s.seamAfter},
+                        {"memeRefs", s.memeRefs},
+                        {"uniqueMemes", s.uniqueMemes}});
+  }
+  return json{{"ok", true},
+              {"units", units.size()},
+              {"slices", rows},
+              {"flowMin", flowMin},
+              {"flowMean", flowMean}};
+}
+
+json SecurityObservatory::annealPreviewJson(int steps,
+                                            std::uint64_t seed) const {
+  DiscreteGraph g;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    g = graph_;
+  }
+  if (g.ids.empty())
+    return json{{"ok", false}, {"reason", "no-graph"}};
+
+  /* Pool: minimal meme units only (2..softWords). Bags larger than one
+     ngramMax window are not samples and stay out. */
+  AnnealConfig cfg;
+  const int soft = cfg.softWords;
+  std::vector<AnnealMeme> pool;
+  std::unordered_map<std::string, int> poolIx;
+  std::unordered_map<std::string, int> df;
+  for (size_t i = 0; i < g.ids.size(); ++i) {
+    const std::string layer = i < g.layers.size() ? g.layers[i] : "meme";
+    if (layer != "meme" || i >= g.mapped.size())
+      continue;
+    for (const auto &w : g.mapped[i])
+      if (!w.empty())
+        df[w]++;
+  }
+  for (size_t i = 0; i < g.ids.size(); ++i) {
+    const std::string layer = i < g.layers.size() ? g.layers[i] : "meme";
+    if (layer != "meme" || i >= g.mapped.size())
+      continue;
+    const auto &words = g.mapped[i];
+    if (words.size() < 2 || static_cast<int>(words.size()) > soft)
+      continue;
+    AnnealMeme m;
+    m.id = g.ids[i];
+    for (size_t k = 0; k < words.size(); ++k) {
+      if (words[k].empty())
+        continue;
+      int tf = 1;
+      if (i < g.mappedTf.size() && k < g.mappedTf[i].size() &&
+          g.mappedTf[i][k] > 0)
+        tf = g.mappedTf[i][k];
+      auto dit = df.find(words[k]);
+      const int d = dit != df.end() && dit->second > 0 ? dit->second : 1;
+      m.weights.push_back(
+          {words[k], phoenix::memetic::mappingWordAlpha(tf, d)});
+    }
+    if (m.weights.size() >= 2) {
+      poolIx[m.id] = static_cast<int>(pool.size());
+      pool.push_back(std::move(m));
+    }
+  }
+
+  std::vector<AnnealEdge> edges;
+  for (const auto &e : g.edges) {
+    if (e.from < 0 || e.to < 0 || e.from >= static_cast<int>(g.ids.size()) ||
+        e.to >= static_cast<int>(g.ids.size()))
+      continue;
+    auto ai = poolIx.find(g.ids[static_cast<size_t>(e.from)]);
+    auto bi = poolIx.find(g.ids[static_cast<size_t>(e.to)]);
+    if (ai == poolIx.end() || bi == poolIx.end())
+      continue;
+    edges.push_back(AnnealEdge{ai->second, bi->second, e.weight});
+  }
+  for (auto &m : pool) {
+    /* degree on the full snapshot, not just inside the pool */
+    m.degree = 0;
+  }
+  for (const auto &e : g.edges) {
+    if (e.from >= 0 && e.from < static_cast<int>(g.ids.size())) {
+      auto it = poolIx.find(g.ids[static_cast<size_t>(e.from)]);
+      if (it != poolIx.end())
+        pool[static_cast<size_t>(it->second)].degree++;
+    }
+  }
+
+  cfg.steps = std::max(0, std::min(steps, 200000)); /* external-facing clamp */
+  cfg.seed = seed;
+  const auto organic =
+      MemeAnnealer::organicMergePairs(pool, 2, cfg.maxMemeWords);
+  const auto res = MemeAnnealer::run(pool, edges, cfg);
+
+  json top = json::array();
+  const size_t take = std::min<size_t>(12, res.groups.size());
+  for (size_t i = 0; i < take; ++i) {
+    const auto &gr = res.groups[i];
+    json members = json::array();
+    for (const int mi : gr.members)
+      members.push_back(pool[static_cast<size_t>(mi)].id);
+    json typical = json::array();
+    const size_t tt = std::min<size_t>(6, gr.typical.size());
+    for (size_t k = 0; k < tt; ++k)
+      typical.push_back(gr.typical[k]);
+    top.push_back(json{{"members", members},
+                       {"wordCount", gr.wordCount},
+                       {"fitness", gr.fitness},
+                       {"cohesion", gr.cohesion},
+                       {"typical", typical}});
+  }
+  return json{{"ok", true},
+              {"poolSize", pool.size()},
+              {"edgeCount", edges.size()},
+              {"organicMergePairs", organic.size()},
+              {"initialEnergy", res.initialEnergy},
+              {"energy", res.energy},
+              {"stepsDone", res.stepsDone},
+              {"groups", res.groups.size()},
+              {"topGroups", top}};
+}
+
 InspectDecision SecurityObservatory::inspectText(const std::string &text) {
   InfluenceReport rep;
   DiscreteGraph g;
@@ -1030,13 +1261,28 @@ json SecurityObservatory::statsJson() const {
                          {"significance", n.significance},
                          {"rankMost", n.rankMost}});
   }
+  /* Oversized-meme watch: bags larger than one ngramMax window are not
+     samples and dilute screening; the annealer's size cap mirrors this. */
+  int memeNodes = 0;
+  int oversizedMemes = 0;
+  for (size_t i = 0; i < graph_.ids.size(); ++i) {
+    const std::string layer =
+        i < graph_.layers.size() ? graph_.layers[i] : "meme";
+    if (layer != "meme" || i >= graph_.mapped.size())
+      continue;
+    ++memeNodes;
+    if (static_cast<int>(graph_.mapped[i].size()) > 14)
+      ++oversizedMemes;
+  }
   return json{{"ok", report_.ok},
               {"nodeCount", report_.nodeCount},
               {"embedDim", report_.embedDim},
               {"mostSignificant", report_.mostSignificant},
               {"leastSignificant", report_.leastSignificant},
+              {"memeNodes", memeNodes},
+              {"oversizedMemes", oversizedMemes},
               {"items", items},
-              {"surfaces", json::array({"stats", "identify", "alerts", "defense", "probe"})},
+              {"surfaces", json::array({"stats", "identify", "alerts", "defense", "probe", "slices", "anneal"})},
               {"excluded", json::array({"construct", "deploy", "human", "weapon"})}};
 }
 
@@ -1243,6 +1489,32 @@ util::CrudReply handleProbe(const util::CrudCall &call) {
                          json{{"reason", "probe_no_public_deploy"}}};
 }
 
+util::CrudReply handleSlices(const util::CrudCall &call) {
+  auto &obs = SecurityObservatory::instance();
+  if (call.op == util::CrudOp::Create || call.op == util::CrudOp::Update) {
+    const std::string text = call.body.value("text", std::string());
+    if (text.empty())
+      return util::CrudReply{false, 400, "bad_request",
+                             json{{"reason", "text_required"}}};
+    const int minU = call.body.value("minUnits", 4);
+    const int maxU = call.body.value("maxUnits", 64);
+    return okBody(obs.semanticSlicesJson(text, minU, maxU));
+  }
+  return okBody(json{{"usage",
+                      "Create/Update with {text, minUnits?, maxUnits?} -> "
+                      "semantic slices over the last graph snapshot"}});
+}
+
+util::CrudReply handleAnneal(const util::CrudCall &call) {
+  auto &obs = SecurityObservatory::instance();
+  if (call.op == util::CrudOp::Create || call.op == util::CrudOp::Update) {
+    const int steps = call.body.value("steps", 4000);
+    const std::uint64_t seed = call.body.value("seed", (std::uint64_t)42);
+    return okBody(obs.annealPreviewJson(steps, seed));
+  }
+  return okBody(obs.annealPreviewJson(4000, 42));
+}
+
 } // namespace
 
 void SecurityObservatory::registerCrudResources() {
@@ -1282,6 +1554,21 @@ void installSecurityModuleResources() {
   reg.registerResource(util::ResourceSpec{
       "security", "probe", "inert in-graph existence probe (read + internal enable)",
       probeAcl, handleProbe});
+
+  /* Analysis surfaces: Create/Update carry the request body but mutate
+     nothing (annealing/slicing run on a copied snapshot, inputs clamped),
+     so external callers may invoke them like the defense switches. */
+  util::ResourceAcl analysisAcl = readOnly;
+  analysisAcl.allowInternalWrite = true;
+  analysisAcl.allowExternalWrite = true;
+  reg.registerResource(util::ResourceSpec{
+      "security", "slices",
+      "semantic dynamic slicing over the last graph snapshot (read-only)",
+      analysisAcl, handleSlices});
+  reg.registerResource(util::ResourceSpec{
+      "security", "anneal",
+      "simulated-annealing meme integration preview (read-only)",
+      analysisAcl, handleAnneal});
 }
 #endif /* PHOENIX_INSTRUMENT_LEAN */
 
