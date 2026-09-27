@@ -805,8 +805,10 @@ public:
     json graphSnap = graph_.exportSnapshot();
     json words = json::object();
     for (auto &kv : kvm_.memeEntries()) {
-      if (kv.second.is_array())
-        words[kv.first] = std::move(kv.second);
+      /* Keys arrive with the KVM "meme:" prefix; strip it so lookups by
+         bare meme id hit. */
+      if (kv.second.is_array() && kv.first.rfind("meme:", 0) == 0)
+        words[kv.first.substr(5)] = std::move(kv.second);
     }
     return json{{"graph", std::move(graphSnap)}, {"words", std::move(words)}};
   }
