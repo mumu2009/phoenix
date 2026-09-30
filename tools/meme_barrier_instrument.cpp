@@ -5,6 +5,7 @@
 #include "addons/ThePlugInForSecurity/security_core.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -217,6 +218,7 @@ int main(int argc, char **argv) {
   std::string memeId;
   std::string poolMode;
   std::string targetsFile;
+  std::string memesFile;
   int maxUnits = 256;
   int takeN = 3;
   int skipUnits = 0;
@@ -248,6 +250,8 @@ int main(int argc, char **argv) {
       requireExclusive = true;
     else if (a == "--targets" && i + 1 < argc)
       targetsFile = argv[++i];
+    else if (a == "--memes-file" && i + 1 < argc)
+      memesFile = argv[++i];
     else if (a == "--quantile" && i + 1 < argc)
       defenseQuantile = std::atof(argv[++i]);
     else if (a == "--quantiles" && i + 1 < argc)
@@ -307,6 +311,25 @@ int main(int argc, char **argv) {
       ss << in.rdbuf();
       rawCorpus = ss.str();
     }
+    if (skipUnits > 0 && !rawCorpus.empty()) {
+      /* 片区间化（2026-09-30 性能）：screen/compose 的载体搜索只扫本片
+         [skip, skip+units) 而非全语料。模因由该片 ingest 而来，最佳载
+         体几乎必然在片内；全库扫描是 O(pool x 全库) 的浪费（dialogue
+         片实测 screen 筛选 >20 分钟）。ingest 行为不变（上方建图分支
+         内部本就 cap maxUnits）。 */
+      const auto units = phoenix::memetic::splitCorpusUnits(rawCorpus);
+      std::string sliced;
+      const size_t end =
+          std::min(units.size(),
+                   static_cast<size_t>(skipUnits) +
+                       static_cast<size_t>(std::max(1, maxUnits)));
+      for (size_t i = static_cast<size_t>(skipUnits); i < end; ++i) {
+        sliced += units[i];
+        sliced += "\n\n";
+      }
+      if (!sliced.empty())
+        rawCorpus = std::move(sliced);
+    }
   }
 
   if (cmd == "detect") {
@@ -327,14 +350,8 @@ int main(int argc, char **argv) {
       std::cerr << "compose needs --corpus\n";
       return 2;
     }
-    std::ifstream in(corpus, std::ios::binary);
-    if (!in) {
-      std::cerr << "cannot read corpus\n";
-      return 2;
-    }
-    std::ostringstream raw;
-    raw << in.rdbuf();
-    const auto rag = phoenix::memetic::composeCarrierRag(store, memeId, raw.str(),
+    /* 用 main 的 rawCorpus（--skip>0 时已片区间化），不再自读全文 */
+    const auto rag = phoenix::memetic::composeCarrierRag(store, memeId, rawCorpus,
                                                          maxUnits, 1, requireExclusive);
     const auto det = detectMemeInText(store, rag.text, memeId, {});
     const TextStats carrierStats = textStatsOf(rag.text);
@@ -369,6 +386,94 @@ int main(int argc, char **argv) {
     jsonEscape(rag.text);
     std::cout << "\"}\n";
     return rag.text.empty() ? 4 : 0;
+  }
+
+  /* compose-batch：一次进程对整片候选批量 compose（2026-09-30）。
+     倒排缓存同进程生效：N 个模因 = 1 次建索引 + N 次命中查询，
+     对比逐次 CLI（每次冷启动全扫）提速约 N 倍。
+     输入 --memes-file：每行一个 meme id。输出：
+     {"results": {"<id>": {<compose 同 schema>, "composeExclusive": bool}}} */
+  if (cmd == "compose-batch") {
+    if (memesFile.empty()) {
+      std::cerr << "compose-batch needs --memes-file\n";
+      return 2;
+    }
+    if (corpus.empty()) {
+      std::cerr << "compose-batch needs --corpus\n";
+      return 2;
+    }
+    std::ifstream min(memesFile);
+    if (!min) {
+      std::cerr << "cannot read memes-file\n";
+      return 2;
+    }
+    std::vector<std::string> ids;
+    std::string line;
+    while (std::getline(min, line)) {
+      const auto b = line.find_first_not_of(" \t\r\n");
+      if (b == std::string::npos)
+        continue;
+      const auto e = line.find_last_not_of(" \t\r\n");
+      ids.push_back(line.substr(b, e - b + 1));
+    }
+    std::cout << "{\"results\": {\n";
+    bool first = true;
+    for (const auto &mid : ids) {
+      auto rag = phoenix::memetic::composeCarrierRag(store, mid, rawCorpus,
+                                                     maxUnits, 1, true);
+      bool excl = true;
+      if (rag.text.empty()) {
+        rag = phoenix::memetic::composeCarrierRag(store, mid, rawCorpus,
+                                                  maxUnits, 1, false);
+        excl = false;
+      }
+      if (rag.text.empty())
+        continue; /* 无载体：不出现在 results（调用方视为 no-carrier） */
+      const auto det = detectMemeInText(store, rag.text, mid, {});
+      const TextStats carrierStats = textStatsOf(rag.text);
+      const auto typSet = phoenix::memetic::mappingTypicalAlpha(
+          store.weightsOfMeme(mid));
+      const int typicalNeed = static_cast<int>(typSet.size());
+      const double redundancy = std::min(typicalNeed, 3) / 3.0;
+      const double entropyNorm = std::min(1.0, carrierStats.entropy / 8.0);
+      if (!first)
+        std::cout << ",\n";
+      first = false;
+      std::cout << "  \"";
+      jsonEscape(mid);
+      std::cout << "\": {\"id\": \"";
+      jsonEscape(mid);
+      std::cout << "\", \"score\": " << rag.score
+                << ", \"wordHit\": " << rag.wordHit
+                << ", \"units\": " << rag.unitIndex.size()
+                << ", \"method\": \"";
+      jsonEscape(rag.method);
+      std::cout << "\", \"bag\": " << rag.bagCos
+                << ", \"semantic\": " << rag.semanticCos
+                << ", \"order\": " << rag.orderLift
+                << ", \"exclusivity\": " << rag.exclusivity
+                << ", \"targetRank\": " << rag.targetRank
+                << ", \"otherPresent\": " << rag.otherPresent
+                << ", \"typicalCover\": " << rag.typicalCover
+                << ", \"typicalNeed\": " << typicalNeed
+                << ", \"carrierEntropy\": " << carrierStats.entropy
+                << ", \"carrierTop1Frac\": " << carrierStats.top1Frac
+                << ", \"carrierMaxRun\": " << carrierStats.maxRun
+                << ", \"carrierCollapsed\": "
+                << (carrierStats.collapsed ? "true" : "false")
+                << ", \"fieldScore\": "
+                << redundancy * entropyNorm * rag.typicalCover
+                << ", \"sourceN\": " << rag.sources.size()
+                << ", \"present\": " << (det.present ? "true" : "false")
+                << ", \"activation\": " << det.memeScore
+                << ", \"lift\": " << det.lift << ", \"rank\": " << det.rank
+                << ", \"composeExclusive\": " << (excl ? "true" : "false")
+                << ", \"text\": \"";
+      jsonEscape(rag.text);
+      std::cout << "\"}";
+    }
+    std::cout << "\n}}\n";
+    return 0;
   }
 
   if (cmd == "wipe-ingest") {
@@ -659,8 +764,14 @@ int main(int argc, char **argv) {
   }
 #endif /* PHOENIX_INSTRUMENT_LEAN */
 
+  fprintf(stderr, "[screen-profile] store loaded, nodes=%d\n",
+          (int)store.nodeCount());
+  const auto tProf0 = std::chrono::steady_clock::now();
   const auto g = graphFromStore(store);
   const auto report = analyzeGraph(g);
+  fprintf(stderr, "[screen-profile] analyzeGraph %.1fs\n",
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        tProf0).count());
   if (!report.ok) {
     std::cerr << "analyzeGraph failed " << report.error << "\n";
     return 3;
@@ -792,11 +903,17 @@ int main(int argc, char **argv) {
   /* Prefer memes that already hold an exclusive carrier sentence in the
      corpus (target rank-0 or >= half of present-meme mass). Fall back to
      significance poles only when no exclusive meme exists. Cache the probe
-     carriers: their entropy and typical-cover feed the field score. */
+     carriers: their entropy and typical-cover feed the field score.
+
+     性能（2026-09-30）：composeCarrierRag 每次调用扫整个 rawCorpus，
+     对全 eligible 池（数千模因 × 数百 MB 语料）是 O(pool x corpus)。
+     --pool eligible 模式下 exclusive 列表根本不被使用，fieldScore 也
+     只查最终选中行——故 eligible 模式只对选中行 compose（O(take)），
+     默认模式保持全池扫描（需要 exclusive 全集）。行为等价。 */
   std::vector<const phoenix::secamp::NodeInfluence *> exclusive;
   std::unordered_map<std::string, double> carrierEntropyOf;
   std::unordered_map<std::string, double> typicalCoverOf;
-  for (const auto *n : eligible) {
+  auto probeCarrier = [&](const phoenix::secamp::NodeInfluence *n) {
     auto rag = phoenix::memetic::composeCarrierRag(store, n->id, rawCorpus,
                                                    maxUnits, 1, true);
     if (rag.text.empty()) {
@@ -809,17 +926,26 @@ int main(int argc, char **argv) {
     if (!rag.text.empty()) {
       carrierEntropyOf[n->id] = textStatsOf(rag.text).entropy;
       typicalCoverOf[n->id] = rag.typicalCover;
-      if (rag.targetRank == 0 || rag.exclusivity >= 0.5)
-        exclusive.push_back(n);
+      return rag.targetRank == 0 || rag.exclusivity >= 0.5;
     }
-  }
+    return false;
+  };
   /* --pool eligible screens the whole typical-set-filtered pool (the
      exclusive pool is small and may already be exhausted by earlier
      batches); default keeps the exclusive preference. */
+  if (poolMode != "eligible") {
+    for (const auto *n : eligible) {
+      if (probeCarrier(n))
+        exclusive.push_back(n);
+    }
+  }
   const auto &pool = (poolMode == "eligible")
                          ? eligible
                          : (exclusive.empty() ? eligible : exclusive);
   const int take = std::min(takeN, static_cast<int>(pool.size()) / 2);
+  /* eligible 模式完全不 compose（2026-09-30）：carrierEntropy/
+     typicalCover/fieldScore 由 exporter 的 compose-batch 实测补填。
+     screen 只留图内快字段，筛选从 O(pool x 语料) 降为 O(图)。 */
   for (int i = 0; i < take; ++i)
     add(pool[static_cast<size_t>(i)], "most");
   for (int i = 0; i < take; ++i)
@@ -842,6 +968,8 @@ int main(int argc, char **argv) {
     row.fieldScore = redundancy * entropyNorm * row.typicalCover;
   }
 
+  fprintf(stderr, "[screen-profile] rows built=%zu, start output\n",
+          rows.size());
   std::cout << "{\n  \"method\": \"analyzeGraph resolvent energy; phrase memes; content-typical\",\n"
             << "  \"source\": \"addons/ThePlugInForSecurity/readme.md 统计+识别\",\n"
             << "  \"ingestedUnits\": " << ingested

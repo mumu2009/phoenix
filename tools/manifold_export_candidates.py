@@ -55,17 +55,22 @@ def load_skip_ids(files):
     return ids
 
 
-def run_compose(snap, corpus, units, meme_id, require_exclusive):
-    cmd = [str(EXE), "compose", "--snap", str(snap), "--corpus",
-           str(corpus), "--units", str(units), "--meme", meme_id]
-    if require_exclusive:
-        cmd.append("--require-exclusive")
+def run_compose_batch(snap, corpus, units, ids_file, skip=0):
+    """一次进程批量 compose（instrument compose-batch，倒排缓存同进程
+    生效：N 个模因 = 1 次建索引 + N 次命中查询）。
+    返回 {id: compose 结果}；无载体的 id 不在结果里。"""
+    cmd = [str(EXE), "compose-batch", "--snap", str(snap), "--corpus",
+           str(corpus), "--units", str(units), "--memes-file",
+           str(ids_file)]
+    if skip > 0:
+        # 片内载体搜索：instrument 2026-09-30 起在 --skip>0 时把
+        # rawCorpus 切到 [skip, skip+units)
+        cmd += ["--skip", str(skip)]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
-    if p.returncode == 4:
-        return None, 4  # 无（独占）载体
     if p.returncode != 0:
-        raise RuntimeError(f"compose exit {p.returncode}: {p.stdout} {p.stderr}")
-    return json.loads(p.stdout), 0
+        raise RuntimeError(f"compose-batch exit {p.returncode}: "
+                           f"{p.stdout[:500]} {p.stderr[:500]}")
+    return json.loads(p.stdout).get("results", {})
 
 
 def run_detect(snap, meme_id, text):
@@ -91,6 +96,9 @@ def main():
     ap.add_argument("--corpus", default=str(ROOT / "robots" /
                                             "wikitext-103-all.txt"))
     ap.add_argument("--units", type=int, default=256)
+    ap.add_argument("--skip", type=int, default=0,
+                    help="该片在 corpus 中的起始 unit（透传 compose，"
+                         "启用片内载体搜索；0=全语料）")
     ap.add_argument("--take", type=int, default=0, help="最多导出 N 个")
     ap.add_argument("--only", default="", help="只导出这些 id（逗号分隔）")
     ap.add_argument("--skip-file", action="append", default=[])
@@ -119,64 +127,80 @@ def main():
             sys.exit("missing corpus")
     screen = json.loads(screen_p.read_text(encoding="utf-8"))
     memes = screen.get("memes", [])
-    if args.farm_filter:
-        memes = [m for m in memes
-                 if m.get("typicalNeed") == 2
-                 and (m.get("carrierEntropy") or 0) > 0
-                 and (m.get("typicalCover") or 0) > 0]
-        # 组合分排序（替代旧的 carrierEntropy 降序——审计证明该方向反了）。
-        # combo = z(wordCount) - z(carrierEntropy)：两字段无共线，
-        # 十分位存活 0.64->1.62 准单调，AUC(>=2臂强模因)=0.65。
-        def _z(vals):
-            n = len(vals)
-            if n == 0:
-                return []
-            mu = sum(vals) / n
-            var = sum((v - mu) ** 2 for v in vals) / n
-            sd = var ** 0.5
-            if sd < 1e-12:
-                return [0.0] * n
-            return [(v - mu) / sd for v in vals]
-        zw = _z([float(m.get("wordCount") or 0) for m in memes])
-        ze = _z([float(m.get("carrierEntropy") or 0) for m in memes])
-        for m, w, e in zip(memes, zw, ze):
-            m["comboScore"] = w - e
-        memes.sort(key=lambda m: -m["comboScore"])
     only = {s.strip() for s in args.only.split(",") if s.strip()}
     skip = load_skip_ids(args.skip_file)
 
-    out_memes, skipped = [], []
-    t0 = time.time()
-    n_seen = 0
+    # 1) 预过滤：typicalNeed==2（screen 字段，图内计算）。
+    #    carrierEntropy/typicalCover 由 compose-batch 实测后补判——
+    #    screen 阶段不再逐个 compose（2026-09-30：全池 compose 是
+    #    O(pool x 语料)，是 screen 慢的根源）。
+    if args.farm_filter:
+        memes = [m for m in memes if m.get("typicalNeed") == 2]
+    cand = []
     for m in memes:
         mid = m["id"]
         if only and mid not in only:
             continue
-        n_seen += 1
         if mid in skip:
-            skipped.append({"id": mid, "reason": "already-tested"})
+            skipped_pre = {"id": mid, "reason": "already-tested"}
+            cand.append((m, None, skipped_pre))
             continue
-        if args.take and len(out_memes) >= args.take:
-            break
-        comp, rc = run_compose(snap_p, corpus_p, args.units, mid, True)
-        excl = True
-        if rc == 4:
-            comp, rc = run_compose(snap_p, corpus_p, args.units, mid, False)
-            excl = False
-        if rc == 4 or comp is None:
+        cand.append((m, None, None))
+
+    # 2) compose-batch 一次进程（倒排缓存：1 次建索引 + N 次命中）
+    t0 = time.time()
+    todo = [m for m, _, sk in cand if sk is None]
+    out_p = Path(args.out)
+    ids_file = out_p.with_suffix(".ids.txt")
+    ids_file.write_text("\n".join(m["id"] for m in todo), encoding="utf-8")
+    comp_map = run_compose_batch(snap_p, corpus_p, args.units, ids_file,
+                                 args.skip) if todo else {}
+    print(f"compose-batch: {len(comp_map)}/{len(todo)} carriers "
+          f"({time.time()-t0:.0f}s)")
+
+    # 3) 过滤：no-carrier / not present / farm: entropy>0 & cover>0
+    skipped = [sk for _, _, sk in cand if sk]
+    pool = []
+    for m, _, sk in cand:
+        if sk is not None:
+            continue
+        mid = m["id"]
+        comp = comp_map.get(mid)
+        if comp is None:
             skipped.append({"id": mid, "reason": "no-carrier"})
-            print(f"  skip {mid}: no corpus carrier")
             continue
-        text = comp.get("text", "")
-        det = run_detect(snap_p, mid, text)
-        el = time.time() - t0
-        print(f"  [{len(out_memes)+1}] {mid} present={det['present']} "
-              f"lift={det['lift']:.2f} excl={excl} chars={len(text)} "
-              f"({el:.0f}s)")
-        if not det["present"]:
+        if not comp.get("present"):
             skipped.append({"id": mid, "reason": "compose-not-present"})
             continue
-        comp["composeExclusive"] = excl
+        if args.farm_filter and not ((comp.get("carrierEntropy") or 0) > 0
+                                     and (comp.get("typicalCover") or 0) > 0):
+            skipped.append({"id": mid, "reason": "farm-filter-post"})
+            continue
+        pool.append((m, comp))
+
+    # 4) 组合分排序（combo = z(wordCount) - z(carrierEntropy)，实测熵。
+    #    两字段无共线；十分位存活 0.64->1.62 准单调，AUC(>=2臂)=0.65。
+    #    替代旧的 carrierEntropy 降序——审计证明该方向反了。）
+    if args.farm_filter and pool:
+        def _z(vals):
+            n = len(vals)
+            mu = sum(vals) / n
+            sd = (sum((v - mu) ** 2 for v in vals) / n) ** 0.5
+            return [(v - mu) / sd if sd > 1e-12 else 0.0 for v in vals]
+        zw = _z([float(m.get("wordCount") or 0) for m, _ in pool])
+        ze = _z([float(c.get("carrierEntropy") or 0) for _, c in pool])
+        for (m, c), w, e in zip(pool, zw, ze):
+            m["comboScore"] = w - e
+        pool.sort(key=lambda mc: -mc[0]["comboScore"])
+
+    # 5) take + 组装
+    out_memes = []
+    for m, comp in pool[:args.take if args.take else None]:
+        mid = m["id"]
+        text = comp.get("text", "")
+        excl = bool(comp.get("composeExclusive"))
+        print(f"  [{len(out_memes)+1}] {mid} present=True "
+              f"lift={comp.get('lift', 0):.2f} excl={excl} chars={len(text)}")
         out_memes.append({
             "id": mid, "pole": m.get("pole"),
             "rankMost": m.get("rankMost"), "rankLeast": m.get("rankLeast"),
@@ -185,12 +209,13 @@ def main():
             # screen 全字段保留（审计用，避免回 join screen 文件）
             "contentN": m.get("contentN"),
             "contentSpec": m.get("contentSpec"),
-            "carrierEntropy": m.get("carrierEntropy"),
-            "fieldScore": m.get("fieldScore"),
+            # entropy/cover/fieldScore 用 compose 实测值（screen 已不填）
+            "carrierEntropy": comp.get("carrierEntropy"),
+            "fieldScore": comp.get("fieldScore"),
             "selfPeak": m.get("selfPeak"),
             "selfRank": m.get("selfRank"),
             "typicalNeed": m.get("typicalNeed"),
-            "typicalCover": m.get("typicalCover"),
+            "typicalCover": comp.get("typicalCover"),
             "comboScore": m.get("comboScore"),
             "seedBag": m.get("carrier"),
             "seedRag": text,
