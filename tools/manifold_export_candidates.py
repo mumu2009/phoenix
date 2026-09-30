@@ -70,7 +70,10 @@ def run_compose_batch(snap, corpus, units, ids_file, skip=0):
     if p.returncode != 0:
         raise RuntimeError(f"compose-batch exit {p.returncode}: "
                            f"{p.stdout[:500]} {p.stderr[:500]}")
-    return json.loads(p.stdout).get("results", {})
+    # strict=False：instrument jsonEscape 未转义 \x00-\x1f 控制字符
+    # （语料里的 \x0c 等进入 compose text），宽松解析入口容错；
+    # 本脚本写出的 candidates json 由 json.dump 正规转义，下游干净。
+    return json.loads(p.stdout, strict=False).get("results", {})
 
 
 def run_detect(snap, meme_id, text):
@@ -125,7 +128,7 @@ def main():
             corpus_p = alt
         else:
             sys.exit("missing corpus")
-    screen = json.loads(screen_p.read_text(encoding="utf-8"))
+    screen = json.loads(screen_p.read_text(encoding="utf-8"), strict=False)
     memes = screen.get("memes", [])
     only = {s.strip() for s in args.only.split(",") if s.strip()}
     skip = load_skip_ids(args.skip_file)

@@ -97,15 +97,25 @@ static std::string fullCarrier(const InMemoryStore &store,
 }
 
 static void jsonEscape(const std::string &s) {
+  /* 2026-10-01：补转义 \x00-\x1f 控制字符（\uXXXX）。语料里的 \x0c/\x0b
+     等进入 compose text 后曾使下游 Python json.loads 报
+     "Invalid control character"（dialogue_1024 片）。 */
   for (unsigned char c : s) {
-    if (c == '"' || c == '\\')
-      std::cout << '\\';
-    if (c == '\n')
+    if (c == '"' || c == '\\') {
+      std::cout << '\\' << static_cast<char>(c);
+    } else if (c == '\n') {
       std::cout << "\\n";
-    else if (c == '\r')
+    } else if (c == '\r') {
       std::cout << "\\r";
-    else
+    } else if (c == '\t') {
+      std::cout << "\\t";
+    } else if (c < 0x20) {
+      char buf[8];
+      snprintf(buf, sizeof(buf), "\\u%04x", c);
+      std::cout << buf;
+    } else {
       std::cout << static_cast<char>(c);
+    }
   }
 }
 
