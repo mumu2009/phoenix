@@ -99,8 +99,9 @@ def main():
                          "指到 meme_barrier_instrument 精益版）")
     ap.add_argument("--farm-filter", action="store_true",
                     help="应用农场 build_batch 同款过滤：typicalNeed==2 且 "
-                         "carrierEntropy>0 且 typicalCover>0，按 "
-                         "carrierEntropy 降序")
+                         "carrierEntropy>0 且 typicalCover>0，按组合分 "
+                         "z(wordCount)-z(carrierEntropy) 降序（2026-09 远端 "
+                         "审计：熵降序方向用反，词多熵低者存活约 2.5x）")
     args = ap.parse_args()
 
     EXE = Path(args.exe)
@@ -123,7 +124,24 @@ def main():
                  if m.get("typicalNeed") == 2
                  and (m.get("carrierEntropy") or 0) > 0
                  and (m.get("typicalCover") or 0) > 0]
-        memes.sort(key=lambda m: -(m.get("carrierEntropy") or 0))
+        # 组合分排序（替代旧的 carrierEntropy 降序——审计证明该方向反了）。
+        # combo = z(wordCount) - z(carrierEntropy)：两字段无共线，
+        # 十分位存活 0.64->1.62 准单调，AUC(>=2臂强模因)=0.65。
+        def _z(vals):
+            n = len(vals)
+            if n == 0:
+                return []
+            mu = sum(vals) / n
+            var = sum((v - mu) ** 2 for v in vals) / n
+            sd = var ** 0.5
+            if sd < 1e-12:
+                return [0.0] * n
+            return [(v - mu) / sd for v in vals]
+        zw = _z([float(m.get("wordCount") or 0) for m in memes])
+        ze = _z([float(m.get("carrierEntropy") or 0) for m in memes])
+        for m, w, e in zip(memes, zw, ze):
+            m["comboScore"] = w - e
+        memes.sort(key=lambda m: -m["comboScore"])
     only = {s.strip() for s in args.only.split(",") if s.strip()}
     skip = load_skip_ids(args.skip_file)
 
@@ -164,6 +182,16 @@ def main():
             "rankMost": m.get("rankMost"), "rankLeast": m.get("rankLeast"),
             "significance": m.get("significance"),
             "wordCount": m.get("wordCount"),
+            # screen 全字段保留（审计用，避免回 join screen 文件）
+            "contentN": m.get("contentN"),
+            "contentSpec": m.get("contentSpec"),
+            "carrierEntropy": m.get("carrierEntropy"),
+            "fieldScore": m.get("fieldScore"),
+            "selfPeak": m.get("selfPeak"),
+            "selfRank": m.get("selfRank"),
+            "typicalNeed": m.get("typicalNeed"),
+            "typicalCover": m.get("typicalCover"),
+            "comboScore": m.get("comboScore"),
             "seedBag": m.get("carrier"),
             "seedRag": text,
             "composeExclusive": excl,

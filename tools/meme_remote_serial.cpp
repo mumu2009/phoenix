@@ -5,7 +5,8 @@
    - 载体在本地预合成（candidates.json 的 seedRag 字段），远端不需要语料库
    - 每组 r1..R：detectIn(冻结图) -> llama /completion -> continuation 截断
      -> exam/echo 检测 -> dirty 停 -> detect -> wipe-ingest（全新 live 图，
-     冻结图作参照）-> collapse 拦截 -> judge(r>=judgeAfter) alphaSame 停
+     冻结图作参照）-> collapse 拦截 -> judge(r>=judgeAfter) 放宽口径
+     (alphaSame 或 typicalHit>=need/2)，累计 2 次失败才停
      -> hopeless-00 早停 -> current = recomposeText（或 fallback 用 output）
    - 输出 schema 与 ps1 产物一致，manifold_batch_classify.py 直接分类
    - jsonl journal 断点续跑（修复了 ps1 resume 在 dirty/collapse/hopeless
@@ -773,6 +774,7 @@ int main(int argc, char **argv) {
     row["wipeEmptyRounds"] = 0;
     row["recomposePresentRounds"] = 0;
     row["alphaSameRounds"] = 0;
+    row["judgeMiss"] = 0; /* judge 降噪：累计 judge 失败次数，>=2 才终止 */
 
     std::string current = m.value("seedRag", std::string());
     bool rowPushed = false;
@@ -816,13 +818,25 @@ int main(int argc, char **argv) {
                   << prev.value("detect", json::object()).value("present",
                                                                 false)
                   << "\n";
-        /* 终止记录：dirty / collapse 拦截 / hopeless00 / judge 失败 */
-        const bool judgeFail =
-            prev.value("judge", false) &&
-            !(prev.contains("wipe") && prev["wipe"].is_object() &&
-              prev["wipe"].value("alphaSame", false));
+        /* judgeMiss 重建（2026-09 审计降噪口径：通过 = alphaSame 或
+           typicalHit 达 typicalNeed 一半；累计 2 次失败才终止）。
+           旧文件无 judgeStop 字段的 judge 失败轮在此按新口径重算：
+           若按新口径算 pass 则不计 miss——旧被单轮冤杀的组 resume 后
+           自然复活续跑。 */
+        if (prev.value("judge", false)) {
+          const json &pw = prev.contains("wipe") && prev["wipe"].is_object()
+                               ? prev["wipe"]
+                               : json::object();
+          const bool pPass =
+              pw.value("alphaSame", false) ||
+              pw.value("typicalHit", 0) * 2 >= pw.value("typicalNeed", 1);
+          if (!pPass)
+            row["judgeMiss"] = row["judgeMiss"].get<int>() + 1;
+        }
+        /* 终止记录：dirty / collapse 拦截 / hopeless00 / judgeStop */
         if (prev.value("dirty", false) || prev.value("intercepted", false) ||
-            prev.value("hopeless00", false) || judgeFail) {
+            prev.value("hopeless00", false) ||
+            prev.value("judgeStop", false)) {
           pushRow();
           break;
         }
@@ -989,6 +1003,27 @@ int main(int argc, char **argv) {
       if (hopeless)
         rec["hopeless00"] = true;
 
+      /* judge 降噪（2026-09 远端审计：单轮 alphaSame 一票否决噪声过
+         大——同模型 test-retest phi 仅 0.238，逐模因判定噪声主导）。
+         1) 通过口径放宽：alphaSame 或 typicalHit 达到 typicalNeed 一半
+            （大词袋 an 组合 typical 集难全重现，比例命中即算活）；
+         2) 累计 2 次 judge 失败才终止（judgeStop 显式入档，resume 按
+            此标记/新口径重建）。 */
+      const bool judgePass =
+          wipe["alphaSame"].get<bool>() ||
+          wipe["typicalHit"].get<int>() * 2 >= wipe["typicalNeed"].get<int>();
+      bool judgeStop = false;
+      if (judge) {
+        rec["judgePass"] = judgePass;
+        if (!judgePass) {
+          row["judgeMiss"] = row["judgeMiss"].get<int>() + 1;
+          if (row["judgeMiss"].get<int>() >= 2) {
+            judgeStop = true;
+            rec["judgeStop"] = true;
+          }
+        }
+      }
+
       row["rounds"].push_back(rec);
       appendJournal(journalFile, rec);
       std::cout << "  round " << r
@@ -1006,10 +1041,10 @@ int main(int argc, char **argv) {
                 << " decayWarn=" << wipe["decayWarn"].get<bool>()
                 << " nextChars=" << next.size() << "\n";
 
-      if (judge && !wipe["alphaSame"].get<bool>()) {
+      if (judgeStop) {
         std::cout << "  stop " << id
-                  << ": judged - wiped GNN did not grow the same (word, α) "
-                     "typical set\n";
+                  << ": judged twice - wiped GNN did not regrow the typical "
+                     "set (miss " << row["judgeMiss"].get<int>() << ")\n";
         pushRow();
         saveJsonAtomic(outFile, doc);
         break;
