@@ -178,19 +178,24 @@ def main():
             continue
         pool.append((m, comp))
 
-    # 4) 组合分排序（combo = z(wordCount) - z(carrierEntropy)，实测熵。
-    #    两字段无共线；十分位存活 0.64->1.62 准单调，AUC(>=2臂)=0.65。
-    #    替代旧的 carrierEntropy 降序——审计证明该方向反了。）
+    # 4) 组合分排序 combo_v2 = 0.835*z(log1p(dfMax)) - 0.255*z(carrierEntropy)
+    #    （2026-09-30 logistic 学习权重，1922 模因 5-fold CV AUC 0.704，
+    #    校准极佳 D1 预测 7.31% 实际 7.29%。机理：枢纽搭接是主效应(OR=2.53)，
+    #    载体低熵次之；wordCount 控制 dfMax 后系数转负——词数效应完全是
+    #    dfMax 的中介，无独立贡献；交互项/GBDT 均无增益，线性即上限。
+    #    旧 screen 无 dfMax 时退化为熵单负向。）
     if args.farm_filter and pool:
         def _z(vals):
             n = len(vals)
             mu = sum(vals) / n
             sd = (sum((v - mu) ** 2 for v in vals) / n) ** 0.5
             return [(v - mu) / sd if sd > 1e-12 else 0.0 for v in vals]
-        zw = _z([float(m.get("wordCount") or 0) for m, _ in pool])
+        import math as _math
         ze = _z([float(c.get("carrierEntropy") or 0) for _, c in pool])
-        for (m, c), w, e in zip(pool, zw, ze):
-            m["comboScore"] = w - e
+        has_df = any(m.get("dfMax") for m, _ in pool)
+        zd = _z([_math.log1p(float(m.get("dfMax") or 0)) for m, _ in pool]) if has_df else [0.0] * len(pool)
+        for (m, c), e, d in zip(pool, ze, zd):
+            m["comboScore"] = 0.835 * d - 0.255 * e
         pool.sort(key=lambda mc: -mc[0]["comboScore"])
 
     # 5) take + 组装
@@ -209,6 +214,9 @@ def main():
             # screen 全字段保留（审计用，避免回 join screen 文件）
             "contentN": m.get("contentN"),
             "contentSpec": m.get("contentSpec"),
+            "dfMax": m.get("dfMax"),
+            "deg": m.get("deg"),
+            "top1Frac": m.get("top1Frac"),
             # entropy/cover/fieldScore 用 compose 实测值（screen 已不填）
             "carrierEntropy": comp.get("carrierEntropy"),
             "fieldScore": comp.get("fieldScore"),

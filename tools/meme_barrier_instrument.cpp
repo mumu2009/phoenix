@@ -789,6 +789,12 @@ int main(int argc, char **argv) {
     double carrierEntropy{0.0};
     double typicalCover{0.0};
     double fieldScore{0.0};
+    /* 图连接特征（2026-09-30 综合约束体系）：dfMax=词袋最大 df（枢纽搭接，
+       单特征 AUC 0.661 最强）；deg=模因间边数；top1Frac=最大 α 权重占比。
+       combo_v2 = z(wordCount)-z(carrierEntropy)+z(log1p(dfMax)) AUC 0.693。 */
+    int dfMax{0};
+    int deg{0};
+    double top1Frac{0.0};
     std::vector<std::string> words;
     std::string carrier;
   };
@@ -898,6 +904,25 @@ int main(int argc, char **argv) {
     row.contentSpec = sit == specOf.end() ? 0.0 : sit->second;
     auto nit = contentNOf.find(n->id);
     row.contentN = nit == contentNOf.end() ? 0 : nit->second;
+    /* 图连接特征：dfMax / deg / top1Frac（store 现成接口，O(词数)） */
+    row.deg = static_cast<int>(store.neighborsOf(n->id).size());
+    {
+      const auto walpha = store.weightsOfMeme(n->id);
+      double sum = 0.0, mx = 0.0;
+      for (const auto &wa : walpha) {
+        sum += wa.second;
+        if (wa.second > mx)
+          mx = wa.second;
+      }
+      row.top1Frac = sum > 0.0 ? mx / sum : 0.0;
+      int dfm = 0;
+      for (const auto &w : row.words) {
+        const int d = static_cast<int>(store.memesOfWord(w).size());
+        if (d > dfm)
+          dfm = d;
+      }
+      row.dfMax = dfm;
+    }
     rows.push_back(std::move(row));
   };
   /* Prefer memes that already hold an exclusive carrier sentence in the
@@ -995,6 +1020,9 @@ int main(int argc, char **argv) {
               << ", \"typicalCover\": " << rows[i].typicalCover
               << ", \"fieldScore\": " << rows[i].fieldScore
               << ", \"wordCount\": " << rows[i].words.size()
+              << ", \"dfMax\": " << rows[i].dfMax
+              << ", \"deg\": " << rows[i].deg
+              << ", \"top1Frac\": " << rows[i].top1Frac
               << ", \"selfPresent\": " << (self.present ? "true" : "false")
               << ", \"selfActivation\": " << self.memeScore
               << ", \"selfPeak\": " << self.peakScore
