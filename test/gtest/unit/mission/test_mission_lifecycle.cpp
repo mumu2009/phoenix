@@ -353,6 +353,8 @@ TEST(MissionPressureTest, TotalPainIntegralMatchesTheorem) {
   const float maxPain = 1.0f;
   const uint64_t startMs = 0;
   Mission m = makeRunningMission(startMs, gain, maxPain);
+  m.pressureFloor = 0.0f; /* pin the integral theorem: floor is an independent
+                             feature (v8.5.1), excluded here to test gain math */
 
   const double dt = 1e-3;  // 1ms step trapezoid (avoids ms truncation at t<1ms)
   auto integrate = [&](double T) {
@@ -731,12 +733,17 @@ TEST_F(AutonomyMissionTest, ReportOutcomeFalseKeepsMissionFailed) {
     auto r = mgr_->reportMissionOutcome(json{{"goalAchieved", false}});
     EXPECT_TRUE(r.value("ok", false)) << r.dump();
     /* Prefer missionStatus() — reportMissionOutcome returns stats() directly
-       under result, while missionStatus nests stats one level deeper. */
+       under result, while missionStatus nests stats one level deeper.
+       v8.x concurrent missions: the legacy result.stats view follows the
+       ACTIVE default mission and clears to state=0 after a terminal report
+       (retargetDefaultMissionLocked); the result.missions array retains every
+       lifecycle including terminal ones — assert against it. */
     auto st = mgr_->missionStatus();
-    ASSERT_TRUE(st["result"]["stats"].is_object()) << st.dump();
-    ASSERT_TRUE(st["result"]["stats"]["mission"].is_object());
-    EXPECT_EQ(st["result"]["stats"]["mission"].value("state", 0), 3); /* Failed */
-    EXPECT_EQ(st["result"]["stats"]["children"].size(), 1u);
+    ASSERT_TRUE(st["result"]["missions"].is_array()) << st.dump();
+    ASSERT_EQ(st["result"]["missions"].size(), 1u) << st.dump();
+    const auto &mstats = st["result"]["missions"][0]["stats"];
+    EXPECT_EQ(mstats["mission"].value("state", 0), 3); /* Failed */
+    EXPECT_EQ(mstats["children"].size(), 1u);
 }
 
 TEST_F(AutonomyMissionTest, CompleteMissionStopsPainInjection) {

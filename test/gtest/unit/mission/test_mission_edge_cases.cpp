@@ -64,6 +64,8 @@ TEST(MissionPressureEdgeCases, ZeroGainKeepsPressureZero) {
   m.pressureMode = "linear";
   m.painGainPerSec = 0.0f;
   m.maxPain = 1.0f;
+  m.pressureFloor = 0.0f; /* v8.5.1 starvation floor is an independent feature;
+                             this test pins zero-gain math, so disable it */
   m.state = MissionState::Running;
   m.startMs = 0;
   for (uint64_t t = 0; t <= 5000; t += 1000) {
@@ -315,8 +317,14 @@ TEST_F(AutonomyMissionFixture, CompleteMissionTwiceIsIdempotent) {
   mgr_->reportMissionOutcome(json{{"goalAchieved", false}});  // must not revert
 
   auto status = mgr_->missionStatus();
-  EXPECT_EQ(status["result"]["stats"]["mission"].value("state", 0), static_cast<int>(MissionState::Completed));
-  EXPECT_EQ(status["result"]["stats"]["completions"].get<size_t>(), 1u);
+  /* v8.x concurrent missions: legacy result.stats follows the ACTIVE default
+     and clears after terminal report; assert against the missions array which
+     retains the terminal lifecycle. */
+  ASSERT_TRUE(status["result"]["missions"].is_array()) << status.dump();
+  ASSERT_EQ(status["result"]["missions"].size(), 1u) << status.dump();
+  const auto &mstats = status["result"]["missions"][0]["stats"];
+  EXPECT_EQ(mstats["mission"].value("state", 0), static_cast<int>(MissionState::Completed));
+  EXPECT_EQ(mstats["completions"].get<size_t>(), 1u);
 }
 
 TEST_F(AutonomyMissionFixture, MultipleSessionsDoNotInterfere) {

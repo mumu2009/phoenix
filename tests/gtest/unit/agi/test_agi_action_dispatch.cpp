@@ -100,7 +100,11 @@ TEST_F(AgiActionDispatchTest, IterateIncludesExecutionWhenPlannerPicksTool) {
     ASSERT_TRUE(cfg.value("ok", false));
 
     // Train the latent transition model: the goal one-hot (index 3) shifts z along dim 3.
-    nlohmann::json trans{{"z", nlohmann::json::array({0.0f, 0.0f, 0.0f, 1.0f})},
+    // v8.5.x per-scope isolation: the transition must land in the SAME scope the
+    // iterate below plans in (chat:agi_tool_test); a sessionless ingest would
+    // train the anonymous bucket and the plan would read an untrained model.
+    nlohmann::json trans{{"sessionId", "agi_tool_test"},
+                         {"z", nlohmann::json::array({0.0f, 0.0f, 0.0f, 1.0f})},
                          {"a", nlohmann::json::array({0.0f, 0.0f, 0.0f, 1.0f})},
                          {"zNext", nlohmann::json::array({0.0f, 0.0f, 0.0f, 2.0f})}};
     auto ingest = manager_->ingestAgiTransition(trans);

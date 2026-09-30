@@ -2076,7 +2076,19 @@ json CognitionAutonomyManager::configureAgi(const json &payload) {
 json CognitionAutonomyManager::agiPlan(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!agiEnabled_) return json{{"ok", false}, {"error", "agi disabled"}};
-    const auto scope = resolveAgiWriteScope(payload);
+    auto scope = resolveAgiWriteScope(payload);
+    /* Match iterate()'s binding rule: a bare agiPlan (no payload scope, no
+       thread-scope guard) must bind the current running mission instead of
+       falling through to the anonymous chat bucket — otherwise the plan reads
+       a different model than the one the mission has been training. */
+    if (scope.id == "anonymous" && missionEnabled_) {
+        for (const auto &kv : missions_) {
+            if (!kv.second.active())
+                continue;
+            scope = phoenix::memory::makeMissionScope(kv.first);
+            break;
+        }
+    }
     auto &scopeAgi = phoenix::memory::ScopedTrainableMemory::instance().agiFor(
         scope, agiController_);
     auto &hot = phoenix::memory::ScopedTrainableMemory::instance().hot(scope);

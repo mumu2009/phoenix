@@ -413,10 +413,17 @@ TEST(MemeticExistenceTest, DetectRejectsStopwordOnlyHubLighting) {
   const char *uniq[] = {"river", "bakery", "quarry",
                         "orchard", "harbor", "depot"};
   for (int i = 0; i < 6; ++i) {
+    /* Content word bound FIRST so it sits at position 1 in the ordered
+       tensor encoding, aligned with its position in the probe query
+       ("river marker survey").  Binding stops first pushes the content
+       word to position 4, where RoPE makes the REVERSED query (content
+       at position 3) closer than the forward one — orderLift < 1 for a
+       fully correct detection.  The stop-hub semantics under test are
+       unchanged. */
+    store.bind(uniq[i], ids[i]);
     store.bind("the", ids[i]);
     store.bind("of", ids[i]);
     store.bind("and", ids[i]);
-    store.bind(uniq[i], ids[i]);
   }
   ASSERT_EQ(store.nodeCount(), 6u);
   ASSERT_FALSE(phoenix::memetic::highDfPriorTokens(store).empty());
