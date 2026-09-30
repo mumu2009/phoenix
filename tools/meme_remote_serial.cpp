@@ -858,10 +858,15 @@ int main(int argc, char **argv) {
                   id.c_str(), r, attempt + 1, lastErr.c_str());
         }
       }
-      if (!genOk)
-        throw std::runtime_error("llama failed 3x at " + id + " round " +
-                                 std::to_string(r) + ": " + lastErr +
-                                 "; stop dirty serial");
+      if (!genOk) {
+        /* 重试耗尽（qwen 偶发持续空输出）：不再当中止切片的致命错误。
+           置空输出，走下方 isWhite -> dirty 行 -> break 的既有温柔路径：
+           该模因记一个 dirty 轮入档后结束，切片内其余模因继续。 */
+        fprintf(stderr,
+                "[giveup] %s round %d: %s; record dirty round, stop meme only\n",
+                id.c_str(), r, lastErr.c_str());
+        rawOut.clear();
+      }
       const std::string output = serialContinuation(rawOut);
       const bool exam = testExamDump(output);
       const bool echo = testEcho(current, output);
