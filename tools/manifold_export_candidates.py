@@ -104,6 +104,9 @@ def main():
                          "启用片内载体搜索；0=全语料）")
     ap.add_argument("--take", type=int, default=0, help="最多导出 N 个")
     ap.add_argument("--only", default="", help="只导出这些 id（逗号分隔）")
+    ap.add_argument("--only-file", default="",
+                    help="只导出文件里列出的 id（每行一个；id 太多超命令行"
+                         "长度时用，与 --only 并集生效）")
     ap.add_argument("--skip-file", action="append", default=[])
     ap.add_argument("--exe", default=str(EXE),
                     help="instrument 可执行文件路径（RDK X5 等精益构建时"
@@ -131,6 +134,12 @@ def main():
     screen = json.loads(screen_p.read_text(encoding="utf-8"), strict=False)
     memes = screen.get("memes", [])
     only = {s.strip() for s in args.only.split(",") if s.strip()}
+    if args.only_file:
+        for line in Path(args.only_file).read_text(
+                encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                only.add(line)
     skip = load_skip_ids(args.skip_file)
 
     # 1) 预过滤：typicalNeed==2（screen 字段，图内计算）。
