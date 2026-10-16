@@ -152,8 +152,9 @@ HTTP API（v8.0 起，人工监督控制台——"生命周期开始时设立问
 
 **每 tick 的协议**（任务 worker 的 deliberator，`111_class_gatewayserver.inc`）：
    双流，不把知识拼进因果末尾。**因果** = 约束钉 + `packContext` 近期全文
-   （滑动窗，预算对齐 `mission.ctxSize` × N-gram 合并因子；enc 后 2–3 个
-   token 行合成一个 unit，4096 slot ≈ 8k token 近期稿）。**RAG** = 作业全文 /
+   （滑动窗。把 2–3 个 token 行平均成一个 unit 的开关是
+   `main.inference.packPrompt`，默认 false；关闭时一个 token 占一个
+   slot。打开时预算才乘 N-gram 因子，4096 slot 大约装下 8k token）。**RAG** = 作业全文 /
    被滑出的摘要 / GNN / plan / 自检 / 工具反馈，残差强调，不占 sequence 位置。
    用户在 Mission 面板选择 `contextPack=summary|full_and_summary` 与
    `includeGnnSummary`。

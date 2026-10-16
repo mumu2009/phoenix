@@ -578,6 +578,8 @@ void applyGenerateInferenceOptions(json &payload, const std::string &host,
   if (options.contains("ngram_protect_last") &&
       options["ngram_protect_last"].is_number_integer())
     payload["ngram_protect_last"] = options["ngram_protect_last"].get<int>();
+  if (options.contains("pack_prompt") && options["pack_prompt"].is_boolean())
+    payload["pack_prompt"] = options["pack_prompt"].get<bool>();
   if (options.contains("rag_mix_cap") && options["rag_mix_cap"].is_number_integer())
     payload["rag_mix_cap"] = options["rag_mix_cap"].get<int>();
   if (options.contains("num_predict") && options["num_predict"].is_number_integer())
@@ -960,12 +962,16 @@ json hiddenStatePipeline(const std::string &host, int port,
                 inferenceOptions["ctxTokenBudget"].is_number_integer()
             ? std::max(512, inferenceOptions["ctxTokenBudget"].get<int>())
             : 3584;
-    const int ngramFit =
+    const bool packOn =
         inferenceOptions.is_object() &&
-                inferenceOptions.contains("ngram_merge") &&
+        inferenceOptions.contains("pack_prompt") &&
+        inferenceOptions["pack_prompt"].is_boolean() &&
+        inferenceOptions["pack_prompt"].get<bool>();
+    const int ngramFit =
+        packOn && inferenceOptions.contains("ngram_merge") &&
                 inferenceOptions["ngram_merge"].is_number_integer()
             ? inferenceOptions["ngram_merge"].get<int>()
-            : 2;
+            : 1;
     /* Short asks fit in ctx; an extra /tokenize (or worse /phx/enc)
        on --parallel 1 races the generate we are about to run. */
     if (formattedPrompt.size() > 2048) {

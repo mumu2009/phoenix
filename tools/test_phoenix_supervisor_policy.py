@@ -94,12 +94,36 @@ def test_rss_fuse_restarts_gateway_not_llama() -> None:
     assert by["llama"]["reason"] == "alive"
 
 
+def test_cold_draft_merges_into_llama_cmd() -> None:
+    plan = {
+        "enabled": True,
+        "refuse": False,
+        "spawnSecondServer": False,
+        "sameProcessArgs": ["--model-draft", "draft.gguf", "--draft-max", "4"],
+    }
+    cmd = s.merge_llama_command("llama-server -m main.gguf --port 8082", plan)
+    assert "--model-draft" in cmd
+    assert "draft.gguf" in cmd
+    assert cmd.count("llama-server") == 1
+    live = s.merge_llama_command(
+        "llama-server -m main.gguf",
+        {"enabled": False, "sameProcessArgs": ["--model-draft", "draft.gguf"]},
+    )
+    assert live == "llama-server -m main.gguf"
+    refused = s.merge_llama_command(
+        "llama-server -m main.gguf",
+        {"enabled": True, "refuse": True, "spawnSecondServer": True, "sameProcessArgs": ["--model-draft", "x"]},
+    )
+    assert refused == "llama-server -m main.gguf"
+
+
 def main() -> int:
     test_checkpoint_roundtrip()
     test_dirty_mission_refuse()
     test_restart_gateway_leaves_llama()
     test_rss_fuse_restarts_gateway_not_llama()
     test_refuse_llama_health_and_second_server()
+    test_cold_draft_merges_into_llama_cmd()
     print("supervisor policy tests OK")
     return 0
 

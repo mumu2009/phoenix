@@ -305,6 +305,47 @@
     return phoenix::instance::liveLlamaUsers();
   }
 
+  /* Interactive-chat sampling floors.  The emotion stack modulates chat
+     sampling but its neutral output ships ZERO penalties, and the unit
+     sampler degenerates at emotion-base temperature (0.7) without
+     anti-repetition pressure (observed: token salad "a1go entertain2").
+     Missions solved this with mission.* bases + penalty floors
+     (applyEmotionSampling: "penalties are FLOORS, never dragged below
+     base"); chat gets the same safety net here.  Emotion may still raise
+     penalties or move temperature within [min,max] — only the naked
+     zero-penalty / over-hot corner is removed. */
+  void applyChatSamplingFloors(nlohmann::json &opts) {
+    if (!opts.is_object())
+      opts = nlohmann::json::object();
+    /* A/B on the unit loop (clean 1k-char chat prompt, penalties on):
+       0.70 -> salad; 0.45 -> answer then instruction-echo drift; 0.25 ->
+       coherent ("The capital of France is Paris.").  This model+pipeline
+       needs LOW temperature for chat; emotion may still push arousal, so
+       cap hard at 0.40. */
+    const double tMin = phoenix::cfgOr<double>("chat.minTemperature", 0.15);
+    const double tMax = phoenix::cfgOr<double>("chat.maxTemperature", 0.40);
+    const double tDef = phoenix::cfgOr<double>("chat.temperature", 0.30);
+    double t = opts.value("temperature", tDef);
+    if (!std::isfinite(t))
+      t = tDef;
+    opts["temperature"] = std::max(tMin, std::min(tMax, t));
+    const double pDef = phoenix::cfgOr<double>("chat.topP", 0.90);
+    double p = opts.value("top_p", pDef);
+    if (!std::isfinite(p))
+      p = pDef;
+    opts["top_p"] = std::max(0.50, std::min(0.95, p));
+    const double fBase = phoenix::cfgOr<double>("chat.frequencyPenalty", 0.35);
+    opts["frequency_penalty"] =
+        std::max(fBase, opts.value("frequency_penalty", 0.0));
+    const double prBase = phoenix::cfgOr<double>("chat.presencePenalty", 0.15);
+    opts["presence_penalty"] =
+        std::max(prBase, opts.value("presence_penalty", 0.0));
+    const double rBase = phoenix::cfgOr<double>("chat.repeatPenalty", 1.18);
+    opts["repeat_penalty"] = std::max(rBase, opts.value("repeat_penalty", 1.0));
+    if (!opts.contains("repeat_last_n") || !opts["repeat_last_n"].is_number())
+      opts["repeat_last_n"] = phoenix::cfgOr<int>("chat.repeatLastN", 512);
+  }
+
   json callLlamaCppBackend(const std::string &text,
                            const std::string &graphContext, int maxTokens,
                            const json &inferenceOptions) {

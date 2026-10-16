@@ -224,6 +224,11 @@ public:
         const std::string rep = pv.value("reply", "");
         if (rep.empty())
           continue;
+        /* Salad quarantine: a peer that recalled contaminated memory
+           answers with collapsed prose; putting it on the blackboard
+           poisons every synthesis prompt below. */
+        if (phoenix::mission::looksLikeCollapsedProse(rep))
+          continue;
         if (shown >= 3)
           break;
         std::string piece = rep;
@@ -248,6 +253,8 @@ public:
             auto r2 = callRespond(controllerSpec, r2Payload);
             const std::string r2Reply = r2.value("reply", "");
             if (r2Reply.empty())
+              continue;
+            if (phoenix::mission::looksLikeCollapsedProse(r2Reply))
               continue;
             const double r2Aff = cosineSim(requestEmbedding,
                                            emb(r2Reply));

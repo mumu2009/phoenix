@@ -1420,7 +1420,8 @@ public:
       if (trim(question).empty() || trim(reply).empty()) {
         return json{{"ok", false}, {"reason", "missing-text"}};
       }
-      if (isLikelyGibberishReply(reply)) {
+      if (isLikelyGibberishReply(reply) ||
+          containsInternalContextMarkers(reply)) {
         return json{{"ok", false}, {"reason", "gibberish-reply-skipped"}};
       }
 
@@ -1821,7 +1822,10 @@ private:
       } else {
         r.clear();
       }
-      if (!r.empty())
+      /* Legacy cache may hold poisoning-era salad / annotation confetti
+         (the count field self-reinforced it).  Never serve it. */
+      if (!r.empty() && !isLikelyGibberishReply(r) &&
+          !containsInternalContextMarkers(r))
         return r;
     }
 
@@ -1920,6 +1924,28 @@ private:
         oss << " ";
       oss << finalWords[i];
     }
-    return oss.str();
+    std::string joined = oss.str();
+    /* A long bag-of-words is not a reply: it lands on the spark blackboard
+       and into chat prompts as "peer views", where the model parrots it
+       (observed: "vaults buildings iii beginning romanesque popular 35
+       large 31 middle ribbed 19 la ...").  Signature of the bag: 8+ words,
+       no sentence punctuation, no capitals, no CJK.  Abstain honestly. */
+    if (finalWords.size() >= 8) {
+      bool hasSentencePunct = false;
+      bool hasUpper = false;
+      bool hasCjk = false;
+      for (unsigned char c : joined) {
+        if (c >= 0x80)
+          hasCjk = true;
+        else if (std::isupper(c))
+          hasUpper = true;
+        else if (c == '.' || c == '!' || c == '?' || c == ',' || c == ';' ||
+                 c == ':')
+          hasSentencePunct = true;
+      }
+      if (!hasSentencePunct && !hasUpper && !hasCjk)
+        return "I need more context to respond.";
+    }
+    return joined;
   }
 };

@@ -1,0 +1,42 @@
+diff --git a/src/unicode.cpp b/src/unicode.cpp
+index 0000000..0000000 100644
+--- a/src/unicode.cpp
++++ b/src/unicode.cpp
+@@ -199,6 +199,29 @@
+     return map;
+ }
+ 
++#if defined(_WIN32) && defined(__GNUC__) && !defined(__clang__)
++// PHOENIX_UNICODE_WSTRING_FROM_UTF8
++// MinGW/libstdc++ std::codecvt_utf8<wchar_t> cannot emit UTF-16 surrogate
++// pairs (wchar_t is 16-bit on Windows), so wstring_convert::from_bytes()
++// throws std::range_error on any input containing codepoints beyond the
++// BMP. The deepseek-llm BPE pre-tokenizer regex contains such codepoints
++// (e.g. U+10400), which made loading deepseek2-arch models fail with
++// "error loading model vocabulary: wstring_convert::from_bytes".
++// Convert manually instead, mirroring MSVC behaviour (surrogate pairs).
++static inline std::wstring unicode_wstring_from_utf8(const std::string & s) {
++    std::wstring result;
++    for (const uint32_t cpt : unicode_cpts_from_utf8(s)) {
++        if (cpt < 0x10000) {
++            result += (wchar_t) cpt;
++        } else {
++            const uint32_t v = cpt - 0x10000;
++            result += (wchar_t) (0xD800 + (v >> 10));
++            result += (wchar_t) (0xDC00 + (v & 0x3FF));
++        }
++    }
++    return result;
++}
++#else
+ static inline std::wstring unicode_wstring_from_utf8(const std::string & s) {
+ #if defined(__clang__)
+     // disable C++17 deprecation warning for std::codecvt_utf8
+@@ -213,6 +236,7 @@
+ 
+     return conv.from_bytes(s);
+ }
++#endif
+ 
+ static std::vector<std::string> unicode_byte_encoding_process(const std::vector<std::string> & bpe_words) {
+     std::vector<std::string> bpe_encoded_words;

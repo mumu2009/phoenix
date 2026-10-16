@@ -162,6 +162,12 @@ struct MissionChild {
   std::string goal;      /*!< effective goal: the bounded sub-task (or "assist with: <parent goal>") */
   std::string subgoal;   /*!< the raw request the parent made when spawning this box */
   std::string parentId;  /*!< empty = spawned by the root mission; otherwise the spawning box id */
+  /* v8.6 summon: which model this box runs on.  Empty = the base model
+     (main llama-server).  A non-empty value must be a registered
+     summon.models entry (see summon_registry.hpp) - the gateway deliberator
+     routes this box's ticks to that endpoint.  The model itself is never
+     told how to call anything; the framework adapts. */
+  std::string model;
   int depth{0};          /*!< task-tree depth: 0 = direct child of the root mission */
   uint64_t bornMs{0};
   int generation{0};
@@ -203,7 +209,8 @@ class MissionLifecycle {
      their own boxes so the mission can decompose into nested sub-tasks. */
   MissionChild recordChild(const MissionGenome &parent, float mutationRate,
                            const std::string &subgoal,
-                           const std::string &parentId = std::string());
+                           const std::string &parentId = std::string(),
+                           const std::string &model = std::string());
   size_t maxReplicaDepth() const;
   void setMaxReplicaDepth(size_t n);
   size_t maxReplicas() const;

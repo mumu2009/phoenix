@@ -393,6 +393,10 @@
     "adaptiveExploration": true,
     "actions": []
   },
+  "summon": {
+    "enabled": false,
+    "models": []
+  },
   "subconscious": {
     "enabled": true,
     "baselineValence": 0,
@@ -699,6 +703,7 @@
       "memoryWeight": 1.0,
       "gnnWeight": 1.0,
       "ngramMerge": 2,
+      "packPrompt": false,
       "ngramProtectLast": 16,
       "ragMixCap": 256,
       "leftoverBeta": 0.08,

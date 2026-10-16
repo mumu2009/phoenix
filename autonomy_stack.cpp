@@ -4,6 +4,7 @@
 #include "inference_abort.hpp"
 #include "mission_reply_parse.hpp"
 #include "mission_workspace.hpp"
+#include "summon_registry.hpp"
 
 #include "addons/builtin_registry.hpp"
 #include "phoenix_config.hpp"
@@ -789,7 +790,7 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
                      json{{"goal", spec.name}, {"description", goal}, {"goals", goals_}}}};
     }
 
-    if (spec.category == "replicate") {
+    if (spec.category == "replicate" || spec.category == "summon") {
         /* v8.2: replicate = summon a Meeseeks-BOX TOOL.  The sub-task comes
            from context.userPrompt; empty/identical requests degrade to
            "assist with: <parent goal>" inside recordChild, so the parent
@@ -797,6 +798,23 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
         /* v8.x concurrent missions: replicate targets the mission from
            context.missionId (the gateway deliberator injects it), else the
            default (most recently assigned) mission. */
+        /* v8.6 summon: category "summon" (action name "summon.<model>")
+           spawns the box on a REGISTERED EXTERNAL MODEL instead of the base
+           model.  The planner picks the action; the model itself is never
+           taught a call syntax (framework adapts to the model, not vice
+           versa).  The model name must exist in summon.models. */
+        std::string summonModel;
+        if (spec.category == "summon") {
+            summonModel = spec.name.size() > 7 ? spec.name.substr(7)
+                                               : std::string();
+            auto &reg = phoenix::summon::SummonRegistry::instance();
+            if (summonModel.empty() || !reg.find(summonModel)) {
+                return json{{"ok", false},
+                            {"error", "summon model not registered: " +
+                                          (summonModel.empty() ? std::string("<empty>")
+                                                               : summonModel)}};
+            }
+        }
         const json ctx0 = context.is_object() ? context : json::object();
         phoenix::mission::MissionLifecycle *msn =
             missionByIdLocked(ctx0.value("missionId", std::string()));
@@ -813,10 +831,17 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
                the user configured mission.maxReplicaDepth > 0. */
             const std::string parentId = ctx.value("parentId", std::string());
             const auto childRec = msn->recordChild(missionGenome_,
-                                                   missionMutationRate_, subgoal, parentId);
+                                                   missionMutationRate_, subgoal,
+                                                   parentId, summonModel);
             const phoenix::mission::Mission snap = msn->mission();
             const std::string childId =
                 "child-" + snap.id + "-" + std::to_string(msn->children().size());
+            if (!summonModel.empty()) {
+                /* The gateway deliberator resolves this box's workspace
+                   scope to the external endpoint through the registry. */
+                phoenix::summon::SummonRegistry::instance().setScopeModel(
+                    snap.id + "/children/" + childRec.id, summonModel);
+            }
             nlohmann::json childSession;
             childSession["sessionId"] = childId;
             childSession["observations"] = 1;
@@ -824,19 +849,26 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
             childSession["lastObservedAtMs"] = nowMs();
             childSession["shouldIterate"] = true;
             childSession["missionGenome"] = childRec.genome.toJson();
-            childSession["spawnedBy"] = "instance-replicate";
+            childSession["spawnedBy"] = summonModel.empty()
+                                            ? "instance-replicate"
+                                            : "instance-summon";
             childSession["parentBoxId"] = parentId;
             childSession["boxId"] = childRec.id;
+            if (!summonModel.empty()) childSession["model"] = summonModel;
             sessions_[childId] = childSession;
             return json{{"ok", true},
                         {"result", json{{"replicated", true},
                                         {"childSessionId", childId},
                                         {"boxId", childRec.id},
                                         {"goal", childRec.goal},
+                                        {"model", summonModel},
                                         {"parentGoal", snap.goal},
                                         {"genome", childRec.genome.toJson()},
                                         {"childrenCount", msn->children().size()},
                                         {"reply", "summoned helper box " + childRec.id +
+                                                  (summonModel.empty()
+                                                       ? std::string()
+                                                       : " on model " + summonModel) +
                                                   " for: " + childRec.goal}}}};
         } catch (const std::runtime_error &e) {
             return json{{"ok", false}, {"error", e.what()}};
@@ -2570,7 +2602,22 @@ json CognitionAutonomyManager::spawnMissionChild(const json &payload) {
     /* v8.2: subgoal = the bounded request this box must fulfil. */
     const std::string subgoal = p.value("subgoal", p.value("userPrompt", std::string()));
     const std::string parentId = p.value("parentId", std::string());
-    const auto child = msn->recordChild(parent, rate, subgoal, parentId);
+    /* v8.6 summon: optional model field - the box runs on a registered
+       external endpoint instead of the base model.  Empty = base.  An
+       unregistered name is rejected so a typo never silently falls back
+       to the base model. */
+    const std::string model = p.value("model", std::string());
+    if (!model.empty() &&
+        !phoenix::summon::SummonRegistry::instance().find(model)) {
+        return json{{"ok", false},
+                    {"error", "unknown summon model: " + model +
+                                  " (register it under summon.models)"}};
+    }
+    const auto child = msn->recordChild(parent, rate, subgoal, parentId, model);
+    if (!model.empty()) {
+        phoenix::summon::SummonRegistry::instance().setScopeModel(
+            msn->mission().id + "/children/" + child.id, model);
+    }
     return json{{"ok", true}, {"result", child.toJson()}};
 }
 
@@ -3222,7 +3269,12 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
                     for (auto &sn : snaps) processHelperBoxes(sn);
                 } else {
                     for (auto &sn : snaps) {
-                        processParentTick(std::move(sn));
+                        /* NOT std::move: processParentTick takes the snap by
+                           value; moving here left sn.helpers empty and
+                           processHelperBoxes below returned instantly -
+                           helper boxes (incl. summoned external-model boxes)
+                           never got a tick in the serial path. */
+                        processParentTick(sn);
                         processHelperBoxes(sn);
                     }
                 }

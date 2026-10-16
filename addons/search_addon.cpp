@@ -341,8 +341,12 @@ public:
     json lookup;
     const bool handlerOk =
         addon::invokeAddonOnlineLookup(json(query), options, lookup);
-    /* Live web first unless a unit-test / index handler already answered. */
-    if (allowWeb && !handlerOk) {
+    /* Live web first when allowed.  This used to be gated on !handlerOk,
+       but the gateway runtime ALWAYS registers an index lookup handler,
+       so handlerOk was always true and the web path was dead code — only
+       the local corpus ever answered.  Index hits still merge below;
+       corpus/assignment echoes are dropped once web answered. */
+    if (allowWeb) {
       const phoenix::websearch::WebSearchEngine engine(engineConfig(options));
       const json out = engine.search(query, options);
       if (out.value("ok", false) && out.contains("results") &&

@@ -107,6 +107,14 @@ projectRowsToLlamaDim(const std::vector<std::vector<float>> &rows,
 /** Token-salad / control-token dumps must not re-enter CCM or the window. */
 inline bool looksLikeCollapsedProse(const std::string &s) {
   const std::string t = trimCopy(s);
+  /* Framework-internal annotation confetti — never natural language, and
+     short fragments ("=1|gnn=1") must be caught before the size gate. */
+  if (t.find("spark-exchange") != std::string::npos) return true;
+  if (t.find("|gnn=") != std::string::npos) return true;
+  if (t.find("|transformer=") != std::string::npos) return true;
+  if (t.find("|agents=") != std::string::npos) return true;
+  if (t.find("|rounds=") != std::string::npos) return true;
+  if (t.find("peer views") != std::string::npos) return true;
   if (t.size() < 40) return false;
   if (t.find("<|") != std::string::npos) return true;
   if (t.find("://acks") != std::string::npos) return true;
@@ -121,6 +129,35 @@ inline bool looksLikeCollapsedProse(const std::string &s) {
   if (t.size() >= 80 && letters * 2 < static_cast<int>(t.size()))
     return true;
   if (t.size() >= 120 && punct * 3 > static_cast<int>(t.size()))
+    return true;
+  /* Shredded-list salad: prose interleaved with standalone count/ordinal
+     tokens ("architectural 18 16 style 19th the world heritage 16 ...").
+     All-alphabetic so the ratio checks above miss it.  Signature: 3+
+     bare numeric tokens at high density relative to word tokens. */
+  int digitToks = 0;
+  int wordToks = 0;
+  {
+    std::istringstream iss(t);
+    std::string tok;
+    while (iss >> tok) {
+      std::string core = tok;
+      /* strip one ordinal suffix: 19th / 2nd / 3rd / 21st */
+      for (const char *suf : {"st", "nd", "rd", "th"}) {
+        if (core.size() > 3 && core.compare(core.size() - 2, 2, suf) == 0) {
+          core.resize(core.size() - 2);
+          break;
+        }
+      }
+      bool allDigits = !core.empty();
+      for (unsigned char c : core)
+        if (!std::isdigit(c)) { allDigits = false; break; }
+      if (allDigits && core.size() >= 2)
+        ++digitToks;
+      else
+        ++wordToks;
+    }
+  }
+  if (digitToks >= 3 && digitToks * 6 >= wordToks)
     return true;
   return false;
 }
@@ -243,11 +280,21 @@ inline void applyEmotionSampling(nlohmann::json &opts,
         opts[key] = emotionOpts[key];
         continue;
       }
-      if (opts.contains(key) && opts[key].is_number())
-        opts[key] = blend(opts[key].get<double>(),
-                          emotionOpts[key].get<double>(), w);
-      else
+      /* Anti-repetition penalties are FLOORS, not blend targets: the emotion
+         engine's neutral output is ~0, and blending toward it halved
+         frequency_penalty (0.15 -> 0.078), collapsing drafts into stopword
+         loops ("the the the of the...").  Emotion may raise these penalties,
+         never drag them below the configured base. */
+      const bool isPenalty = std::string(key) == "presence_penalty" ||
+                             std::string(key) == "frequency_penalty";
+      if (opts.contains(key) && opts[key].is_number()) {
+        const double base = opts[key].get<double>();
+        double v = blend(base, emotionOpts[key].get<double>(), w);
+        if (isPenalty && v < base) v = base;
+        opts[key] = v;
+      } else {
         opts[key] = emotionOpts[key];
+      }
     }
   }
   const float memW = static_cast<float>(opts.value("memoryWeight", 1.0));

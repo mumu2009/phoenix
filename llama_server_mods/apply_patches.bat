@@ -35,6 +35,9 @@ if "%PATCH_DIR:~-1%"=="\" set "PATCH_DIR=%PATCH_DIR:~0,-1%"
 
 set "PATCH_1=%PATCH_DIR%\existing_mods.patch"
 set "PATCH_2=%PATCH_DIR%\enc_dec_separation.patch"
+set "PATCH_3=%PATCH_DIR%\force_moe_expert.patch"
+set "PATCH_4=%PATCH_DIR%\unicode_wstring_from_utf8.patch"
+set "PATCH_5=%PATCH_DIR%\deepseek_llm_regex_bmp.patch"
 
 echo [apply_patches] LLAMACPP_ROOT=%LLAMACPP_ROOT%
 
@@ -66,15 +69,14 @@ if exist "%PATCH_2%" set "LAST_PATCH=%PATCH_2%"
 
 git apply --reverse --check "%LAST_PATCH%" >nul 2>&1
 if not errorlevel 1 (
-  echo [apply_patches] Patch stack already applied ^(checked against %LAST_PATCH%^). Nothing to do.
-  popd
-  exit /b 0
+  echo [apply_patches] Patch stack already applied ^(checked against %LAST_PATCH%^).
+  goto :additive
 )
 
 REM --- Otherwise: reset to a clean checkout and re-apply both patches. ---
 echo [apply_patches] Resetting outsides\llamacpp working tree to a clean checkout...
 git reset --hard HEAD >nul 2>&1
-git clean -fd -- include src examples/server >nul 2>&1
+git clean -fd -- include src examples/server ggml/src >nul 2>&1
 
 echo [apply_patches] Applying existing_mods.patch...
 git apply --whitespace=nowarn "%PATCH_1%"
@@ -94,6 +96,54 @@ if exist "%PATCH_2%" (
   )
 ) else (
   echo [apply_patches][WARN] enc_dec_separation.patch not found under %PATCH_DIR%. Skipping enc/infer/dec split.
+)
+
+:additive
+REM --- Additive patches with in-tree markers (safe to re-run; also runs ---
+REM     on the fast path so existing trees pick them up without a reset).
+if exist "%PATCH_3%" (
+  findstr /C:"LLAMA_FORCE_MOE_EXPERT" "%LLAMACPP_ROOT%\ggml\src\ggml-cpu\ggml-cpu.c" >nul 2>&1
+  if not errorlevel 1 (
+    echo [apply_patches] force_moe_expert already present in ggml-cpu.c
+  ) else (
+    echo [apply_patches] Applying force_moe_expert.patch...
+    git apply --whitespace=nowarn "%PATCH_3%"
+    if errorlevel 1 (
+      echo [apply_patches][ERROR] Failed to apply force_moe_expert.patch.
+      popd
+      exit /b 1
+    )
+  )
+)
+
+if exist "%PATCH_4%" (
+  findstr /C:"PHOENIX_UNICODE_WSTRING_FROM_UTF8" "%LLAMACPP_ROOT%\src\unicode.cpp" >nul 2>&1
+  if not errorlevel 1 (
+    echo [apply_patches] unicode_wstring_from_utf8 already present in unicode.cpp
+  ) else (
+    echo [apply_patches] Applying unicode_wstring_from_utf8.patch...
+    git apply --whitespace=nowarn "%PATCH_4%"
+    if errorlevel 1 (
+      echo [apply_patches][ERROR] Failed to apply unicode_wstring_from_utf8.patch.
+      popd
+      exit /b 1
+    )
+  )
+)
+
+if exist "%PATCH_5%" (
+  findstr /C:"PHOENIX_DEEPSEEK_LLM_REGEX_BMP" "%LLAMACPP_ROOT%\src\llama-vocab.cpp" >nul 2>&1
+  if not errorlevel 1 (
+    echo [apply_patches] deepseek_llm_regex_bmp already present in llama-vocab.cpp
+  ) else (
+    echo [apply_patches] Applying deepseek_llm_regex_bmp.patch...
+    git apply --whitespace=nowarn "%PATCH_5%"
+    if errorlevel 1 (
+      echo [apply_patches][ERROR] Failed to apply deepseek_llm_regex_bmp.patch.
+      popd
+      exit /b 1
+    )
+  )
 )
 
 echo [apply_patches] All patches applied successfully.

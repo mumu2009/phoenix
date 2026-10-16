@@ -24,6 +24,9 @@ separately rather than committed into this repo. That means:
 |---|---|
 | `existing_mods.patch` | Pre-existing Phoenix modifications: an intrusive "style adapter" that biases the attention mask with an online gradient-style update (`llama_style_adapter_*` API). Unrelated to the enc/infer/dec split; kept as-is. |
 | `enc_dec_separation.patch` | New: splits llama3.1-8b's forward pass into three independently callable conceptual stages (see below). |
+| `force_moe_expert.patch` | New: `LLAMA_FORCE_MOE_EXPERT=N` env var forces every MoE router layer to select expert N for every token (single-expert instances for Phoenix model summoning, `${model}_${expertId}`). Patches the ggml CPU argsort kernel (`ffn_moe_argsort-*` tensors only); `-1`/unset = off. See below. |
+| `unicode_wstring_from_utf8.patch` | MinGW fix: libstdc++ `std::codecvt_utf8<wchar_t>` (16-bit `wchar_t`) cannot emit UTF-16 surrogate pairs, so `wstring_convert::from_bytes` throws `std::range_error` on any input with codepoints beyond the BMP. deepseek2-arch models (DeepSeek-V2-Lite) failed to load with `error loading model vocabulary: wstring_convert::from_bytes`. The patch hand-rolls UTF-8 -> UTF-16 (surrogate pairs) for `_WIN32 && __GNUC__`, mirroring MSVC behaviour. |
+| `deepseek_llm_regex_bmp.patch` | Drops the >BMP codepoint ranges (U+10400..U+10903: Deseret/Osmanya/Adlam, archaic scripts) from the `deepseek-llm` pre-tokenizer letter-class regex in `llama-vocab.cpp`. 16-bit `wchar_t` `std::wregex` cannot express surrogate-range bracket expressions (`Invalid range in bracket expression`). BMP tokenization (CJK/Latin/Greek/Cyrillic/...) is unchanged; text in the dropped scripts falls back to per-codepoint splitting. |
 | `apply_patches.bat` | Windows: resets `outsides/llamacpp` if needed and applies patches. Idempotent. |
 | `apply_patches.sh` | Linux/RDK counterpart of `apply_patches.bat` (used by `tools/rdk_llama_setup.sh`). |
 | `build_llama_server.bat` | Builds `llama`, `llama-server`, and `llama-cli` from `outsides/llamacpp/build-gcc` via `ninja` (configuring with `cmake -G Ninja` first if that directory hasn't been configured yet). Skips the actual ninja invocation if nothing under `include/`, `src/`, `examples/server/`, or these `.patch` files has changed since the last successful build (tracked via a stamp file, `build-gcc/.phoenix_llama_server_build_stamp`). |
@@ -152,6 +155,43 @@ endpoints remain exposed for offline pipeline experimentation (e.g. running
 `enc` on one machine, `infer` on another, and a modality-specific `dec` on
 a third), but they should not be mixed with heavy concurrent `/completion`
 traffic against the same server process.
+
+## What the forced single MoE expert does
+
+`force_moe_expert.patch` enables running one llama-server instance per MoE
+expert from the SAME GGUF file (OS page cache / mmap shares the weight
+pages between instances, so RAM stays close to one model):
+
+```powershell
+# one instance per expert (see tools/start_moe_experts.ps1)
+$env:LLAMA_FORCE_MOE_EXPERT = "3"
+outsides\llamacpp\build-gcc\bin\llama-server.exe -m qwen3-30b-a3b.gguf --port 8094 ...
+```
+
+Mechanism (all inside `ggml_compute_forward_argsort_f32` in
+`ggml/src/ggml-cpu/ggml-cpu.c`):
+
+- MoE routing in `src/llama.cpp` (`llm_build_moe_ffn`) selects experts via
+  `ggml_top_k(selection_probs, n_expert_used)`, which is
+  `ggml_argsort(DESC)` + a view of the first `n_expert_used` rows.  The
+  argsort output tensor is named `ffn_moe_argsort-<layer>`.
+- When the env var is set (`>= 0`) and the tensor being argsorted is an
+  `ffn_moe_argsort-*` tensor, the kernel overwrites every sorted index with
+  the forced expert id, so `selected_experts = [N, N, ..., N]`.
+- Downstream, all `n_expert_used` slots compute expert N's FFN on the same
+  input; the router weights are identical and normalise to `1/n_expert_used`
+  each, so the weighted sum reproduces EXACTLY expert N's output at the
+  same compute cost as normal routing (same number of expert evaluations,
+  just all on the same expert - whose weights stay hot in cache).
+- Non-MoE models have no `ffn_moe_argsort` tensors, so the patch is a no-op
+  for dense models (e.g. the main llama3.1-8b on :8082) whether or not the
+  env var is set.
+- `N >= n_expert` is ignored per layer (safety), `-1`/unset disables.
+
+Quality note: a single forced expert is a research-grade approximation -
+expect degraded but often topically specialised output.  Phoenix summons
+several expert boxes and lets the parent box synthesise; treat it as an
+experiment, not a free lunch.
 
 ## Integration with `compile.bat`
 

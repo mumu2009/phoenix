@@ -145,6 +145,7 @@ nlohmann::json MissionChild::toJson() const {
           {"goal", goal},
           {"subgoal", subgoal},
           {"parentId", parentId},
+          {"model", model},
           {"depth", depth},
           {"bornMs", bornMs},
           {"generation", generation},
@@ -248,7 +249,8 @@ MissionGenome MissionLifecycle::spawnChild(const MissionGenome &parent,
 MissionChild MissionLifecycle::recordChild(const MissionGenome &parent,
                                              float mutationRate,
                                              const std::string &subgoal,
-                                             const std::string &parentId) {
+                                             const std::string &parentId,
+                                             const std::string &model) {
   std::lock_guard<std::mutex> lock(mu_);
   if (children_.size() >= maxReplicas_) {
     throw std::runtime_error("maxReplicas reached (" +
@@ -283,6 +285,7 @@ MissionChild MissionLifecycle::recordChild(const MissionGenome &parent,
   rec.genome = child;
   rec.subgoal = subgoal;
   rec.parentId = parentId;
+  rec.model = model;
   rec.depth = depth;
   /* bounded helper semantics: an empty request - or one that just echoes the
      whole parent goal - becomes "assist with: <parent goal>".  The parent
@@ -467,6 +470,7 @@ void MissionLifecycle::fromJson(const nlohmann::json &j) {
       rec.goal = ch.value("goal", std::string());
       rec.subgoal = ch.value("subgoal", std::string());
       rec.parentId = ch.value("parentId", std::string());
+      rec.model = ch.value("model", std::string());
       rec.depth = ch.value("depth", 0);
       rec.done = ch.value("done", false);
       rec.bornMs = ch.value("bornMs", 0ull);

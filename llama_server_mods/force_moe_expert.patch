@@ -1,0 +1,47 @@
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index dbef5df2..a2816f56 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -10854,6 +10854,29 @@ static void ggml_compute_forward_argsort_f32(
+ 
+     enum ggml_sort_order order = (enum ggml_sort_order) ggml_get_op_params_i32(dst, 0);
+ 
++    /* phoenix: LLAMA_FORCE_MOE_EXPERT=N forces every MoE router layer to
++       select expert N for every token ("${model}_${expertId}" single-expert
++       instances).  The MoE path names its argsort output
++       "ffn_moe_argsort-<layer>"; ggml_top_k then views the first
++       n_expert_used rows, so filling the whole row with N yields
++       selected_experts = [N, N, ..., N].  The downstream weighted sum of
++       n_expert_used identical expert outputs (each weight 1/n_expert_used
++       after normalization) reproduces EXACTLY expert N's FFN output at the
++       same compute cost as normal routing.  -1 (default) = off. */
++    static int phx_force_moe_expert = -2; /* -2 = not yet read from env */
++    if (phx_force_moe_expert == -2) {
++        const char * env = getenv("LLAMA_FORCE_MOE_EXPERT");
++        phx_force_moe_expert = (env != NULL && env[0] != '\0') ? atoi(env) : -1;
++        if (phx_force_moe_expert >= 0) {
++            fprintf(stderr, "%s: LLAMA_FORCE_MOE_EXPERT=%d (forcing single MoE expert)\n",
++                    __func__, phx_force_moe_expert);
++        }
++    }
++    const int phx_force = (strncmp(dst->name, "ffn_moe_argsort", 15) == 0 &&
++                           phx_force_moe_expert >= 0 &&
++                           phx_force_moe_expert < ne0)
++                          ? phx_force_moe_expert : -1;
++
+     for (int64_t i = ith; i < nr; i += nth) {
+         int32_t * dst_data = (int32_t *)((char *) dst->data + i*nb1);
+         const float * src_data = (float *)((char *) src0->data + i*nb01);
+@@ -10873,6 +10896,12 @@ static void ggml_compute_forward_argsort_f32(
+                 }
+             }
+         }
++
++        if (phx_force >= 0) {
++            for (int64_t j = 0; j < ne0; j++) {
++                dst_data[j] = phx_force;
++            }
++        }
+     }
+ }
+ 

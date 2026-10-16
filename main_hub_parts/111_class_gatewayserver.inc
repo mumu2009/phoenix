@@ -44,11 +44,23 @@ public:
     if (!worldModel_)
       return;
     try {
+      /* Salad quarantine (write path): a collapsed generation must never
+         become world-model evidence — the WM serves its graphContext back
+         into the next chat prompt, so one bad deposit self-reinforces
+         (observed: "peer views - g1_ai1 vaults buildings romanesque..."
+         looping through world:session/*).  Drop the whole evidence when the
+         user text itself is collapsed; strip a collapsed graphSummary but
+         keep the clean user text. */
+      if (phoenix::mission::looksLikeCollapsedProse(text))
+        return;
       nlohmann::json evidence;
       evidence["sessionId"] = sessionId;
       evidence["modality"] = "text";
       evidence["text"] = text;
-      evidence["graphSummary"] = graphSummary;
+      evidence["graphSummary"] =
+          phoenix::mission::looksLikeCollapsedProse(graphSummary)
+              ? std::string()
+              : graphSummary;
       evidence["metadata"] = nlohmann::json{{"source", source}};
       /* Chat must not inherit the default running mission.  Only an
          explicit mission MemoryScope tags evidence with missionId. */
@@ -238,6 +250,8 @@ public:
                   phoenix::cfgOr<int>("mission.ctxSize", 4096);
               packOpt.ngramMerge =
                   phoenix::cfgOr<int>("main.inference.ngramMerge", 2);
+              if (!phoenix::cfgOr<bool>("main.inference.packPrompt", false))
+                packOpt.ngramMerge = 1;
               std::string gnnText =
                   cognitionManager_.missionGnnSummaryFor(msnId);
               nlohmann::json missionGraphResult = nlohmann::json::object();
@@ -245,6 +259,8 @@ public:
                 const auto copts = cognitionManager_.missionContextOptions();
                 const auto &cr = copts.value("result", nlohmann::json::object());
                 packOpt = phoenix::context::optionsFromJson(cr, packOpt);
+              if (!phoenix::cfgOr<bool>("main.inference.packPrompt", false))
+                packOpt.ngramMerge = 1;
               } catch (...) {
               }
               const auto packed =
@@ -1008,8 +1024,32 @@ public:
                             << " onesJunk=" << (onesJunkDraft ? 1 : 0)
                             << " deliv=" << currentFile.size() << std::endl;
               }
-              const auto r =
-                  chatWithLlamaCpp(dynamicPrompt, staticPrompt, tokBudget, opts);
+              /* v8.6 summon routing: a helper box spawned with a model
+                 field has its workspace scope registered in the summon
+                 registry; its ticks go to that external endpoint (the
+                 adapter translates the prompt - the model is never taught
+                 a protocol).  Base-model boxes take the normal slot path. */
+              json r;
+              const std::string summonModel =
+                  phoenix::summon::SummonRegistry::instance().modelForScope(
+                      scope);
+              const auto *summonEp =
+                  summonModel.empty()
+                      ? nullptr
+                      : phoenix::summon::SummonRegistry::instance().find(
+                            summonModel);
+              if (summonEp) {
+                if (config_.httpLog)
+                  std::cout << "[mission-deliberate] summon scope=" << scope
+                            << " model=" << summonEp->name
+                            << " kind=" << summonEp->kind
+                            << " url=" << summonEp->url << std::endl;
+                r = chatWithSummonEndpoint(*summonEp, dynamicPrompt,
+                                           staticPrompt, tokBudget, opts);
+              } else {
+                r = chatWithLlamaCpp(dynamicPrompt, staticPrompt, tokBudget,
+                                     opts);
+              }
               if (config_.httpLog && !r.value("ok", false)) {
                 std::cout << "[mission-deliberate] llamacpp FAIL err="
                           << r.value("error", std::string()).substr(0, 320)
@@ -1997,12 +2037,63 @@ public:
             call.input = context.value("userPrompt", std::string());
             addon::AddonResult result;
             const bool handled = invokeAddonTool(call, context, result);
+            if (!handled) {
+              /* v8.6: non-addon categories (replicate / summon / goal /
+                 script sandbox / mcp) are dispatched by the manager itself.
+                 Without this fallback a planner-picked "replicate" returned
+                 "tool not handled" and never spawned the box.  iterate()
+                 releases mu_ before invoking the executor, so this re-lock
+                 inside executeAgiActionByName cannot deadlock. */
+              return cognitionManager_.executeAgiActionByName(spec.name,
+                                                              context);
+            }
             return json{{"ok", handled},
                         {"handled", handled},
                         {"action", spec.name},
                         {"reply", result.reply},
                         {"meta", result.meta}};
           });
+    }
+    /* v8.6 model summoning: each registered summon.models entry becomes a
+       planner action "summon.<name>" (category "summon").  The EFE planner
+       itself decides when a knowledge gap calls for a bigger/expert model -
+       the base model is NEVER taught a call syntax (no prompt text, no
+       fine-tuning): the framework adapts to the model, not vice versa.
+       Endpoint adapters translate the prompt into each backend's API.
+       Disabled by default (summon.enabled=false). */
+    {
+      const bool summonEnabled = phoenix::resolveConfig<bool>(
+          "summon.enabled", false, "AI_SUMMON_ENABLED");
+      json summonModels = phoenix::cfgOr<nlohmann::json>(
+          "summon.models", nlohmann::json::array());
+      auto &summonReg = phoenix::summon::SummonRegistry::instance();
+      const auto summonLoad = summonReg.loadFromConfig(summonEnabled,
+                                                       summonModels);
+      if (logger_.enabled())
+        logger_.log(LoggerCXX::Type::MONITORING,
+                    std::string("summon registry: ") + summonLoad.dump());
+      if (summonEnabled) {
+        const auto endpoints = summonReg.list();
+        /* One-hot action embeddings past the five default actions; one
+           shared dim so only the first registration grows actionDim. */
+        const size_t summonDim = 5 + endpoints.size();
+        size_t summonIdx = 0;
+        for (const auto &ep : endpoints) {
+          json summonSpec;
+          summonSpec["name"] = "summon." + ep.name;
+          summonSpec["category"] = "summon";
+          summonSpec["addonType"] = "";
+          summonSpec["description"] =
+              ep.description.empty()
+                  ? "Summon a helper box running external model " + ep.name
+                  : ep.description;
+          std::vector<float> emb(summonDim, 0.0f);
+          emb[5 + summonIdx] = 1.0f;
+          summonSpec["embedding"] = emb;
+          cognitionManager_.registerAgiAction(summonSpec);
+          ++summonIdx;
+        }
+      }
     }
     rlDisabled_ = config_.disableLearning || config_.disableRL;
     advDisabled_ = config_.disableLearning || config_.disableADV;
@@ -2281,8 +2372,19 @@ private:
             if (wmState.value("ok", false)) {
               worldState["worldModelState"] = wmState;
               world_model::PromptContextOptions wmOpts;
-              wmOpts.maxRecentEvidence = 3;
+              wmOpts.maxRecentEvidence = 0;
               wmOpts.maxSummaryChars = 220;
+              /* Raw causal chat on the small unit-loop model: telemetry
+                 lines (relations/goals/prediction/calibration) AND scene
+                 summary/object/evidence lines dominate the short prompt and
+                 the model pattern-continues them into salad at EVERY
+                 temperature (ablation _temp_ab3.py on the exact live chat
+                 prompt: 0.40..0.15 all salad; emotion head + question alone
+                 answers cleanly).  The world-model pipeline still runs
+                 (ingest, calibration, /api/world-model/*) — only its chat
+                 prompt rendering is fully suppressed. */
+              wmOpts.telemetryLines = false;
+              wmOpts.sceneLines = false;
               const std::string wmOnly =
                   world_model::mergePromptContext("", wmState, wmOpts);
               if (!wmOnly.empty())
@@ -2365,17 +2467,16 @@ private:
           }
         }
       }
-      std::string mod = r.value("cognitionModulation", "");
-      if (!mod.empty()) {
-        if (pack.context.empty())
-          pack.context = mod;
-        else
-          pack.context = mod + "\n" + pack.context;
-        if (pack.instanceMemoryText.empty())
-          pack.instanceMemoryText = mod;
-        else
-          pack.instanceMemoryText = mod + "\n" + pack.instanceMemoryText;
-      }
+      /* Architecture rule (user directive 2026-10-04): the prompt carries
+         ONLY the task / ask message.  Emotion state modulates generation
+         through the pre-processing matrix channels — inferenceOptions
+         (temperature/top_p/penalties) and the vocabulary logit_bias map —
+         never as prompt text.  The cognitionModulation string
+         (EmotionTensor::modulationHint, "high-arousal; risk-tolerant; ...")
+         stays in the iterate() result json for observability but is no
+         longer prepended to the prompt context.  Ablation _temp_ab5.py:
+         pure message prompts answer correctly at 0.25..0.40. */
+      (void)r.value("cognitionModulation", "");
 
       // Run graph-diffusion summarization over the provided graph result.
       phoenix::graph::GraphDiffusionSummarizer diffusor;
@@ -2712,6 +2813,134 @@ private:
       logSecurityEvent(std::string("auth failed path=") + path +
                        " reason=invalid-token");
       return false;
+    }
+  }
+
+  /* v8.6 summon endpoint adapter: translate Phoenix's (dynamic, static)
+     prompt split into the target backend's API shape.  This is where the
+     framework adapts to the model - the model itself never sees a tool
+     protocol.  Bounded by ep.timeoutMs; never touches the main llama slot
+     bookkeeping (a summoned box does not occupy the base model's slot). */
+  json chatWithSummonEndpoint(const phoenix::summon::ModelEndpoint &ep,
+                              const std::string &text,
+                              const std::string &graphContext, int maxTokens,
+                              const json &inferenceOptions = json::object()) {
+    json out = json::object();
+    out["provider"] = std::string("summon:") + ep.kind;
+    out["model"] = ep.name;
+    out["ok"] = false;
+    std::string prompt = text;
+    if (!graphContext.empty()) {
+      prompt = graphContext;
+      if (!text.empty()) {
+        if (!prompt.empty() && prompt.back() != '\n') prompt.push_back('\n');
+        prompt += text;
+      }
+    }
+    const int numPredict = std::max(16, maxTokens > 0 ? maxTokens : ep.maxTokens);
+    json body;
+    std::string path;
+    if (ep.kind == "ollama") {
+      path = "/api/chat";
+      json options = json{{"num_predict", numPredict}};
+      if (inferenceOptions.is_object()) {
+        for (auto it = inferenceOptions.begin(); it != inferenceOptions.end();
+             ++it) {
+          if (it.value().is_number()) options[it.key()] = it.value();
+        }
+      }
+      body = {{"model", ep.model},
+              {"stream", false},
+              {"messages",
+               json::array({json{{"role", "user"}, {"content", prompt}}})},
+              {"options", options}};
+    } else if (ep.kind == "openai") {
+      path = "/v1/chat/completions";
+      body = {{"model", ep.model},
+              {"stream", false},
+              {"messages",
+               json::array({json{{"role", "user"}, {"content", prompt}}})},
+              {"max_tokens", numPredict}};
+    } else { /* llamacpp */
+      path = "/completion";
+      body = {{"prompt", prompt},
+              {"n_predict", numPredict},
+              {"stream", false},
+              {"cache_prompt", false}};
+      if (inferenceOptions.is_object()) {
+        for (auto it = inferenceOptions.begin(); it != inferenceOptions.end();
+             ++it) {
+          if (it.value().is_number()) body[it.key()] = it.value();
+        }
+      }
+    }
+    try {
+      auto client = drogon::HttpClient::newHttpClient(ep.url);
+      if (!client) {
+        out["error"] = "summon client init failed";
+        return out;
+      }
+      auto req = drogon::HttpRequest::newHttpRequest();
+      req->setMethod(drogon::Post);
+      req->setPath(path);
+      req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+      req->setBody(body.dump());
+      std::promise<std::pair<drogon::ReqResult, drogon::HttpResponsePtr>> pr;
+      auto fut = pr.get_future();
+      client->sendRequest(
+          req, [&pr](drogon::ReqResult result,
+                     const drogon::HttpResponsePtr &resp) {
+            try {
+              pr.set_value({result, resp});
+            } catch (...) {
+            }
+          });
+      const int waitMs = std::max(1000, ep.timeoutMs);
+      if (fut.wait_for(std::chrono::milliseconds(waitMs)) !=
+          std::future_status::ready) {
+        out["error"] = "summon endpoint timeout";
+        return out;
+      }
+      auto pair = fut.get();
+      if (pair.first != drogon::ReqResult::Ok || !pair.second) {
+        out["error"] = "summon endpoint unreachable";
+        return out;
+      }
+      if (pair.second->statusCode() < 200 || pair.second->statusCode() >= 300) {
+        out["error"] = std::string("summon endpoint http ") +
+                       std::to_string(static_cast<int>(pair.second->statusCode()));
+        return out;
+      }
+      json doc = json::parse(pair.second->getBody(), nullptr, false);
+      if (doc.is_discarded()) {
+        out["error"] = "summon endpoint bad json";
+        return out;
+      }
+      std::string reply;
+      if (ep.kind == "ollama") {
+        reply = doc.value("message", json::object()).value("content",
+                                                           std::string());
+      } else if (ep.kind == "openai") {
+        const auto choices = doc.value("choices", json::array());
+        if (!choices.empty() && choices[0].is_object())
+          reply = choices[0].value("message", json::object())
+                      .value("content", std::string());
+      } else {
+        reply = doc.value("content", std::string());
+      }
+      if (reply.empty()) {
+        out["error"] = "summon endpoint empty reply";
+        return out;
+      }
+      out["ok"] = true;
+      out["reply"] = reply;
+      return out;
+    } catch (const std::exception &ex) {
+      out["error"] = std::string("summon endpoint exception: ") + ex.what();
+      return out;
+    } catch (...) {
+      out["error"] = "summon endpoint exception";
+      return out;
     }
   }
 

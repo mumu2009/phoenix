@@ -103,4 +103,22 @@ fi
 if grep -q 'leftover_mix' "$LLAMA_ROOT/examples/server/server.cpp" 2>/dev/null; then
   echo "[OK] leftover+RAG hidden-path mix already present in server.cpp"
 fi
+# Forced single MoE expert (LLAMA_FORCE_MOE_EXPERT) in the ggml argsort kernel.
+if grep -q 'LLAMA_FORCE_MOE_EXPERT' "$LLAMA_ROOT/ggml/src/ggml-cpu/ggml-cpu.c" 2>/dev/null; then
+  echo "[OK] force-moe-expert already present in ggml-cpu.c"
+else
+  apply_one "$MODS/force_moe_expert.patch" || exit 1
+fi
+# MinGW UTF-8 -> UTF-16 fix for unicode_wstring_from_utf8 (deepseek2 vocab load).
+if grep -q 'PHOENIX_UNICODE_WSTRING_FROM_UTF8' "$LLAMA_ROOT/src/unicode.cpp" 2>/dev/null; then
+  echo "[OK] unicode_wstring_from_utf8 fix already present in unicode.cpp"
+else
+  apply_one "$MODS/unicode_wstring_from_utf8.patch" || exit 1
+fi
+# deepseek-llm pre-tokenizer regex: drop >BMP ranges (16-bit wchar_t wregex).
+if grep -q 'PHOENIX_DEEPSEEK_LLM_REGEX_BMP' "$LLAMA_ROOT/src/llama-vocab.cpp" 2>/dev/null; then
+  echo "[OK] deepseek-llm regex BMP fix already present in llama-vocab.cpp"
+else
+  apply_one "$MODS/deepseek_llm_regex_bmp.patch" || exit 1
+fi
 echo "[DONE] llama_server_mods patches applied (chunked encode maintained in-tree)"

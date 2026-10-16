@@ -4,9 +4,10 @@
      causal: recent full text (sliding) — continuation chain
      rag:    pinned extractive summary of the dropped head + optional GNN text
 
-   N-gram merge (2-3 token rows -> one unit) multiplies how much recent
-   text fits in the same KV slots. Summaries stay RAG and do not consume
-   causal positions.
+   N-gram merge (2-3 token rows -> one unit) is default off
+   (main.inference.packPrompt=false). The budget multiplier below
+   applies only while that flag is on. Summaries stay RAG and do not
+   consume causal positions.
 
    Modes:
      - "summary"          : mostly summary (RAG) + a small recent window
@@ -34,7 +35,7 @@ struct PackOptions {
   int summaryBudgetTokens{512}; /* pinned summary slot (RAG) */
   int gnnBudgetTokens{256};     /* pinned GNN slot when enabled (RAG) */
   int overheadTokens{256};      /* unused for recent-window size */
-  int ngramMerge{2};            /* 0/1 = off; 2 or 3 = unit compaction */
+  int ngramMerge{1};            /* 1 = off; 2 or 3 only if packPrompt */
 };
 
 struct PackResult {
