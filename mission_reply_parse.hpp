@@ -2235,6 +2235,56 @@ inline std::string keepUniqueContinuation(const std::string &reply,
       prefixBeforeSelfRepeat(prefixBeforeRepeatedShortLine(reply)), existing);
 }
 
+/** Lowercase word 4-grams. Short tokens are dropped so "1." / "the"
+    cannot by themselves mark a paragraph as already written. */
+inline std::vector<std::string> wordShingles(const std::string &text,
+                                             size_t n = 4) {
+  std::vector<std::string> words;
+  std::string cur;
+  auto flush = [&]() {
+    if (cur.size() >= 3) words.push_back(cur);
+    cur.clear();
+  };
+  for (unsigned char c : text) {
+    if (std::isalnum(c))
+      cur.push_back(static_cast<char>(std::tolower(c)));
+    else
+      flush();
+  }
+  flush();
+  std::vector<std::string> out;
+  if (n == 0 || words.size() < n) return out;
+  out.reserve(words.size() - n + 1);
+  for (size_t i = 0; i + n <= words.size(); ++i) {
+    std::string gram = words[i];
+    for (size_t k = 1; k < n; ++k) {
+      gram.push_back(' ');
+      gram += words[i + k];
+    }
+    out.push_back(std::move(gram));
+  }
+  return out;
+}
+
+/** True when a new chunk is a paraphrase of text already in the draft.
+    Exact-span stripping misses "Requirements" rewritten with the same
+    4-grams ("system shall autonomously plan"). A short or genuinely new
+    chapter stays under the threshold. */
+inline bool continuationRestatesDraft(const std::string &chunk,
+                                      const std::string &existing) {
+  if (chunk.size() < 80 || existing.size() < 600) return false;
+  const auto fresh = wordShingles(chunk, 4);
+  if (fresh.size() < 6) return false;
+  const auto prior = wordShingles(existing, 4);
+  if (prior.size() < 12) return false;
+  std::unordered_set<std::string> seen(prior.begin(), prior.end());
+  size_t hit = 0;
+  for (const auto &gram : fresh) {
+    if (seen.find(gram) != seen.end()) ++hit;
+  }
+  return hit * 5 >= fresh.size() * 2;
+}
+
 /** True when a real-time mention is denied in the same window. */
 inline bool realtimeMentionIsNegated(const std::string &lower, size_t at,
                                      size_t n) {

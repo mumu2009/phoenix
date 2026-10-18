@@ -649,6 +649,16 @@ TEST(MissionReplyParse, PinAndSeedAreNotAssignmentBrief) {
   EXPECT_EQ(firstMissingGoalChapter(goal, ""), chs.front());
   EXPECT_NE(firstMissingGoalChapter(goal, chs.front()).find("Chapter 2"),
             std::string::npos);
+  const std::string restated =
+      "The system shall autonomously plan and schedule scientific "
+      "experiments and observations. The system shall monitor and control "
+      "the station systems including power generation and communication. ";
+  const std::string looped = restated + restated + restated;
+  EXPECT_TRUE(continuationRestatesDraft(restated, looped));
+  EXPECT_FALSE(continuationRestatesDraft(
+      "Chapter 2 describes a three-layer onboard executive with a "
+      "separate perception bus and a delay-tolerant uplink queue.",
+      looped));
   EXPECT_TRUE(formatEmptyFileResume(goal).empty());
   EXPECT_TRUE(formatMissionResumeSuffix(seed, goal).empty());
   EXPECT_TRUE(formatMissionResumeSuffix("", goal).empty());

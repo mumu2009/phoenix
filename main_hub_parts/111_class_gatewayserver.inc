@@ -262,8 +262,10 @@ public:
                   phoenix::cfgOr<bool>("mission.includeGnnSummary", true);
               packOpt.ctxTokens =
                   phoenix::cfgOr<int>("mission.ctxSize", 4096);
-              /* packPrompt stays off, so the recent-window budget is 1x ctx. */
-              packOpt.ngramMerge = 1;
+              packOpt.ngramMerge =
+                  phoenix::cfgOr<int>("main.inference.ngramMerge", 2);
+              if (!phoenix::cfgOr<bool>("main.inference.packPrompt", false))
+                packOpt.ngramMerge = 1;
               std::string gnnText =
                   cognitionManager_.missionGnnSummaryFor(msnId);
               nlohmann::json missionGraphResult = nlohmann::json::object();
@@ -271,7 +273,8 @@ public:
                 const auto copts = cognitionManager_.missionContextOptions();
                 const auto &cr = copts.value("result", nlohmann::json::object());
                 packOpt = phoenix::context::optionsFromJson(cr, packOpt);
-                packOpt.ngramMerge = 1;
+                if (!phoenix::cfgOr<bool>("main.inference.packPrompt", false))
+                  packOpt.ngramMerge = 1;
               } catch (...) {
               }
               const auto packed =
@@ -405,6 +408,19 @@ public:
                  is not a chapter table. Full assignment is RAG hint. */
               std::string staticPrompt =
                   phoenix::mission::extractGoalWorkingContext(goalClip);
+              /* The working brief stops before the chapter table, so a long
+                 assignment otherwise keeps regenerating the requirements
+                 preamble. Name the one section the draft has not opened. */
+              {
+                const std::string missing =
+                    phoenix::mission::firstMissingGoalChapter(goal, currentFile);
+                if (!missing.empty()) {
+                  staticPrompt =
+                      std::string("Write this unopened section next. Do not "
+                                  "restate requirements already in the draft.\n") +
+                      missing + "\n\n" + staticPrompt;
+                }
+              }
               {
                 const std::string expPath = phoenix::resolveConfig<std::string>(
                     "mission.experiencePath",
@@ -924,8 +940,10 @@ public:
               const int safePromptTokens = std::max(
                   512, packOpt.ctxTokens - genReserve - tmplReserve -
                            packOpt.overheadTokens);
+              const bool packOn =
+                  phoenix::cfgOr<bool>("main.inference.packPrompt", false);
               const int ngramFac = phoenix::inference::causalBudgetNgram(
-                  false, packOpt.ngramMerge);
+                  packOn, packOpt.ngramMerge);
               const size_t maxPromptChars =
                   static_cast<size_t>(safePromptTokens) *
                   phoenix::context::charsPerPackedToken() *
@@ -1859,6 +1877,21 @@ public:
                               << std::endl;
                   writeToolFeedback(
                       phoenix::mission::onesJunkRewriteHint());
+                  return std::string();
+                } else if (!currentFile.empty() &&
+                           phoenix::mission::continuationRestatesDraft(
+                               chunk, currentFile)) {
+                  const std::string missing =
+                      phoenix::mission::firstMissingGoalChapter(goal,
+                                                                currentFile);
+                  if (config_.httpLog)
+                    std::cout << "[mission-deliberate] drop restate len="
+                              << chunk.size() << std::endl;
+                  writeToolFeedback(
+                      missing.empty()
+                          ? "That paragraph restates text already in the draft. Continue from the last new sentence."
+                          : "That paragraph restates text already in the draft. Write this unopened section next: " +
+                                missing);
                   return std::string();
                 } else {
                   edited = currentFile.empty()
