@@ -313,12 +313,16 @@ public:
                     std::string gnnSrc = packed.recentFull.empty()
                                              ? currentFile
                                              : packed.recentFull;
-                    const size_t gnnCap = std::max(
-                        static_cast<size_t>(phoenix::cfgOr<int>(
-                            "mission.gnnSourceChars", 2000)),
-                        packed.recentFull.size());
+                    /* Cap is an upper bound. max(cap, window) made a 50k
+                       draft the graph input and stalled the tick for minutes
+                       before llama was called. */
+                    const size_t gnnCap = static_cast<size_t>(std::max(
+                        256, phoenix::cfgOr<int>("mission.gnnSourceChars", 2000)));
                     if (gnnSrc.size() > gnnCap)
                       gnnSrc = gnnSrc.substr(gnnSrc.size() - gnnCap);
+                    if (config_.httpLog)
+                      std::cout << "[mission-deliberate] gnnSrc="
+                                << gnnSrc.size() << std::endl;
                     if (!pinOnly && currentFile.size() >= 2500 &&
                         !gnnSrc.empty() &&
                         !phoenix::mission::draftTailLooksCollapsed(gnnSrc)) {
@@ -419,6 +423,12 @@ public:
                       std::string("Write this unopened section next. Do not "
                                   "restate requirements already in the draft.\n") +
                       missing + "\n\n" + staticPrompt;
+                  if (config_.httpLog) {
+                    std::string shown = missing;
+                    if (shown.size() > 120) shown.resize(120);
+                    std::cout << "[mission-deliberate] next-section=" << shown
+                              << std::endl;
+                  }
                 }
               }
               {
@@ -775,6 +785,16 @@ public:
               if (onesJunkDraft) {
                 resumeSuffix.clear();
                 opts.erase("resume_suffix");
+              }
+              /* The causal tip is what the model continues. Any tail of the
+                 current requirements loop makes the next sentence another
+                 restatement. When a chapter is still unopened, continue from
+                 that heading alone. */
+              if (!resumeSuffix.empty()) {
+                const std::string missing =
+                    phoenix::mission::firstMissingGoalChapter(goal, currentFile);
+                if (!missing.empty())
+                  resumeSuffix = missing + "\n";
               }
               if (draftEmpty) {
                 opts.erase("gnn_units");
@@ -1894,10 +1914,22 @@ public:
                                 missing);
                   return std::string();
                 } else {
+                  std::string toWrite = chunk;
+                  const std::string missing =
+                      phoenix::mission::firstMissingGoalChapter(goal, currentFile);
+                  if (!missing.empty()) {
+                    std::string key = missing;
+                    const auto colon = key.find(':');
+                    if (colon != std::string::npos)
+                      key = phoenix::mission::trimCopy(key.substr(0, colon));
+                    if (phoenix::mission::lowerCopy(toWrite).find(
+                            phoenix::mission::lowerCopy(key)) == std::string::npos)
+                      toWrite = missing + "\n\n" + toWrite;
+                  }
                   edited = currentFile.empty()
-                      ? chunk
+                      ? toWrite
                       : phoenix::mission::joinDeliverableText(currentFile,
-                                                              chunk);
+                                                              toWrite);
                   if (phoenix::mission::isZeroInformationGrowth(currentFile,
                                                                 edited) ||
                       phoenix::mission::looksLikeRewriteInstructionEcho(
