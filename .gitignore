@@ -111,6 +111,22 @@ tools/__pycache__/
 
 # ─── Hardware design files (not part of the software package) ─────────────────
 catastrophe/
+# ─── Weights, datasets, vendor archives (never commit; too large for GitHub) ─
+models/
+datasets/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.gguf
+*.ckpt
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+OpenClaw-*.zip
+openclaw-*.tar.gz
+
 # ─── Corpus / test data (too large; user must provide locally) ────────────────
 robots/
 
