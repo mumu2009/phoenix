@@ -20,17 +20,24 @@ from pathlib import Path
 from typing import Any
 
 try:
+    import phoenix_mlock as mlock
+    import phoenix_model_router as router
     import phoenix_process_guard as pguard
     import phoenix_runtime_amp as amp
     import phoenix_runtime_opt as ropt
     import phoenix_shm_channel as shmchan
     import phoenix_speculative_bridge as specbridge
 except ImportError:
+    mlock = None  # type: ignore[misc, assignment]
+    router = None  # type: ignore[misc, assignment]
     pguard = None  # type: ignore[misc, assignment]
     amp = None  # type: ignore[misc, assignment]
     ropt = None  # type: ignore[misc, assignment]
     shmchan = None  # type: ignore[misc, assignment]
     specbridge = None  # type: ignore[misc, assignment]
+
+# Kept alive so VirtualLock/mlock is not dropped when the buffer is collected.
+_MLOCK_HOLD: bytearray | None = None
 
 BUILTIN_DENY = ("2678077", "6477259", "9374278")
 PRODUCT = "phoenix"
@@ -304,12 +311,55 @@ def start_service(
     return int(proc.pid)
 
 
+def apply_hot_mlock(overlay: dict[str, Any] | None) -> dict[str, Any]:
+    """Lock a small hot buffer when mlock is on. Never passes --mlock to llama."""
+    global _MLOCK_HOLD
+    if mlock is None or not overlay or not overlay.get("flags", {}).get("mlock"):
+        return {"locked": False, "reason": "mlock_off"}
+    cap = int((overlay.get("mlock") or {}).get("maxBytes") or 4096)
+    cap = max(4096, min(cap, 4 * 1024 * 1024))
+    # 4MiB often exceeds the process working-set quota; step down until it locks.
+    last = {"locked": False, "degraded": True, "reason": "mlock_off", "bytes": 0}
+    for size in (cap, 256 * 1024, 4096):
+        if size > cap:
+            continue
+        buf = bytearray(size)
+        last = mlock.try_lock(buf, overlay)
+        if last.get("locked"):
+            _MLOCK_HOLD = buf
+            return last
+    return last
+
+
+def apply_model_route(overlay: dict[str, Any] | None, llama_up: bool) -> dict[str, Any]:
+    """Info-only route. Never opens a second llama slot."""
+    if router is None or not overlay:
+        return {"backend": "llama" if llama_up else "none", "reason": "router_missing", "dualSlot": False}
+    picked = router.route_task(0, "chat", overlay, llama_up=llama_up, tiny_up=False)
+    if picked.get("dualSlot"):
+        picked = {"backend": "llama" if llama_up else "none", "reason": "dual_slot_blocked", "dualSlot": False}
+    return picked
+
+
+def merge_llama_command(cmd: str, draft_plan: dict[str, Any] | None) -> str:
+    """Append same-process draft flags. Never a second server."""
+    if not cmd.strip() or not draft_plan or not draft_plan.get("enabled"):
+        return cmd
+    if draft_plan.get("spawnSecondServer") or draft_plan.get("refuse"):
+        return cmd
+    extra = [str(x) for x in (draft_plan.get("sameProcessArgs") or [])]
+    if not extra or specbridge is None:
+        return cmd
+    return specbridge.merge_llama_cmd(cmd, extra)
+
+
 def plan_and_act(
     observed: list[dict[str, Any]],
     specs: list[dict[str, Any]],
     cwd: Path,
     dry_run: bool,
     overlay: dict[str, Any] | None = None,
+    draft_plan: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     spec_by_role = {s["role"]: s for s in specs}
     decisions: list[dict[str, str]] = []
@@ -338,6 +388,8 @@ def plan_and_act(
         if dry_run:
             continue
         cmd = os.environ.get(str(spec["cmd_env"]), "")
+        if role == "llama":
+            cmd = merge_llama_command(cmd, draft_plan)
         pid = start_service(role, cmd, cwd, {}, overlay)
         if pid:
             (cwd / "runtime_store" / "pids").mkdir(parents=True, exist_ok=True)
@@ -382,14 +434,20 @@ def main() -> int:
             "llama-server (--parallel 1)",
             flush=True,
         )
+    llama_up = port_listening("127.0.0.1", 8082)
+    draft_plan: dict[str, Any] = {"enabled": False, "reason": "bridge_missing", "sameProcessArgs": []}
     if overlay and specbridge is not None:
         draft_plan = specbridge.plan_speculative(
             overlay,
-            llama_already_running=True,
+            parallel=int(overlay.get("parallel") or 1),
+            llama_already_running=llama_up,
             want_standalone_draft_server=bool(os.environ.get("PHOENIX_LLAMA_DRAFT_CMD")),
         )
-        if draft_plan.get("refuse"):
-            print(f"[supervisor] speculative {draft_plan['reason']}", flush=True)
+        print(
+            f"[supervisor] speculative reason={draft_plan.get('reason')} "
+            f"enabled={draft_plan.get('enabled')} llama_listen={llama_up}",
+            flush=True,
+        )
     shm = None
     if overlay and overlay.get("flags", {}).get("shm_ipc") and shmchan is not None:
         shm = shmchan.ShmChannel()
@@ -420,7 +478,19 @@ def main() -> int:
 
     while True:
         observed = [observe(spec, pid_dir) for spec in specs]
-        decisions = plan_and_act(observed, specs, repo, args.dry_run, overlay)
+        llama_obs = next((s for s in observed if s.get("role") == "llama"), None)
+        if overlay and specbridge is not None:
+            draft_plan = specbridge.plan_speculative(
+                overlay,
+                parallel=int(overlay.get("parallel") or 1),
+                llama_already_running=bool(llama_obs and llama_obs.get("alive")),
+                want_standalone_draft_server=False,
+            )
+        decisions = plan_and_act(
+            observed, specs, repo, args.dry_run, overlay, draft_plan
+        )
+        mlock_status = apply_hot_mlock(overlay)
+        route_status = apply_model_route(overlay, bool(llama_obs and llama_obs.get("alive")))
         press = amp.host_pressure() if amp is not None else {"diskFreePct": 100, "swapUsedPct": 0}
         survive = (
             amp.plan_survive(press, overlay or {"flags": {}}, 1)
@@ -455,6 +525,13 @@ def main() -> int:
             "hostPressure": press,
             "survivability": survive,
             "securityAgg": alert_agg,
+            "speculative": {
+                "reason": draft_plan.get("reason"),
+                "enabled": bool(draft_plan.get("enabled")),
+                "spawnSecondServer": False,
+            },
+            "mlock": mlock_status,
+            "modelRoute": route_status,
         }
         write_checkpoint(ck_path, payload)
         for d in decisions:

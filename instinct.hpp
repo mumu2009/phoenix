@@ -51,9 +51,44 @@ struct BenefitHarmResult {
     float netUtility = 0.0f;                 /*!< benefit - harm, normalized [-1, 1]. */
     std::string recommendedAction;
     std::vector<float> driveVector;          /*!< 8-dim emotion-direction vector. */
+    float novelty = 0.0f;                    /*!< [0, 1], 0 leaves arousal at the benefit/harm map. */
+    float control = 0.5f;                    /*!< [0, 1], 0.5 leaves dominance equal to utility. */
+    float uncertainty = 0.0f;                /*!< [0, 1], 0 leaves surprise at the PAD value. */
+    float otherAgency = 0.0f;                /*!< [0, 1], 0 leaves anger/trust at the PAD value. */
 
     nlohmann::json toJson() const;
 };
+
+/** Read-only thought -> one scoped sensation. Source is the context tag,
+    never the thought text. Empty tag is "detached:thought" so it is not global. */
+inline primal::PrimalSensation sensationFromThought(const std::string &action,
+                                                    const std::string &contextTag) {
+    primal::PrimalSensation s;
+    s.source = contextTag.empty() ? std::string("detached:thought")
+                                  : contextTag + ":thought";
+    if (action == "recall") {
+        s.type = primal::SensationType::Pleasure;
+        s.valence = 0.35f;
+        s.intensity = 0.22f;
+    } else if (action == "prefer") {
+        s.type = primal::SensationType::Pleasure;
+        s.valence = 0.65f;
+        s.intensity = 0.30f;
+    } else if (action == "continue") {
+        s.type = primal::SensationType::Novelty;
+        s.valence = 0.15f;
+        s.intensity = 0.18f;
+    } else if (action == "ask") {
+        s.type = primal::SensationType::Novelty;
+        s.valence = 0.10f;
+        s.intensity = 0.34f;
+    } else if (action == "service") {
+        s.type = primal::SensationType::Threat;
+        s.valence = -0.55f;
+        s.intensity = 0.28f;
+    }
+    return s;
+}
 
 /**
  * @brief Converts between primal sensations, instincts and emotional tensors.

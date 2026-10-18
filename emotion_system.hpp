@@ -130,10 +130,8 @@ struct EmotionTensor {
         return s;
     }
 
-    /* Map the emotion tensor to LLM inference options.
-       Returns a JSON object with temperature, top_p, presence_penalty and
-       frequency_penalty adjustments.  These are *additive* to the caller's
-       base values and can be clamped by the caller. */
+    /* Wide sampling map used by mission blending.  Chat must call
+       mapChatSampling(), which keeps temperature inside [0.15, 0.40]. */
     nlohmann::json inferenceOptions(float baseTemp = 0.7f,
                                     float baseTopP = 0.9f) const {
         float temperature = baseTemp + 0.35f * arousal - 0.15f * fear;
@@ -213,6 +211,277 @@ inline EmotionTensor fromAppraisal(float benefit, float harm) {
     const float U = (B - H) / (B + H + eps);
     const float A = 2.0f * std::min(B + H, 1.0f) - 1.0f;
     return padToTensor(U, A, U);
+}
+
+/**
+ * Finer appraisal on top of benefit/harm.  Neutral extras
+ * (novelty = 0, control = 0.5, uncertainty = 0, otherAgency = 0)
+ * reproduce fromAppraisal(benefit, harm) exactly.
+ *
+ *   U  = (B - H) / (B + H + eps)
+ *   A0 = 2 * min(B + H, 1) - 1
+ *   A  = clamp(A0 + 0.55 * novelty * (1 - A0), -1, 1)
+ *   D  = clamp(U + 0.65 * (2*control - 1) * (1 - |U|), -1, 1)
+ *   t  = padToTensor(U, A, D)
+ *   surprise *= (1 + 0.75 * uncertainty)     then clamp
+ *   blame = otherAgency * H
+ *   anger += 0.40 * blame * (1 - anger)
+ *   trust -= 0.35 * blame * (1 + trust)
+ */
+struct FineAppraisal {
+    float benefit{0.0f};
+    float harm{0.0f};
+    float novelty{0.0f};
+    float control{0.5f};
+    float uncertainty{0.0f};
+    float otherAgency{0.0f};
+};
+
+inline EmotionTensor fromFineAppraisal(const FineAppraisal &in) {
+    const float B = std::clamp(in.benefit, 0.0f, 1.0f);
+    const float H = std::clamp(in.harm, 0.0f, 1.0f);
+    const float N = std::clamp(in.novelty, 0.0f, 1.0f);
+    const float C = std::clamp(in.control, 0.0f, 1.0f);
+    const float Unc = std::clamp(in.uncertainty, 0.0f, 1.0f);
+    const float O = std::clamp(in.otherAgency, 0.0f, 1.0f);
+    const float eps = 1e-6f;
+    const float U = (B - H) / (B + H + eps);
+    const float A0 = 2.0f * std::min(B + H, 1.0f) - 1.0f;
+    const float A = std::clamp(A0 + 0.55f * N * (1.0f - A0), -1.0f, 1.0f);
+    const float pull = 2.0f * C - 1.0f;
+    const float D = std::clamp(U + 0.65f * pull * (1.0f - std::fabs(U)), -1.0f, 1.0f);
+    EmotionTensor t = padToTensor(U, A, D);
+    t.surprise = std::clamp(t.surprise * (1.0f + 0.75f * Unc), -1.0f, 1.0f);
+    const float blame = O * H;
+    t.anger = std::clamp(t.anger + 0.40f * blame * (1.0f - t.anger), -1.0f, 1.0f);
+    t.trust = std::clamp(t.trust - 0.35f * blame * (1.0f + t.trust), -1.0f, 1.0f);
+    return t;
+}
+
+/** Same two lerps as EmotionSystem::processMessage. */
+inline EmotionTensor homeostaticUpdate(const EmotionTensor &current,
+                                       const EmotionTensor &stimulus,
+                                       const EmotionTensor &baseline,
+                                       float decayRate,
+                                       float homeostasisRate) {
+    const float couple = std::clamp(1.0f - decayRate, 0.0f, 1.0f);
+    const float pull = std::clamp(homeostasisRate, 0.0f, 1.0f);
+    const EmotionTensor coupled = EmotionTensor::lerp(current, stimulus, couple);
+    return EmotionTensor::lerp(coupled, baseline, pull);
+}
+
+inline std::vector<float> tensorToDrive(const EmotionTensor &t) {
+    return {t.valence, t.arousal, t.dominance, t.trust,
+            t.joy, t.fear, t.anger, t.surprise};
+}
+
+/** Word -> (valence, arousal, dominance), each in [-1, 1]. */
+inline const std::unordered_map<std::string, std::array<float, 3>> &vadLexicon() {
+    static const std::unordered_map<std::string, std::array<float, 3>> lex = {
+        {"happy", {0.90f, 0.70f, 0.50f}},
+        {"glad", {0.80f, 0.50f, 0.40f}},
+        {"great", {0.80f, 0.60f, 0.40f}},
+        {"wonderful", {0.90f, 0.60f, 0.50f}},
+        {"excellent", {0.90f, 0.60f, 0.60f}},
+        {"love", {0.90f, 0.80f, 0.30f}},
+        {"joy", {0.90f, 0.80f, 0.50f}},
+        {"amazing", {0.90f, 0.80f, 0.40f}},
+        {"calm", {0.40f, -0.50f, 0.30f}},
+        {"peaceful", {0.55f, -0.40f, 0.20f}},
+        {"hopeful", {0.60f, 0.30f, 0.25f}},
+        {"proud", {0.70f, 0.45f, 0.65f}},
+        {"grateful", {0.75f, 0.25f, 0.20f}},
+        {"relief", {0.50f, -0.20f, 0.15f}},
+        {"safe", {0.45f, -0.30f, 0.35f}},
+        {"curious", {0.25f, 0.45f, 0.10f}},
+        {"sad", {-0.80f, -0.40f, -0.50f}},
+        {"bad", {-0.70f, 0.20f, -0.30f}},
+        {"terrible", {-0.90f, 0.40f, -0.40f}},
+        {"awful", {-0.90f, 0.30f, -0.50f}},
+        {"hate", {-0.90f, 0.60f, 0.20f}},
+        {"grief", {-0.85f, -0.20f, -0.55f}},
+        {"lonely", {-0.60f, -0.30f, -0.40f}},
+        {"ashamed", {-0.70f, 0.20f, -0.60f}},
+        {"guilty", {-0.65f, 0.25f, -0.45f}},
+        {"bored", {-0.30f, -0.60f, -0.10f}},
+        {"afraid", {-0.80f, 0.70f, -0.70f}},
+        {"scared", {-0.80f, 0.70f, -0.70f}},
+        {"fear", {-0.80f, 0.60f, -0.60f}},
+        {"worried", {-0.60f, 0.50f, -0.50f}},
+        {"anxious", {-0.60f, 0.60f, -0.50f}},
+        {"panic", {-0.85f, 0.95f, -0.80f}},
+        {"danger", {-0.70f, 0.75f, -0.40f}},
+        {"angry", {-0.80f, 0.80f, 0.70f}},
+        {"furious", {-0.90f, 0.90f, 0.80f}},
+        {"mad", {-0.70f, 0.70f, 0.60f}},
+        {"rage", {-0.90f, 0.95f, 0.75f}},
+        {"tense", {-0.40f, 0.55f, -0.15f}},
+        {"surprise", {0.20f, 0.80f, 0.00f}},
+        {"shock", {-0.40f, 0.90f, -0.60f}},
+        {"unexpected", {0.00f, 0.70f, -0.20f}},
+        {"confused", {-0.20f, 0.35f, -0.30f}},
+        {"trust", {0.60f, 0.10f, 0.40f}},
+        {"believe", {0.50f, 0.10f, 0.30f}},
+        {"confident", {0.70f, 0.40f, 0.80f}},
+        {"reliable", {0.60f, 0.10f, 0.50f}},
+        {"\xE5\xAE\xB3\xE6\x80\x95", {-0.80f, 0.70f, -0.70f}}, /* 害怕 */
+        {"\xE9\xAB\x98\xE5\x85\xB4", {0.85f, 0.70f, 0.40f}},   /* 高兴 */
+        {"\xE7\x94\x9F\xE6\xB0\x94", {-0.75f, 0.75f, 0.55f}}, /* 生气 */
+        {"\xE9\x9A\xBE\xE8\xBF\x87", {-0.75f, -0.35f, -0.45f}}, /* 难过 */
+        {"\xE5\xAE\x89\xE5\xBF\x83", {0.45f, -0.40f, 0.25f}}, /* 安心 */
+        {"\xE5\xA5\xBD\xE5\xA5\x87", {0.20f, 0.50f, 0.05f}},   /* 好奇 */
+        {"\xE8\xAE\xA8\xE5\x8E\x8C", {-0.80f, 0.55f, 0.15f}}, /* 讨厌 */
+        {"\xE4\xBF\xA1\xE4\xBB\xBB", {0.60f, 0.10f, 0.40f}},   /* 信任 */
+        {"\xE6\x83\x8A\xE8\xAE\xB6", {0.15f, 0.80f, -0.10f}}, /* 惊讶 */
+        {"\xE5\xAD\xA4\xE7\x8B\xAC", {-0.60f, -0.25f, -0.40f}}, /* 孤独 */
+    };
+    return lex;
+}
+
+/** Mean-pool lexicon hits. Unmatched ASCII tokens contribute 0.
+    CJK keys are substring hits and each adds one to the pool size. */
+inline EmotionTensor surfaceAffect(const std::string &text) {
+    std::string lower;
+    lower.reserve(text.size());
+    bool anyHigh = false;
+    for (unsigned char ch : text) {
+        if (ch < 128) {
+            lower.push_back(static_cast<char>(std::tolower(ch)));
+        } else {
+            lower.push_back(static_cast<char>(ch));
+            anyHigh = true;
+        }
+    }
+    std::vector<std::string> toks;
+    std::string cur;
+    for (unsigned char ch : lower) {
+        if (std::isalnum(ch) || ch == '\'') {
+            cur.push_back(static_cast<char>(ch));
+        } else if (!cur.empty()) {
+            toks.push_back(cur);
+            cur.clear();
+        }
+    }
+    if (!cur.empty()) toks.push_back(cur);
+    const auto &lex = vadLexicon();
+    float V = 0.0f, A = 0.0f, D = 0.0f;
+    float pool = static_cast<float>(toks.size());
+    for (const auto &t : toks) {
+        auto it = lex.find(t);
+        if (it == lex.end()) continue;
+        V += it->second[0];
+        A += it->second[1];
+        D += it->second[2];
+    }
+    if (anyHigh) {
+        for (const auto &kv : lex) {
+            bool cjk = false;
+            for (unsigned char c : kv.first) {
+                if (c >= 128) { cjk = true; break; }
+            }
+            if (!cjk) continue;
+            if (lower.find(kv.first) == std::string::npos) continue;
+            V += kv.second[0];
+            A += kv.second[1];
+            D += kv.second[2];
+            pool += 1.0f;
+        }
+    }
+    if (pool <= 0.0f) return EmotionTensor();
+    const float inv = 1.0f / pool;
+    return padToTensor(V * inv, A * inv, D * inv);
+}
+
+/** Continuous logit nudge. Neutral affect emits an empty object.
+    Values stay in [-0.75, 0.75]. These words are sampler biases, not prompt text. */
+inline nlohmann::json affectLogitBias(const EmotionTensor &e, float strength = 1.0f) {
+    const float k = std::clamp(strength, 0.0f, 2.0f);
+    constexpr float kCap = 0.75f;
+    nlohmann::json j = nlohmann::json::object();
+    auto put = [&](const char *word, float raw) {
+        const float b = std::clamp(k * raw, -kCap, kCap);
+        if (std::fabs(b) < 0.02f) return;
+        j[word] = b;
+    };
+    put("glad", 0.60f * e.joy + 0.15f * e.valence);
+    put("wonderful", 0.55f * e.joy);
+    put("worry", 0.70f * e.fear);
+    put("anxious", 0.65f * e.fear);
+    put("frustrated", 0.70f * e.anger);
+    put("annoyed", 0.55f * e.anger);
+    put("trust", 0.65f * e.trust);
+    put("reliable", 0.50f * e.trust);
+    put("unexpected", 0.65f * e.surprise);
+    put("curious", 0.45f * e.surprise);
+    put("clearly", 0.55f * e.dominance);
+    put("perhaps", -0.55f * e.dominance);
+    return j;
+}
+
+/** Chat sampling. Temperature lands in [0.15, 0.40], centered at 0.30.
+    Penalties are floors plus a non-negative lift, so emotion can raise
+    them and cannot drag them under the chat floors. */
+inline nlohmann::json mapChatSampling(const EmotionTensor &e, float biasStrength = 1.0f) {
+    constexpr float kTNeutral = 0.30f;
+    constexpr float kTAmp = 0.10f;
+    constexpr float kTMin = 0.15f;
+    constexpr float kTMax = 0.40f;
+    const float sTemp = std::clamp(0.55f * e.arousal - 0.35f * e.fear + 0.10f * e.surprise,
+                                   -1.0f, 1.0f);
+    const float temperature = std::clamp(kTNeutral + kTAmp * sTemp, kTMin, kTMax);
+    const float topP = std::clamp(0.90f + 0.04f * e.surprise - 0.03f * e.dominance,
+                                  0.50f, 0.95f);
+    const float uFreq = std::clamp(0.5f * std::max(e.anger, 0.0f) + 0.5f * std::max(-e.valence, 0.0f),
+                                   0.0f, 1.0f);
+    const float uPres = std::clamp(0.5f * std::max(-e.trust, 0.0f) + 0.5f * std::max(e.joy, 0.0f),
+                                   0.0f, 1.0f);
+    const float uRep = std::clamp(0.6f * std::max(e.anger, 0.0f) + 0.4f * std::max(e.surprise, 0.0f),
+                                  0.0f, 1.0f);
+    return nlohmann::json{
+        {"temperature", temperature},
+        {"top_p", topP},
+        {"frequency_penalty", 0.35f + 0.25f * uFreq},
+        {"presence_penalty", 0.15f + 0.20f * uPres},
+        {"repeat_penalty", 1.18f + 0.22f * uRep},
+        {"logit_bias", affectLogitBias(e, biasStrength)}
+    };
+}
+
+/** Read-only thought nudge. Does not accept a SelfMind and returns no text. */
+inline EmotionTensor blendThoughtAffect(const EmotionTensor &base,
+                                        const std::string &action,
+                                        const std::string &text,
+                                        float gain) {
+    float v = 0.0f, a = 0.0f, d = 0.0f;
+    if (action == "recall") { v = 0.15f; a = -0.10f; d = 0.12f; }
+    else if (action == "prefer") { v = 0.28f; a = 0.06f; d = 0.16f; }
+    else if (action == "continue") { v = 0.05f; a = 0.12f; d = 0.05f; }
+    else if (action == "ask") { v = 0.00f; a = 0.22f; d = -0.08f; }
+    else if (action == "service") { v = -0.22f; a = 0.08f; d = -0.24f; }
+    const float g = std::clamp(gain, 0.0f, 1.0f);
+    const EmotionTensor nud = padToTensor(v, a, d);
+    const EmotionTensor lex = surfaceAffect(text);
+    const float lg = 0.50f * g;
+    auto mix = [&](float oldv, float nv, float lv) {
+        return std::clamp(oldv + g * nv + lg * lv, -1.0f, 1.0f);
+    };
+    EmotionTensor out;
+    out.valence = mix(base.valence, nud.valence, lex.valence);
+    out.arousal = mix(base.arousal, nud.arousal, lex.arousal);
+    out.dominance = mix(base.dominance, nud.dominance, lex.dominance);
+    out.trust = mix(base.trust, nud.trust, lex.trust);
+    out.joy = mix(base.joy, nud.joy, lex.joy);
+    out.fear = mix(base.fear, nud.fear, lex.fear);
+    out.anger = mix(base.anger, nud.anger, lex.anger);
+    out.surprise = mix(base.surprise, nud.surprise, lex.surprise);
+    return out;
+}
+
+/** Chat causal string is the user text only. No affect labels, no thought. */
+inline std::string chatCausalText(const std::string &userText) {
+    if (userText.empty()) return std::string();
+    if (userText.back() == '\n') return userText;
+    return userText + "\n";
 }
 
 

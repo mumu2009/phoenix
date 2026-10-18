@@ -130,7 +130,7 @@ if "%NEED_BUILD%"=="0" (
     for %%F in ("%SERVER_EXE%" "%STAMP_FILE%") do if not exist %%F set "NEED_BUILD=1"
     powershell -NoProfile -Command ^
       "$stamp = (Get-Item -LiteralPath '%STAMP_FILE%').LastWriteTimeUtc;" ^
-      "$paths = @('%LLAMACPP_ROOT%\include', '%LLAMACPP_ROOT%\src', '%LLAMACPP_ROOT%\examples\server', '%SCRIPT_DIR%existing_mods.patch', '%SCRIPT_DIR%enc_dec_separation.patch');" ^
+      "$paths = @('%LLAMACPP_ROOT%\include', '%LLAMACPP_ROOT%\src', '%LLAMACPP_ROOT%\examples\server', '%LLAMACPP_ROOT%\ggml\src', '%SCRIPT_DIR%existing_mods.patch', '%SCRIPT_DIR%enc_dec_separation.patch', '%SCRIPT_DIR%force_moe_expert.patch', '%SCRIPT_DIR%force_moe_expert_count.patch', '%SCRIPT_DIR%prefetch_virtual_memory.patch', '%SCRIPT_DIR%unicode_wstring_from_utf8.patch', '%SCRIPT_DIR%deepseek_llm_regex_bmp.patch', '%SCRIPT_DIR%phx_pack_jacobi.patch');" ^
       "$newer = $false;" ^
       "foreach ($p in $paths) { if (Test-Path $p) { Get-ChildItem -LiteralPath $p -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { if ($_.LastWriteTimeUtc -gt $stamp) { $newer = $true } } } }" ^
       "if ($newer) { exit 1 } else { exit 0 }"

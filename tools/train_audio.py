@@ -84,7 +84,9 @@ class AudioEncoder(nn.Module):
         x = self.conv(x)            # [N,C,1,62]
         x = self.gap(x)             # [N,C,1,1]
         x = x.view(x.size(0), -1)   # [N,C]
-        return self.fc(x)           # [N,concept]
+        x = self.fc(x)              # [N,concept]
+        # Runtime manifest and ORT checks expect NCHW [N, concept, 1, 1].
+        return x.view(x.size(0), self.concept, 1, 1)
 
 
 class AudioDecoder(nn.Module):
@@ -201,31 +203,37 @@ def export_onnx(model, out_dir, concept=128):
     model.eval()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    device = next(model.parameters()).device
+    model = model.cpu().eval()
+    export_kwargs = dict(
+        opset_version=11,
+        do_constant_folding=True,
+    )
+    try:
+        import inspect
+        if 'dynamo' in inspect.signature(torch.onnx.export).parameters:
+            export_kwargs['dynamo'] = False
+    except (TypeError, ValueError):
+        pass
     with torch.no_grad():
-        dummy_enc = torch.randn(1, 1, 1, CHUNK).to(device)
+        dummy_enc = torch.randn(1, 1, 1, CHUNK)
         torch.onnx.export(
             model.encoder,
             dummy_enc,
-            out_dir / 'model_encoder.onnx',
+            str(out_dir / 'model_encoder.onnx'),
             input_names=['waveform'],
             output_names=['concept'],
-            opset_version=11,
-            do_constant_folding=True,
-            dynamo=False,
             dynamic_axes={'waveform': {0: 'batch'}, 'concept': {0: 'batch'}},
+            **export_kwargs,
         )
-        dummy_dec = torch.randn(1, concept, 1, 1).to(device)
+        dummy_dec = torch.randn(1, concept, 1, 1)
         torch.onnx.export(
             model.decoder,
             dummy_dec,
-            out_dir / 'model_decoder.onnx',
+            str(out_dir / 'model_decoder.onnx'),
             input_names=['concept'],
             output_names=['reconstruction'],
-            opset_version=11,
-            do_constant_folding=True,
-            dynamo=False,
             dynamic_axes={'concept': {0: 'batch'}, 'reconstruction': {0: 'batch'}},
+            **export_kwargs,
         )
 
     # Also deploy fused encoder/decoder as best.onnx for C++ local ONNX.
@@ -385,6 +393,11 @@ def main():
                 'concept': args.concept,
             }, out_dir / f'epoch_{epoch:03d}.pt')
 
+    best_ckpt = out_dir / 'best.pt'
+    if best_ckpt.is_file():
+        best_state = torch.load(best_ckpt, map_location='cpu')
+        _unwrap_compiled(model).load_state_dict(best_state['model'])
+        print(f"[train] exporting best checkpoint epoch={best_state.get('epoch')} loss={best_state.get('loss')}")
     export_onnx(_unwrap_compiled(model), out_dir, concept=args.concept)
     torch.save({
         'model': _unwrap_compiled(model).state_dict(),

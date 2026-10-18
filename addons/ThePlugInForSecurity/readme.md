@@ -18,6 +18,7 @@
 2. **识别**：在 meme/word 双层上标记映射、邻域、影响范围。研究旁路默认关，需环境变量 + 鉴权更新才会打开。
 3. **防御**：高显著且异常/已隔离的节点出现在文本中则拦截告警。
 4. **惰性 hop 沙箱（默认关）**：固定标记 `phoenix.probe.inert.v1`，只在观测器自己的 activation 表上走一跳。这是边遍历沙箱，**不是**官方记忆/GNN 复制，**不能**用来证实模因。
+5. **硬嵌入**（`hard_embed.hpp`，由 `security_core.cpp` 编进主机）：进程启动时核对 DEP/ASLR/高熵并套上扩展点禁用、镜像加载策略、堆破坏即终止；工作区路径按规范路径收紧；配置或插件文件在信任前做 SHA-256 钉扎。缺钉、不匹配、敏感路径、急停已按下、或缓解没封上，一律拒绝。模因屏障原有拦截不放宽；急停闩上时 `inspectText` 额外阻断。
 
 未注册 `construct` / `deploy`（404）。外部写探针关闭。
 
@@ -28,10 +29,12 @@
 任选其一启动：
 
 1. 环境 `PHOENIX_SECURITY_ENABLED=1`
-2. `config/phoenix.json` 的 `addons.security.enabled=true`
+2. `config/phoenix.json` 的 `addons.security.enabled=true`，且环境 `PHOENIX_SECURITY_CONFIG_PIN` 等于该文件的 SHA-256。没有钉或对不上则配置不能把插件打开（失败闭合）
 3. 选择串含 `security`，或 `AddonManager::addBuiltin("security", "security")`
 4. 鉴权后更新 `security/defense`：`{"pluginEnabled": true}`
 
 CRUD：`security/stats`、`identify`、`alerts`（只读）；`security/defense`（Get/Update，含 `pluginEnabled`）；`security/probe`（内部 Update + 环境 `PHOENIX_SECURITY_ALLOW_INERT_PROBE=1`）。
 
 主机单测：`gtest_runner.exe --gtest_filter=SecurityPluginTest*:MemeticExistenceTest*`
+
+安全线（不链 `phoenix_main`）：`addons\ThePlugInForSecurity\build_security_line_tests.bat`，然后 `build\security_line_tests.exe --gtest_filter=HardEmbed*:*SoftBarrier*`

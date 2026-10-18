@@ -158,7 +158,12 @@ class VideoEncoder(nn.Module):
         if not hasattr(models, resnet_name):
             raise ValueError(f'Unknown torchvision model: {resnet_name}')
         weights = 'IMAGENET1K_V1' if pretrained else None
-        resnet = getattr(models, resnet_name)(weights=weights)
+        ctor = getattr(models, resnet_name)
+        try:
+            resnet = ctor(weights=weights)
+        except TypeError:
+            # torchvision<0.13 (e.g. 0.11 + CUDA 11.1 wheels) takes pretrained=.
+            resnet = ctor(pretrained=bool(pretrained))
         self.feature_dim = resnet.fc.in_features
         resnet.fc = nn.Identity()  # we apply the head ourselves
         self.resnet = resnet
@@ -238,7 +243,7 @@ def export_onnx(model, out_dir, concept=128, resolution=224):
     with torch.no_grad():
         # Encoder base: 3x224x224 -> 512-D embedding for BPU.
         dummy_enc = torch.randn(1, 3, resolution, resolution).to(device)
-        torch.onnx.export(
+        export_runtime_models.onnx_export(
             base,
             dummy_enc,
             out_dir / 'model_encoder.onnx',
@@ -246,13 +251,12 @@ def export_onnx(model, out_dir, concept=128, resolution=224):
             output_names=['embedding'],
             opset_version=11,
             do_constant_folding=True,
-            dynamo=False,
             dynamic_axes={'pixel_values': {0: 'batch'}, 'embedding': {0: 'batch'}},
         )
 
         # Encoder head: 512 -> concept, runs on CPU in C++.
         dummy_head = torch.randn(1, feature_dim).to(device)
-        torch.onnx.export(
+        export_runtime_models.onnx_export(
             head,
             dummy_head,
             out_dir / 'model_encoder_head.onnx',
@@ -260,13 +264,12 @@ def export_onnx(model, out_dir, concept=128, resolution=224):
             output_names=['concept'],
             opset_version=11,
             do_constant_folding=True,
-            dynamo=False,
             dynamic_axes={'embedding': {0: 'batch'}, 'concept': {0: 'batch'}},
         )
 
         # Decoder: concept -> 3x224x224.
         dummy_dec = torch.randn(1, concept, 1, 1).to(device)
-        torch.onnx.export(
+        export_runtime_models.onnx_export(
             model.decoder,
             dummy_dec,
             out_dir / 'model_decoder.onnx',
@@ -274,7 +277,6 @@ def export_onnx(model, out_dir, concept=128, resolution=224):
             output_names=['reconstruction'],
             opset_version=11,
             do_constant_folding=True,
-            dynamo=False,
             dynamic_axes={'concept': {0: 'batch'}, 'reconstruction': {0: 'batch'}},
         )
 
@@ -345,7 +347,7 @@ def main():
     load_sd = None
     if args.decoder_pt and Path(args.decoder_pt).is_file():
         print(f'[train] loading decoder warm-start from {args.decoder_pt}')
-        load_sd = torch.load(args.decoder_pt, map_location='cpu', weights_only=False)
+        load_sd = export_runtime_models.torch_load(args.decoder_pt, map_location='cpu')
         if isinstance(load_sd, dict) and 'model' in load_sd:
             load_sd = load_sd['model']
         print(f'[train] decoder checkpoint has {len(list(load_sd.keys()))} keys')
@@ -393,8 +395,15 @@ def main():
     loss_fn = nn.MSELoss()
 
     use_amp = args.amp and device.type == 'cuda'
-    scaler = torch.amp.GradScaler() if use_amp else None
-    autocast = lambda: torch.autocast(device_type=device.type, dtype=torch.float16) if use_amp else torch.enable_grad()
+    if not use_amp:
+        scaler = None
+        autocast = torch.enable_grad
+    elif hasattr(torch, 'amp') and hasattr(torch.amp, 'GradScaler'):
+        scaler = torch.amp.GradScaler()
+        autocast = lambda: torch.autocast(device_type=device.type, dtype=torch.float16)
+    else:
+        scaler = torch.cuda.amp.GradScaler()
+        autocast = torch.cuda.amp.autocast
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -428,6 +437,8 @@ def main():
                 sched.step()
 
             total += loss.item() * args.grad_accum
+            if step == 1 or step % 100 == 0:
+                print(f'  step {step}/{len(loader)} loss={loss.item() * args.grad_accum:.4f}', flush=True)
 
         avg = total / len(loader)
         print(f'epoch {epoch}/{args.epochs}  loss={avg:.6f}  time={time.time()-t0:.1f}s')

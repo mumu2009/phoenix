@@ -1,0 +1,65 @@
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 0f4b62c4..82c8ee51 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -9,4 +9,5 @@
+ #include <algorithm>
+ #include <cassert>
++#include <cstdlib>
+ #include <cstring>
+ #include <functional>
+@@ -432,4 +433,22 @@ void llama_model::load_hparams(llama_model_loader & ml) {
+     }
+ 
++    /* PHOENIX_FORCE_MOE_N_EXPERT_USED
++       LLAMA_FORCE_MOE_EXPERT=N (N >= 0 and N < n_expert) collapses the
++       routed expert count to 1 before tensors and print_info. Weight
++       shapes stay on n_expert. The argsort kernel pins that one top-k
++       slot to expert N. Unset, or a dense model, leaves the GGUF count. */
++    {
++        const char * phx_env = std::getenv("LLAMA_FORCE_MOE_EXPERT");
++        if (phx_env != nullptr && phx_env[0] != '\0' && hparams.n_expert > 0) {
++            const int forced = std::atoi(phx_env);
++            if (forced >= 0 && forced < static_cast<int>(hparams.n_expert)) {
++                const uint32_t native_used = hparams.n_expert_used;
++                hparams.n_expert_used = 1;
++                LLAMA_LOG_INFO("%s: LLAMA_FORCE_MOE_EXPERT=%d n_expert_used=1 (native %u)\n",
++                               __func__, forced, native_used);
++            }
++        }
++    }
++
+     // zero-out the array hparams
+     std::fill(hparams.n_head_arr.begin(),    hparams.n_head_arr.end(),    0);
+diff --git a/src/llama.cpp b/src/llama.cpp
+index 607f2786..742195eb 100644
+--- a/src/llama.cpp
++++ b/src/llama.cpp
+@@ -22,6 +22,7 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <ctime>
+ #include <functional>
+@@ -435,6 +436,20 @@ llama_expert_gating_func_type gating_op,
+     int64_t n_embd = cur->ne[0];
+     int64_t n_tokens = cur->ne[1];
+ 
++    /* PHOENIX_FORCE_MOE_N_EXPERT_USED: log the count this graph actually routes. */
++    {
++        static int phx_moe_route_logged = 0;
++        if (phx_moe_route_logged == 0) {
++            const char * phx_env = std::getenv("LLAMA_FORCE_MOE_EXPERT");
++            if (phx_env != nullptr && phx_env[0] != '\0') {
++                phx_moe_route_logged = 1;
++                fprintf(stderr,
++                        "LLAMA_FORCE_MOE_EXPERT=%s graph n_expert_used=%lld\n",
++                        phx_env, (long long) n_expert_used);
++            }
++        }
++    }
++
+     ggml_tensor * logits = llm_build_lora_mm(lctx, ctx, gate_inp, cur); // [n_expert, n_tokens]
+     cb(logits, "ffn_moe_logits", il);

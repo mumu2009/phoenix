@@ -18,11 +18,11 @@ namespace phoenix {
  * @brief Emotion-conditioned generation steering.
  *
  * This namespace deliberately does NOT perform a raw "small matrix multiply"
- * with backend weight matrices.  Instead it uses evidence-based, interpretable
- * levers that are already supported by production inference servers:
- *   - prompt-level modulation (system-prompt / prefix injection),
- *   - token-level logit bias (OpenAI/Ollama/llama-server compatible),
- *   - sampling-parameter adjustment (temperature, top_p, presence/frequency).
+ * with backend weight matrices.  Chat affect moves sampling only:
+ *   - temperature / top_p / penalties via emotion::mapChatSampling
+ *     (chat temperature stays in [0.15, 0.40]),
+ *   - token-level logit bias (word keys, capped, not prompt text).
+ * Affect sentences are not written into the chat causal string.
  *
  * The mapping from the 8-d emotion tensor to these levers is a small
  * learnable or hand-crafted projection.  For the default implementation we use

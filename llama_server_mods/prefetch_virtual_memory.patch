@@ -1,0 +1,38 @@
+diff --git a/src/llama-mmap.cpp b/src/llama-mmap.cpp
+index b716630a..5b412e11 100644
+--- a/src/llama-mmap.cpp
++++ b/src/llama-mmap.cpp
+@@ -380,14 +380,19 @@ struct llama_mmap::impl {
+         }
+ 
+         if (prefetch > 0) {
+-#if _WIN32_WINNT >= 0x602
+-            BOOL (WINAPI *pPrefetchVirtualMemory) (HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
++            /* PHOENIX_PREFETCH_VIRTUAL_MEMORY
++               MinGW GCC 16 defaults _WIN32_WINNT below 0x602, so the old
++               #else threw and refused to mmap. Resolve the Win8+ API at
++               runtime; if it is missing, keep the mapping and skip prefetch. */
++            typedef struct {
++                PVOID  VirtualAddress;
++                SIZE_T NumberOfBytes;
++            } phx_memory_range_entry;
++            BOOL (WINAPI *pPrefetchVirtualMemory) (HANDLE, ULONG_PTR, phx_memory_range_entry *, ULONG);
+             HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+-
+             pPrefetchVirtualMemory = (decltype(pPrefetchVirtualMemory))(void *) GetProcAddress(hKernel32, "PrefetchVirtualMemory");
+-
+             if (pPrefetchVirtualMemory) {
+-                WIN32_MEMORY_RANGE_ENTRY range;
++                phx_memory_range_entry range;
+                 range.VirtualAddress = addr;
+                 range.NumberOfBytes = (SIZE_T) std::min(size, prefetch);
+                 if (!pPrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0)) {
+@@ -395,9 +400,6 @@ struct llama_mmap::impl {
+                             llama_format_win_err(GetLastError()).c_str());
+                 }
+             }
+-#else
+-            throw std::runtime_error("PrefetchVirtualMemory unavailable");
+-#endif
+         }
+     }

@@ -17,6 +17,10 @@
 #include "scoped_trainable_memory.hpp"
 #include "mcp_client.hpp"
 #include "emergency_stop.hpp"
+#include "self_mind.hpp"
+#include "study_unit_learn.hpp"
+#include "population_layer.hpp"
+#include "tiny_expert.hpp"
 #include "instance_registry.hpp"
 #include "addon.hpp"
 #include <functional>
@@ -148,6 +152,22 @@ public:
     /* v7.0 subconscious profile (optional, config subconscious.*) */
     json configureSubconscious(const json &payload); /* Configure temperament/tuning. */
 
+    /* Self-mind: dialogue bandit, inner thought, mirror/Turing probes.
+       Thoughts are not answers. The chat causal string is left untouched. */
+    json configureSelfMind(const json &payload);
+    json ingestSelfCorpus(const json &payload);
+    json selfMindStatus() const;
+    json selfProbe();
+    json tickSelfThought();
+
+    /* Deepened unit learning, capped population layer, tiny goal expert.
+       All three stay off the chat causal string. Population and the expert
+       default off; unit learning follows study.unitLearn.enabled. */
+    json configureStudy(const json &payload);
+    json learnUnits(const json &payload);
+    json runPopulationGoal(const json &payload);
+    json summonTinyExpert(const json &payload);
+
     /* v7.0 mission layer (optional, config mission.*): Meeseeks-style goal
        pressure + instance reproduction.  In-process lifecycle state machine;
        no separate runtime layer. */
@@ -249,6 +269,14 @@ private:
     /* v7.0 subconscious profile (optional) */
     bool subconsciousEnabled_{false};
     phoenix::subconscious::SubconsciousProfile subProfile_;
+
+    /* Person model under the chat window. Default on; chat prompts stay user-only. */
+    phoenix::selfmind::SelfMind selfMind_;
+
+    /* Study line: unit graph, population above instances, local tiny expert. */
+    phoenix::study::UnitLearner unitLearner_;
+    phoenix::study::PopulationLayer population_;
+    phoenix::study::TinyExpert tinyExpert_;
 
     /* v7.0 mission layer (optional) */
     bool missionEnabled_{false};

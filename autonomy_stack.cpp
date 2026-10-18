@@ -4,6 +4,7 @@
 #include "inference_abort.hpp"
 #include "mission_reply_parse.hpp"
 #include "mission_workspace.hpp"
+#include "summon_registry.hpp"
 
 #include "addons/builtin_registry.hpp"
 #include "phoenix_config.hpp"
@@ -27,6 +28,76 @@ int64_t nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+/* Dump first, then replace. Opening the destination before dump()
+   truncates it; a later dump throw (invalid UTF-8) left a 0-byte file. */
+bool persistAutonomyStateFile(const std::string &persistPath, const nlohmann::json &state) {
+    if (persistPath.empty())
+        return false;
+    std::string body;
+    try {
+        body = state.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+    } catch (const std::exception &e) {
+        std::cerr << "[autonomy-state] dump failed, destination left untouched: "
+                  << e.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cerr << "[autonomy-state] dump failed, destination left untouched" << std::endl;
+        return false;
+    }
+    if (body.size() < 2) {
+        std::cerr << "[autonomy-state] refused empty dump" << std::endl;
+        return false;
+    }
+    const std::filesystem::path path(persistPath);
+    std::error_code ec;
+    if (!path.parent_path().empty()) {
+        std::filesystem::create_directories(path.parent_path(), ec);
+        if (ec) {
+            std::cerr << "[autonomy-state] mkdir failed: " << ec.message() << std::endl;
+            return false;
+        }
+    }
+    const std::filesystem::path tmp(path.string() + ".tmp");
+    const std::filesystem::path bak(path.string() + ".bak");
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            std::cerr << "[autonomy-state] temp open failed" << std::endl;
+            return false;
+        }
+        f.write(body.data(), static_cast<std::streamsize>(body.size()));
+        f.flush();
+        if (!f) {
+            std::cerr << "[autonomy-state] temp write failed" << std::endl;
+            std::filesystem::remove(tmp, ec);
+            return false;
+        }
+    }
+    std::filesystem::remove(bak, ec);
+    ec.clear();
+    if (std::filesystem::exists(path)) {
+        std::filesystem::rename(path, bak, ec);
+        if (ec) {
+            std::cerr << "[autonomy-state] could not move existing file aside: "
+                      << ec.message() << std::endl;
+            std::filesystem::remove(tmp, ec);
+            return false;
+        }
+    }
+    ec.clear();
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        std::cerr << "[autonomy-state] rename temp failed: " << ec.message() << std::endl;
+        std::error_code ec2;
+        if (std::filesystem::exists(bak))
+            std::filesystem::rename(bak, path, ec2);
+        std::filesystem::remove(tmp, ec2);
+        return false;
+    }
+    std::filesystem::remove(bak, ec);
+    return true;
 }
 
 double clampDouble(double v, double lo, double hi) {
@@ -668,6 +739,44 @@ CognitionAutonomyManager::CognitionAutonomyManager()
         missionIncludeGnnSummary_ = phoenix::cfgOr<bool>("mission.includeGnnSummary", true);
     } catch (...) {
     }
+    try {
+        nlohmann::json selfCfg;
+        selfCfg["enabled"] = phoenix::cfgOr<bool>("selfMind.enabled", true);
+        selfCfg["name"] = phoenix::cfgOr<std::string>("selfMind.name", std::string("self"));
+        selfCfg["learningRate"] = phoenix::cfgOr<double>("selfMind.learningRate", 0.35);
+        selfCfg["corpusPath"] = phoenix::cfgOr<std::string>("selfMind.corpusPath", std::string());
+        selfCfg["learnFromLiveTurns"] = phoenix::cfgOr<bool>("selfMind.learnFromLiveTurns", false);
+        selfCfg["holdoutEvery"] = phoenix::cfgOr<int>("selfMind.holdoutEvery", 4);
+        selfMind_.configure(selfCfg);
+    } catch (...) {
+    }
+    try {
+        nlohmann::json unitCfg;
+        unitCfg["enabled"] = phoenix::cfgOr<bool>("study.unitLearn.enabled", true);
+        unitCfg["steps"] = phoenix::cfgOr<int>("study.unitLearn.steps", 3);
+        unitCfg["dim"] = phoenix::cfgOr<int>("study.unitLearn.dim", 16);
+        unitCfg["maxMerges"] = phoenix::cfgOr<int>("study.unitLearn.maxMerges", 32);
+        unitLearner_.configure(unitCfg);
+        nlohmann::json popCfg;
+        const bool populationOn = phoenix::cfgOr<bool>("study.population.enabled", false);
+        popCfg["enabled"] = populationOn;
+        popCfg["maxPopulation"] = phoenix::cfgOr<int>("study.population.maxPopulation", 8);
+        popCfg["mutationScale"] = phoenix::cfgOr<double>("study.population.mutationScale", 0.05);
+        popCfg["tolerance"] = phoenix::cfgOr<double>("study.population.tolerance", 0.2);
+        if (populationOn) popCfg["n"] = phoenix::cfgOr<int>("study.population.n", 4);
+        population_.configure(popCfg);
+        nlohmann::json expCfg;
+        expCfg["enabled"] = phoenix::cfgOr<bool>("study.expert.enabled", false);
+        expCfg["corpusPath"] = phoenix::cfgOr<std::string>(
+            "study.expert.corpusPath", std::string("./runtime_store/datasets/study_expert/corpus.txt"));
+        expCfg["weightsPath"] = phoenix::cfgOr<std::string>(
+            "study.expert.weightsPath", std::string("./runtime_store/experts/study_tiny/weights.json"));
+        expCfg["hidden"] = phoenix::cfgOr<int>("study.expert.hidden", 16);
+        expCfg["vocab"] = phoenix::cfgOr<int>("study.expert.vocab", 32);
+        expCfg["epochs"] = phoenix::cfgOr<int>("study.expert.epochs", 8);
+        tinyExpert_.configure(expCfg);
+    } catch (...) {
+    }
 }
 
 CognitionAutonomyManager::~CognitionAutonomyManager() {
@@ -730,6 +839,10 @@ json CognitionAutonomyManager::status() const {
                                  {"lastBenefitHarmBias", lastBenefitHarmBias_},
                                  {"agi", agiEnabled_ ? agiController_.status() : json{{"enabled", false}}},
                                  {"subconscious", subconsciousEnabled_ ? subProfile_.toJson() : json{{"enabled", false}}},
+                                 {"selfMind", selfMind_.status()},
+                                 {"study", json{{"unitLearn", unitLearner_.status()},
+                                                {"population", population_.status()},
+                                                {"expert", tinyExpert_.status()}}},
                                  {"agiActions", agiActionRegistry_.toJson()},
                                  {"agiGoals", goals_},
                                  {"mixedModalInputSize", inputBuffer_.size()},
@@ -789,7 +902,7 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
                      json{{"goal", spec.name}, {"description", goal}, {"goals", goals_}}}};
     }
 
-    if (spec.category == "replicate") {
+    if (spec.category == "replicate" || spec.category == "summon") {
         /* v8.2: replicate = summon a Meeseeks-BOX TOOL.  The sub-task comes
            from context.userPrompt; empty/identical requests degrade to
            "assist with: <parent goal>" inside recordChild, so the parent
@@ -797,6 +910,23 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
         /* v8.x concurrent missions: replicate targets the mission from
            context.missionId (the gateway deliberator injects it), else the
            default (most recently assigned) mission. */
+        /* v8.6 summon: category "summon" (action name "summon.<model>")
+           spawns the box on a REGISTERED EXTERNAL MODEL instead of the base
+           model.  The planner picks the action; the model itself is never
+           taught a call syntax (framework adapts to the model, not vice
+           versa).  The model name must exist in summon.models. */
+        std::string summonModel;
+        if (spec.category == "summon") {
+            summonModel = spec.name.size() > 7 ? spec.name.substr(7)
+                                               : std::string();
+            auto &reg = phoenix::summon::SummonRegistry::instance();
+            if (summonModel.empty() || !reg.find(summonModel)) {
+                return json{{"ok", false},
+                            {"error", "summon model not registered: " +
+                                          (summonModel.empty() ? std::string("<empty>")
+                                                               : summonModel)}};
+            }
+        }
         const json ctx0 = context.is_object() ? context : json::object();
         phoenix::mission::MissionLifecycle *msn =
             missionByIdLocked(ctx0.value("missionId", std::string()));
@@ -813,10 +943,17 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
                the user configured mission.maxReplicaDepth > 0. */
             const std::string parentId = ctx.value("parentId", std::string());
             const auto childRec = msn->recordChild(missionGenome_,
-                                                   missionMutationRate_, subgoal, parentId);
+                                                   missionMutationRate_, subgoal,
+                                                   parentId, summonModel);
             const phoenix::mission::Mission snap = msn->mission();
             const std::string childId =
                 "child-" + snap.id + "-" + std::to_string(msn->children().size());
+            if (!summonModel.empty()) {
+                /* The gateway deliberator resolves this box's workspace
+                   scope to the external endpoint through the registry. */
+                phoenix::summon::SummonRegistry::instance().setScopeModel(
+                    snap.id + "/children/" + childRec.id, summonModel);
+            }
             nlohmann::json childSession;
             childSession["sessionId"] = childId;
             childSession["observations"] = 1;
@@ -824,19 +961,26 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
             childSession["lastObservedAtMs"] = nowMs();
             childSession["shouldIterate"] = true;
             childSession["missionGenome"] = childRec.genome.toJson();
-            childSession["spawnedBy"] = "instance-replicate";
+            childSession["spawnedBy"] = summonModel.empty()
+                                            ? "instance-replicate"
+                                            : "instance-summon";
             childSession["parentBoxId"] = parentId;
             childSession["boxId"] = childRec.id;
+            if (!summonModel.empty()) childSession["model"] = summonModel;
             sessions_[childId] = childSession;
             return json{{"ok", true},
                         {"result", json{{"replicated", true},
                                         {"childSessionId", childId},
                                         {"boxId", childRec.id},
                                         {"goal", childRec.goal},
+                                        {"model", summonModel},
                                         {"parentGoal", snap.goal},
                                         {"genome", childRec.genome.toJson()},
                                         {"childrenCount", msn->children().size()},
                                         {"reply", "summoned helper box " + childRec.id +
+                                                  (summonModel.empty()
+                                                       ? std::string()
+                                                       : " on model " + summonModel) +
                                                   " for: " + childRec.goal}}}};
         } catch (const std::runtime_error &e) {
             return json{{"ok", false}, {"error", e.what()}};
@@ -1752,10 +1896,73 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
     if (userText.empty() && !consumedInterjections.empty()) {
         userText = consumedInterjections.back();
     }
+    const bool chatScope =
+        iterMemScope.kind == phoenix::memory::MemoryKind::Chat;
     if (!userText.empty()) {
-        composedPrompt = promptComposer_.compose(userText, true);
-        cognitionModulation = promptComposer_.modulationHint();
+        if (chatScope) {
+            /* Causal string is the user text. Affect stays in sampling. */
+            composedPrompt = phoenix::emotion::chatCausalText(userText);
+        } else {
+            composedPrompt = promptComposer_.compose(userText, true);
+            cognitionModulation = promptComposer_.modulationHint();
+        }
     }
+    /* Inner thought is not an answer and is not written into composedPrompt.
+       A question in userText does not steer the thought. The tick only
+       updates SelfMind; the affect blend below reads the tick JSON. */
+    nlohmann::json selfMindInfo = nlohmann::json{{"enabled", false}};
+    if (selfMind_.enabled()) {
+        if (selfMind_.learnFromLiveTurns() && !userText.empty() &&
+            userText.size() <= 400 && !payload.contains("missionId")) {
+            selfMind_.observeUtterance("human", userText);
+        }
+        selfMindInfo = selfMind_.tickThought(nlohmann::json::object());
+    }
+    /* Unit learning is a side channel. Thoughts and unit rows stay out of
+       composedPrompt. Population runs only when that layer is enabled and
+       this call carries an explicit goal. */
+    nlohmann::json studyLearn = nlohmann::json{{"enabled", unitLearner_.enabled()},
+                                               {"writesCausalString", false}};
+    if (unitLearner_.enabled() && !userText.empty()) {
+        try {
+            const std::string slice = userText.size() > 512 ? userText.substr(0, 512) : userText;
+            const auto learned = unitLearner_.learnEpisode(slice);
+            studyLearn = unitLearner_.sideChannel(learned);
+        } catch (...) {
+            studyLearn = nlohmann::json{{"enabled", true},
+                                        {"ok", false},
+                                        {"writesCausalString", false}};
+        }
+    }
+    nlohmann::json populationInfo = nlohmann::json{{"enabled", population_.enabled()},
+                                                   {"ran", false}};
+    if (population_.enabled() && payload.contains("populationGoal") &&
+        payload["populationGoal"].is_object()) {
+        populationInfo = population_.runGoal(payload["populationGoal"]);
+    }
+    if (selfMindInfo.value("spontaneous", false)) {
+        const std::string action = selfMindInfo.value("action", std::string());
+        const std::string thoughtText = selfMindInfo.value("text", std::string());
+        const std::string scope = ctxTag.empty() ? iterMemScope.key() : ctxTag;
+        const auto felt = phoenix::instinct::sensationFromThought(action, scope);
+        if (felt.intensity > 0.0f)
+            sensationEngine_.add(felt);
+        memory.emotionTensor = phoenix::emotion::blendThoughtAffect(
+            memory.emotionTensor, action, thoughtText, 0.22f);
+    }
+    if (chatScope && !userText.empty()) {
+        const auto heard = phoenix::emotion::surfaceAffect(userText);
+        if (heard.distance(phoenix::emotion::EmotionTensor{}) > 1e-4f) {
+            memory.emotionTensor = phoenix::emotion::homeostaticUpdate(
+                memory.emotionTensor, heard, phoenix::emotion::EmotionTensor{},
+                0.75f, 0.05f);
+        }
+    }
+    memory.driveVector = phoenix::emotion::tensorToDrive(memory.emotionTensor);
+    memory.inferenceOptions = chatScope
+        ? phoenix::emotion::mapChatSampling(memory.emotionTensor)
+        : memory.emotionTensor.inferenceOptions();
+    promptComposer_.setMemory(memory);
     if (!consumedInterjections.empty()) {
         std::string injBlock = "[human interjections]";
         for (const auto &s : consumedInterjections) injBlock += "\n- " + s;
@@ -1820,7 +2027,10 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
                                  {"agiPlan", agiPlanJson},
                                  {"memoryScope", iterMemScope.key()},
                                  {"mission", missionInfo},
-                                 {"interjectionsConsumed", consumedInterjections.size()}}}};
+                                 {"interjectionsConsumed", consumedInterjections.size()},
+                                 {"selfMind", selfMindInfo},
+                                 {"studyLearn", studyLearn},
+                                 {"population", populationInfo}}}};
 }
 
 json CognitionAutonomyManager::session(const std::string &sessionId) const {
@@ -1870,7 +2080,12 @@ json CognitionAutonomyManager::exportState() const {
                 {"missionGenome", missionGenome_.toJson()},
                 {"goals", goals_},
                 {"subconsciousEnabled", subconsciousEnabled_},
-                {"subconscious", subProfile_.toJson()}};
+                {"subconscious", subProfile_.toJson()},
+                {"selfMindEnabled", selfMind_.enabled()},
+                {"selfMind", selfMind_.toJson()},
+                {"studyUnitLearn", unitLearner_.toJson()},
+                {"studyPopulation", population_.toJson()},
+                {"studyExpert", tinyExpert_.toJson()}};
 }
 
 json CognitionAutonomyManager::importState(const json &state) {
@@ -1931,6 +2146,18 @@ json CognitionAutonomyManager::importState(const json &state) {
         goals_.clear();
         for (const auto &g : state["goals"])
             if (g.is_string()) goals_.push_back(g.get<std::string>());
+    }
+    if (state.contains("selfMind") && state["selfMind"].is_object()) {
+        selfMind_.fromJson(state["selfMind"]);
+    }
+    if (state.contains("studyUnitLearn") && state["studyUnitLearn"].is_object()) {
+        unitLearner_.fromJson(state["studyUnitLearn"]);
+    }
+    if (state.contains("studyPopulation") && state["studyPopulation"].is_object()) {
+        population_.fromJson(state["studyPopulation"]);
+    }
+    if (state.contains("studyExpert") && state["studyExpert"].is_object()) {
+        tinyExpert_.fromJson(state["studyExpert"]);
     }
     subconsciousEnabled_ = state.value("subconsciousEnabled", subconsciousEnabled_);
     if (state.contains("subconscious") && state["subconscious"].is_object()) {
@@ -2216,6 +2443,70 @@ json CognitionAutonomyManager::configureSubconscious(const json &payload) {
     subProfile_.applyTo(instinctEngine_);
     subProfile_.applyTo(agiController_);
     return json{{"ok", true}, {"result", subProfile_.toJson()}};
+}
+
+json CognitionAutonomyManager::configureSelfMind(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    return selfMind_.configure(payload);
+}
+
+json CognitionAutonomyManager::ingestSelfCorpus(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    return selfMind_.ingest(payload);
+}
+
+json CognitionAutonomyManager::selfMindStatus() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return json{{"ok", true}, {"result", selfMind_.status()}};
+}
+
+json CognitionAutonomyManager::selfProbe() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return selfMind_.probe();
+}
+
+json CognitionAutonomyManager::tickSelfThought() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return selfMind_.tickThought(json::object());
+}
+
+json CognitionAutonomyManager::configureStudy(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    json out = json::object();
+    if (payload.contains("unitLearn")) out["unitLearn"] = unitLearner_.configure(payload["unitLearn"]);
+    if (payload.contains("population")) out["population"] = population_.configure(payload["population"]);
+    if (payload.contains("expert")) out["expert"] = tinyExpert_.configure(payload["expert"]);
+    return json{{"ok", true}, {"result", out}};
+}
+
+json CognitionAutonomyManager::learnUnits(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (payload.contains("units") || payload.contains("memes")) {
+        return unitLearner_.importUnits(payload);
+    }
+    const std::string text = payload.value("text", std::string());
+    const auto learned = unitLearner_.learnEpisode(text);
+    return json{{"ok", learned.value("ok", false)}, {"result", unitLearner_.sideChannel(learned)}};
+}
+
+json CognitionAutonomyManager::runPopulationGoal(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    return population_.runGoal(payload);
+}
+
+json CognitionAutonomyManager::summonTinyExpert(const json &payload) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!tinyExpert_.enabled()) {
+        return json{{"ok", false}, {"ran", false}, {"reason", "disabled"}};
+    }
+    auto trained = tinyExpert_.trainForGoal(payload);
+    bool registered = false;
+    if (trained.value("ok", false) && phoenix::summon::SummonRegistry::instance().enabled()) {
+        const std::string name = payload.value("name", std::string("tiny-expert"));
+        registered = tinyExpert_.registerSummon(name);
+    }
+    trained["registered"] = registered;
+    return trained;
 }
 
 json CognitionAutonomyManager::assignMission(const json &payload) {
@@ -2508,12 +2799,13 @@ json CognitionAutonomyManager::reportMissionOutcome(const json &payload) {
     if (stopLoop || !persistPath.empty()) {
         try {
             nlohmann::json state = exportState();
-            std::filesystem::path path(persistPath);
-            if (!path.parent_path().empty())
-                std::filesystem::create_directories(path.parent_path());
-            std::ofstream f(path);
-            f << state.dump(2);
+            if (!persistAutonomyStateFile(persistPath, state))
+                std::cerr << "[autonomy-state] report persist failed; previous file kept"
+                          << std::endl;
+        } catch (const std::exception &e) {
+            std::cerr << "[autonomy-state] report persist exception: " << e.what() << std::endl;
         } catch (...) {
+            std::cerr << "[autonomy-state] report persist exception" << std::endl;
         }
     }
     return json{{"ok", true}, {"result", stats}};
@@ -2570,7 +2862,22 @@ json CognitionAutonomyManager::spawnMissionChild(const json &payload) {
     /* v8.2: subgoal = the bounded request this box must fulfil. */
     const std::string subgoal = p.value("subgoal", p.value("userPrompt", std::string()));
     const std::string parentId = p.value("parentId", std::string());
-    const auto child = msn->recordChild(parent, rate, subgoal, parentId);
+    /* v8.6 summon: optional model field - the box runs on a registered
+       external endpoint instead of the base model.  Empty = base.  An
+       unregistered name is rejected so a typo never silently falls back
+       to the base model. */
+    const std::string model = p.value("model", std::string());
+    if (!model.empty() &&
+        !phoenix::summon::SummonRegistry::instance().find(model)) {
+        return json{{"ok", false},
+                    {"error", "unknown summon model: " + model +
+                                  " (register it under summon.models)"}};
+    }
+    const auto child = msn->recordChild(parent, rate, subgoal, parentId, model);
+    if (!model.empty()) {
+        phoenix::summon::SummonRegistry::instance().setScopeModel(
+            msn->mission().id + "/children/" + child.id, model);
+    }
     return json{{"ok", true}, {"result", child.toJson()}};
 }
 
@@ -2869,12 +3176,13 @@ json CognitionAutonomyManager::startAutonomyLoop(const json &opts) {
     if (!restoreState) {
         try {
             nlohmann::json state = exportState();
-            std::filesystem::path path(loopPersistPath_);
-            if (!path.parent_path().empty())
-                std::filesystem::create_directories(path.parent_path());
-            std::ofstream f(path);
-            f << state.dump(2);
+            if (!persistAutonomyStateFile(loopPersistPath_, state))
+                std::cerr << "[autonomy-state] loop-start persist failed; previous file kept"
+                          << std::endl;
+        } catch (const std::exception &e) {
+            std::cerr << "[autonomy-state] loop-start persist exception: " << e.what() << std::endl;
         } catch (...) {
+            std::cerr << "[autonomy-state] loop-start persist exception" << std::endl;
         }
     }
     return json{{"ok", true},
@@ -3000,6 +3308,24 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
             return;
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
+    auto formatRunningPressure = [this]() {
+        std::lock_guard<std::mutex> lock(mu_);
+        std::ostringstream os;
+        os.setf(std::ios::fixed);
+        os << std::setprecision(9);
+        bool any = false;
+        for (const auto &kv : missions_) {
+            if (!kv.second.active())
+                continue;
+            if (any)
+                os << ';';
+            os << kv.first << '=' << kv.second.pressureNow();
+            any = true;
+        }
+        if (!any)
+            os << "none";
+        return os.str();
+    };
     while (!loopStop_.load(std::memory_order_acquire) &&
            loopGeneration_.load(std::memory_order_acquire) == gen) {
         if (phoenix::safety::EmergencyStop::instance().latched()) break;
@@ -3007,7 +3333,8 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
         setLoopStage(1);
         std::cout << "[mission-loop] tick="
                   << loopTickCount_.load(std::memory_order_relaxed)
-                  << " start" << std::endl;
+                  << " start pressure=" << formatRunningPressure()
+                  << std::endl;
         try {
             /* v8.0 mission worker: actually WORK on a Running mission via the
                gateway-registered LLM deliberator.  Runs BEFORE the iterate
@@ -3222,7 +3549,12 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
                     for (auto &sn : snaps) processHelperBoxes(sn);
                 } else {
                     for (auto &sn : snaps) {
-                        processParentTick(std::move(sn));
+                        /* NOT std::move: processParentTick takes the snap by
+                           value; moving here left sn.helpers empty and
+                           processHelperBoxes below returned instantly -
+                           helper boxes (incl. summoned external-model boxes)
+                           never got a tick in the serial path. */
+                        processParentTick(sn);
                         processHelperBoxes(sn);
                     }
                 }
@@ -3358,14 +3690,13 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
         if (loopTickCount_.load(std::memory_order_relaxed) % loopPersistEveryTicks_ == 0) {
             try {
                 nlohmann::json state = exportState();
-                std::filesystem::path path(loopPersistPath_);
-                if (!path.parent_path().empty()) {
-                    std::filesystem::create_directories(path.parent_path());
-                }
-                std::ofstream f(path);
-                f << state.dump(2);
+                if (!persistAutonomyStateFile(loopPersistPath_, state))
+                    std::cerr << "[autonomy-state] tick persist failed; previous file kept"
+                              << std::endl;
+            } catch (const std::exception &e) {
+                std::cerr << "[autonomy-state] tick persist exception: " << e.what() << std::endl;
             } catch (...) {
-                /* persistence is best-effort */
+                std::cerr << "[autonomy-state] tick persist exception" << std::endl;
             }
         }
         const int64_t elapsed = nowMs() - tickStart;
@@ -3397,6 +3728,7 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
                   << (loopTickCount_.load(std::memory_order_relaxed) - 1)
                   << " done elapsed=" << elapsed << "ms sleep=" << sleepMs
                   << "ms draftIncomplete=" << (draftIncomplete ? 1 : 0)
+                  << " pressure=" << formatRunningPressure()
                   << std::endl;
         setLoopStage(0);
         for (int64_t slept = 0;

@@ -1002,3 +1002,18 @@ every N scheduling rounds:
 - **急停闩锁**：`phoenix::safety::EmergencyStop::press(reason)`——顺序：① 闩锁置位（原子，先于一切）；② stopAll 杀全部登记实例（停心跳/停 MCP）；③ 关停处理函数（网关：持久化 `runtime_store/estop_state.json` → `drogon::app().quit()`）。幂等：二次按下返回原报告；代码不可解锁（测试专用 resetForTesting 除外）。
 - **最高优先级检查点**：`iterate()`/`interject()`/`startAutonomyLoop()` 入口 + 心跳每 tick——置位后任何实例拒绝新工作。默认开启（`safety.estop.enabled=true`）：安全装置是"默认关闭"原则的唯一例外。
 - 路由：`POST /api/safety/estop`、`GET /api/safety/estop/status`。分层：memebarrier（单实例图安全）→ E-stop（多实例进程级）→ 进程退出。完整设计、诚实边界（进程内作用域、协作式停堆窗口）见 `doc/v7.0/safety.md`。
+
+## 24. 自我层（selfMind，对话带、自动思考、镜子/图灵探针）
+
+聊天因果串仍然只有用户原话。自我层是它下面的另一条通道：用对话把“服务窗口”学成一个具体的人，并在没有提问时继续想。
+
+- **特征** φ(text) ∈ R^24：第一人称/服务腔/记忆词/情感词/标点，加上字节二元组的 14 桶。向量做 L2 归一，供余弦；第一人称分 ρ_fp 与服务腔分 ρ_bot 另记，不跟二元组抢尺度。
+- **两个质心**（EMA，步长 α）：μ_h 来自角色 `human` 的训练句（每 `holdoutEvery` 句留出，不进质心）；μ_c 来自角色 `chatbot`。自己说出的念头更新 μ_self。
+- **奖励** r(u) = (ρ_fp − ρ_bot) + (cos(φ(u), μ_h) − cos(φ(u), μ_c))。服务腔句为负，像这个人的句子为正。
+- **策略**：五个言语行为（recall / prefer / continue / ask / service）。Q_a = w_a · φ̃，φ̃ 是上一句念头的特征再加一维偏置 1。全信息一步 TD（γ = 0）：对每个行为 a，w_a ← clip(w_a + α (r_a − Q_a) φ̃, −4, 4)。然后贪心取 argmax。这不是对 8B 做梯度，只训这一层线性头。
+- **自动思考**：`tickThought` 不读 `userPrompt`。有没有问句，下一句念头都由内部状态决定。念头写入 `result.selfMind`，不写入 `composedPrompt`。
+- **底层提示** `kernelText`：第一人称续写底，声明这不是服务窗口。供状态与审计，不拼进聊天因果串。
+- **镜子**：自己的念头（以及带〔自识〕标记、且风格仍像自己的句子）对 μ_self 的余弦高于服务腔/他人质心，召回 ≥ 0.75；他人句子和“标记贴在别人身上”的假阳性 ≤ 0.25。
+- **图灵探针**：留出的 `human` 句得分严格高于服务窗口箔句的成对比例 ≥ 0.75。这是自我模型把“这个人”和“客服窗口”分开，不是人类裁判的模仿游戏，也不是现象意识的证明。
+
+设计与口径：`doc/v8.3/self_mind.md`。校准语料 `doc/v8.3/self_mind_sample.json` 是合成的，不是采集来的人声。真对话用 `selfMind.corpusPath` 或 `POST /api/self/ingest`。

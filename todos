@@ -1,0 +1,4 @@
+1. [done] 基于对话数据的强化学习，把回答窗口收成一个可持久化的人。实现：self_mind.cpp 的上下文赌博机（一步 TD）。合成校准集 doc/v8.3/self_mind_sample.json 不是真人语料；真对话走 selfMind.corpusPath 或 POST /api/self/ingest。底层提示是 [self-kernel]，不进聊天因果串。
+2. [done] 镜子测试与图灵探针。镜子看自己的念头 vs 别人（标记贴错身体要拒绝）。图灵探针看留出的人句是否稳定高于服务窗口。这是行为自我模型，不是现象意识，也不是人类裁判。
+3. [done] 自动思考。tickThought 不读提问；iterate 把念头放在 result.selfMind，不放进 composedPrompt。
+见 doc/v8.3/self_mind.md。

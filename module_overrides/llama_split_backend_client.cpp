@@ -578,6 +578,19 @@ void applyGenerateInferenceOptions(json &payload, const std::string &host,
   if (options.contains("ngram_protect_last") &&
       options["ngram_protect_last"].is_number_integer())
     payload["ngram_protect_last"] = options["ngram_protect_last"].get<int>();
+  /* pack_prompt / group_n come from the caller. A hard false here made
+     main.inference.packPrompt a no-op. Mean-pool is a blend (server
+     pack_alpha) so the causal tip rows stay protected. */
+  if (options.contains("pack_prompt") && options["pack_prompt"].is_boolean())
+    payload["pack_prompt"] = options["pack_prompt"].get<bool>();
+  else
+    payload["pack_prompt"] = false;
+  if (options.contains("group_n") && options["group_n"].is_number_integer())
+    payload["group_n"] = options["group_n"].get<int>();
+  else
+    payload.erase("group_n");
+  if (options.contains("speculative") && options["speculative"].is_boolean())
+    payload["speculative"] = options["speculative"].get<bool>();
   if (options.contains("rag_mix_cap") && options["rag_mix_cap"].is_number_integer())
     payload["rag_mix_cap"] = options["rag_mix_cap"].get<int>();
   if (options.contains("num_predict") && options["num_predict"].is_number_integer())
@@ -838,6 +851,29 @@ json unitIterationPipeline(const std::string &host, int port,
                       {"feedback_mode", feedbackMode}};
       applyGenerateInferenceOptions(payload, host, port, timeoutMs,
                                     inferenceOptions);
+      payload["loop_mode"] = "unit";
+      {
+        const int ngramSent = payload.value("ngram_merge", 1);
+        const bool pack = payload.value("pack_prompt", false);
+        const int groupN = payload.value("group_n", ngramSent);
+        const int npar = payload.value("n_parallel", 1);
+        const std::string pmode =
+            payload.value("parallel_mode", std::string());
+        const bool spec = payload.value("speculative", false);
+        std::cerr << "[llama] pack_prompt=" << (pack ? "true" : "false")
+                  << " group_n=" << groupN
+                  << " n_parallel=" << npar
+                  << " parallel_mode=" << pmode
+                  << " speculative=" << (spec ? 1 : 0)
+                  << " budget_ngram="
+                  << phoenix::inference::causalBudgetNgram(pack, ngramSent)
+                  << " ngram_merge=" << ngramSent
+                  << " loop_mode=" << payload.value("loop_mode", std::string("unit"))
+                  << " causal_chars=" << formattedPrompt.size()
+                  << " self_kernel="
+                  << (formattedPrompt.find("[self-kernel]") == std::string::npos ? 0 : 1)
+                  << std::endl;
+      }
       payload.erase("prefix_hidden");
       payload.erase("memory_units");
       if (!pipeCfg.memoryEnabled) {
@@ -960,12 +996,9 @@ json hiddenStatePipeline(const std::string &host, int port,
                 inferenceOptions["ctxTokenBudget"].is_number_integer()
             ? std::max(512, inferenceOptions["ctxTokenBudget"].get<int>())
             : 3584;
-    const int ngramFit =
-        inferenceOptions.is_object() &&
-                inferenceOptions.contains("ngram_merge") &&
-                inferenceOptions["ngram_merge"].is_number_integer()
-            ? inferenceOptions["ngram_merge"].get<int>()
-            : 2;
+    const bool packOn = genOpts.value("pack_prompt", false);
+    const int ngramCfg = genOpts.value("ngram_merge", 2);
+    const int ngramFit = phoenix::inference::causalBudgetNgram(packOn, ngramCfg);
     /* Short asks fit in ctx; an extra /tokenize (or worse /phx/enc)
        on --parallel 1 races the generate we are about to run. */
     if (formattedPrompt.size() > 2048) {
@@ -1174,18 +1207,16 @@ json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
       callTimeoutMs, effectiveMaxTokens,
       inferenceOptions.is_object() ? inferenceOptions : json::object());
 
-  /* Prefix is the document head. Resume is the document tail.
-     skipGraphContext means GNN is in units, not prompt text. */
-  std::string ctxForPipeline;
-  if (inferenceOptions.is_object() &&
-      inferenceOptions.contains("system_content") &&
-      inferenceOptions["system_content"].is_string()) {
-    ctxForPipeline = inferenceOptions["system_content"].get<std::string>();
-  } else {
-    ctxForPipeline = graphContext;
-  }
+  /* Prefix is the mission document head (system_content). Interactive
+     chat keeps memory/CCM/GNN/self-kernel off the causal string. */
   json shortOpts = inferenceOptions.is_object() ? inferenceOptions
                                                 : json::object();
+  std::string ctxForPipeline =
+      phoenix::inference::selectCausalPrefix(shortOpts, graphContext);
+  std::cerr << "[llama] causal_prefix_chars=" << ctxForPipeline.size()
+            << " skip_graph=" << (shortOpts.value("skipGraphContext", false) ? 1 : 0)
+            << " low_priority=" << (shortOpts.value("lowPriority", false) ? 1 : 0)
+            << std::endl;
   /* Short ask: do not ship cognition/GNN units or a long prefix.
      Board chat was returning empty text at the 90s cap; the same
      llama finishes the bare prompt in ~26s. */

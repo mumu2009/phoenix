@@ -21,6 +21,7 @@
 #include "../../plugin_system.hpp"
 #include "../../util/module_resource.hpp"
 #endif
+#include "hard_embed.hpp"
 #include "meme_tensor.hpp"
 
 namespace phoenix {

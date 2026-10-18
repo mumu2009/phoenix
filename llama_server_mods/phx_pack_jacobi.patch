@@ -1,0 +1,317 @@
+diff --git a/examples/server/server.cpp b/examples/server/server.cpp
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -4426,22 +4426,87 @@
+             }
+         } else {
+             res_error(res, format_error_response("\"hidden\", \"tokens\" or \"content\" must be provided", ERROR_TYPE_INVALID_REQUEST));
+             return;
+         }
+ 
+-        // --- prime KV cache with prompt ---
++        /* PHOENIX_PHX_PACK_JACOBI
++           pack_prompt blends earlier hidden rows toward their group mean
++           (group_n / ngram_merge) and leaves the last ngram_protect_last
++           rows raw so the causal tip stays put. parallel_mode=jacobi with
++           n_parallel>1 samples the window head at the request temperature
++           and self-drafts the rest by argmax. speculative=1 compares an
++           in-process argmax draft to the temperature sample (accept when
++           they match, reject when they differ) and counts those drafts.
++           Empty draftModel does not start a second server and does not
++           call /health. Immediate repeats are not drafted. */
++        const bool pack_prompt = json_value(body, "pack_prompt", false);
++        int group_n = 1;
++        if (body.contains("group_n")) group_n = json_value(body, "group_n", 1);
++        else if (body.contains("ngram_merge")) group_n = json_value(body, "ngram_merge", 1);
++        if (group_n < 1) group_n = 1;
++        if (group_n > 3) group_n = 3;
++        int protect_last = json_value(body, "ngram_protect_last", 16);
++        if (protect_last < 1) protect_last = 1;
++        int n_parallel = json_value(body, "n_parallel", 1);
++        if (n_parallel < 1) n_parallel = 1;
++        if (n_parallel > 8) n_parallel = 8;
++        std::string parallel_mode;
++        if (body.contains("parallel_mode") && body.at("parallel_mode").is_string())
++            parallel_mode = body.at("parallel_mode").get<std::string>();
++        const bool speculative = json_value(body, "speculative", false) || parallel_mode == "speculative";
++        const bool jacobi = n_parallel > 1 &&
++            (parallel_mode == "jacobi" || parallel_mode == "speculative" || speculative);
++        const float pack_alpha = pack_prompt ? 0.15f : 0.f;
++        int packed_groups = 0;
++        float pack_l2 = 0.f;
++        if (pack_prompt && group_n >= 2 && n_prompt_tokens > protect_last) {
++            const int head = n_prompt_tokens - protect_last;
++            std::vector<float> saved_row(n_embd);
++            bool saved = false;
++            for (int i = 0; i + group_n <= head; i += group_n) {
++                std::vector<float> mean(n_embd, 0.f);
++                for (int k = 0; k < group_n; ++k) {
++                    const float * row = prompt_hidden.data() + (size_t)(i + k) * n_embd;
++                    for (int d = 0; d < n_embd; ++d) mean[d] += row[d];
++                }
++                const float inv = 1.f / (float) group_n;
++                for (float & v : mean) v *= inv;
++                for (int k = 0; k < group_n; ++k) {
++                    float * row = prompt_hidden.data() + (size_t)(i + k) * n_embd;
++                    if (!saved && k == 0) {
++                        std::copy(row, row + n_embd, saved_row.begin());
++                        saved = true;
++                    }
++                    for (int d = 0; d < n_embd; ++d)
++                        row[d] = (1.f - pack_alpha) * row[d] + pack_alpha * mean[d];
++                }
++                packed_groups++;
++            }
++            if (saved) {
++                const float * row = prompt_hidden.data();
++                double acc = 0.0;
++                for (int d = 0; d < n_embd; ++d) {
++                    const double diff = (double) row[d] - (double) saved_row[d];
++                    acc += diff * diff;
++                }
++                pack_l2 = (float) std::sqrt(acc);
++            }
++        }
++
++        // --- prime KV cache with prompt (fresh cache every request) ---
+         std::vector<llama_pos> prompt_positions(n_prompt_tokens);
+         for (int32_t i = 0; i < n_prompt_tokens; i++) {
+             prompt_positions[i] = i;
+         }
+ 
+         std::vector<float> prompt_out((size_t) n_prompt_tokens * n_embd);
+         int32_t ret;
+         {
+             std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
++            llama_kv_cache_clear(ctx_server.ctx);
+             ret = llama_phx_infer(ctx_server.ctx, prompt_hidden.data(), n_prompt_tokens, prompt_positions.data(), prompt_out.data());
+         }
+         if (ret != 0) {
+             res_error(res, format_error_response("llama_phx_infer (prompt) failed", ERROR_TYPE_SERVER));
+             return;
+         }
+@@ -4527,56 +4592,198 @@
+ 
+         std::vector<float> logits((size_t) n_vocab);
+         std::vector<float> embd(n_embd);
+         std::vector<float> infer_out(n_embd);
+         std::vector<llama_pos> gen_pos(1);
+ 
++        int jacobi_accepted = 0;
++        int jacobi_rounds = 0;
++        int jacobi_rejected = 0;
++        int speculative_draft = 0;
++        int speculative_accepted = 0;
++        int speculative_rejected = 0;
++        std::vector<llama_token> prompt_token_ids;
++        if (body.contains("content") && body.at("content").is_string()) {
++            const bool add_special = json_value(body, "add_special", true);
++            prompt_token_ids = tokenize_mixed(ctx_server.vocab, body.at("content").get<std::string>(), add_special, true);
++        } else if (body.contains("tokens") && body.at("tokens").is_array()) {
++            prompt_token_ids = body.at("tokens").get<llama_tokens>();
++        }
++        {
++            const llama_token bos = llama_vocab_bos(ctx_server.vocab);
++            if (bos >= 0 && !prompt_token_ids.empty() && prompt_token_ids.front() == bos)
++                prompt_token_ids.erase(prompt_token_ids.begin());
++        }
++        auto is_stop = [&](llama_token tok) {
++            return std::find(stop_token_ids.begin(), stop_token_ids.end(), tok) != stop_token_ids.end();
++        };
++        /* Jacobi still drafts, but a suffix that replays the prompt prefix
++           after an answer token is not committed. That keeps the window
++           from echoing the user sentence. */
++        auto replays_prompt = [&](llama_token next) -> bool {
++            if (prompt_token_ids.empty() || generated_tokens.empty()) return false;
++            std::vector<llama_token> seq = generated_tokens;
++            seq.push_back(next);
++            size_t best = 0;
++            const size_t max_len = std::min(seq.size(), prompt_token_ids.size());
++            for (size_t len = 1; len <= max_len; ++len) {
++                bool ok = true;
++                for (size_t k = 0; k < len; ++k) {
++                    if (seq[seq.size() - len + k] != prompt_token_ids[k]) {
++                        ok = false;
++                        break;
++                    }
++                }
++                if (ok) best = len;
++            }
++            if (best < 1 || seq.size() <= best) return false;
++            const size_t head = std::min<size_t>(4, prompt_token_ids.size());
++            for (size_t i = 0; i < seq.size() - best; ++i) {
++                bool in_head = false;
++                for (size_t k = 0; k < head; ++k) {
++                    if (seq[i] == prompt_token_ids[k]) {
++                        in_head = true;
++                        break;
++                    }
++                }
++                if (!in_head) return true;
++            }
++            return false;
++        };
++        auto repeats_earlier = [&](llama_token next) -> bool {
++            if (generated_tokens.size() < 6) return false;
++            std::vector<llama_token> seq = generated_tokens;
++            seq.push_back(next);
++            const size_t n = 4;
++            if (seq.size() < n + 4) return false;
++            for (size_t i = 0; i + n <= seq.size() - n; ++i) {
++                bool match = true;
++                for (size_t k = 0; k < n; ++k) {
++                    if (seq[i + k] != seq[seq.size() - n + k]) {
++                        match = false;
++                        break;
++                    }
++                }
++                if (match) return true;
++            }
++            return false;
++        };
++        auto repeating = [&]() {
++            const size_t n = generated_tokens.size();
++            if (n < 4) return false;
++            return generated_tokens[n - 1] == generated_tokens[n - 2] &&
++                   generated_tokens[n - 2] == generated_tokens[n - 3] &&
++                   generated_tokens[n - 3] == generated_tokens[n - 4];
++        };
+         {
+             std::lock_guard<std::mutex> lock(ctx_server.phx_mutex);
+-            for (int32_t step = 0; step < max_tokens; ++step) {
+-                // dec: unit query -> logits (logits buffer is in vocab order)
++            auto commit_tok = [&](llama_token tok) -> bool {
++                generated_tokens.push_back(tok);
++                if (return_hidden) {
++                    generated_hidden.push_back(last_hidden);
++                }
++                if (llama_phx_encode(ctx_server.ctx, &tok, 1, embd.data()) != 0) return false;
++                gen_pos[0] = n_prompt_tokens + (int32_t) generated_tokens.size() - 1;
++                if (llama_phx_infer(ctx_server.ctx, embd.data(), 1, gen_pos.data(), infer_out.data()) != 0) return false;
++                std::copy(infer_out.begin(), infer_out.begin() + n_embd, last_hidden.begin());
++                return true;
++            };
++            for (int32_t step = 0; step < max_tokens; ) {
+                 int32_t dec_ret = llama_phx_decode(ctx_server.ctx, last_hidden.data(), 1, logits.data());
+                 if (dec_ret != 0) {
+                     res_error(res, format_error_response("llama_phx_decode failed", ERROR_TYPE_SERVER));
+                     return;
+                 }
+ 
+-                // sample next token from the logits buffer directly
+                 const llama_token tok = sample_logit(logits.data(), n_vocab, temperature, top_p);
+-
+-                if (std::find(stop_token_ids.begin(), stop_token_ids.end(), tok) != stop_token_ids.end()) {
++                if (speculative) {
++                    llama_token draft = 0;
++                    for (int32_t i = 1; i < n_vocab; ++i) {
++                        if (logits[i] > logits[draft]) draft = i;
++                    }
++                    speculative_draft++;
++                    if (draft == tok) speculative_accepted++;
++                    else speculative_rejected++;
++                }
++                if (is_stop(tok)) break;
++                if (replays_prompt(tok) || repeats_earlier(tok)) {
++                    jacobi_rejected++;
+                     break;
+                 }
+-
+-                generated_tokens.push_back(tok);
+-                if (return_hidden) {
+-                    generated_hidden.push_back(last_hidden);
+-                }
+-
+-                // enc: token -> embedding (unit query for next infer step)
+-                int32_t enc_ret = llama_phx_encode(ctx_server.ctx, &tok, 1, embd.data());
+-                if (enc_ret != 0) {
+-                    res_error(res, format_error_response("llama_phx_encode failed", ERROR_TYPE_SERVER));
+-                    return;
+-                }
+-
+-                // infer: unit query -> unit query
+-                gen_pos[0] = n_prompt_tokens + step;
+-                int32_t infer_ret = llama_phx_infer(ctx_server.ctx, embd.data(), 1, gen_pos.data(), infer_out.data());
+-                if (infer_ret != 0) {
++                if (!commit_tok(tok)) {
+                     res_error(res, format_error_response("llama_phx_infer failed", ERROR_TYPE_SERVER));
+                     return;
+                 }
+-
+-                std::copy(infer_out.begin(), infer_out.begin() + n_embd, last_hidden.begin());
+-            }
+-        }
++                step++;
++                if (repeating()) break;
++
++                if (jacobi) {
++                    jacobi_rounds++;
++                    jacobi_accepted++;
++                    llama_token prev = tok;
++                    int guard = 1;
++                    while (guard < n_parallel && step < max_tokens) {
++                        dec_ret = llama_phx_decode(ctx_server.ctx, last_hidden.data(), 1, logits.data());
++                        if (dec_ret != 0) {
++                            res_error(res, format_error_response("llama_phx_decode failed", ERROR_TYPE_SERVER));
++                            return;
++                        }
++                        llama_token greedy = 0;
++                        for (int32_t i = 1; i < n_vocab; ++i) {
++                            if (logits[i] > logits[greedy]) greedy = i;
++                        }
++                        if (speculative) speculative_draft++;
++                        if (is_stop(greedy) || greedy == prev) {
++                            if (speculative) speculative_rejected++;
++                            break;
++                        }
++                        if (replays_prompt(greedy) || repeats_earlier(greedy)) {
++                            jacobi_rejected++;
++                            if (speculative) speculative_rejected++;
++                            break;
++                        }
++                        if (!commit_tok(greedy)) {
++                            res_error(res, format_error_response("llama_phx_infer failed", ERROR_TYPE_SERVER));
++                            return;
++                        }
++                        prev = greedy;
++                        step++;
++                        guard++;
++                        jacobi_accepted++;
++                        if (speculative) speculative_accepted++;
++                        if (repeating()) break;
++                    }
++                    if (repeating()) break;
++                }
++            }
++        }
++
++        fprintf(stderr,
++                "[phx] pack_prompt=%d group_n=%d packed_groups=%d pack_l2=%.6f protect=%d parallel_mode=%s n_parallel=%d speculative=%d jacobi=%d jacobi_rounds=%d jacobi_accepted=%d jacobi_rejected=%d speculative_draft=%d speculative_accepted=%d speculative_rejected=%d\n",
++                pack_prompt ? 1 : 0, group_n, packed_groups, pack_l2, protect_last,
++                parallel_mode.c_str(), n_parallel, speculative ? 1 : 0, jacobi ? 1 : 0,
++                jacobi_rounds, jacobi_accepted, jacobi_rejected,
++                speculative_draft, speculative_accepted, speculative_rejected);
++        fflush(stderr);
+ 
+         json data = json{
+             {"n_tokens", (int) generated_tokens.size()},
+             {"tokens",   generated_tokens},
++            {"pack_prompt", pack_prompt},
++            {"group_n", group_n},
++            {"packed_groups", packed_groups},
++            {"pack_l2", pack_l2},
++            {"parallel_mode", parallel_mode},
++            {"n_parallel", n_parallel},
++            {"speculative", speculative},
++            {"jacobi_rounds", jacobi_rounds},
++            {"jacobi_accepted", jacobi_accepted},
++            {"jacobi_rejected", jacobi_rejected},
++            {"speculative_draft", speculative_draft},
++            {"speculative_accepted", speculative_accepted},
++            {"speculative_rejected", speculative_rejected},
+         };
+ 
+         if (decode_text) {
+             std::string text;
+             for (llama_token tok : generated_tokens) {
+                 text += common_token_to_piece(ctx_server.ctx, tok);

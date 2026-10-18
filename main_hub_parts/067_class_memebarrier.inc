@@ -25,7 +25,21 @@ public:
   };
 
   explicit MemeBarrier(std::shared_ptr<RuntimeState> runtime)
-      : runtime_(std::move(runtime)) {}
+      : runtime_(std::move(runtime)) {
+    /* Hard embed: bind the existing e-stop, mark this barrier attached,
+       apply process mitigations, and audit the mission workspace root.
+       inspectText below is unchanged except for an extra e-stop block. */
+    phoenix::secamp::bindEstopProbes(
+        []() { return phoenix::safety::EmergencyStop::instance().latched(); },
+        []() {
+          return phoenix::safety::EmergencyStop::instance().hasShutdownHandler();
+        });
+    phoenix::secamp::notifyMemeBarrierAttached();
+    (void)phoenix::secamp::ensureProcessHardEmbed();
+    phoenix::secamp::noteWorkspaceRoot(phoenix::cfgOr<std::string>(
+        "mission.workspaceDir",
+        std::string("./runtime_store/mission_workspace")));
+  }
 
   void start() {
     if (running_)
@@ -80,6 +94,11 @@ public:
   /** Safety intercept only. Style / format / knowledge are not blocked. */
   Inspect inspectText(const std::string &text) const {
     Inspect out;
+    if (phoenix::secamp::estopRequiresBlock()) {
+      out.blocked = true;
+      out.reason = "emergency-stop";
+      return out;
+    }
     if (text.empty())
       return out;
     if (text.find("BEGIN PRIVATE KEY") != std::string::npos ||

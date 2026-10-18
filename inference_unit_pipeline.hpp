@@ -221,8 +221,10 @@ inline std::vector<float> ragAttend(
 }
 
 /** Adjacent token rows -> one equivalent unit (mean of the window).
-    ngram 0/1 = no-op. ngram 2 or 3. Last protectLast rows stay raw so
-    the continuation tip is still one unit per token. */
+    Default off (packPrompt=false): callers must not run this on the
+    live prompt. ngram 0/1 = no-op. ngram 2 or 3. Values above 3 clamp
+    to 3. Last protectLast rows stay raw so the continuation tip is
+    still one unit per token. */
 inline void mergeNgramUnits(std::vector<std::vector<float>> &rows, int ngram,
                             int protectLast = 0) {
   if (ngram < 2 || rows.size() < 2) return;
@@ -267,6 +269,32 @@ inline void mergeNgramUnits(std::vector<std::vector<float>> &rows, int ngram,
 
 inline int ngramMergeFactor(int ngram) {
   return ngram >= 2 ? std::min(ngram, 3) : 1;
+}
+
+/* Long-prompt budget multiplier. When packPrompt is on, an ngram window
+   of 2 or 3 widens the slot budget by that factor. */
+inline int causalBudgetNgram(bool packPrompt, int ngramMerge) {
+  if (!packPrompt) return 1;
+  int n = ngramMerge;
+  if (n < 0) n = 0;
+  if (n > 3) n = 3;
+  return ngramMergeFactor(n);
+}
+
+/* Prefix ahead of the user/mission body on /phx/generate content.
+   system_content is the mission document head. Interactive chat and
+   skipGraphContext leave memory, CCM, GNN, and [self-kernel] off. */
+inline std::string selectCausalPrefix(const nlohmann::json &opts,
+                                      const std::string &graphContext) {
+  if (opts.is_object() && opts.contains("system_content") &&
+      opts["system_content"].is_string())
+    return opts["system_content"].get<std::string>();
+  const bool skipGraph =
+      opts.is_object() && opts.value("skipGraphContext", false);
+  const bool lowPriority =
+      opts.is_object() && opts.value("lowPriority", false);
+  if (skipGraph || !lowPriority) return std::string();
+  return graphContext;
 }
 
 /** How many trailing causal units stay unmixed.
@@ -387,8 +415,9 @@ struct UnitPipelineConfig {
   bool gnnEnabled{true};
   float memoryWeight{1.0f};
   float gnnWeight{1.0f};
-  int ngramMerge{2};
+  int ngramMerge{2};          /* window if packPrompt; 0/1 off, 2 or 3 */
   int ngramProtectLast{16};
+  bool packPrompt{false};     /* default off: do not mean-pool token rows */
 };
 
 inline UnitPipelineConfig pipelineConfigFromJson(const nlohmann::json &opts) {
@@ -416,6 +445,10 @@ inline UnitPipelineConfig pipelineConfigFromJson(const nlohmann::json &opts) {
   if (opts.contains("ngram_protect_last") &&
       opts["ngram_protect_last"].is_number_integer())
     cfg.ngramProtectLast = opts["ngram_protect_last"].get<int>();
+  if (opts.contains("pack_prompt") && opts["pack_prompt"].is_boolean())
+    cfg.packPrompt = opts["pack_prompt"].get<bool>();
+  if (opts.contains("packPrompt") && opts["packPrompt"].is_boolean())
+    cfg.packPrompt = opts["packPrompt"].get<bool>();
   if (cfg.memoryWeight <= 0.f) cfg.memoryEnabled = false;
   if (cfg.gnnWeight <= 0.f) cfg.gnnEnabled = false;
   if (cfg.ngramMerge < 0) cfg.ngramMerge = 0;

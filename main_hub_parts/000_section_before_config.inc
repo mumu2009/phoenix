@@ -1357,9 +1357,17 @@ static bool containsInternalContextMarkers(const std::string &raw) {
   std::string s = raw;
   std::transform(s.begin(), s.end(), s.begin(),
                  [](unsigned char c) { return (char)std::tolower(c); });
-  static const std::array<const char *, 11> markers = {
-      "ctx_v2", "ctx_stage1", "nodes:", "edges:",     "summary:n=",  "|act=",
-      "|deg=",  "|seed=",     "|kw=",   "[tool_call", "[tool_result"};
+  static const std::array<const char *, 21> markers = {
+      "ctx_v2",         "ctx_stage1",  "nodes:",    "edges:",
+      "summary:n=",     "|act=",       "|deg=",     "|seed=",
+      "|kw=",           "[tool_call",  "[tool_result",
+      /* spark-exchange annotation confetti: these are framework-internal
+         metadata strings ("spark-exchange|rounds=2|agents=1|gnn=1|..."),
+         never natural language.  They were learned into dialog/surface
+         stores during the poisoning era and self-reinforced via counts. */
+      "spark-exchange", "|gnn=",       "|transformer=", "|agents=",
+      "|rounds=",       "peer views",  "|top:",      "|reply=",
+      "|input=",        "|answer="};
   for (const char *m : markers) {
     if (s.find(m) != std::string::npos)
       return true;

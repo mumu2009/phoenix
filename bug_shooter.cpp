@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -86,6 +87,7 @@ int main(int argc, char **argv) {
     const DWORD targetPid = static_cast<DWORD>(std::strtoul(argValue(argc, argv, "--target-pid", "0").c_str(), nullptr, 10));
     const std::string targetName = argValue(argc, argv, "--target-name", "phoenix_main.exe");
     const fs::path statusFile = argValue(argc, argv, "--status-file", "runtime_store/bug_shooter_status.json");
+    const fs::path timelineFile = argValue(argc, argv, "--timeline-file", "");
     const std::size_t softLimitMb = static_cast<std::size_t>(std::strtoull(argValue(argc, argv, "--soft-limit-mb", "3072").c_str(), nullptr, 10));
     const std::size_t hardLimitMb = static_cast<std::size_t>(std::strtoull(argValue(argc, argv, "--hard-limit-mb", "4096").c_str(), nullptr, 10));
     const int pollMs = std::max(250, std::atoi(argValue(argc, argv, "--poll-ms", "1500").c_str()));
@@ -147,16 +149,27 @@ int main(int argc, char **argv) {
             // Record memory timeline every 30 seconds
             if (nowMs() - lastMemorySnapshotMs >= 30000) {
                 lastMemorySnapshotMs = nowMs();
-                memoryTimeline.push_back({
+                json sample = {
                     {"atMs", nowMs()},
                     {"workingSetMb", workingSetMb},
                     {"privateMb", privateMb},
-                    {"pageFaults", pageFaults}
-                });
+                    {"pageFaults", pageFaults},
+                    {"peakWorkingSetMb", peakWorkingSetMb},
+                    {"peakPrivateMb", peakPrivateMb}
+                };
+                memoryTimeline.push_back(sample);
                 if (memoryTimeline.size() > 120) {
                     memoryTimeline.erase(memoryTimeline.begin());
                 }
                 status["memoryTimeline"] = memoryTimeline;
+                if (!timelineFile.empty()) {
+                    std::error_code tec;
+                    fs::create_directories(timelineFile.parent_path(), tec);
+                    std::ofstream timeline(timelineFile, std::ios::app);
+                    if (timeline) {
+                        timeline << sample.dump() << "\n";
+                    }
+                }
             }
             if (workingSetMb >= softLimitMb || privateMb >= softLimitMb) {
                 ++warnings;

@@ -44,11 +44,23 @@ public:
     if (!worldModel_)
       return;
     try {
+      /* Salad quarantine (write path): a collapsed generation must never
+         become world-model evidence — the WM serves its graphContext back
+         into the next chat prompt, so one bad deposit self-reinforces
+         (observed: "peer views - g1_ai1 vaults buildings romanesque..."
+         looping through world:session/*).  Drop the whole evidence when the
+         user text itself is collapsed; strip a collapsed graphSummary but
+         keep the clean user text. */
+      if (phoenix::mission::looksLikeCollapsedProse(text))
+        return;
       nlohmann::json evidence;
       evidence["sessionId"] = sessionId;
       evidence["modality"] = "text";
       evidence["text"] = text;
-      evidence["graphSummary"] = graphSummary;
+      evidence["graphSummary"] =
+          phoenix::mission::looksLikeCollapsedProse(graphSummary)
+              ? std::string()
+              : graphSummary;
       evidence["metadata"] = nlohmann::json{{"source", source}};
       /* Chat must not inherit the default running mission.  Only an
          explicit mission MemoryScope tags evidence with missionId. */
@@ -147,6 +159,18 @@ public:
       subCfg["instincts"] = phoenix::cfgOr<nlohmann::json>("subconscious.instincts", nlohmann::json::array());
       cognitionManager_.configureSubconscious(subCfg);
     }
+    /* Self-mind: person bandit + inner thought. Chat causal text stays the
+       user message; thoughts are a separate channel (selfMind.*). */
+    {
+      json selfCfg;
+      selfCfg["enabled"] = phoenix::resolveConfig<bool>("selfMind.enabled", true, "AI_SELF_MIND_ENABLED");
+      selfCfg["name"] = phoenix::cfgOr<std::string>("selfMind.name", std::string("self"));
+      selfCfg["learningRate"] = phoenix::cfgOr<double>("selfMind.learningRate", 0.35);
+      selfCfg["corpusPath"] = phoenix::cfgOr<std::string>("selfMind.corpusPath", std::string());
+      selfCfg["learnFromLiveTurns"] = phoenix::cfgOr<bool>("selfMind.learnFromLiveTurns", false);
+      selfCfg["holdoutEvery"] = phoenix::cfgOr<int>("selfMind.holdoutEvery", 4);
+      cognitionManager_.configureSelfMind(selfCfg);
+    }
     /* v7.0 mission layer: load mission.* config (disabled by default).  When
        enabled AND a goal is configured, this instance is born as a Meeseeks:
        ONE mission whose time-increasing pain ends only when the mission is
@@ -170,6 +194,8 @@ public:
       /* 0 = UNLIMITED task-tree depth (boxes may summon their own boxes);
          user can cap it via mission.maxReplicaDepth / AI_MISSION_MAX_REPLICA_DEPTH. */
       missionCfg["maxReplicaDepth"] = phoenix::resolveConfig<int>("mission.maxReplicaDepth", 0, "AI_MISSION_MAX_REPLICA_DEPTH");
+      missionCfg["evolutionEnabled"] =
+          phoenix::cfgOr<bool>("mission.evolution.enabled", false);
       cognitionManager_.assignMission(missionCfg);
       /* v8.1 mission worker: LLM-backed deliberator with a sandboxed file
          workspace AND tool calls.  Registered UNCONDITIONALLY - the mission
@@ -236,8 +262,8 @@ public:
                   phoenix::cfgOr<bool>("mission.includeGnnSummary", true);
               packOpt.ctxTokens =
                   phoenix::cfgOr<int>("mission.ctxSize", 4096);
-              packOpt.ngramMerge =
-                  phoenix::cfgOr<int>("main.inference.ngramMerge", 2);
+              /* packPrompt stays off, so the recent-window budget is 1x ctx. */
+              packOpt.ngramMerge = 1;
               std::string gnnText =
                   cognitionManager_.missionGnnSummaryFor(msnId);
               nlohmann::json missionGraphResult = nlohmann::json::object();
@@ -245,6 +271,7 @@ public:
                 const auto copts = cognitionManager_.missionContextOptions();
                 const auto &cr = copts.value("result", nlohmann::json::object());
                 packOpt = phoenix::context::optionsFromJson(cr, packOpt);
+                packOpt.ngramMerge = 1;
               } catch (...) {
               }
               const auto packed =
@@ -897,8 +924,8 @@ public:
               const int safePromptTokens = std::max(
                   512, packOpt.ctxTokens - genReserve - tmplReserve -
                            packOpt.overheadTokens);
-              const int ngramFac =
-                  phoenix::inference::ngramMergeFactor(packOpt.ngramMerge);
+              const int ngramFac = phoenix::inference::causalBudgetNgram(
+                  false, packOpt.ngramMerge);
               const size_t maxPromptChars =
                   static_cast<size_t>(safePromptTokens) *
                   phoenix::context::charsPerPackedToken() *
@@ -1008,8 +1035,33 @@ public:
                             << " onesJunk=" << (onesJunkDraft ? 1 : 0)
                             << " deliv=" << currentFile.size() << std::endl;
               }
-              const auto r =
-                  chatWithLlamaCpp(dynamicPrompt, staticPrompt, tokBudget, opts);
+              /* v8.6 summon routing: a helper box spawned with a model
+                 field has its workspace scope registered in the summon
+                 registry; its ticks go to that external endpoint (the
+                 adapter translates the prompt - the model is never taught
+                 a protocol).  Base-model boxes take the normal slot path. */
+              json r;
+              const std::string summonModel =
+                  phoenix::summon::SummonRegistry::instance().modelForScope(
+                      scope);
+              const auto *summonEp =
+                  summonModel.empty()
+                      ? nullptr
+                      : phoenix::summon::SummonRegistry::instance().find(
+                            summonModel);
+              opts["system_content"] = staticPrompt;
+              if (summonEp) {
+                if (config_.httpLog)
+                  std::cout << "[mission-deliberate] summon scope=" << scope
+                            << " model=" << summonEp->name
+                            << " kind=" << summonEp->kind
+                            << " url=" << summonEp->url << std::endl;
+                r = chatWithSummonEndpoint(*summonEp, dynamicPrompt,
+                                           staticPrompt, tokBudget, opts);
+              } else {
+                r = chatWithLlamaCpp(dynamicPrompt, staticPrompt, tokBudget,
+                                     opts);
+              }
               if (config_.httpLog && !r.value("ok", false)) {
                 std::cout << "[mission-deliberate] llamacpp FAIL err="
                           << r.value("error", std::string()).substr(0, 320)
@@ -1997,12 +2049,251 @@ public:
             call.input = context.value("userPrompt", std::string());
             addon::AddonResult result;
             const bool handled = invokeAddonTool(call, context, result);
+            if (!handled) {
+              /* v8.6: non-addon categories (replicate / summon / goal /
+                 script sandbox / mcp) are dispatched by the manager itself.
+                 Without this fallback a planner-picked "replicate" returned
+                 "tool not handled" and never spawned the box.  iterate()
+                 releases mu_ before invoking the executor, so this re-lock
+                 inside executeAgiActionByName cannot deadlock. */
+              return cognitionManager_.executeAgiActionByName(spec.name,
+                                                              context);
+            }
             return json{{"ok", handled},
                         {"handled", handled},
                         {"action", spec.name},
                         {"reply", result.reply},
                         {"meta", result.meta}};
           });
+    }
+    /* v8.6 model summoning: each registered summon.models entry becomes a
+       planner action "summon.<name>" (category "summon").  The EFE planner
+       itself decides when a knowledge gap calls for a bigger/expert model -
+       the base model is NEVER taught a call syntax (no prompt text, no
+       fine-tuning): the framework adapts to the model, not vice versa.
+       Endpoint adapters translate the prompt into each backend's API.
+       Disabled by default (summon.enabled=false). */
+    {
+      const bool summonEnabled = phoenix::resolveConfig<bool>(
+          "summon.enabled", false, "AI_SUMMON_ENABLED");
+      json summonModels = phoenix::cfgOr<nlohmann::json>(
+          "summon.models", nlohmann::json::array());
+      auto &summonReg = phoenix::summon::SummonRegistry::instance();
+      const auto summonLoad = summonReg.loadFromConfig(summonEnabled,
+                                                       summonModels);
+      /* Optional single-MoE spec. Absent object is a no-op. upsertMoe adds
+         or replaces that one row and does not start a process. */
+      {
+        json summonMoe = phoenix::cfgOr<nlohmann::json>(
+            "summon.moe", nlohmann::json::object());
+        if (summonMoe.is_object() && !summonMoe.empty()) {
+          const auto moeUp = summonReg.upsertMoe(summonMoe);
+          /* autoStart spawns Granite in-process-adjacent: one llama-server
+             child, CPU only, expert pin via the child environment. The
+             parent process environment is not modified, so 8082 is untouched.
+             No /health probe. */
+          const bool autoStart = summonMoe.value("autoStart", false);
+          std::string modelPath = summonMoe.value("modelPath", std::string());
+          if (modelPath.empty() && summonMoe.contains("gguf") &&
+              summonMoe["gguf"].is_string())
+            modelPath = summonMoe["gguf"].get<std::string>();
+          std::string lowered = modelPath;
+          for (char &c : lowered) {
+            if (c >= 'A' && c <= 'Z')
+              c = static_cast<char>(c - 'A' + 'a');
+          }
+          const bool blocked = lowered.find("qwen3-30b") != std::string::npos ||
+                               lowered.find("deepseek") != std::string::npos;
+          std::error_code moeEc;
+          const bool ggufPresent =
+              !modelPath.empty() &&
+              std::filesystem::is_regular_file(modelPath, moeEc);
+          const std::string envName =
+              summonMoe.value("moeEnv", std::string("LLAMA_FORCE_MOE_EXPERT"));
+          const std::string envValue =
+              summonMoe.value("moeEnvValue", std::string("0"));
+          const int moeK = summonMoe.value("k", summonMoe.value("activeExperts", 1));
+          const int pinned = summonMoe.value(
+              "pinnedExpert", summonMoe.value("expertId", -1));
+          const int moePort = summonMoe.value("port", 0);
+          int launchPid = 0;
+          int launch = 0;
+          std::string launchReason = "autoStart false";
+          if (blocked)
+            launchReason = "refused model";
+          else if (autoStart && !ggufPresent)
+            launchReason = "gguf missing";
+          else if (autoStart && moePort <= 0)
+            launchReason = "port missing";
+          else if (autoStart) {
+#ifdef _WIN32
+            const auto serverExe = std::filesystem::absolute(
+                "outsides/llamacpp/build-gcc/bin/llama-server.exe", moeEc);
+            const auto modelAbs = std::filesystem::absolute(modelPath, moeEc);
+            if (moeEc || !std::filesystem::is_regular_file(serverExe)) {
+              launchReason = "llama-server.exe missing";
+            } else {
+              std::filesystem::create_directories("runtime_store", moeEc);
+              const std::string errPath =
+                  "runtime_store/moe_8100_gateway.err.log";
+              SECURITY_ATTRIBUTES sa{};
+              sa.nLength = sizeof(sa);
+              sa.bInheritHandle = TRUE;
+              HANDLE hNul = CreateFileA(
+                  "NUL", GENERIC_READ | GENERIC_WRITE,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING,
+                  FILE_ATTRIBUTE_NORMAL, nullptr);
+              HANDLE hErr = CreateFileA(
+                  errPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
+                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+              auto quoteArg = [](const std::string &s) {
+                std::string o = "\"";
+                for (char c : s) {
+                  if (c == '"')
+                    o += "\\\"";
+                  else
+                    o.push_back(c);
+                }
+                o.push_back('"');
+                return o;
+              };
+              const std::string cmd =
+                  quoteArg(serverExe.string()) + " -m " +
+                  quoteArg(modelAbs.string()) +
+                  " --host 127.0.0.1 --port " + std::to_string(moePort) +
+                  " --ctx-size 4096 --parallel 1 --threads 6 --n-gpu-layers 0";
+              std::string envBlock;
+              if (LPCH env = GetEnvironmentStringsA()) {
+                for (LPCH p = env; *p;) {
+                  const std::string entry(p);
+                  p += entry.size() + 1;
+                  if (entry.size() >= 6 &&
+                      entry.compare(0, 6, "LLAMA_") == 0)
+                    continue;
+                  envBlock.append(entry);
+                  envBlock.push_back('\0');
+                }
+                FreeEnvironmentStringsA(env);
+              }
+              envBlock.append(envName);
+              envBlock.push_back('=');
+              envBlock.append(envValue);
+              envBlock.push_back('\0');
+              envBlock.push_back('\0');
+              STARTUPINFOA si{};
+              si.cb = sizeof(si);
+              si.dwFlags = STARTF_USESTDHANDLES;
+              si.hStdInput = hNul;
+              si.hStdOutput = hErr;
+              si.hStdError = hErr;
+              PROCESS_INFORMATION pi{};
+              std::vector<char> cmdBuf(cmd.begin(), cmd.end());
+              cmdBuf.push_back('\0');
+              const DWORD flags = CREATE_NEW_PROCESS_GROUP |
+                                  DETACHED_PROCESS | CREATE_NO_WINDOW;
+              if (hNul == INVALID_HANDLE_VALUE ||
+                  hErr == INVALID_HANDLE_VALUE) {
+                launchReason = "log handle failed";
+              } else if (!CreateProcessA(
+                             nullptr, cmdBuf.data(), nullptr, nullptr, TRUE,
+                             flags, envBlock.empty() ? nullptr : &envBlock[0],
+                             nullptr, &si, &pi)) {
+                launchReason = "CreateProcess failed " +
+                               std::to_string(GetLastError());
+              } else {
+                launchPid = static_cast<int>(pi.dwProcessId);
+                launch = 1;
+                launchReason = "gateway spawned granite";
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                {
+                  std::ofstream pidf("runtime_store/moe_8100_gateway.pid",
+                                     std::ios::trunc);
+                  if (pidf)
+                    pidf << launchPid;
+                }
+                bool sawPin = false;
+                bool sawLoaded = false;
+                for (int wait = 0; wait < 120 && !(sawPin && sawLoaded);
+                     ++wait) {
+                  Sleep(500);
+                  HANDLE hRead = CreateFileA(
+                      errPath.c_str(), GENERIC_READ,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                  if (hRead == INVALID_HANDLE_VALUE)
+                    continue;
+                  std::string log;
+                  char buf[4096];
+                  DWORD n = 0;
+                  while (ReadFile(hRead, buf, sizeof(buf), &n, nullptr) &&
+                         n > 0)
+                    log.append(buf, buf + n);
+                  CloseHandle(hRead);
+                  if (log.find("n_expert_used=1") != std::string::npos)
+                    sawPin = true;
+                  if (log.find("model loaded") != std::string::npos)
+                    sawLoaded = true;
+                  if (log.find("failed to bind") != std::string::npos ||
+                      log.find("address already in use") != std::string::npos) {
+                    launchReason = "port busy";
+                    break;
+                  }
+                }
+                if (sawPin && sawLoaded)
+                  launchReason = "gateway spawned granite, model loaded";
+                else if (launchReason == "gateway spawned granite")
+                  launchReason = "spawned but model not loaded yet";
+              }
+              if (hNul != INVALID_HANDLE_VALUE)
+                CloseHandle(hNul);
+              if (hErr != INVALID_HANDLE_VALUE)
+                CloseHandle(hErr);
+            }
+#else
+            launchReason = "autoStart spawn is implemented on Windows";
+#endif
+          }
+          std::cerr << "[summon] moe name="
+                    << summonMoe.value("name", std::string("moe"))
+                    << " port=" << moePort
+                    << " k=" << moeK
+                    << " pinnedExpert=" << pinned
+                    << " env=" << envName << "=" << envValue
+                    << " ggufPresent=" << (ggufPresent ? 1 : 0)
+                    << " autoStart=" << (autoStart ? 1 : 0)
+                    << " launch=" << launch
+                    << " pid=" << launchPid
+                    << " reason=" << launchReason
+                    << " upsert=" << moeUp.dump()
+                    << std::endl;
+        }
+      }
+      if (logger_.enabled())
+        logger_.log(LoggerCXX::Type::MONITORING,
+                    std::string("summon registry: ") + summonLoad.dump());
+      if (summonEnabled) {
+        const auto endpoints = summonReg.list();
+        /* One-hot action embeddings past the five default actions; one
+           shared dim so only the first registration grows actionDim. */
+        const size_t summonDim = 5 + endpoints.size();
+        size_t summonIdx = 0;
+        for (const auto &ep : endpoints) {
+          json summonSpec;
+          summonSpec["name"] = "summon." + ep.name;
+          summonSpec["category"] = "summon";
+          summonSpec["addonType"] = "";
+          summonSpec["description"] =
+              ep.description.empty()
+                  ? "Summon a helper box running external model " + ep.name
+                  : ep.description;
+          std::vector<float> emb(summonDim, 0.0f);
+          emb[5 + summonIdx] = 1.0f;
+          summonSpec["embedding"] = emb;
+          cognitionManager_.registerAgiAction(summonSpec);
+          ++summonIdx;
+        }
+      }
     }
     rlDisabled_ = config_.disableLearning || config_.disableRL;
     advDisabled_ = config_.disableLearning || config_.disableADV;
@@ -2281,8 +2572,19 @@ private:
             if (wmState.value("ok", false)) {
               worldState["worldModelState"] = wmState;
               world_model::PromptContextOptions wmOpts;
-              wmOpts.maxRecentEvidence = 3;
+              wmOpts.maxRecentEvidence = 0;
               wmOpts.maxSummaryChars = 220;
+              /* Raw causal chat on the small unit-loop model: telemetry
+                 lines (relations/goals/prediction/calibration) AND scene
+                 summary/object/evidence lines dominate the short prompt and
+                 the model pattern-continues them into salad at EVERY
+                 temperature (ablation _temp_ab3.py on the exact live chat
+                 prompt: 0.40..0.15 all salad; emotion head + question alone
+                 answers cleanly).  The world-model pipeline still runs
+                 (ingest, calibration, /api/world-model/*) — only its chat
+                 prompt rendering is fully suppressed. */
+              wmOpts.telemetryLines = false;
+              wmOpts.sceneLines = false;
               const std::string wmOnly =
                   world_model::mergePromptContext("", wmState, wmOpts);
               if (!wmOnly.empty())
@@ -2365,17 +2667,16 @@ private:
           }
         }
       }
-      std::string mod = r.value("cognitionModulation", "");
-      if (!mod.empty()) {
-        if (pack.context.empty())
-          pack.context = mod;
-        else
-          pack.context = mod + "\n" + pack.context;
-        if (pack.instanceMemoryText.empty())
-          pack.instanceMemoryText = mod;
-        else
-          pack.instanceMemoryText = mod + "\n" + pack.instanceMemoryText;
-      }
+      /* Architecture rule (user directive 2026-10-04): the prompt carries
+         ONLY the task / ask message.  Emotion state modulates generation
+         through the pre-processing matrix channels — inferenceOptions
+         (temperature/top_p/penalties) and the vocabulary logit_bias map —
+         never as prompt text.  The cognitionModulation string
+         (EmotionTensor::modulationHint, "high-arousal; risk-tolerant; ...")
+         stays in the iterate() result json for observability but is no
+         longer prepended to the prompt context.  Ablation _temp_ab5.py:
+         pure message prompts answer correctly at 0.25..0.40. */
+      (void)r.value("cognitionModulation", "");
 
       // Run graph-diffusion summarization over the provided graph result.
       phoenix::graph::GraphDiffusionSummarizer diffusor;
@@ -2712,6 +3013,134 @@ private:
       logSecurityEvent(std::string("auth failed path=") + path +
                        " reason=invalid-token");
       return false;
+    }
+  }
+
+  /* v8.6 summon endpoint adapter: translate Phoenix's (dynamic, static)
+     prompt split into the target backend's API shape.  This is where the
+     framework adapts to the model - the model itself never sees a tool
+     protocol.  Bounded by ep.timeoutMs; never touches the main llama slot
+     bookkeeping (a summoned box does not occupy the base model's slot). */
+  json chatWithSummonEndpoint(const phoenix::summon::ModelEndpoint &ep,
+                              const std::string &text,
+                              const std::string &graphContext, int maxTokens,
+                              const json &inferenceOptions = json::object()) {
+    json out = json::object();
+    out["provider"] = std::string("summon:") + ep.kind;
+    out["model"] = ep.name;
+    out["ok"] = false;
+    std::string prompt = text;
+    if (!graphContext.empty()) {
+      prompt = graphContext;
+      if (!text.empty()) {
+        if (!prompt.empty() && prompt.back() != '\n') prompt.push_back('\n');
+        prompt += text;
+      }
+    }
+    const int numPredict = std::max(16, maxTokens > 0 ? maxTokens : ep.maxTokens);
+    json body;
+    std::string path;
+    if (ep.kind == "ollama") {
+      path = "/api/chat";
+      json options = json{{"num_predict", numPredict}};
+      if (inferenceOptions.is_object()) {
+        for (auto it = inferenceOptions.begin(); it != inferenceOptions.end();
+             ++it) {
+          if (it.value().is_number()) options[it.key()] = it.value();
+        }
+      }
+      body = {{"model", ep.model},
+              {"stream", false},
+              {"messages",
+               json::array({json{{"role", "user"}, {"content", prompt}}})},
+              {"options", options}};
+    } else if (ep.kind == "openai") {
+      path = "/v1/chat/completions";
+      body = {{"model", ep.model},
+              {"stream", false},
+              {"messages",
+               json::array({json{{"role", "user"}, {"content", prompt}}})},
+              {"max_tokens", numPredict}};
+    } else { /* llamacpp */
+      path = "/completion";
+      body = {{"prompt", prompt},
+              {"n_predict", numPredict},
+              {"stream", false},
+              {"cache_prompt", false}};
+      if (inferenceOptions.is_object()) {
+        for (auto it = inferenceOptions.begin(); it != inferenceOptions.end();
+             ++it) {
+          if (it.value().is_number()) body[it.key()] = it.value();
+        }
+      }
+    }
+    try {
+      auto client = drogon::HttpClient::newHttpClient(ep.url);
+      if (!client) {
+        out["error"] = "summon client init failed";
+        return out;
+      }
+      auto req = drogon::HttpRequest::newHttpRequest();
+      req->setMethod(drogon::Post);
+      req->setPath(path);
+      req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+      req->setBody(body.dump());
+      std::promise<std::pair<drogon::ReqResult, drogon::HttpResponsePtr>> pr;
+      auto fut = pr.get_future();
+      client->sendRequest(
+          req, [&pr](drogon::ReqResult result,
+                     const drogon::HttpResponsePtr &resp) {
+            try {
+              pr.set_value({result, resp});
+            } catch (...) {
+            }
+          });
+      const int waitMs = std::max(1000, ep.timeoutMs);
+      if (fut.wait_for(std::chrono::milliseconds(waitMs)) !=
+          std::future_status::ready) {
+        out["error"] = "summon endpoint timeout";
+        return out;
+      }
+      auto pair = fut.get();
+      if (pair.first != drogon::ReqResult::Ok || !pair.second) {
+        out["error"] = "summon endpoint unreachable";
+        return out;
+      }
+      if (pair.second->statusCode() < 200 || pair.second->statusCode() >= 300) {
+        out["error"] = std::string("summon endpoint http ") +
+                       std::to_string(static_cast<int>(pair.second->statusCode()));
+        return out;
+      }
+      json doc = json::parse(pair.second->getBody(), nullptr, false);
+      if (doc.is_discarded()) {
+        out["error"] = "summon endpoint bad json";
+        return out;
+      }
+      std::string reply;
+      if (ep.kind == "ollama") {
+        reply = doc.value("message", json::object()).value("content",
+                                                           std::string());
+      } else if (ep.kind == "openai") {
+        const auto choices = doc.value("choices", json::array());
+        if (!choices.empty() && choices[0].is_object())
+          reply = choices[0].value("message", json::object())
+                      .value("content", std::string());
+      } else {
+        reply = doc.value("content", std::string());
+      }
+      if (reply.empty()) {
+        out["error"] = "summon endpoint empty reply";
+        return out;
+      }
+      out["ok"] = true;
+      out["reply"] = reply;
+      return out;
+    } catch (const std::exception &ex) {
+      out["error"] = std::string("summon endpoint exception: ") + ex.what();
+      return out;
+    } catch (...) {
+      out["error"] = "summon endpoint exception";
+      return out;
     }
   }
 

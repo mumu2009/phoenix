@@ -16,6 +16,7 @@
 - `algorithm/`：算法说明与数据流文档。
 - `math/`：数学推导与证明材料。
 - `v5.1/`、`v5.2/`：版本演进文档。
+- `v8.3/self_mind.md`：自我层（对话强化学习、无提问的自动思考、镜子/图灵探针）。校准语料 `v8.3/self_mind_sample.json` 是合成的。
 - `v8.0/`：v8.0 "Lancelot" 文档集：
   - `migration_backlog.md`：ollama/GNN 时代功能 → llama-server 迁移积压（A1–A8 状态表 + 优先级 + 不迁移清单）；
   - `sparkarray_scopes.md`：SparkArray 作用域化设计（可选/多选/禁用，chat 域已接入）；

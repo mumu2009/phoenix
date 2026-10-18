@@ -73,45 +73,20 @@ void EmotionInfluence::setAffectiveLexicon(
 }
 
 float EmotionInfluence::tokenScore_(const std::string &emotionKey, float emotionValue) const {
-    return cfg_.strength * std::tanh(emotionValue) * 0.5f;
+    (void)emotionKey;
+    const float cap = std::min(0.75f, std::max(0.0f, cfg_.maxBias));
+    return std::clamp(cfg_.strength * emotionValue, -cap, cap);
 }
 
 std::string EmotionInfluence::buildPromptModulation_(
-    const phoenix::emotion::EmotionTensor &e) const {
-    std::ostringstream oss;
-    oss << "<emotion: ";
-    if (e.arousal >= 0.3f) oss << "high-arousal; ";
-    else if (e.arousal <= -0.3f) oss << "low-arousal; ";
-    if (e.valence >= 0.3f) oss << "positive; ";
-    else if (e.valence <= -0.3f) oss << "negative; ";
-    if (e.dominance >= 0.3f) oss << "directive; ";
-    else if (e.dominance <= -0.3f) oss << "deferential; ";
-    if (e.fear >= 0.3f) oss << "risk-averse; ";
-    if (e.anger >= 0.3f) oss << "tense; ";
-    if (e.joy >= 0.3f) oss << "optimistic; ";
-    if (e.surprise >= 0.3f) oss << "attentive; ";
-    std::string s = oss.str();
-    if (s.size() > 10) s.pop_back(), s.pop_back();
-    s += ">";
-    return s;
+    const phoenix::emotion::EmotionTensor &) const {
+    /* Chat causal text must not carry an affect sentence. */
+    return std::string();
 }
 
 nlohmann::json EmotionInfluence::buildInferenceOptions_(
     const phoenix::emotion::EmotionTensor &e) const {
-    float temperature = cfg_.baseTemperature + 0.35f * e.arousal - 0.15f * e.fear;
-    float topP = cfg_.baseTopP + 0.08f * e.surprise - 0.05f * e.dominance;
-    float presence = -0.2f * e.trust + 0.15f * e.joy;
-    float frequency = 0.15f * e.anger - 0.1f * e.valence;
-    temperature = std::max(0.1f, std::min(1.5f, temperature));
-    topP = std::max(0.1f, std::min(1.0f, topP));
-    presence = std::max(-2.0f, std::min(2.0f, presence));
-    frequency = std::max(-2.0f, std::min(2.0f, frequency));
-    return {
-        {"temperature", temperature},
-        {"top_p", topP},
-        {"presence_penalty", presence},
-        {"frequency_penalty", frequency}
-    };
+    return phoenix::emotion::mapChatSampling(e, cfg_.strength);
 }
 
 EmotionInfluenceResult EmotionInfluence::compute(
@@ -119,35 +94,30 @@ EmotionInfluenceResult EmotionInfluence::compute(
     const std::string & /*context*/,
     int64_t /*turn*/) const {
     EmotionInfluenceResult r;
-    nlohmann::json logitBias = nlohmann::json::object();
-
-    // Map each emotion dimension to token scores for its token group.
-    auto addTokens = [&](const std::vector<std::string> &tokens, float score) {
-        if (tokens.empty()) return;
-        float clamped = std::max(cfg_.minBias, std::min(cfg_.maxBias, score));
-        for (const auto &tok : tokens) {
-            logitBias[tok] = clamped;
-        }
+    r.logitBias = phoenix::emotion::affectLogitBias(emotion, cfg_.strength);
+    auto dimOf = [&](const std::string &key) -> float {
+        if (key == "joy" || key == "positive")
+            return 0.60f * emotion.joy + 0.15f * emotion.valence;
+        if (key == "trust") return 0.65f * emotion.trust;
+        if (key == "fear") return 0.70f * emotion.fear;
+        if (key == "anger" || key == "negative") return 0.70f * emotion.anger;
+        if (key == "surprise") return 0.65f * emotion.surprise;
+        if (key == "sadness") return -0.55f * emotion.joy;
+        if (key == "dominance") return 0.55f * emotion.dominance;
+        if (key == "submission") return -0.55f * emotion.dominance;
+        return 0.0f;
     };
-
-    auto it = cfg_.affectiveLexicon.find("joy");
-    if (it != cfg_.affectiveLexicon.end()) addTokens(it->second, tokenScore_("joy", emotion.joy + emotion.valence));
-    it = cfg_.affectiveLexicon.find("trust");
-    if (it != cfg_.affectiveLexicon.end()) addTokens(it->second, tokenScore_("trust", emotion.trust));
-    it = cfg_.affectiveLexicon.find("fear");
-    if (it != cfg_.affectiveLexicon.end()) addTokens(it->second, tokenScore_("fear", emotion.fear - emotion.valence));
-    it = cfg_.affectiveLexicon.find("anger");
-    if (it != cfg_.affectiveLexicon.end()) addTokens(it->second, tokenScore_("anger", emotion.anger - emotion.valence));
-    it = cfg_.affectiveLexicon.find("surprise");
-    if (it != cfg_.affectiveLexicon.end()) addTokens(it->second, tokenScore_("surprise", emotion.surprise));
-    it = cfg_.affectiveLexicon.find("dominance");
-    if (it != cfg_.affectiveLexicon.end()) addTokens(it->second, tokenScore_("dominance", emotion.dominance));
-    it = cfg_.affectiveLexicon.find("submission");
-    if (it != cfg_.affectiveLexicon.end()) addTokens(it->second, tokenScore_("submission", -emotion.dominance));
-
-    r.logitBias = logitBias;
+    for (const auto &kv : cfg_.affectiveLexicon) {
+        const float clamped = tokenScore_(kv.first, dimOf(kv.first));
+        if (std::fabs(clamped) < 0.02f) continue;
+        for (const auto &tok : kv.second) {
+            if (!tok.empty()) r.logitBias[tok] = clamped;
+        }
+    }
     r.promptModulation = buildPromptModulation_(emotion);
     r.inferenceOptions = buildInferenceOptions_(emotion);
+    if (r.inferenceOptions.is_object())
+        r.inferenceOptions["logit_bias"] = r.logitBias;
 
     std::ostringstream ex;
     ex << "emotion influence: arousal=" << emotion.arousal

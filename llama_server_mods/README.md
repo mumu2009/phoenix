@@ -24,6 +24,10 @@ separately rather than committed into this repo. That means:
 |---|---|
 | `existing_mods.patch` | Pre-existing Phoenix modifications: an intrusive "style adapter" that biases the attention mask with an online gradient-style update (`llama_style_adapter_*` API). Unrelated to the enc/infer/dec split; kept as-is. |
 | `enc_dec_separation.patch` | New: splits llama3.1-8b's forward pass into three independently callable conceptual stages (see below). |
+| `force_moe_expert.patch` | `LLAMA_FORCE_MOE_EXPERT=N` pins expert N in the ggml CPU argsort kernel (`ffn_moe_argsort-*` only). `-1`/unset = off. | 
+| `force_moe_expert_count.patch` | Same env collapses `hparams.n_expert_used` to 1 in `load_hparams` and logs the graph's routed count. Weight tensors stay shaped by `n_expert`. |
+| `unicode_wstring_from_utf8.patch` | MinGW fix: libstdc++ `std::codecvt_utf8<wchar_t>` (16-bit `wchar_t`) cannot emit UTF-16 surrogate pairs, so `wstring_convert::from_bytes` throws `std::range_error` on any input with codepoints beyond the BMP. deepseek2-arch models (DeepSeek-V2-Lite) failed to load with `error loading model vocabulary: wstring_convert::from_bytes`. The patch hand-rolls UTF-8 -> UTF-16 (surrogate pairs) for `_WIN32 && __GNUC__`, mirroring MSVC behaviour. |
+| `deepseek_llm_regex_bmp.patch` | Drops the >BMP codepoint ranges (U+10400..U+10903: Deseret/Osmanya/Adlam, archaic scripts) from the `deepseek-llm` pre-tokenizer letter-class regex in `llama-vocab.cpp`. 16-bit `wchar_t` `std::wregex` cannot express surrogate-range bracket expressions (`Invalid range in bracket expression`). BMP tokenization (CJK/Latin/Greek/Cyrillic/...) is unchanged; text in the dropped scripts falls back to per-codepoint splitting. |
 | `apply_patches.bat` | Windows: resets `outsides/llamacpp` if needed and applies patches. Idempotent. |
 | `apply_patches.sh` | Linux/RDK counterpart of `apply_patches.bat` (used by `tools/rdk_llama_setup.sh`). |
 | `build_llama_server.bat` | Builds `llama`, `llama-server`, and `llama-cli` from `outsides/llamacpp/build-gcc` via `ninja` (configuring with `cmake -G Ninja` first if that directory hasn't been configured yet). Skips the actual ninja invocation if nothing under `include/`, `src/`, `examples/server/`, or these `.patch` files has changed since the last successful build (tracked via a stamp file, `build-gcc/.phoenix_llama_server_build_stamp`). |
@@ -152,6 +156,40 @@ endpoints remain exposed for offline pipeline experimentation (e.g. running
 `enc` on one machine, `infer` on another, and a modality-specific `dec` on
 a third), but they should not be mixed with heavy concurrent `/completion`
 traffic against the same server process.
+
+## What the forced single MoE expert does
+
+`force_moe_expert.patch` enables running one llama-server instance per MoE
+expert from the SAME GGUF file (OS page cache / mmap shares the weight
+pages between instances, so RAM stays close to one model):
+
+```powershell
+# one instance per expert (see tools/start_moe_experts.ps1)
+$env:LLAMA_FORCE_MOE_EXPERT = "3"
+outsides\llamacpp\build-gcc\bin\llama-server.exe -m qwen3-30b-a3b.gguf --port 8094 ...
+```
+
+Mechanism:
+
+- `llama_model::load_hparams` (`force_moe_expert_count.patch`) reads
+  `LLAMA_FORCE_MOE_EXPERT`. When `N >= 0` and `N < n_expert`, it sets
+  `hparams.n_expert_used = 1` before `print_info` and before tensor load.
+  Weight tensors stay shaped by `n_expert`. Dense models (`n_expert == 0`)
+  are unchanged, so the llama3.1-8b on :8082 is unaffected even if the
+  variable leaks into that process.
+- MoE routing in `src/llama.cpp` (`llm_build_moe_ffn`) selects experts via
+  `ggml_top_k(selection_probs, n_expert_used)`. With the count collapsed,
+  that view is one row. The first graph build logs
+  `graph n_expert_used=1`.
+- `ggml_compute_forward_argsort_f32` (`force_moe_expert.patch`) overwrites
+  the `ffn_moe_argsort-*` indices with expert N, so the single top-k slot
+  is N. Only that expert's FFN runs.
+- `N >= n_expert` is ignored, `-1`/unset disables.
+
+Quality note: a single forced expert is a research-grade approximation -
+expect degraded but often topically specialised output.  Phoenix summons
+several expert boxes and lets the parent box synthesise; treat it as an
+experiment, not a free lunch.
 
 ## Integration with `compile.bat`
 

@@ -125,7 +125,11 @@ nlohmann::json BenefitHarmResult::toJson() const {
         {"harmScore", harmScore},
         {"netUtility", netUtility},
         {"recommendedAction", recommendedAction},
-        {"driveVector", driveVector}
+        {"driveVector", driveVector},
+        {"novelty", novelty},
+        {"control", control},
+        {"uncertainty", uncertainty},
+        {"otherAgency", otherAgency}
     };
 }
 
@@ -229,13 +233,58 @@ BenefitHarmResult InstinctEngine::evaluate(
         result.recommendedAction.clear();
     }
 
-    // Canonical appraisal -> 8-d drive vector (shared with the emotion module).
-    // Replaces the previous ad-hoc 8x5 fixed matrix.  See emotion::fromAppraisal
-    // and doc/v7.0/algorithm.md sections 7 and 15.
-    const emotion::EmotionTensor t =
-        emotion::fromAppraisal(result.benefitScore, result.harmScore);
-    result.driveVector = {t.valence, t.arousal, t.dominance, t.trust,
-                          t.joy, t.fear, t.anger, t.surprise};
+    /* Extra appraisal channels. Benefit and harm above are unchanged.
+       Neutral channels reproduce emotion::fromAppraisal. */
+    float nov = 0.0f, unc = 0.0f, oth = 0.0f, ctrlW = 0.0f, ctrlS = 0.0f;
+    for (const auto &s : sensations) {
+        const float m = std::clamp(s.intensity, 0.0f, 1.0f);
+        if (m <= 0.0f) continue;
+        switch (s.type) {
+            case primal::SensationType::Novelty:
+                nov += m;
+                unc += 0.55f * m;
+                break;
+            case primal::SensationType::Threat:
+                unc += 0.80f * m;
+                oth += 0.35f * m;
+                ctrlW += m;
+                ctrlS += 0.20f * m;
+                break;
+            case primal::SensationType::Pain:
+                unc += 0.25f * m;
+                ctrlW += m;
+                ctrlS += 0.15f * m;
+                break;
+            case primal::SensationType::Pleasure:
+                ctrlW += m;
+                ctrlS += 0.80f * m;
+                break;
+            case primal::SensationType::SocialIsolation:
+                oth += 0.70f * m;
+                ctrlW += m;
+                ctrlS += 0.35f * m;
+                break;
+            case primal::SensationType::Fatigue:
+                ctrlW += m;
+                ctrlS += 0.30f * m;
+                break;
+            default:
+                break;
+        }
+    }
+    emotion::FineAppraisal fa;
+    fa.benefit = result.benefitScore;
+    fa.harm = result.harmScore;
+    fa.novelty = std::clamp(nov, 0.0f, 1.0f);
+    fa.uncertainty = std::clamp(unc, 0.0f, 1.0f);
+    fa.otherAgency = std::clamp(oth, 0.0f, 1.0f);
+    fa.control = ctrlW > 0.0f ? std::clamp(ctrlS / ctrlW, 0.0f, 1.0f) : 0.5f;
+    result.novelty = fa.novelty;
+    result.control = fa.control;
+    result.uncertainty = fa.uncertainty;
+    result.otherAgency = fa.otherAgency;
+    const emotion::EmotionTensor t = emotion::fromFineAppraisal(fa);
+    result.driveVector = emotion::tensorToDrive(t);
 
     return result;
 }

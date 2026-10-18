@@ -104,6 +104,20 @@ struct PromptContextOptions {
     std::size_t maxEvidenceChars{96};
     std::size_t maxSummaryChars{220};
     std::size_t maxObjectSlots{6};
+    /* Telemetry lines (relations/goals/prediction/calibration) are internal
+       instrumentation.  Big models on chatml absorb them; the small raw
+       causal-completion chat model pattern-continues them into salad
+       (ablation: same prompt minus telemetry answers "Paris", with
+       telemetry salads even at temperature 0.1).  Chat sets this false;
+       missions/tests keep the default full rendering. */
+    bool telemetryLines{true};
+    /* Scene/episode summary + object-label lines are likewise meta-annotation
+       ("Observed N evidence item(s) ...") that the small chat model
+       pattern-continues ("_context summary of this_text ...") at EVERY
+       temperature (ablation _temp_ab3.py: 0.40..0.15 all salad; emotion head
+       + question alone answers cleanly).  Chat sets this false so its prompt
+       is just emotion head + session tag + message. */
+    bool sceneLines{true};
 };
 
 struct HotspotAnalysis {
@@ -1176,6 +1190,12 @@ inline std::string buildPromptEvidenceText(const json &evidence, const PromptCon
     if (summary.empty()) {
         return std::string();
     }
+    /* The GNN peer's honest abstention (composeReply fallback) is not
+       evidence content — depositing it makes every later prompt echo
+       "I need more context to respond." */
+    if (summary == "I need more context to respond.") {
+        return std::string();
+    }
     return truncateText(summary, options.maxEvidenceChars);
 }
 
@@ -1187,17 +1207,28 @@ inline std::string buildPromptContext(const json &sessionState, PromptContextOpt
 
     std::vector<std::string> lines;
 
-    const std::string sceneSummary = truncateText(trimCopy(sceneState.value("summary", std::string())), options.maxSummaryChars);
+    const std::string abstainSentence = "I need more context to respond.";
+    auto stripAbstain = [&abstainSentence](std::string s) {
+        /* The abstain sentence gets glued into deposited summaries
+           ("... Context: X. I need more context to respond."); remove every
+           embedded occurrence, not just whole-string matches. */
+        std::size_t pos = 0;
+        while ((pos = s.find(abstainSentence)) != std::string::npos) {
+            s.erase(pos, abstainSentence.size());
+        }
+        return trimCopy(s);
+    };
+    std::string sceneSummary = options.sceneLines ? stripAbstain(truncateText(trimCopy(sceneState.value("summary", std::string())), options.maxSummaryChars)) : std::string();
     if (!sceneSummary.empty()) {
         lines.push_back("world_scene|summary: " + sceneSummary);
     }
 
-    const std::string episodeSummary = truncateText(trimCopy(episode.value("summary", std::string())), options.maxSummaryChars);
+    std::string episodeSummary = options.sceneLines ? stripAbstain(truncateText(trimCopy(episode.value("summary", std::string())), options.maxSummaryChars)) : std::string();
     if (!episodeSummary.empty() && episodeSummary != sceneSummary) {
         lines.push_back("world_episode|summary: " + episodeSummary);
     }
 
-    if (sceneState.contains("objectSlots") && sceneState["objectSlots"].is_array()) {
+    if (options.sceneLines && sceneState.contains("objectSlots") && sceneState["objectSlots"].is_array()) {
         std::vector<std::string> labels;
         std::unordered_set<std::string> seen;
         for (const auto &slot : sceneState["objectSlots"]) {
@@ -1230,14 +1261,14 @@ inline std::string buildPromptContext(const json &sessionState, PromptContextOpt
         }
     }
 
-    if (sceneState.contains("relations") && sceneState["relations"].is_array()) {
+    if (options.telemetryLines && sceneState.contains("relations") && sceneState["relations"].is_array()) {
         const auto relations = collectRelationSummaries(sceneState["relations"], std::max<std::size_t>(std::size_t(2), options.maxObjectSlots));
         if (!relations.empty()) {
             lines.push_back("world_relations|active: " + truncateText(joinStrings(relations, " || "), options.maxSummaryChars));
         }
     }
 
-    const auto predictionGoals = collectJsonStrings(prediction.value("goals", json::array()), 2);
+    const auto predictionGoals = options.telemetryLines ? collectJsonStrings(prediction.value("goals", json::array()), 2) : std::vector<std::string>();
     if (!predictionGoals.empty()) {
         lines.push_back("world_goals|active: " + truncateText(joinStrings(predictionGoals, " || "), options.maxSummaryChars));
     }
@@ -1252,17 +1283,17 @@ inline std::string buildPromptContext(const json &sessionState, PromptContextOpt
                                  ? prediction["calibration"]
                                  : json::object();
 
-    const std::string expectedSummary = truncateText(trimCopy(expectedState.value("summary", std::string())), options.maxSummaryChars);
+    const std::string expectedSummary = options.telemetryLines ? truncateText(trimCopy(expectedState.value("summary", std::string())), options.maxSummaryChars) : std::string();
     if (!expectedSummary.empty()) {
         lines.push_back("world_prediction|expected: " + expectedSummary);
     }
 
-    const std::string observedSummary = truncateText(trimCopy(observedState.value("summary", std::string())), options.maxSummaryChars);
+    const std::string observedSummary = options.telemetryLines ? truncateText(trimCopy(observedState.value("summary", std::string())), options.maxSummaryChars) : std::string();
     if (!observedSummary.empty()) {
         lines.push_back("world_prediction|observed: " + observedSummary);
     }
 
-    if (calibration.is_object() && calibration.value("samples", 0) > 0) {
+    if (options.telemetryLines && calibration.is_object() && calibration.value("samples", 0) > 0) {
         std::ostringstream oss;
         oss << "world_prediction|calibration: alignment="
             << std::fixed

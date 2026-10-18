@@ -185,3 +185,18 @@
 4. **禁用**：`["none"]` → chat 域即便 gnnScheduler.enabled=true 也不发起 SparkArray 派发（sparkAnn 为空、graphContext 不受其影响）。
 5. **all/异常**：`["all"]` 全开；配置损坏时 fail-open 回遗留行为。
 6. **组合矩阵**：[]/chat/none/all × gnnScheduler.enabled∈{true,false} 共 8 组合逐一断言 sparkAnn 出现与否（阶段 2 起扩展到 consensus/voter/evaluate）。
+
+## 14. 自我层（selfMind）验证协议
+
+前置：从仓库根目录跑，以便读到 `doc/v8.3/self_mind_sample.json`（合成校准集，不是真人语料）。
+
+1. **关闭**：`enabled=false` 时 `tickThought` 的 `spontaneous=false`，`spontaneousCount` 保持 0。
+2. **学习冻结**：`learningRate=0` 时摄入语料并 tick 一次，`policyBias` 仍为 0，`episodes=0`。
+3. **不像提问**：同一语料、同一学习率的两个实例，一个 tick 带 `userPrompt=ZZZ-QUESTION-TOKEN?`，一个不带；两句 `text` 相同，且都不含该记号。`action != service`。
+4. **奖励方向**：再 tick 数次后，`policyBias[service] < policyBias[recall]`，`weightsFinite=true`，`lastAction != service`。
+5. **底层提示**：`kernel` 含 `[self-kernel]` 与 `not a service window`，不含 `language model`。
+6. **镜子与图灵**：摄入校准集并至少 4 次自发念头后 `probe().mirror.pass` 且 `probe().turing.pass`。图灵要求留出句 ≥ 3，成对准确率 ≥ 0.75。镜子：自己的召回 ≥ 0.75，他人（含把〔自识〕贴到英文句子上）假阳性 ≤ 0.25。
+7. **无失控**：α=0.35 连续 200 次 tick，权重有限且每个分量在 [−4, 4]，`spontaneousCount=200`。
+8. **往返**：`toJson/fromJson` 后 `humanCount` 与 `lastThought` 一致。`exportState/importState` 携带 `selfMind`。
+9. **不进聊天因果串**：`iterate({userPrompt})` 的 `result.selfMind.text` 不含提问记号，`composedPrompt` 不含 `[self-kernel]`，也不包含这句念头。
+10. **命令**：`test/self_mind_driver.cpp`（只链 `self_mind.cpp`）或 `gtest_runner.exe --gtest_filter=SelfMindTest.*`。安全模块未改，不跑安全线。

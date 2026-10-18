@@ -14,6 +14,7 @@ namespace {
 class SecurityAddon final : public Addon {
 public:
   explicit SecurityAddon(std::string name) : name_(std::move(name)) {
+    (void)phoenix::secamp::ensureProcessHardEmbed();
     phoenix::secamp::installSecurityModuleResources();
     phoenix::secamp::SecurityObservatory::instance().setPluginEnabled(true);
   }

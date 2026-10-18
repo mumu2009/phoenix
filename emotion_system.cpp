@@ -270,82 +270,10 @@ std::vector<std::string> SQLiteEmotionStorage::listSessions() {
     return sessions;
 }
 
-// VAD-lexicon based emotion analyzer.
-//
-// A compact affective lexicon maps lowercased words to PAD coordinates
-// (valence, arousal, dominance) in [-1, 1], following the affective-norms
-// tradition (Russell, 1980, "A circumplex model of affect"; Warriner et al.,
-// 2013, "Norms of valence, arousal, and dominance for 13,915 English lemmas").
-// The analyzer mean-pools the matched coordinates over ALL tokens (unmatched
-// words contribute zero), which (a) bounds the signal by match density instead
-// of the saturated keyword counting used previously, and (b) removes the
-// double-counting caused by overlapping keyword categories.  The pooled
-// (V, A, D) triple is converted to the 8-d tensor through padToTensor().
-namespace {
-struct VAD { float v; float a; float d; };
-
-const std::unordered_map<std::string, VAD>& vadLexicon() {
-    static const std::unordered_map<std::string, VAD> lex = {
-        // joy / positive
-        {"happy",     {0.90f,  0.70f,  0.50f}},
-        {"glad",      {0.80f,  0.50f,  0.40f}},
-        {"great",     {0.80f,  0.60f,  0.40f}},
-        {"wonderful", {0.90f,  0.60f,  0.50f}},
-        {"excellent", {0.90f,  0.60f,  0.60f}},
-        {"love",      {0.90f,  0.80f,  0.30f}},
-        {"joy",       {0.90f,  0.80f,  0.50f}},
-        {"amazing",   {0.90f,  0.80f,  0.40f}},
-        // sadness / negative
-        {"sad",       {-0.80f, -0.40f, -0.50f}},
-        {"bad",       {-0.70f,  0.20f, -0.30f}},
-        {"terrible",  {-0.90f,  0.40f, -0.40f}},
-        {"awful",     {-0.90f,  0.30f, -0.50f}},
-        {"hate",      {-0.90f,  0.60f,  0.20f}},
-        // fear
-        {"afraid",    {-0.80f,  0.70f, -0.70f}},
-        {"scared",    {-0.80f,  0.70f, -0.70f}},
-        {"fear",      {-0.80f,  0.60f, -0.60f}},
-        {"worried",   {-0.60f,  0.50f, -0.50f}},
-        {"anxious",   {-0.60f,  0.60f, -0.50f}},
-        // anger
-        {"angry",     {-0.80f,  0.80f,  0.70f}},
-        {"furious",   {-0.90f,  0.90f,  0.80f}},
-        {"mad",       {-0.70f,  0.70f,  0.60f}},
-        // surprise
-        {"surprise",  { 0.20f,  0.80f,  0.00f}},
-        {"shock",     {-0.40f,  0.90f, -0.60f}},
-        {"unexpected",{ 0.00f,  0.70f, -0.20f}},
-        // trust
-        {"trust",     { 0.60f,  0.10f,  0.40f}},
-        {"believe",   { 0.50f,  0.10f,  0.30f}},
-        {"confident", { 0.70f,  0.40f,  0.80f}},
-        {"reliable",  { 0.60f,  0.10f,  0.50f}},
-    };
-    return lex;
-}
-}  // namespace
-
 class RuleBasedEmotionAnalyzer : public EmotionAnalyzer {
 public:
     EmotionTensor analyzeText(const std::string& text) override {
-        const auto toks = tokenizeText(text);
-        if (toks.empty()) return EmotionTensor();
-        const auto& lex = vadLexicon();
-        float V = 0.0f, A = 0.0f, D = 0.0f;
-        size_t matched = 0;
-        for (const auto& t : toks) {
-            auto it = lex.find(t);
-            if (it == lex.end()) continue;
-            V += it->second.v;
-            A += it->second.a;
-            D += it->second.d;
-            ++matched;
-        }
-        if (matched == 0) return EmotionTensor();
-        // Mean-pool over ALL tokens (unmatched -> 0) so intensity scales with
-        // match density rather than being saturated by a single keyword.
-        const float invN = 1.0f / static_cast<float>(toks.size());
-        return padToTensor(V * invN, A * invN, D * invN);
+        return surfaceAffect(text);
     }
 
     EmotionTensor analyzeAudio(const std::vector<float>& audioFeatures) override {
@@ -495,8 +423,9 @@ EmotionState EmotionSystem::processMessage(const std::string& sessionId,
     // The second term is the opponent-process homeostatic pull toward the
     // session baseline (Solomon & Corbit, 1974, "An opponent-process theory of
     // motivation").  See doc/v7.0/algorithm.md section 15 for the derivation.
-    newEmotion = EmotionTensor::lerp(state.current, newEmotion, 1.0f - impl_->config.emotionDecayRate);
-    newEmotion = EmotionTensor::lerp(newEmotion, state.baseline, impl_->config.homeostasisRate);
+    newEmotion = homeostaticUpdate(state.current, newEmotion, state.baseline,
+                                   impl_->config.emotionDecayRate,
+                                   impl_->config.homeostasisRate);
     state.current = newEmotion;
 
     // Update vocabulary-level emotion weight table across stages.

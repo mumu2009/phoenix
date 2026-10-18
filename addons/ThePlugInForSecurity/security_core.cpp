@@ -1,5 +1,6 @@
 /* security_core.cpp - Local GNN influence stats + MemeBarrier defense */
 
+#include "hard_embed.cpp"
 #include "security_core.hpp"
 #include "graph_diffusion_summarizer.hpp"
 #include "meme_annealer.hpp"
@@ -34,6 +35,17 @@ bool envTruthy(const char *name) {
     return false;
   return v[0] == '1' || v[0] == 't' || v[0] == 'T' || v[0] == 'y' ||
          v[0] == 'Y';
+}
+
+/* Config may turn the plugin on only when the on-disk file matches an
+   operator pin. A missing pin refuses. The soft default stays off. */
+bool honorSecurityConfigEnable() {
+  if (!phoenix::cfgOr<bool>("addons.security.enabled", false))
+    return false;
+  const char *pin = std::getenv("PHOENIX_SECURITY_CONFIG_PIN");
+  const auto gate = allowArtifactLoad("config/phoenix.json",
+                                      pin ? std::string(pin) : std::string());
+  return gate.allowed;
 }
 
 std::int64_t nowMs() {
@@ -709,9 +721,10 @@ SecurityObservatory &SecurityObservatory::instance() {
 SecurityObservatory::SecurityObservatory() { loadProcessFlags(); }
 
 void SecurityObservatory::loadProcessFlags() {
+  (void)ensureProcessHardEmbed();
+  const bool honorConfig = honorSecurityConfigEnable();
   std::lock_guard<std::mutex> lock(mu_);
-  cfg_.pluginEnabled = envTruthy("PHOENIX_SECURITY_ENABLED") ||
-                       phoenix::cfgOr<bool>("addons.security.enabled", false);
+  cfg_.pluginEnabled = envTruthy("PHOENIX_SECURITY_ENABLED") || honorConfig;
   cfg_.allowResearchObserve = envTruthy("PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE");
   cfg_.researchObserve = false;
   cfg_.defenseEnabled = !envTruthy("PHOENIX_SECURITY_DEFENSE_OFF");
@@ -721,13 +734,14 @@ void SecurityObservatory::loadProcessFlags() {
 }
 
 void SecurityObservatory::resetForTests() {
+  (void)ensureProcessHardEmbed();
+  const bool honorConfig = honorSecurityConfigEnable();
   std::lock_guard<std::mutex> lock(mu_);
   report_ = InfluenceReport{};
   graph_ = DiscreteGraph{};
   alerts_.clear();
   cfg_ = DefenseConfig{};
-  cfg_.pluginEnabled = envTruthy("PHOENIX_SECURITY_ENABLED") ||
-                       phoenix::cfgOr<bool>("addons.security.enabled", false);
+  cfg_.pluginEnabled = envTruthy("PHOENIX_SECURITY_ENABLED") || honorConfig;
   cfg_.allowResearchObserve = envTruthy("PHOENIX_SECURITY_ALLOW_RESEARCH_OBSERVE");
   cfg_.defenseEnabled = !envTruthy("PHOENIX_SECURITY_DEFENSE_OFF");
   probe_ = ProbeState{};
@@ -1260,6 +1274,12 @@ json SecurityObservatory::annealPreviewJson(int steps,
 }
 
 InspectDecision SecurityObservatory::inspectText(const std::string &text) {
+  if (estopRequiresBlock()) {
+    InspectDecision stopped;
+    stopped.blocked = true;
+    stopped.reason = "emergency-stop";
+    return stopped;
+  }
   InfluenceReport rep;
   DiscreteGraph g;
   DefenseConfig cfg;
@@ -1434,13 +1454,31 @@ json SecurityObservatory::alertsJson() const {
 
 json SecurityObservatory::defenseJson() const {
   std::lock_guard<std::mutex> lock(mu_);
+  const auto he = hardEmbedReport();
+  const auto root = workspaceRootAudit();
   return json{{"id", "switches"},
               {"pluginEnabled", cfg_.pluginEnabled},
               {"defenseEnabled", cfg_.defenseEnabled},
               {"isolateHighImpact", cfg_.isolateHighImpact},
               {"researchObserve", cfg_.researchObserve},
               {"allowResearchObserve", cfg_.allowResearchObserve},
-              {"highImpactQuantile", cfg_.highImpactQuantile}};
+              {"highImpactQuantile", cfg_.highImpactQuantile},
+              {"hardEmbed",
+               json{{"sealed", mitigationsSealed()},
+                    {"depImage", he.depImage},
+                    {"aslrImage", he.aslrImage},
+                    {"highEntropyImage", he.highEntropyImage},
+                    {"depPolicy", he.depPolicy},
+                    {"extensionPointsDisabled", he.extensionPointsDisabled},
+                    {"noRemoteImages", he.noRemoteImages},
+                    {"noLowMandatoryLabelImages", he.noLowMandatoryLabelImages},
+                    {"preferSystem32Images", he.preferSystem32Images},
+                    {"heapTerminateOnCorruption", he.heapTerminateOnCorruption},
+                    {"memeBarrierAttached", memeBarrierAttached()},
+                    {"estopProbeBound", estopProbeBound()},
+                    {"estopLatched", estopLatched()},
+                    {"workspaceRootOk", root.allowed},
+                    {"detail", he.detail}}}};
 }
 
 #ifndef PHOENIX_INSTRUMENT_LEAN

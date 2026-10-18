@@ -33,6 +33,29 @@ def _write_manifest(path: Path, fields: Dict[str, Any]) -> None:
         json.dump(fields, f, indent=2, ensure_ascii=False)
 
 
+def onnx_export(module: nn.Module, args: torch.Tensor, f, **kwargs):
+    """torch.onnx.export that keeps the legacy exporter on PyTorch 2 and omits dynamo on 1.10."""
+    try:
+        import inspect
+        params = inspect.signature(torch.onnx.export).parameters
+    except (TypeError, ValueError):
+        params = None
+    if params is not None:
+        if "dynamo" in params:
+            kwargs.setdefault("dynamo", False)
+        else:
+            kwargs.pop("dynamo", None)
+    return torch.onnx.export(module, args, f, **kwargs)
+
+
+def torch_load(path, map_location="cpu"):
+    """torch.load compatible with PyTorch 1.10 (no weights_only) and 2.x."""
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
 def _export_full_module(
     module: nn.Module,
     out_path: Path,
@@ -43,18 +66,23 @@ def _export_full_module(
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     module.eval().cpu()
+    kwargs: Dict[str, Any] = {
+        "input_names": [input_name],
+        "output_names": [output_name],
+        "opset_version": 11,
+        "do_constant_folding": True,
+        "dynamic_axes": dynamic_axes or {input_name: {0: "batch"}, output_name: {0: "batch"}},
+    }
+    # torch>=2.1 accepts dynamo=False to keep the legacy exporter. CUDA 11.1
+    # wheels (torch 1.11) reject the keyword.
+    try:
+        import inspect
+        if "dynamo" in inspect.signature(torch.onnx.export).parameters:
+            kwargs["dynamo"] = False
+    except (TypeError, ValueError):
+        pass
     with torch.no_grad():
-        torch.onnx.export(
-            module,
-            dummy.cpu(),
-            out_path,
-            input_names=[input_name],
-            output_names=[output_name],
-            opset_version=11,
-            do_constant_folding=True,
-            dynamo=False,
-            dynamic_axes=dynamic_axes or {input_name: {0: "batch"}, output_name: {0: "batch"}},
-        )
+        torch.onnx.export(module, dummy.cpu(), str(out_path), **kwargs)
 
 
 def _copy_if_exists(src: Path, dst: Path) -> None:

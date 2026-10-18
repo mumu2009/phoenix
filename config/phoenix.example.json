@@ -393,6 +393,106 @@
     "adaptiveExploration": true,
     "actions": []
   },
+  "summon": {
+    "enabled": false,
+    "moe": {
+      "name": "granite_moe_e0",
+      "kind": "moe",
+      "model": "granite-3.1-1b-a400m",
+      "modelPath": "GGUF_models/granite-3.1-1b-a400m-instruct-Q4_K_M.gguf",
+      "url": "http://127.0.0.1:8100",
+      "port": 8100,
+      "k": 1,
+      "pinnedExpert": 0,
+      "expertPool": 32,
+      "nativeTopK": 8,
+      "autoStart": false,
+      "allowWithBase": false,
+      "moeEnv": "LLAMA_FORCE_MOE_EXPERT",
+      "moeEnvValue": "0",
+      "timeoutMs": 120000,
+      "maxTokens": 128,
+      "description": "Granite 3.1 1B-A400M. Pool 32, native top-8, this slot K=1 via LLAMA_FORCE_MOE_EXPERT=0. autoStart false. Do not load qwen3-30b or deepseek-v2."
+    },
+    "models": [
+      {
+        "name": "llama3.1_8b",
+        "kind": "llamacpp",
+        "url": "http://127.0.0.1:8082",
+        "port": 8082,
+        "model": "llama3.1-8b",
+        "gguf": "GGUF_models/blobs/sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29",
+        "autoStart": false,
+        "timeoutMs": 120000,
+        "maxTokens": 128,
+        "description": "Base model: Llama 3.1 8B already served on 8082"
+      },
+      {
+        "name": "llama3.2_3b",
+        "kind": "llamacpp",
+        "url": "http://127.0.0.1:8092",
+        "port": 8092,
+        "model": "llama3.2-3b",
+        "gguf": "GGUF_models/llama-3.2-3b-instruct-Q4_K_M.gguf",
+        "autoStart": false,
+        "timeoutMs": 120000,
+        "maxTokens": 128,
+        "description": "Dense Llama 3.2 3B slot. Do not auto-start"
+      },
+      {
+        "name": "granite_moe_e0",
+        "kind": "moe",
+        "url": "http://127.0.0.1:8100",
+        "port": 8100,
+        "model": "granite-3.1-1b-a400m",
+        "modelPath": "GGUF_models/granite-3.1-1b-a400m-instruct-Q4_K_M.gguf",
+        "gguf": "GGUF_models/granite-3.1-1b-a400m-instruct-Q4_K_M.gguf",
+        "k": 1,
+        "autoStart": false,
+        "allowWithBase": false,
+        "activeExperts": 1,
+        "expertId": 0,
+        "expertPool": 32,
+        "nativeTopK": 8,
+        "moeEnv": "LLAMA_FORCE_MOE_EXPERT",
+        "moeEnvValue": "0",
+        "timeoutMs": 120000,
+        "maxTokens": 128,
+        "description": "Granite 3.1 1B-A400M single expert 0. Native pool 32, native top-8, this slot K=1 via LLAMA_FORCE_MOE_EXPERT=0. autoStart false. Do not load qwen3-30b or deepseek-v2 here."
+      }
+    ]
+  },
+  "selfMind": {
+    "enabled": true,
+    "name": "self",
+    "learningRate": 0.35,
+    "corpusPath": "",
+    "learnFromLiveTurns": false,
+    "holdoutEvery": 4
+  },
+  "study": {
+    "unitLearn": {
+      "enabled": true,
+      "steps": 3,
+      "dim": 16,
+      "maxMerges": 32
+    },
+    "population": {
+      "enabled": false,
+      "n": 4,
+      "maxPopulation": 8,
+      "mutationScale": 0.05,
+      "tolerance": 0.2
+    },
+    "expert": {
+      "enabled": false,
+      "corpusPath": "./runtime_store/datasets/study_expert/corpus.txt",
+      "weightsPath": "./runtime_store/experts/study_tiny/weights.json",
+      "hidden": 16,
+      "vocab": 32,
+      "epochs": 8
+    }
+  },
   "subconscious": {
     "enabled": true,
     "baselineValence": 0,
@@ -699,6 +799,7 @@
       "memoryWeight": 1.0,
       "gnnWeight": 1.0,
       "ngramMerge": 2,
+      "packPrompt": false,
       "ngramProtectLast": 16,
       "ragMixCap": 256,
       "leftoverBeta": 0.08,

@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
 
-cd /d "%~dp0"
+cd /d "D:\_phoenix\_079\v6.0Alixander\phoenix"
 
 echo ============================================
 echo  AA TEST SUITE - Phoenix v6.0 Alixander

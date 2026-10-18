@@ -70,14 +70,17 @@ def run(cmd, stdout_to=None, timeout_h=5):
 
 
 def load_screen(path):
-    """严格解析失败时剔除 [screen-profile] 等非 json 尾行重试。"""
+    """严格解析失败时剔除 [screen-profile] 等非 json 尾行重试。
+    空文件（另一实例刚创建、正在跑）统一抛 JSONDecodeError。"""
     txt = path.read_text(encoding="utf-8", errors="replace")
     try:
         return json.loads(txt, strict=False)
     except json.JSONDecodeError:
         lines = txt.splitlines()
-        end = max(i for i, ln in enumerate(lines) if ln.rstrip() == "}")
-        return json.loads("\n".join(lines[:end + 1]), strict=False)
+        ends = [i for i, ln in enumerate(lines) if ln.rstrip() == "}"]
+        if not ends:
+            raise json.JSONDecodeError("empty/no-json screen", txt, 0)
+        return json.loads("\n".join(lines[:ends[-1] + 1]), strict=False)
 
 
 def build_screen(corpus_key, skip):
@@ -88,6 +91,14 @@ def build_screen(corpus_key, skip):
         try:
             return snap, load_screen(screen)
         except json.JSONDecodeError:
+            # 0 字节且刚被修改 = 另一实例正在跑这片——不要重筛（会撞
+            # 写同一文件），直接报错退出本进程
+            age = time.time() - screen.stat().st_mtime
+            if screen.stat().st_size == 0 and age < 1800:
+                raise RuntimeError(
+                    "screen %s is being written by another instance "
+                    "(0 bytes, %ds old); refusing to double-run"
+                    % (screen.name, age))
             log("stale/broken screen %s - re-screening" % screen.name)
     # snap 缓存陷阱（2026-10-01）：screen 对已存在 snap 直接 loadText
     # 跳过 ingest——若 snap 是旧参数建的必须删掉重建
@@ -155,16 +166,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", required=True, choices=sorted(CORPORA))
     ap.add_argument("--slices", type=int, default=SLICES_PER_CORPUS)
+    ap.add_argument("--start", type=int, default=0,
+                    help="起始片序号（skip = start*512；分链并行时用）")
     args = ap.parse_args()
 
     if not CORPORA[args.corpus].exists():
         log("ERROR: corpus missing: %s" % CORPORA[args.corpus])
         return 1
     SLICES.mkdir(parents=True, exist_ok=True)
-    log("v4 pipeline start: corpus=%s slices=%d" % (args.corpus, args.slices))
+    log("v4 pipeline start: corpus=%s slices=%d start=%d"
+        % (args.corpus, args.slices, args.start))
 
     made = 0
-    for i in range(args.slices):
+    for i in range(args.start, args.start + args.slices):
         skip = i * UNITS_PER_SLICE
         snap, screen = build_screen(args.corpus, skip)
         units = screen.get("ingestedUnits", 0)

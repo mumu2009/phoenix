@@ -68,7 +68,7 @@ def export_speech(ckpt, out_dir: Path):
 
     with torch.no_grad():
         dummy_enc = torch.randn(1, 1, 1, SPEECH_CHUNK)
-        torch.onnx.export(
+        export_runtime_models.onnx_export(
             model.encoder,
             dummy_enc,
             out_dir / 'model_encoder.onnx',
@@ -80,7 +80,7 @@ def export_speech(ckpt, out_dir: Path):
             dynamic_axes={'waveform': {0: 'batch'}, 'concept': {0: 'batch'}},
         )
         dummy_dec = torch.randn(1, concept, 1, 1)
-        torch.onnx.export(
+        export_runtime_models.onnx_export(
             model.decoder,
             dummy_dec,
             out_dir / 'model_decoder.onnx',
@@ -142,7 +142,7 @@ def export_image(ckpt, out_dir: Path, calib_images=None, calib_count=10):
 
     with torch.no_grad():
         dummy_enc = torch.randn(1, 3, resolution, resolution)
-        torch.onnx.export(
+        export_runtime_models.onnx_export(
             base,
             dummy_enc,
             out_dir / 'model_encoder.onnx',
@@ -154,7 +154,7 @@ def export_image(ckpt, out_dir: Path, calib_images=None, calib_count=10):
             dynamic_axes={'pixel_values': {0: 'batch'}, 'embedding': {0: 'batch'}},
         )
         dummy_head = torch.randn(1, feature_dim)
-        torch.onnx.export(
+        export_runtime_models.onnx_export(
             head,
             dummy_head,
             out_dir / 'model_encoder_head.onnx',
@@ -166,7 +166,7 @@ def export_image(ckpt, out_dir: Path, calib_images=None, calib_count=10):
             dynamic_axes={'embedding': {0: 'batch'}, 'concept': {0: 'batch'}},
         )
         dummy_dec = torch.randn(1, concept, 1, 1)
-        torch.onnx.export(
+        export_runtime_models.onnx_export(
             model.decoder,
             dummy_dec,
             out_dir / 'model_decoder.onnx',
@@ -228,7 +228,7 @@ def main():
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
-    ckpt = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    ckpt = export_runtime_models.torch_load(args.checkpoint, map_location='cpu')
     if 'model' not in ckpt:
         raise ValueError(f'Checkpoint {args.checkpoint} does not contain "model" key')
 

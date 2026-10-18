@@ -14,7 +14,11 @@
 namespace phoenix {
 namespace plugin {
 
-/* Plugin lifecycle states */
+/* Plugin lifecycle states.
+   windows.h defines ERROR as 0. security_core includes that header
+   before this one, so the enumerator must be parsed with the macro off. */
+#pragma push_macro("ERROR")
+#undef ERROR
 enum class PluginState {
     UNLOADED,    /* Plugin not loaded */
     LOADING,     /* Plugin loading in progress */
@@ -27,6 +31,7 @@ enum class PluginState {
     ERROR,       /* Plugin in error state */
     UNLOADING    /* Plugin unloading in progress */
 };
+#pragma pop_macro("ERROR")
 
 /* Plugin capability flags */
 enum class PluginCapability {

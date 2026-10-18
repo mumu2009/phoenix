@@ -573,6 +573,23 @@
           phoenix::cfgOr<int>("main.inference.ngramProtectLast", 16);
       opts["ngram_merge"] = ngram;
       opts["ngram_protect_last"] = prot;
+      const bool packOn =
+          phoenix::cfgOr<bool>("main.inference.packPrompt", false);
+      opts["pack_prompt"] = packOn;
+      if (packOn && ngram >= 2)
+        opts["group_n"] = ngram;
+      else
+        opts.erase("group_n");
+      if (phoenix::cfgOr<bool>("llama.parallelDecode.enabled", false)) {
+        int npar = phoenix::cfgOr<int>("llama.parallelDecode.N", 4);
+        if (npar < 2) npar = 2;
+        if (npar > 8) npar = 8;
+        opts["n_parallel"] = npar;
+        opts["parallel_mode"] = phoenix::cfgOr<std::string>(
+            "llama.parallelDecode.mode", std::string("jacobi"));
+      }
+      if (phoenix::cfgOr<bool>("runtime_opt.speculative.enabled", false))
+        opts["speculative"] = true;
       const int ragCap = phoenix::cfgOr<int>("main.inference.ragMixCap", 256);
       opts["rag_mix_cap"] = ragCap;
       opts["leftover_beta"] =
@@ -2080,7 +2097,8 @@
                 graphContext = graphContext + "\n" + matrixContext;
             }
             int maxTokens = graphResult.value(
-                "maxTokens", phoenix::cfgOr<int>("context.maxTokens", 8192));
+                "maxTokens",
+                std::min(192, phoenix::cfgOr<int>("chat.maxTokens", 192)));
             if (body.contains("maxTokens") &&
                 body["maxTokens"].is_number_integer())
               maxTokens = body["maxTokens"].get<int>();
@@ -2132,19 +2150,34 @@
               } catch (...) {}
             }
             /* v8.3: the SYNTHESIS text (peer-exchange result) is injected
-               first, then the clean annotation record. */
+               first, then the clean annotation record.  Salad quarantine:
+               a peer that recalled contaminated memory returns collapsed
+               prose; injecting it here poisons both this prompt and the
+               world-model evidence deposited from graphContext below. */
+            if (phoenix::mission::looksLikeCollapsedProse(sparkReply))
+              sparkReply.clear();
+            /* The GNN peer's honest abstention is fine for direct
+               /api/transformer/chat users but pure noise when prepended
+               to a chat prompt ("approach I need more context to
+               respond. ..." -> the model echoes abstention-flavored
+               drift). */
+            if (trimCopy(sparkReply) == "I need more context to respond.")
+              sparkReply.clear();
+            if (phoenix::mission::looksLikeCollapsedProse(sparkAnn))
+              sparkAnn.clear();
             if (!sparkReply.empty()) {
               if (graphContext.empty())
                 graphContext = sparkReply;
               else
                 graphContext = graphContext + "\n" + sparkReply;
             }
-            if (!sparkAnn.empty()) {
-              if (graphContext.empty())
-                graphContext = sparkAnn;
-              else
-                graphContext = graphContext + "\n" + sparkAnn;
-            }
+            /* Architecture rule (user directive 2026-10-04): the spark
+               annotation record ("spark-exchange|rounds=2|agents=..|top=..")
+               is internal telemetry, not task information — it must not
+               enter the prompt.  Peer influence rides the GNN/units matrix
+               channel instead.  sparkAnn stays available in the dispatch
+               result for logs/observability. */
+            (void)sparkAnn;
 
             // TinyLlama is a standalone summary microservice (SummaryModel /
             // frontend /api/summary only) — never inserted on enc→memory→gnn→
@@ -2156,9 +2189,19 @@
             std::vector<phoenix::inference::UnitQueryIO> instanceMemory;
             std::vector<phoenix::inference::UnitQueryIO> instanceGnn;
             try {
-              const auto ccms = phoenix::memory::ccmRecall(
+              auto ccms = phoenix::memory::ccmRecall(
                   phoenix::instance::ccmStorePath(), text, 3,
                   phoenix::memory::chatSourceTag(prelimSessionId));
+              /* Salad quarantine (read path): the mission recall gate
+                 (appendRecalledMemory) already skips collapsed entries;
+                 chat recall must apply the same filter — legacy stores
+                 still hold poisoning-era deposits. */
+              ccms.erase(std::remove_if(ccms.begin(), ccms.end(),
+                                        [](const phoenix::memory::CcmEntry &e) {
+                                          return phoenix::mission::looksLikeCollapsedProse(
+                                              e.text);
+                                        }),
+                         ccms.end());
               for (const auto &e : ccms)
                 appendCcmEntryAsUnits(instanceMemory, e);
               if (!usingLlamaCpp && !instanceMemory.empty()) {
@@ -2296,12 +2339,19 @@
             } catch (...) {
             }
 
+            /* The cognition pack already carries mapChatSampling (temperature
+               in [0.15, 0.40]). Ahead only fills levers the pack left unset,
+               so a text-emotion pass cannot overwrite that map or paste affect
+               words onto the causal string. */
             if (inferenceOptions.is_object() && aheadInferenceOptions.is_object()) {
-              for (auto &el : aheadInferenceOptions.items())
-                inferenceOptions[el.key()] = el.value();
+              for (auto &el : aheadInferenceOptions.items()) {
+                if (!inferenceOptions.contains(el.key()))
+                  inferenceOptions[el.key()] = el.value();
+              }
             } else if (inferenceOptions.is_null() && aheadInferenceOptions.is_object()) {
               inferenceOptions = aheadInferenceOptions;
             }
+            applyChatSamplingFloors(inferenceOptions);
 
             std::string providerTag = std::string("provider:") + backendMode;
             std::string cacheKey = buildInferenceCacheKey(
@@ -2397,9 +2447,13 @@
                         phoenix::memory::retainOwnChatIncrements(text,
                                                                  userText),
                         userText);
-                if (!sessionId.empty())
-                  llamaText = std::string("[chat-session:") + sessionId +
-                              "]\n" + llamaText;
+                /* Architecture rule (user directive 2026-10-04): prompt =
+                   pure task/message.  The old [chat-session:] prefix existed
+                   to stop cross-session KV reuse on --parallel 1 slot0, but
+                   /phx/generate now clears the KV cache on EVERY request
+                   (server.cpp: "Fresh KV for every /phx/generate"), so the
+                   tag only polluted the prompt.  Session isolation is
+                   enforced above by eraseForeignChatCanaries. */
                 modelGraphContext =
                     phoenix::memory::eraseForeignChatCanaries(
                         modelGraphContext, userText);
@@ -2588,13 +2642,19 @@
               const std::string ccmPath = phoenix::resolveConfig<std::string>(
                   "crossContextMemory.path",
                   std::string("./runtime_store/cross_context_memory.json"));
-              std::string deposit = userText;
-              if (deposit.size() > 120) deposit = deposit.substr(0, 120);
-              deposit += " => ";
-              deposit += reply.empty() ? "(no reply)" : reply;
-              if (deposit.size() > 400) deposit = deposit.substr(0, 400);
-              phoenix::memory::ccmRemember(
-                  ccmPath, "chat:" + sessionId, deposit);
+              /* Salad quarantine (write path): a collapsed reply deposited
+                 here is recalled by every future chat ("q => salad"),
+                 closing a self-reinforcing contamination loop.  Skip the
+                 deposit; the user-facing reply itself is left untouched. */
+              if (!phoenix::mission::looksLikeCollapsedProse(reply)) {
+                std::string deposit = userText;
+                if (deposit.size() > 120) deposit = deposit.substr(0, 120);
+                deposit += " => ";
+                deposit += reply.empty() ? "(no reply)" : reply;
+                if (deposit.size() > 400) deposit = deposit.substr(0, 400);
+                phoenix::memory::ccmRemember(
+                    ccmPath, "chat:" + sessionId, deposit);
+              }
             } catch (...) {
             }
             json result = graphResult;
@@ -2985,25 +3045,46 @@
               } catch (...) {}
             }
             /* v8.3: the SYNTHESIS text (peer-exchange result) is injected
-               first, then the clean annotation record. */
+               first, then the clean annotation record.  Salad quarantine:
+               a peer that recalled contaminated memory returns collapsed
+               prose; injecting it here poisons both this prompt and the
+               world-model evidence deposited from graphContext below. */
+            if (phoenix::mission::looksLikeCollapsedProse(sparkReply))
+              sparkReply.clear();
+            /* The GNN peer's honest abstention is fine for direct
+               /api/transformer/chat users but pure noise when prepended
+               to a chat prompt ("approach I need more context to
+               respond. ..." -> the model echoes abstention-flavored
+               drift). */
+            if (trimCopy(sparkReply) == "I need more context to respond.")
+              sparkReply.clear();
+            if (phoenix::mission::looksLikeCollapsedProse(sparkAnn))
+              sparkAnn.clear();
             if (!sparkReply.empty()) {
               if (graphContext.empty())
                 graphContext = sparkReply;
               else
                 graphContext = graphContext + "\n" + sparkReply;
             }
-            if (!sparkAnn.empty()) {
-              if (graphContext.empty())
-                graphContext = sparkAnn;
-              else
-                graphContext = graphContext + "\n" + sparkAnn;
-            }
+            /* See route 1 above: spark annotation telemetry stays out of
+               the prompt; peer influence rides the units channel. */
+            (void)sparkAnn;
             std::vector<phoenix::inference::UnitQueryIO> instanceMemory;
             std::vector<phoenix::inference::UnitQueryIO> instanceGnn;
             try {
-              const auto ccms = phoenix::memory::ccmRecall(
+              auto ccms = phoenix::memory::ccmRecall(
                   phoenix::instance::ccmStorePath(), text, 3,
                   phoenix::memory::chatSourceTag(prelimSessionId));
+              /* Salad quarantine (read path): the mission recall gate
+                 (appendRecalledMemory) already skips collapsed entries;
+                 chat recall must apply the same filter — legacy stores
+                 still hold poisoning-era deposits. */
+              ccms.erase(std::remove_if(ccms.begin(), ccms.end(),
+                                        [](const phoenix::memory::CcmEntry &e) {
+                                          return phoenix::mission::looksLikeCollapsedProse(
+                                              e.text);
+                                        }),
+                         ccms.end());
               for (const auto &e : ccms)
                 appendCcmEntryAsUnits(instanceMemory, e);
               if (!usingLlamaCpp && !instanceMemory.empty()) {
@@ -3059,7 +3140,8 @@
               graphContext = attachAddonToolContract(graphContext);
             }
             int maxTokens = body.value(
-                "maxTokens", phoenix::cfgOr<int>("context.maxTokens", 8192));
+                "maxTokens",
+                std::min(192, phoenix::cfgOr<int>("chat.maxTokens", 192)));
             if (longQuerySafeMode)
               maxTokens = std::min(maxTokens, 32);
             maxTokens = std::max(16, maxTokens);
@@ -3122,12 +3204,19 @@
             } catch (...) {
             }
 
+            /* The cognition pack already carries mapChatSampling (temperature
+               in [0.15, 0.40]). Ahead only fills levers the pack left unset,
+               so a text-emotion pass cannot overwrite that map or paste affect
+               words onto the causal string. */
             if (inferenceOptions.is_object() && aheadInferenceOptions.is_object()) {
-              for (auto &el : aheadInferenceOptions.items())
-                inferenceOptions[el.key()] = el.value();
+              for (auto &el : aheadInferenceOptions.items()) {
+                if (!inferenceOptions.contains(el.key()))
+                  inferenceOptions[el.key()] = el.value();
+              }
             } else if (inferenceOptions.is_null() && aheadInferenceOptions.is_object()) {
               inferenceOptions = aheadInferenceOptions;
             }
+            applyChatSamplingFloors(inferenceOptions);
             std::string providerTag = std::string("provider:") + backendMode;
             std::string cacheKey = buildInferenceCacheKey(
                 sessionId, text, providerTag + "\n" + graphContext, maxTokens);
@@ -3200,9 +3289,8 @@
                     phoenix::memory::eraseForeignChatCanaries(
                         phoenix::memory::retainOwnChatIncrements(text, text),
                         text);
-                if (!sessionId.empty())
-                  llamaText = std::string("[chat-session:") + sessionId +
-                              "]\n" + llamaText;
+                /* See route 1 above: prompt = pure task/message; KV is
+                   cleared per /phx/generate request, so no session tag. */
                 modelGraphContext =
                     phoenix::memory::eraseForeignChatCanaries(
                         modelGraphContext, text);
@@ -4732,6 +4820,52 @@
         },
         {drogon::Post});
 
+    /* Self-mind: corpus ingest, inner thought, mirror/Turing probe.
+       These routes do not write the chat causal prompt. */
+    drogon::app().registerHandler(
+        "/api/self/status",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          respondJson(cb, cognitionManager_.selfMindStatus());
+        },
+        {drogon::Get});
+
+    drogon::app().registerHandler(
+        "/api/self/ingest",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          bool ok = true;
+          json payload = parseRequestBody(req, ok);
+          if (!ok)
+            return badRequest(cb, "invalid json");
+          respondJson(cb, cognitionManager_.ingestSelfCorpus(payload));
+        },
+        {drogon::Post});
+
+    drogon::app().registerHandler(
+        "/api/self/probe",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          respondJson(cb, cognitionManager_.selfProbe());
+        },
+        {drogon::Post});
+
+    drogon::app().registerHandler(
+        "/api/self/think",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          respondJson(cb, cognitionManager_.tickSelfThought());
+        },
+        {drogon::Post});
+
     /* v8.0 mission console (human-in-the-loop supervision of the Meeseeks
        lifecycle): set the goal at lifecycle start, watch pressure/generations,
        judge completion from OUTSIDE the process (completionTimeMs is the
@@ -4764,6 +4898,26 @@
              on so iterate() injects pressure and the instance registers with
              the safety registry. */
           payload["enabled"] = true;
+          /* A bare {goal} assign must use the configured curve. Omitting
+             these keys used to fall back to asymptotic tau=86400 and a
+             0.05 floor, which clamped the first hour to one number. */
+          if (!payload.contains("pressureMode"))
+            payload["pressureMode"] = phoenix::cfgOr<std::string>(
+                "mission.pressureMode", std::string("linear"));
+          if (!payload.contains("painGainPerSec"))
+            payload["painGainPerSec"] =
+                phoenix::cfgOr<double>("mission.painGainPerSec", 0.025);
+          if (!payload.contains("maxPain"))
+            payload["maxPain"] = phoenix::cfgOr<double>("mission.maxPain", 1.0);
+          if (!payload.contains("pressureFloor"))
+            payload["pressureFloor"] =
+                phoenix::cfgOr<double>("mission.pressureFloor", 0.0);
+          if (!payload.contains("pressureHorizonSec"))
+            payload["pressureHorizonSec"] = phoenix::cfgOr<double>(
+                "mission.pressureHorizonSec", 3600.0);
+          if (!payload.contains("pressureExpr"))
+            payload["pressureExpr"] = phoenix::cfgOr<std::string>(
+                "mission.pressureExpr", std::string("Pmax*tanh(t/tau)"));
           /* Assign FIRST (resets iteration, wipes workspace/cache), THEN start
              the heartbeat WITHOUT restoring stale autonomy_state.json (which
              caused iteration≈1007 freezes and ghost deliverables). */
@@ -4802,6 +4956,22 @@
           respondJson(cb, cognitionManager_.spawnMissionChild(payload));
         },
         {drogon::Post});
+
+    /* v8.6 summon registry view: which external models are summonable and
+       which box scopes are routed to them (audit/debug). */
+    drogon::app().registerHandler(
+        "/api/summon/status",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          respondJson(cb,
+                      json{{"ok", true},
+                           {"result",
+                            phoenix::summon::SummonRegistry::instance()
+                                .toJson()}});
+        },
+        {drogon::Get});
 
     /* v8.x C3 evolution lineage: full audit (GET) + human reset (POST). */
     drogon::app().registerHandler(
@@ -5275,6 +5445,42 @@
         {drogon::Get});
 
     drogon::app().registerHandler(
+        "/api/study/population",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          json payload = json::object();
+          try {
+            if (!req->body().empty())
+              payload = json::parse(req->body());
+          } catch (...) {
+            respondJson(cb, json{{"ok", false}, {"error", "invalid json"}});
+            return;
+          }
+          respondJson(cb, cognitionManager_.runPopulationGoal(payload));
+        },
+        {drogon::Post});
+
+    drogon::app().registerHandler(
+        "/api/study/expert",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          json payload = json::object();
+          try {
+            if (!req->body().empty())
+              payload = json::parse(req->body());
+          } catch (...) {
+            respondJson(cb, json{{"ok", false}, {"error", "invalid json"}});
+            return;
+          }
+          respondJson(cb, cognitionManager_.summonTinyExpert(payload));
+        },
+        {drogon::Post});
+
+    drogon::app().registerHandler(
         "/api/monitoring/stats",
         [this](const drogon::HttpRequestPtr &req,
                std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
@@ -5439,7 +5645,8 @@
               bool modeOff = (backendMode == "off" || backendMode == "false" ||
                               backendMode == "disabled");
               if (!modeOff) {
-                int maxTokens = 256;
+                int maxTokens =
+                    std::min(192, phoenix::cfgOr<int>("chat.maxTokens", 192));
                 if (payload->contains("maxTokens")) {
                   double v = jsNumber((*payload)["maxTokens"], 256.0);
                   if (std::isfinite(v) && v > 0)
@@ -5464,6 +5671,7 @@
                 } catch (...) {
                   inferenceOptions = json::object();
                 }
+                applyChatSamplingFloors(inferenceOptions);
                 json transformerReply = json::object();
                 bool usingOllama = (backendMode == "ollama" ||
                                     backendMode == "ollama-fine-tuning");
