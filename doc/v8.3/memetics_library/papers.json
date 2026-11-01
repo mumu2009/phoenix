@@ -1,0 +1,184 @@
+{
+  "library": "phoenix-memetics",
+  "note": "Citations checked against publisher or DOI pages on 2026-10-23. Formulas are the ones this tree actually uses or explicitly declines.",
+  "papers": [
+    {
+      "id": "eigen-1971",
+      "authors": "Manfred Eigen",
+      "year": 1971,
+      "title": "Selforganization of matter and the evolution of biological macromolecules",
+      "venue": "Naturwissenschaften 58:465-523",
+      "formula": "A master sequence stays maintainable only when fidelity q and advantage sigma satisfy q^L * sigma > 1. Equivalently Lmax = ln(sigma) / -ln(q).",
+      "use": "replica_trace account. Live q is the fraction of ticks that are source edits."
+    },
+    {
+      "id": "bull-2005",
+      "authors": "J. J. Bull, Lauren Ancel Meyers, Michael Lachmann",
+      "year": 2005,
+      "title": "Quasispecies Made Simple",
+      "venue": "PLoS Computational Biology 1(6):e61",
+      "doi": "10.1371/journal.pcbi.0010061",
+      "formula": "The error threshold is not an extinction threshold. Below it the master remains the most common type; above it the population is a cloud of mutants.",
+      "use": "Read Lmax with fidelity, not with training accuracy."
+    },
+    {
+      "id": "price-1970",
+      "authors": "George R. Price",
+      "year": 1970,
+      "title": "Selection and covariance",
+      "venue": "Nature 227:520-521",
+      "formula": "Delta z_bar = Cov(w, z) / w_bar + E(w Delta z) / w_bar.",
+      "use": "Selection term of the replica account. Not re-derived here."
+    },
+    {
+      "id": "elmouden-2014",
+      "authors": "C. El Mouden, J.-B. Andre, O. Morin, D. Nettle",
+      "year": 2014,
+      "title": "Cultural transmission and the evolution of human behaviour: a general approach based on the Price equation",
+      "venue": "Journal of Evolutionary Biology",
+      "doi": "10.1111/jeb.12296",
+      "formula": "Delta z = cov(c, z) + E_c(Delta z). E_c(Delta z) = E(Delta z) + cov(c, Delta z).",
+      "use": "While every instance has cultural fitness 1, cov(c, z) = 0 and the account binding is transmission or below-error-threshold."
+    },
+    {
+      "id": "kendall-1938",
+      "authors": "Maurice G. Kendall",
+      "year": 1938,
+      "title": "A New Measure of Rank Correlation",
+      "venue": "Biometrika 30:81-93",
+      "doi": "10.1093/biomet/30.1-2.81",
+      "formula": "tau = (n_concordant - n_discordant) / (n_concordant + n_discordant), ties omitted.",
+      "use": "orderedMemeOrderLift. Present requires tau > 0."
+    },
+    {
+      "id": "sparck-jones-1972",
+      "authors": "Karen Sparck Jones",
+      "year": 1972,
+      "title": "A statistical interpretation of term specificity and its application in retrieval",
+      "venue": "Journal of Documentation 28(1):11-21",
+      "doi": "10.1108/eb026526",
+      "formula": "Specificity is collection frequency, not a hand-made stop list. Rare terms weigh more.",
+      "use": "alpha(w|m) = tf(w,m) / df(w), then the high-df prior."
+    },
+    {
+      "id": "robertson-2004",
+      "authors": "Stephen Robertson",
+      "year": 2004,
+      "title": "Understanding inverse document frequency: on theoretical arguments for IDF",
+      "venue": "Journal of Documentation 60:503-520",
+      "formula": "IDF is a probability weight, not an ad hoc penalty.",
+      "use": "mappingIdfScale already applies this. No second penalty was added."
+    },
+    {
+      "id": "centola-2010",
+      "authors": "Damon Centola",
+      "year": 2010,
+      "title": "The Spread of Behavior in an Online Social Network Experiment",
+      "venue": "Science 329:1194-1197",
+      "doi": "10.1126/science.1185231",
+      "formula": "A complex contagion needs reinforcement from more than one neighbor.",
+      "use": "Present requires two distinct overlapping types, not one anchor word."
+    },
+    {
+      "id": "claidiere-2014",
+      "authors": "Nicolas Claidiere, Thomas C. Scott-Phillips, Dan Sperber",
+      "year": 2014,
+      "title": "How Darwinian is cultural evolution?",
+      "venue": "Philosophical Transactions of the Royal Society B 369:20130368",
+      "doi": "10.1098/rstb.2013.0368",
+      "formula": "Cultural attraction is the general population process. Selection is the special case in which transmission preserves the variant.",
+      "use": "Goal-echo replies are attraction toward the causal tip. The external score never receives a preservable variant."
+    },
+    {
+      "id": "dawkins-1976",
+      "authors": "Richard Dawkins",
+      "year": 1976,
+      "title": "The Selfish Gene",
+      "venue": "Oxford University Press, chapter 11",
+      "formula": "A replicator's fitness factors are longevity, fecundity, and copying fidelity.",
+      "use": "Fidelity is judgeCopy. Fecundity counts distinct later carriers. Longevity is the parent plus the current run of copies. Admitted only when both counts are at least 2. Wired in cross-context recall."
+    },
+    {
+      "id": "shannon-1948",
+      "authors": "Claude E. Shannon",
+      "year": 1948,
+      "title": "A Mathematical Theory of Communication",
+      "venue": "Bell System Technical Journal 27:379-423",
+      "formula": "The typical set is the set of sequences whose self-information is close to the entropy.",
+      "use": "The IPR cut is this tree's finite-sample stand-in. It is not Shannon's asymptotic typical set."
+    },
+    {
+      "id": "cavalli-sforza-feldman-1981",
+      "authors": "L. L. Cavalli-Sforza, M. W. Feldman",
+      "year": 1981,
+      "title": "Cultural Transmission and Evolution: A Quantitative Approach",
+      "venue": "Princeton University Press",
+      "formula": "Vertical, oblique, and horizontal transmission are different equations.",
+      "use": "The two peers are a horizontal pair. The account reads both jsonl files."
+    },
+    {
+      "id": "boyd-richerson-1985",
+      "authors": "Robert Boyd, Peter J. Richerson",
+      "year": 1985,
+      "title": "Culture and the Evolutionary Process",
+      "venue": "University of Chicago Press",
+      "formula": "Guided variation and biased transmission change the trait even when selection is flat.",
+      "use": "Same reading as the Price transmission term."
+    },
+    {
+      "id": "nowak-2006",
+      "authors": "Martin A. Nowak",
+      "year": 2006,
+      "title": "Evolutionary Dynamics",
+      "venue": "Harvard University Press",
+      "formula": "Replicator equation: dx_i/dt = x_i (f_i - phi).",
+      "use": "The discrete map p'_i = p_i w_i / sum_j p_j w_j is replicatorStep. Equal fitness does not move the frequency."
+    },
+    {
+      "id": "sperber-1996",
+      "authors": "Dan Sperber",
+      "year": 1996,
+      "title": "Explaining Culture",
+      "venue": "Blackwell",
+      "formula": "Representations are transformed toward attractors. Copying fidelity is not the default.",
+      "use": "Explains a goal echo without treating it as a failed selection event."
+    },
+    {
+      "id": "edmonds-2005",
+      "authors": "Bruce Edmonds",
+      "year": 2005,
+      "title": "The revealed poverty of the gene-meme analogy – why memetics per se has failed to produce substantive results",
+      "venue": "Journal of Memetics 9",
+      "url": "http://cfpm.org/jom-emit/2005/vol9/edmonds_b.html",
+      "formula": "Calling a phenomenon a meme does not give it the properties of a replicator. The narrow gene-meme analogy added no predictive power.",
+      "use": "The graph's (word, alpha) record is an index. judgeCopy is the copy test. A shared index is not reported as a meme."
+    },
+    {
+      "id": "hull-1988",
+      "authors": "David L. Hull",
+      "year": 1988,
+      "title": "Science as a Process",
+      "venue": "University of Chicago Press",
+      "formula": "A replicator passes on its structure in successive copies. An interactor is the cohesive thing that meets the environment.",
+      "use": "The sentence or the diff is the candidate replicator. The weight set is neither."
+    },
+    {
+      "id": "moscow-not-used",
+      "authors": "Pablo Moscato",
+      "year": 1989,
+      "title": "On Evolution, Search, Optimization, Genetic Algorithms and Martial Arts: Towards Memetic Algorithms",
+      "venue": "Caltech Concurrent Computation Program report C3P-826",
+      "formula": "A memetic algorithm is a population search plus local search.",
+      "use": "Declined. That is an optimization method. The sealed evolution loop stays sealed."
+    },
+    {
+      "id": "acerbi-2021",
+      "authors": "Alberto Acerbi et al.",
+      "year": 2021,
+      "title": "Cultural transmission regimes: copying versus convergent transmission cutoffs (as cited in theory.md section 9)",
+      "venue": "bibliographic details to be completed; the cutoffs are the ones theory.md definition 9.1 implements",
+      "formula": "copying: stepwise fidelity >= 0.75 in both halves of the run; convergent: first half <= 0.55 and the second-half mean rises by >= 0.25; otherwise undetermined.",
+      "use": "theory.md definition 9.1 regime cutoffs, fixed on 2026-10-24; the identifier does not imply the cutoffs were read off Acerbi et al. - the exact source page must be confirmed before publication."
+    }
+  ]
+}

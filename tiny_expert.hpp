@@ -20,6 +20,12 @@ public:
 
     nlohmann::json configure(const nlohmann::json &payload);
     nlohmann::json trainForGoal(const nlohmann::json &payload);
+    /* One fit on this repository's real relative paths. Negatives are
+       the same words reversed, plus ordinary sentences. Training stops
+       once train accuracy reaches 0.95, or at the epoch cap. 1072
+       parameters. It scores a string; it does not emit a diff. */
+    nlohmann::json trainProjectTree(const std::string &root);
+    nlohmann::json scoreProjectText(const std::string &text) const;
     nlohmann::json predict(const nlohmann::json &payload) const;
     nlohmann::json save(const std::string &path) const;
     nlohmann::json load(const std::string &path);

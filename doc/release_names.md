@@ -14,7 +14,8 @@
 | 8.8     | Kay      | planned |
 | 8.9     | Gaheris  | planned |
 | 8.10    | Lamorak  | planned |
-| 9.0     | Tristan  | current |
+| 9.0     | Tristan  | shipped |
+| 10.0    | Gareth   | current |
 
 The naming decree comes from `v7.0.md`: v7.0 = Arthur; from 8.0 onward the
 codenames are Lancelot, Gawain, Galahad, Percival, Ganis, Tristan, Gareth,
@@ -23,4 +24,5 @@ Bedivere, Kay, Gaheris, Lamorak.
 **Rule (corrected):** only major versions (x.0.0) carry a codename. Minor
 versions (8.x.0) and debug/patch versions (8.5.x) have NO codename. 8.5.0
 therefore shipped without a codename; the earlier "Tristan" plan for 8.5 was
-withdrawn, and Tristan is recovered for 9.0.0.
+withdrawn, and Tristan is recovered for 9.0.0. Gareth, the next name after
+Tristan, names 10.0.0.

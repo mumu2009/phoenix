@@ -1,0 +1,43 @@
+{
+  "_comment": "Multi-model repetition of the p-injection manipulation check (protocols_2026-10-31.md 9.4): same procedure as force_conformity_live but the carrier model is Granite 1B (8100) instead of the Qwen coder. Expected: the same fixed force if the p-insensitivity is model-independent.",
+  "mission": {
+    "temperature": 0.0,
+    "plainTextOnly": true,
+    "autoChildDoneChars": 1200,
+    "childFreshTask": true,
+    "aliasProbe": false,
+    "maxReplicas": 8
+  },
+  "autonomyLoop": { "intervalSec": 60 },
+  "research": {
+    "force": { "enabled": false },
+    "deterministicCarriers": false,
+    "forceLive": { "enabled": true }
+  },
+  "summon": {
+    "models": [
+      {
+        "name": "granite_moe_e0",
+        "kind": "moe",
+        "model": "granite-3.1-1b-a400m",
+        "modelPath": "GGUF_models/granite-3.1-1b-a400m-instruct-Q4_K_M.gguf",
+        "url": "http://127.0.0.1:8100",
+        "port": 8100,
+        "autoStart": true,
+        "timeoutMs": 600000,
+        "maxTokens": 512,
+        "roles": ["programming"]
+      }
+    ],
+    "moe": {
+      "kind": "moe",
+      "model": "granite-3.1-1b-a400m",
+      "modelPath": "GGUF_models/granite-3.1-1b-a400m-instruct-Q4_K_M.gguf",
+      "url": "http://127.0.0.1:8100",
+      "port": 8100,
+      "k": 1,
+      "autoStart": false,
+      "roles": ["programming"]
+    }
+  }
+}

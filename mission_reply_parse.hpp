@@ -1229,17 +1229,224 @@ collectGoalChapterHeadings(const std::string &goal) {
   return out;
 }
 
+/** "Chapter 1" must not match the line "Chapter 10". */
+inline std::string chapterKey(const std::string &heading) {
+  std::string key = trimCopy(heading);
+  const auto colon = key.find(':');
+  if (colon != std::string::npos) key = trimCopy(key.substr(0, colon));
+  return key;
+}
+
+inline bool lineOpensChapterKey(const std::string &line,
+                                const std::string &key) {
+  std::string l = trimCopy(line);
+  while (!l.empty() && l[0] == '#') {
+    l.erase(l.begin());
+    l = trimCopy(l);
+  }
+  const std::string ll = lowerCopy(l);
+  const std::string kk = lowerCopy(trimCopy(key));
+  if (kk.empty() || ll.rfind(kk, 0) != 0) return false;
+  if (ll.size() == kk.size()) return true;
+  const unsigned char n = static_cast<unsigned char>(ll[kk.size()]);
+  if (std::isdigit(n)) return false;
+  return n == ':' || std::isspace(n);
+}
+
+inline bool lineOpensAnyChapter(const std::string &line) {
+  std::string l = trimCopy(line);
+  while (!l.empty() && l[0] == '#') {
+    l.erase(l.begin());
+    l = trimCopy(l);
+  }
+  const std::string ll = lowerCopy(l);
+  if (ll.rfind("chapter ", 0) != 0 || ll.size() < 9) return false;
+  return std::isdigit(static_cast<unsigned char>(ll[8]));
+}
+
+inline bool draftOpensChapter(const std::string &draft,
+                              const std::string &heading) {
+  const std::string key = chapterKey(heading);
+  size_t pos = 0;
+  while (pos < draft.size()) {
+    size_t eol = draft.find('\n', pos);
+    if (eol == std::string::npos) eol = draft.size();
+    if (lineOpensChapterKey(draft.substr(pos, eol - pos), key)) return true;
+    pos = (eol == draft.size()) ? draft.size() : eol + 1;
+  }
+  return false;
+}
+
 /** First chapter heading in the goal that the draft has not opened. */
 inline std::string firstMissingGoalChapter(const std::string &goal,
                                            const std::string &draft) {
-  const std::string dlow = lowerCopy(draft);
   for (const auto &h : collectGoalChapterHeadings(goal)) {
-    std::string key = h;
-    const auto colon = key.find(':');
-    if (colon != std::string::npos) key = trimCopy(key.substr(0, colon));
-    if (dlow.find(lowerCopy(key)) == std::string::npos) return h;
+    if (!draftOpensChapter(draft, h)) return h;
   }
   return std::string();
+}
+
+/** Requirement-list lines. They are not a chapter body. */
+inline bool lineIsRequirementBoilerplate(const std::string &line) {
+  const std::string l = lowerCopy(trimCopy(line));
+  if (l.empty()) return false;
+  if (l.rfind("the station must", 0) == 0) return true;
+  if (l.rfind("the system shall", 0) == 0) return true;
+  if (l.rfind("the helios system shall", 0) == 0) return true;
+  if (l.rfind("system requirements", 0) == 0) return true;
+  if (l.rfind("design requirements", 0) == 0) return true;
+  if (l.rfind("functional requirements", 0) == 0) return true;
+  if (l.rfind("key requirements", 0) == 0) return true;
+  if (l.rfind("mission objectives", 0) == 0) return true;
+  if (l.rfind("goals and objectives", 0) == 0) return true;
+  if (l.find("must also") != std::string::npos && l.size() < 240) return true;
+  if (l.find(" shall") != std::string::npos || l.find(" must ") != std::string::npos)
+    return true;
+  size_t i = 0;
+  while (i < l.size() && std::isdigit(static_cast<unsigned char>(l[i]))) ++i;
+  if (i > 0 && i < l.size() && (l[i] == '.' || l[i] == ')')) return true;
+  if (!l.empty() && (l[0] == '*' || l[0] == '-' || l[0] == '+') &&
+      l.size() < 180)
+    return true;
+  return false;
+}
+
+inline std::string stripRequirementBoilerplate(const std::string &text) {
+  std::string out;
+  size_t pos = 0;
+  while (pos < text.size()) {
+    size_t eol = text.find('\n', pos);
+    if (eol == std::string::npos) eol = text.size();
+    const std::string line = text.substr(pos, eol - pos);
+    if (!lineIsRequirementBoilerplate(line)) {
+      if (!out.empty()) out.push_back('\n');
+      out += line;
+    }
+    pos = (eol == text.size()) ? text.size() : eol + 1;
+  }
+  return trimCopy(out);
+}
+
+/** Body between this chapter heading and the next chapter heading. */
+inline std::string goalChapterBody(const std::string &draft,
+                                   const std::string &heading) {
+  const std::string key = chapterKey(heading);
+  size_t pos = 0;
+  while (pos < draft.size()) {
+    size_t eol = draft.find('\n', pos);
+    if (eol == std::string::npos) eol = draft.size();
+    if (lineOpensChapterKey(draft.substr(pos, eol - pos), key)) {
+      size_t body = (eol == draft.size()) ? draft.size() : eol + 1;
+      size_t scan = body;
+      while (scan < draft.size()) {
+        size_t e2 = draft.find('\n', scan);
+        if (e2 == std::string::npos) e2 = draft.size();
+        const std::string line = draft.substr(scan, e2 - scan);
+        if (lineOpensAnyChapter(line) && !lineOpensChapterKey(line, key))
+          return draft.substr(body, scan - body);
+        scan = (e2 == draft.size()) ? draft.size() : e2 + 1;
+      }
+      return draft.substr(body);
+    }
+    pos = (eol == draft.size()) ? draft.size() : eol + 1;
+  }
+  return std::string();
+}
+
+/** A heading with only a requirements list is still unwritten.  Scan in
+    chapter order: an earlier thin chapter must win over a later missing
+    one (the old shortcut returned the later missing heading first). */
+inline std::string firstUnderfilledGoalChapter(const std::string &goal,
+                                               const std::string &draft,
+                                               size_t minLetters = 480) {
+  const auto headings = collectGoalChapterHeadings(goal);
+  if (headings.empty()) return std::string();
+  for (const auto &h : headings) {
+    const std::string real = stripRequirementBoilerplate(goalChapterBody(draft, h));
+    if (deliverableInformationChars(real) < minLetters) return h;
+  }
+  return std::string();
+}
+
+/** Causal tip for one section. Ends the text the model continues. */
+inline std::string chapterContinuationTip(const std::string &heading,
+                                          const std::string &draft,
+                                          int variant = 0) {
+  std::string real = stripRequirementBoilerplate(goalChapterBody(draft, heading));
+  if (real.size() > 600) real = real.substr(real.size() - 600);
+  std::string topic = heading;
+  const auto colon = topic.find(':');
+  if (colon != std::string::npos) topic = trimCopy(topic.substr(colon + 1));
+  std::string tip = "Write the next sentences of this section as design prose: "
+                    "mechanisms, data, and decisions. Do not use shall or must.\n";
+  tip += trimCopy(heading);
+  tip += "\n\n";
+  if (deliverableInformationChars(real) >= 80 && variant <= 0) {
+    tip += real;
+    if (tip.back() != '\n') tip.push_back('\n');
+    return tip;
+  }
+  if (deliverableInformationChars(real) >= 80) {
+    std::string tail = real;
+    if (tail.size() > 180) tail = tail.substr(tail.size() - 180);
+    tip += tail;
+    if (tip.back() != '\n') tip.push_back('\n');
+  }
+  const std::string topicText =
+      topic.empty() ? std::string("this section") : topic;
+  if (variant % 3 == 1)
+    tip += "What the station actually runs for " + topicText + " is ";
+  else if (variant % 3 == 2)
+    tip += "Data and control move through " + topicText + " by ";
+  else {
+    tip += "The concrete design of ";
+    tip += topicText;
+    tip += " relies on ";
+  }
+  return tip;
+}
+
+/** Put prose inside the chapter, before the next chapter heading. */
+inline std::string insertChapterProse(const std::string &draft,
+                                      const std::string &heading,
+                                      const std::string &prose) {
+  std::string body = trimCopy(stripRequirementBoilerplate(prose));
+  if (body.empty()) return draft;
+  const std::string key = chapterKey(heading);
+  size_t pos = 0;
+  while (pos < draft.size()) {
+    size_t eol = draft.find('\n', pos);
+    if (eol == std::string::npos) eol = draft.size();
+    if (lineOpensChapterKey(draft.substr(pos, eol - pos), key)) {
+      size_t bodyAt = (eol == draft.size()) ? draft.size() : eol + 1;
+      size_t scan = bodyAt;
+      size_t next = draft.size();
+      while (scan < draft.size()) {
+        size_t e2 = draft.find('\n', scan);
+        if (e2 == std::string::npos) e2 = draft.size();
+        const std::string line = draft.substr(scan, e2 - scan);
+        if (lineOpensAnyChapter(line) && !lineOpensChapterKey(line, key)) {
+          next = scan;
+          break;
+        }
+        scan = (e2 == draft.size()) ? draft.size() : e2 + 1;
+      }
+      std::string out = draft.substr(0, next);
+      if (!out.empty() && out.back() != '\n') out.push_back('\n');
+      out += body;
+      if (out.back() != '\n') out.push_back('\n');
+      if (next < draft.size()) out += draft.substr(next);
+      return out;
+    }
+    pos = (eol == draft.size()) ? draft.size() : eol + 1;
+  }
+  std::string out = draft;
+  if (!out.empty() && out.back() != '\n') out.push_back('\n');
+  out += trimCopy(heading);
+  out += "\n\n";
+  out += body;
+  if (out.back() != '\n') out.push_back('\n');
+  return out;
 }
 
 /** Web-searchable queries from THIS goal. Title / background / the first
@@ -2272,7 +2479,9 @@ inline std::vector<std::string> wordShingles(const std::string &text,
     chapter stays under the threshold. */
 inline bool continuationRestatesDraft(const std::string &chunk,
                                       const std::string &existing) {
-  if (chunk.size() < 80 || existing.size() < 600) return false;
+  /* 300 letters is already about two sentences; the old 600 guard let a
+     threefold repeat of a 200-letter requirement list slip through. */
+  if (chunk.size() < 80 || existing.size() < 300) return false;
   const auto fresh = wordShingles(chunk, 4);
   if (fresh.size() < 6) return false;
   const auto prior = wordShingles(existing, 4);

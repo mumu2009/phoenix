@@ -31,7 +31,7 @@ test('renders shell', async () => {
   render(<App />);
   expect(screen.getByText(/079 phoenix/i)).toBeInTheDocument();
   expect(screen.getByText('新会话')).toBeInTheDocument();
-  expect(screen.getByDisplayValue('core')).toBeInTheDocument();
+  expect(screen.getByText(/core=0/)).toBeInTheDocument();
   expect(screen.getByText('World')).toBeInTheDocument();
   expect(screen.getByText('运维')).toBeInTheDocument();
   expect(screen.getByText('退出登录')).toBeInTheDocument();

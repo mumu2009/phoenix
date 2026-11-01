@@ -3,7 +3,7 @@
     "focus": "token-to-unit-many-to-many",
     "gradientFit": {
       "convergence": {
-        "generatedAtMs": 1791020268063,
+        "generatedAtMs": 1793466427920,
         "reached": false,
         "reason": "insufficient-semantic-units",
         "sampleCount": 0
@@ -41,11 +41,11 @@
     },
     "tokenSplitPolicy": "semantic-dense"
   },
-  "generatedAtMs": 1791020268063,
+  "generatedAtMs": 1793466427919,
   "inspection": {
     "error": "gguf file not found",
     "exists": false,
-    "path": "D:\\models\\model.gguf",
+    "path": "E:\\models\\model.gguf",
     "valid": false
   },
   "model": {
@@ -65,7 +65,7 @@
     },
     "windowTokens": 1024
   },
-  "modelPath": "D:\\models\\model.gguf",
+  "modelPath": "E:\\models\\model.gguf",
   "provider": "",
   "source": "heuristic-fallback",
   "toolBridges": {

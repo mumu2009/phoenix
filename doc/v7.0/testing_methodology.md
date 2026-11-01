@@ -145,12 +145,25 @@
 2. **markComplete 终结疼痛**：Running 中途 `markComplete()` 后 `pressureNow()==0` 且 `state==Completed`、`endMs≥startMs`；再次 `markComplete()` 幂等（状态不倒退）。`markFailed()` 同理且不可再 Complete。
 3. **累积疼痛定理**：数值积分 g=0.1、P_max=1 的 p(t) 曲线，对照 P(T)=gT²/2（T≤10 段）与 P(T)=5+P_max(T−10)（T>10 段）；判据相对误差 ≤1e-6（验证 §2 定理的分段公式，防实现回归）。
 4. **spawnChild 变异有界**：以 `SubconsciousProfile::defaults()` + learningRate=0.05 为父本，rate=0.05，spawn 100 个子代：判据 ① 所有标量都在文档声明的 clamp 界内（PAD∈[−1,1]、riskAversion∈[0.2,3]、gain∈[0,5]、halfLife∈[1,3600]、learningRate∈[0.001,0.5]）；② 变异前后均值差 ≤ 2σ（无漂移）；③ rate=0 时子代与父本逐位相等（纯遗传）。
-5. **多代完成时间下降（协议层模拟）**：模拟 G=10 代、每代 λ=8 子代（同一合成任务、完成时间 = 基线 + 高斯噪声），按 (1+λ) 保留最优父本；判据后 5 代均值 < 前 5 代均值（单侧 t 检验 p<0.05 才记为通过；噪声任务下允许失败并记录）。注意：这是**协议层**验证"若编排多代重试，完成时间会下降"的性质；运行时**没有**进程内自动选择循环（见 `doc/v7.0/archive/uncontrolled_evolution.md`）。运行时繁殖 = **复制是实例的自由能力**：`replicate` 是默认规划器动作、无固定触发条件、无接班（gtest：ReplicateMutatesAndRecords / ReplicaLimitBoundsReproduction / ReplicateActionRegisteredByDefault / ExecuteReplicateSpawnsSuccessorSession / ReplicateRespectsMaxReplicas / ReportOutcomeFalseKeepsMissionFailed）。
+5. **多代完成时间下降（协议层模拟）**：模拟 G=10 代、每代 λ=8 子代（同一合成任务、完成时间 = 基线 + 高斯噪声），按 (1+λ) 保留最优父本；判据后 5 代均值 < 前 5 代均值（单侧 t 检验 p<0.05 才记为通过；噪声任务下允许失败并记录）。2026-10-25 按原文跑过：种子 20261025，基线 1000，标准差 80，前五均值 857.461，后五均值 818.56，p=0.0889039。2026-11-01 撤出进化判据：完成时间被写成与基因组无关的 1000+N(0,80)，没有变异能作用到表型，所以这个 p 值既不算通过，也不再当作理论失败。数字留档，种子、方差和 0.05 不改。进化判据改由第 9.11、9.12 节和父代实测工作时间的保留规则承担。运行时在 `mission.evolution.enabled=true` 时，父本完成后会保留完成时间严格更短的基因组（`adoptEliteLocked`）；子代数量仍由 `maxReplicas` 限制，急停在生命周期外。繁殖仍是实例的自由能力：`replicate` 是默认规划器动作、无固定触发条件、无接班（gtest：ReplicateMutatesAndRecords / ReplicaLimitBoundsReproduction / ReplicateActionRegisteredByDefault / ExecuteReplicateSpawnsSuccessorSession / ReplicateRespectsMaxReplicas / ReportOutcomeFalseKeepsMissionFailed）。
 6. **自主栈注入（gtest）**：`assignMission({enabled,goal,..})` 后调 `iterate`：判据 ① 返回 `result.mission.active==true` 且 `pressure>0`；② `sensationEngine_.active()` 中存在 `type=Pain, source="mission-pressure", valence=−1, intensity==pressure` 的感受；③ `reportMissionOutcome({goalAchieved:true})` 后再 iterate：`active==false`、`pressure==0`、不再注入新 Pain。**单信号与衰减（新）**：连续 3 次 iterate 后 status 中 mission-pressure Pain 恰为 **1 条**（刷新而非堆叠）；`decayAuto(150s)` 后强度 ≈0.707（缺省半衰期 300s），`decayAuto(1500s)` 后整条剪除、homeostaticCost==0；per-type 调谐（如 pain halfLife=60s）覆盖缺省值。
 7. **空目标幂等**：`assignMission({enabled:true})`（goal 为空）→ 不进入 Running、压力恒 0、`missionStatus().enabled==true`（武装但空闲）；随后带 goal 的 assignMission 正常启动。
 8. **配置门（阶段 8，系统级）**：`mission.enabled=true` 且配置 goal 非空时，网关启动后 `missionStatus` 返回 Running（出生即绑定）；`mission.enabled=false` 时任何 mission 字段都不出现在 iterate 结果里（`mission` 为空对象）。
 9. **压力增长模式（v8.0，gtest + 手工）**：① 缺省 `pressureMode=="logarithmic"`；② 对数模式 p(H)=P_max（H=pressureHorizonSec）且在 [0,H] 单调不减；③ `pressureMode="linear"` 时与 §9.1-9.3 的线性断言逐位一致（既有测试已显式钉住 linear）；④ 手工冒烟（用户口径：每模式一测）：Mission 控制台设立任务后 1 分钟内 pressure 增长但**不应**在 1 分钟即饱和（对数默认），随后启动自主循环，交付物（deliverable）应开始累积、宿主 llama-server 出现显著负载。
 10. **人工监督 HTTP API（v8.0，阶段 8 系统级）**：① `POST /api/mission/assign {goal:"t"}`（goal 必填，缺省 400；自动 enabled=true）→ 200 且 `result.mission.state==Running`，随后 `GET /api/mission/status` 的 `pressure` 随墙钟增长；② `POST /api/mission/report {goalAchieved:true}` → `state==Completed`、`pressure==0`、`completionTimeMs>=0`，之后 iterate 不再注入 Pain；③ `POST /api/mission/replicate {}` → 返回子代 `{id,generation,goal}` 且 status 的 `children` 增长 1；④ `POST /api/cognition/autonomy/interject {text:"x",amendGoal:"y"}` → 运行中任务目标被重定向（`startMs` 保留、压力继续增长）；⑤ 未认证（`auth.enabled=true` 时无 token）四条 mission 路由全部 401。
+
+11. **学习率有表型（协议层，2026-10-25 写定后才跑）**：完成时间不再是与基因组无关的噪声。`episodesToCriterion(learningRate)` 是长度 8 的确定性链，末态目标为 1，每代从后向前做 `v ← v + α(target−v)`，起点达到 0.5 的回合数即表型。测量时间 = 该回合数 + N(0, 2)。种子 20261026，父本学习率 0.05，变异用 `MissionGenome::mutate`、速率 0.05，不套用谱系 softmax 步长。G=10，λ=8，父本已测时间保留，`selectOnePlusLambda` 取严格更短者。判据与 9.5 相同：后 5 代均值 < 前 5 代均值且单侧 Welch p<0.05。另外三条不计入这条 p 值、但必须先成立：α=0.2 的回合数小于 α=0.05；α≤0 返回 100000；进化开启且父本已完成时，严格更快的子代基因组被保留，更慢的不保留，开关关闭时不保留。2026-10-25 跑完：α=0.05 为 128 回合，α=0.2 为 28 回合；前五均值 96.4073，后五均值 69.5275，p=0.00382034，末代学习率 0.0854414。记为通过。种子、方差和 0.05 没有改。
+
+12. **真实 TD(0) 用第 9.11 节留下的步长（2026-10-25 写定后才跑）**：调用 `ActiveInferenceController::learnValue`，γ=0.9，八个 one-hot 状态，只在 6→7 给奖励 1。一个回合是一次从后向前的扫描。起点效用达到 0.5 即停，上限 100000。慢步长 0.05，快步长 0.0854414。步长 0 必须停在上限。通过条件只是快步长的回合数严格更少。这条不重跑第 9.11 节。2026-10-25 跑完：慢步长 222 回合，快步长 127 回合，步长 0 停在 100000。记为通过。三个数没有改。
+
+13. **2026-10-26 的七个新协议**：真实墙钟表型（10.1）、连续复制子方程（10.2）、
+    力识别（10.3）、Acerbi 体制接到谱系（10.4）、侧表合取隐层（10.5）、打开
+    输出列的路由器（10.6）、两次命中门与老师缓存（10.7）。切线在跑之前写在
+    `doc/v8.3/memetics_library/protocols_2026-10-26.md`，结果在
+    `papers/transmission.md` 与 `doc/v8.3/memetics_library/library.md`，公式和
+    证明在 `doc/v8.3/memetics_library/theory.md`。第 9.5 节的噪声表型已撤出进化判据。
+    10.1 是 pilot（阶梯代价，前/后段均值没有检验），10.1b 用配对设计通过：
+    同一真实写作任务 83.5 s → 41.0 s，p = 8.13655e-08。
 
 ## 10. 插件生态验证协议
 

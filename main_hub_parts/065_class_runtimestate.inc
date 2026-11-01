@@ -627,12 +627,93 @@ public:
         std::min(6, (int)numberOrHard(
                         pickValue(budget, {"radius", "windowRadius"}), 2, 2)));
 
-    auto mapping = mapWordsToMemesOrdered(words);
-    auto seeds = mapping.seeds;
-    auto seedOrder = mapping.order;
+    const bool chainGraph =
+        payload.value("graphMode", std::string()) == "chain";
+    SeedMapping mapping;
+    std::unordered_map<std::string, double> seeds;
+    std::vector<std::string> seedOrder;
+    if (chainGraph) {
+      /* One seed per word, spread across the whole text. Phrase windows
+         are not scanned: a 14-gram probe at every offset does not see
+         more of the document than the unigram chain, and it does not
+         finish on a long draft. */
+      mapping.queryId = phoenix::memetic::mappingNewQueryId();
+      auto norm = [](std::string s) {
+        s = trimCopy(s);
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char ch) { return (char)std::tolower(ch); });
+        while (!s.empty()) {
+          unsigned char c = (unsigned char)s.front();
+          if (std::isalnum(c) || c == '_' || c == '-' || c >= 0x80)
+            break;
+          s.erase(s.begin());
+        }
+        while (!s.empty()) {
+          unsigned char c = (unsigned char)s.back();
+          if (std::isalnum(c) || c == '_' || c == '-' || c >= 0x80)
+            break;
+          s.pop_back();
+        }
+        return s;
+      };
+      struct Acc {
+        std::string id;
+        double w{0};
+      };
+      std::vector<Acc> acc;
+      std::unordered_map<std::string, size_t> at;
+      for (size_t i = 0; i < words.size(); ++i) {
+        std::string t = norm(words[i]);
+        if (t.empty())
+          continue;
+        bool ascii = true;
+        for (unsigned char c : t) {
+          if (c >= 0x80) {
+            ascii = false;
+            break;
+          }
+        }
+        if (ascii && t.size() <= 1)
+          continue;
+        const std::string id = "meme_" + sha1Hex(t);
+        const double w = (t.size() >= 4 ? 1.0 : 0.2) /
+                         (1.0 + 0.0005 * (double)i);
+        auto it = at.find(id);
+        if (it == at.end()) {
+          at.emplace(id, acc.size());
+          acc.push_back(Acc{id, w});
+        } else {
+          acc[it->second].w += w;
+        }
+      }
+      constexpr size_t kSeedCap = 3500;
+      if (acc.size() > kSeedCap) {
+        std::vector<Acc> sampled;
+        sampled.reserve(kSeedCap);
+        const double step = (double)acc.size() / (double)kSeedCap;
+        for (size_t s = 0; s < kSeedCap; ++s) {
+          const size_t idx =
+              std::min(acc.size() - 1, (size_t)((double)s * step));
+          sampled.push_back(acc[idx]);
+        }
+        acc.swap(sampled);
+      }
+      mapping.tokens.reserve(acc.size());
+      for (auto &a : acc) {
+        mapping.seeds[a.id] = a.w;
+        mapping.order.push_back(a.id);
+        mapping.tokens.push_back(a.id);
+      }
+      seeds = mapping.seeds;
+      seedOrder = mapping.order;
+    } else {
+      mapping = mapWordsToMemesOrdered(words);
+      seeds = mapping.seeds;
+      seedOrder = mapping.order;
+    }
     int hopsUsed = 0;
     PropagationResult result;
-    if (depth > 1) {
+    if (!chainGraph && depth > 1) {
       for (int hop = 1; hop < depth; hop++) {
         result = runPropagation(seeds, json{{"iteration", iteration},
                                             {"radius", radius},
@@ -1002,21 +1083,84 @@ public:
     if (tokens.empty())
       return json{{"ok", false}, {"reason", "no-tokens"}};
 
-    auto memeIds = buildMemeSequenceFromTokens(tokens);
-    for (size_t i = 0; i + 1 < memeIds.size(); i++) {
-      graph_.link(memeIds[i], memeIds[i + 1], 1.0, 0);
+    /* mode=chain records every token of the document as a unigram node and
+       links them in order. The sliding 3..14-gram builder creates a new
+       phrase node at every offset and rewrites the word index; on a full
+       deliverable that is O(tokens * ngram * fanout) and never finishes.
+       The chain is still the whole text. */
+    const bool chain = doc.value("mode", std::string()) == "chain";
+    std::vector<std::string> memeIds;
+    if (chain) {
+      auto norm = [](std::string s) {
+        s = trimCopy(s);
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char ch) { return (char)std::tolower(ch); });
+        while (!s.empty()) {
+          unsigned char c = (unsigned char)s.front();
+          if (std::isalnum(c) || c == '_' || c == '-' || c >= 0x80)
+            break;
+          s.erase(s.begin());
+        }
+        while (!s.empty()) {
+          unsigned char c = (unsigned char)s.back();
+          if (std::isalnum(c) || c == '_' || c == '-' || c >= 0x80)
+            break;
+          s.pop_back();
+        }
+        return s;
+      };
+      memeIds.reserve(tokens.size());
+      std::unordered_set<std::string> bound;
+      for (auto &raw : tokens) {
+        std::string t = norm(raw);
+        if (t.empty())
+          continue;
+        bool ascii = true;
+        for (unsigned char c : t) {
+          if (c >= 0x80) {
+            ascii = false;
+            break;
+          }
+        }
+        if (ascii && t.size() <= 1)
+          continue;
+        std::string id = "meme_" + sha1Hex(t);
+        if (bound.insert(id).second)
+          kvm_.link(t, id, false);
+        memeIds.push_back(std::move(id));
+      }
+    } else {
+      memeIds = buildMemeSequenceFromTokens(tokens);
+    }
+    /* One row write per touched meme, not one full-neighbor rewrite per
+       edge. A full-document ingest used to be O(tokens * degree) sqlite. */
+    {
+      struct GraphBulkGuard {
+        MemeGraph &graph;
+        explicit GraphBulkGuard(MemeGraph &g) : graph(g) { graph.beginBulk(); }
+        ~GraphBulkGuard() { graph.endBulk(); }
+      } bulk(graph_);
+      for (size_t i = 0; i + 1 < memeIds.size(); i++) {
+        graph_.link(memeIds[i], memeIds[i + 1], 1.0, 0);
+      }
     }
     std::string source = doc.value("source", "");
-    for (auto &memeId : memeIds) {
-      json meta = graph_.getMeta(memeId);
-      meta["lastTouched"] = nowMs();
-      meta["degree"] = graph_.degreeOf(memeId);
+    std::unordered_map<std::string, int> mentionCount;
+    mentionCount.reserve(memeIds.size());
+    for (auto &memeId : memeIds)
+      mentionCount[memeId] += 1;
+    const auto touchedAt = nowMs();
+    for (auto &kv : mentionCount) {
+      json meta = graph_.getMeta(kv.first);
+      meta["lastTouched"] = touchedAt;
+      meta["degree"] = graph_.degreeOf(kv.first);
       if (!source.empty()) {
         if (!meta.contains("sources") || !meta["sources"].is_object())
           meta["sources"] = json::object();
-        meta["sources"][source] = meta["sources"].value(source, 0) + 1;
+        meta["sources"][source] =
+            meta["sources"].value(source, 0) + kv.second;
       }
-      graph_.setMeta(memeId, meta);
+      graph_.setMeta(kv.first, meta);
     }
     corpusStats_["ingested"] = corpusStats_.value("ingested", 0) + 1;
     corpusStats_["lastIngest"] = nowMs();

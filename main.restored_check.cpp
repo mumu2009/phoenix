@@ -18281,8 +18281,7 @@ private:
                         json{{"id", "core"}, {"mode", "backend-mainchain"}, {"supports", json::array({"chat", "transformer-chat", "verify"})}},
                         json{{"id", "ollama"}, {"mode", "backend-adapter"}, {"supports", json::array({"chat", "transformer-chat"})}, {"model", config_.ollamaModel}},
                         json{{"id", "llamacpp"}, {"mode", "backend-adapter"}, {"supports", json::array({"chat", "transformer-chat"})}, {"model", config_.llamaCppModel}},
-                        json{{"id", "bitnet"}, {"mode", "backend-adapter"}, {"supports", json::array({"chat", "transformer-chat"})}, {"model", config_.bitnetModel}},
-                        json{{"id", "openclaw"}, {"mode", "frontend-bypass"}, {"supports", json::array({"chat"})}, {"compat", "provider-adapter-v1"}}
+                        json{{"id", "bitnet"}, {"mode", "backend-adapter"}, {"supports", json::array({"chat", "transformer-chat"})}, {"model", config_.bitnetModel}}
                     })},
                     {"defaultProvider", defaultProvider},
                     {"compat", json{{"shmProtocolVersion", kSharedMemoryProtocolVersion}, {"outsidesLinkMode", currentOutsidesLinkMode()}}}

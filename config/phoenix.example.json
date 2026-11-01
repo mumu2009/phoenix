@@ -398,6 +398,7 @@
     "moe": {
       "name": "granite_moe_e0",
       "kind": "moe",
+      "roles": ["programming"],
       "model": "granite-3.1-1b-a400m",
       "modelPath": "GGUF_models/granite-3.1-1b-a400m-instruct-Q4_K_M.gguf",
       "url": "http://127.0.0.1:8100",
@@ -442,6 +443,7 @@
       {
         "name": "granite_moe_e0",
         "kind": "moe",
+        "roles": ["programming"],
         "url": "http://127.0.0.1:8100",
         "port": 8100,
         "model": "granite-3.1-1b-a400m",
@@ -581,7 +583,8 @@
     "maxMissionsPerTick": 0,
     "parallelMissions": true,
     "persistEveryTicks": 5,
-    "persistPath": "runtime_store/autonomy_state.json"
+    "persistPath": "runtime_store/autonomy_state.json",
+    "stallWarnSec": 1800
   },
   "cliTools": [
     {"name": "python3", "command": "python3", "args": [], "timeoutMs": 30000, "json": false, "maxReply": 4000},

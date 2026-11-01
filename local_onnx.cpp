@@ -105,7 +105,10 @@ nlohmann::json runLocalOnnx(
   };
 
   std::ostringstream cmd;
-  cmd << py << " "
+  /* The embedded CPython's PYTHONHOME/PYTHONPATH must not leak into the
+     spawned system python (which carries numpy); clear them in the child. */
+  cmd << "set PYTHONHOME=&& set AI_PYTHON_HOME=&& set PYTHONPATH=&& "
+      << py << " "
       << "tools/local_onnx_runner.py "
       << "--model " << quoteIfNeeded(modelPath) << " "
       << "--input " << quoteIfNeeded(inPath.string()) << " "

@@ -6,43 +6,6 @@ const asNum = (v, fallback) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-const OPENCLAW_PANEL_STORAGE_KEY = 'phoenix.openclaw.panel';
-const OPENCLAW_DEFAULT_DASHBOARD_URL = 'http://127.0.0.1:18789/';
-
-function loadOpenClawPanelState() {
-  try {
-    const raw = localStorage.getItem(OPENCLAW_PANEL_STORAGE_KEY);
-    if (!raw) {
-      return { enabled: false, dashboardUrl: OPENCLAW_DEFAULT_DASHBOARD_URL };
-    }
-    const parsed = JSON.parse(raw) || {};
-    return {
-      enabled: Boolean(parsed.enabled),
-      dashboardUrl: String(parsed.dashboardUrl || OPENCLAW_DEFAULT_DASHBOARD_URL)
-    };
-  } catch (_e) {
-    return { enabled: false, dashboardUrl: OPENCLAW_DEFAULT_DASHBOARD_URL };
-  }
-}
-
-export function normalizeOpenClawDashboardUrl(raw) {
-  const text = String(raw || '').trim();
-  if (!text) return '';
-  let candidate = text.replace(/^ws:/i, 'http:').replace(/^wss:/i, 'https:');
-  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
-    candidate = `http://${candidate}`;
-  }
-  try {
-    const parsed = new URL(candidate);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return '';
-    }
-    return parsed.toString();
-  } catch (_e) {
-    return '';
-  }
-}
-
 function FieldRow({ label, hint, children }) {
   return (
     <div className="cfg-row">
@@ -55,12 +18,10 @@ function FieldRow({ label, hint, children }) {
   );
 }
 
-export default function ConfigPanel({ onError, chatProvider = 'core', onChatProviderChange, providerStats }) {
+export default function ConfigPanel({ onError, providerStats }) {
   const [loading, setLoading] = useState(false);
   const [features, setFeatures] = useState(null);
   const [patchBusy, setPatchBusy] = useState(false);
-  const [openclawPanel, setOpenclawPanel] = useState(() => loadOpenClawPanelState());
-  const [openclawFrameKey, setOpenclawFrameKey] = useState(0);
   const [studyStatus, setStudyStatus] = useState(null);
   const [monitoringStats, setMonitoringStats] = useState(null);
   const [clusterStatus, setClusterStatus] = useState(null);
@@ -159,11 +120,6 @@ export default function ConfigPanel({ onError, chatProvider = 'core', onChatProv
       thresholds: features.dialogThresholds
     };
   }, [features]);
-
-  const openclawDashboardHref = useMemo(
-    () => normalizeOpenClawDashboardUrl(openclawPanel.dashboardUrl),
-    [openclawPanel.dashboardUrl]
-  );
 
   const refreshAll = async () => {
     setLoading(true);
@@ -274,12 +230,6 @@ export default function ConfigPanel({ onError, chatProvider = 'core', onChatProv
     refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(OPENCLAW_PANEL_STORAGE_KEY, JSON.stringify(openclawPanel));
-    } catch (_e) {}
-  }, [openclawPanel]);
 
   const applyPatch = async (patch) => {
     setPatchBusy(true);
@@ -600,18 +550,7 @@ export default function ConfigPanel({ onError, chatProvider = 'core', onChatProv
 
       <div className="cfg-grid">
         <section className="card">
-          <div className="card-title">Chat Provider</div>
-          <div className="muted">OpenClaw 作为前端并行旁路，不替换后端主链</div>
-
-          <FieldRow label="当前 Provider" hint="切换前端聊天请求目标">
-            <div className="cfg-inline">
-              <select className="input" value={chatProvider} onChange={(e) => onChatProviderChange?.(e.target.value)}>
-                <option value="core">core</option>
-                <option value="openclaw">openclaw</option>
-              </select>
-            </div>
-          </FieldRow>
-
+          <div className="card-title">Chat</div>
           <div className="cfg-kv" style={{ marginTop: 10 }}>
             <div className="muted">core</div>
             <div className="mono">
@@ -619,101 +558,11 @@ export default function ConfigPanel({ onError, chatProvider = 'core', onChatProv
               {providerStats?.core?.count ? Math.round((providerStats.core.totalLatency || 0) / providerStats.core.count) : 0}ms
             </div>
           </div>
-          <div className="cfg-kv">
-            <div className="muted">openclaw</div>
-            <div className="mono">
-              count={providerStats?.openclaw?.count ?? 0}, avgLatency=
-              {providerStats?.openclaw?.count ? Math.round((providerStats.openclaw.totalLatency || 0) / providerStats.openclaw.count) : 0}ms
-            </div>
-          </div>
-        </section>
-
-        <section className="card openclaw-card">
-          <div className="card-title">OpenClaw 工作台</div>
-          <div className="muted">
-            直接嵌入 OpenClaw 自带 dashboard，在 079 网页内完成网关配置、技能安装和运行调试；数学与搜索仍保持为 079 本地内建模块。
-          </div>
-
-          <FieldRow label="嵌入式工作台" hint="启用后会在当前页面直接载入 OpenClaw dashboard">
-            <div className="cfg-inline">
-              <button className="btn" onClick={() => setOpenclawPanel((prev) => ({ ...prev, enabled: true }))}>
-                启用 OpenClaw
-              </button>
-              <button className="btn btn-ghost" onClick={() => setOpenclawPanel((prev) => ({ ...prev, enabled: false }))}>
-                停用 OpenClaw
-              </button>
-              <span className="pill">{openclawPanel.enabled ? 'enabled' : 'disabled'}</span>
-            </div>
-          </FieldRow>
-
-          <FieldRow label="Dashboard URL" hint="建议填入带 #token=... 的完整 dashboard 地址；空值会阻止内嵌加载">
-            <div className="cfg-inline openclaw-toolbar">
-              <input
-                aria-label="OpenClaw Dashboard URL"
-                className="input openclaw-url-input"
-                value={openclawPanel.dashboardUrl}
-                placeholder={OPENCLAW_DEFAULT_DASHBOARD_URL}
-                onChange={(e) => setOpenclawPanel((prev) => ({ ...prev, dashboardUrl: e.target.value }))}
-              />
-              <button
-                className="btn btn-ghost"
-                onClick={() => setOpenclawPanel((prev) => ({ ...prev, dashboardUrl: OPENCLAW_DEFAULT_DASHBOARD_URL }))}
-              >
-                本地默认
-              </button>
-              <button
-                className="btn btn-ghost"
-                disabled={!openclawDashboardHref}
-                onClick={() => setOpenclawFrameKey((prev) => prev + 1)}
-              >
-                重载嵌入
-              </button>
-              <button
-                className="btn btn-ghost"
-                disabled={!openclawDashboardHref}
-                onClick={() => {
-                  if (!openclawDashboardHref) return;
-                  window.open(openclawDashboardHref, '_blank', 'noopener,noreferrer');
-                }}
-              >
-                新标签打开
-              </button>
-            </div>
-          </FieldRow>
-
-          <div className="cfg-kv" style={{ marginTop: 10 }}>
-            <div className="muted">使用建议</div>
-            <div className="mono openclaw-note">
-              推荐先在 outsides/openclaw 目录执行 pnpm openclaw dashboard --no-open，复制完整 URL（含 #token=...）再粘贴到这里。
-            </div>
-          </div>
-
-          {openclawPanel.enabled ? (
-            openclawDashboardHref ? (
-              <div className="openclaw-frame-wrap" style={{ marginTop: 12 }}>
-                <iframe
-                  key={`${openclawFrameKey}:${openclawDashboardHref}`}
-                  title="OpenClaw Dashboard"
-                  data-testid="openclaw-dashboard-iframe"
-                  className="openclaw-frame"
-                  src={openclawDashboardHref}
-                />
-              </div>
-            ) : (
-              <div className="muted" style={{ marginTop: 12 }}>
-                请输入有效的 OpenClaw dashboard 地址后再启用内嵌工作台。
-              </div>
-            )
-          ) : (
-            <div className="muted" style={{ marginTop: 12 }}>
-              启用后，OpenClaw 的配置页面、skills 安装与调试视图会直接显示在这里。
-            </div>
-          )}
         </section>
 
         <section className="card">
           <div className="card-title">插件管理</div>
-          <div className="muted">运行时添加/删除 079 本地插件。OpenClaw skills 请在上方工作台内管理。</div>
+          <div className="muted">运行时添加/删除 079 本地插件。</div>
 
           <div className="addon-form">
             <select className="input" value={addonType} onChange={(e) => setAddonType(e.target.value)}>

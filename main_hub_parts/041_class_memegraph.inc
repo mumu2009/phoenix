@@ -36,16 +36,51 @@ public:
           (int64_t)std::chrono::system_clock::now().time_since_epoch().count();
       meta_[memeId] = meta;
       pushMetaOrderIfNew(memeId);
-      store_->put("node:" + memeId, meta);
+      if (bulkDepth_ > 0)
+        bulkDirty_.insert(memeId);
+      else
+        store_->put("node:" + memeId, meta);
+    }
+    if (bulkDepth_ > 0) {
+      bulkDirty_.insert(memeId);
+      return;
     }
     if (!store_->get("row:" + memeId)) {
       store_->put("row:" + memeId, json{{"neighbors", json::array()}});
     }
   }
 
+  /* Coalesce per-edge row rewrites. link() updates memory immediately and
+     persistNode() writes each touched node once when endBulk() runs. */
+  void beginBulk() {
+    std::lock_guard<std::mutex> lock(graphMu_);
+    ++bulkDepth_;
+  }
+  void endBulk() {
+    std::lock_guard<std::mutex> lock(graphMu_);
+    if (bulkDepth_ > 0)
+      --bulkDepth_;
+    if (bulkDepth_ != 0)
+      return;
+    std::vector<std::string> ids;
+    ids.reserve(bulkDirty_.size());
+    for (const auto &id : bulkDirty_)
+      ids.push_back(id);
+    bulkDirty_.clear();
+    for (const auto &id : ids) {
+      if (nodes_.count(id))
+        persistNode(id);
+      auto mit = meta_.find(id);
+      if (mit != meta_.end())
+        store_->put("node:" + id, mit->second);
+    }
+  }
+
   void link(const std::string &fromId, const std::string &toId,
             double weight = 1, int direction = 0) {
     std::lock_guard<std::mutex> lock(graphMu_);
+    if (!fullyLoaded_)
+      loadAll();
     if (fromId == toId)
       return;
     ensureNodeLocked(fromId);
@@ -532,6 +567,8 @@ private:
   // node in the graph (previously O(totalNodes) per removeNode() call).
   std::unordered_map<std::string, std::unordered_set<std::string>> incomingEdges_;
   bool fullyLoaded_{false};
+  int bulkDepth_{0};
+  std::unordered_set<std::string> bulkDirty_;
 
   void pushNodeOrderIfNew(const std::string &id) {
     if (nodeOrderSet_.insert(id).second)
@@ -648,6 +685,10 @@ private:
   }
 
   void persistNode(const std::string &id) {
+    if (bulkDepth_ > 0) {
+      bulkDirty_.insert(id);
+      return;
+    }
     auto &table = nodes_[id];
     json neighbors = json::array();
     for (auto &to : table.order) {

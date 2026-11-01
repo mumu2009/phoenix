@@ -1,0 +1,266 @@
+{
+  "collected": "2026-10-24",
+  "rule": "A row is included only when a full text or a publisher page was opened on this date. PDFs are not stored in the repo. abstract means the page showed the abstract, not the article body.",
+  "memeticsLibrary": "doc/v8.3/memetics_library/papers.json",
+  "papers": [
+    {
+      "id": "bergstra-2012",
+      "direction": "machine_learning",
+      "year": 2012,
+      "authors": "James Bergstra, Yoshua Bengio",
+      "title": "Random Search for Hyper-Parameter Optimization",
+      "venue": "Journal of Machine Learning Research 13:281-305",
+      "url": "https://jmlr.org/papers/volume13/bergstra12a/bergstra12a.pdf",
+      "visibility": "full",
+      "use": "Baseline for tuning. Most hyperparameters do not matter, and which ones matter changes with the data."
+    },
+    {
+      "id": "snoek-2012",
+      "direction": "machine_learning",
+      "year": 2012,
+      "authors": "Jasper Snoek, Hugo Larochelle, Ryan P. Adams",
+      "title": "Practical Bayesian Optimization of Machine Learning Algorithms",
+      "url": "https://arxiv.org/abs/1206.2944",
+      "visibility": "full",
+      "use": "Gaussian-process tuning when one evaluation is expensive. Acquisition accounts for cost and parallel trials."
+    },
+    {
+      "id": "hyperband-2018",
+      "direction": "machine_learning",
+      "year": 2018,
+      "authors": "Lisha Li, Kevin Jamieson, Giulia DeSalvo, Afshin Rostamizadeh, Ameet Talwalkar",
+      "title": "Hyperband: A Novel Bandit-Based Approach to Hyperparameter Optimization",
+      "venue": "Journal of Machine Learning Research 18:1-52",
+      "url": "https://arxiv.org/abs/1603.06560",
+      "visibility": "full",
+      "use": "Early-stop random configurations when a cheap prefix predicts the final score."
+    },
+    {
+      "id": "bischl-hpo",
+      "direction": "machine_learning",
+      "year": 2021,
+      "authors": "Bernd Bischl, Martin Binder, Michel Lang, Tobias Pielok, Jakob Richter, Stefan Coors, Janek Thomas, Theresa Ullmann, Marc Becker, Anne-Laure Boulesteix, Difan Deng, Marius Lindauer",
+      "title": "Hyperparameter Optimization: Foundations, Algorithms, Best Practices, and Open Challenges",
+      "url": "https://arxiv.org/pdf/2107.05847v3.pdf",
+      "doi": "10.1002/widm.1484",
+      "visibility": "full",
+      "use": "Nested validation. The score used to pick a configuration is not the score used to report it."
+    },
+    {
+      "id": "loshchilov-2019",
+      "direction": "deep_learning",
+      "year": 2019,
+      "authors": "Ilya Loshchilov, Frank Hutter",
+      "title": "Decoupled Weight Decay Regularization",
+      "venue": "ICLR 2019",
+      "url": "https://arxiv.org/abs/1711.05101",
+      "visibility": "full",
+      "use": "Weight decay and L2 are not the same knob under Adam."
+    },
+    {
+      "id": "hoffmann-2022",
+      "direction": "deep_learning",
+      "year": 2022,
+      "authors": "Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, et al.",
+      "title": "Training Compute-Optimal Large Language Models",
+      "url": "https://arxiv.org/abs/2203.15556",
+      "visibility": "full",
+      "use": "Under a fixed compute budget, parameters and tokens scale together."
+    },
+    {
+      "id": "li-2025-scaling-survey",
+      "direction": "deep_learning",
+      "year": 2025,
+      "authors": "Margaret Li, Sneha Kudugunta, Luke Zettlemoyer",
+      "title": "(Mis)Fitting: A Survey of Scaling Laws",
+      "url": "https://arxiv.org/html/2502.18969v1",
+      "visibility": "full",
+      "use": "Fitted scaling exponents move when the optimizer, checkpoint, or parameter count changes."
+    },
+    {
+      "id": "sengupta-2025",
+      "direction": "deep_learning",
+      "year": 2025,
+      "authors": "Ayan Sengupta, Yash Goel, Tanmoy Chakraborty",
+      "title": "How to Upscale Neural Networks with Scaling Law? A Survey and Practical Guidelines",
+      "url": "https://arxiv.org/pdf/2502.12051v3",
+      "visibility": "full",
+      "use": "Sparse, mixture-of-experts, retrieval, and multimodal models leave the dense-language-model power law."
+    },
+    {
+      "id": "volkova-2026",
+      "direction": "deep_learning",
+      "year": 2026,
+      "authors": "Alexandra Volkova, Mher Safaryan, Christoph H. Lampert, Dan Alistarh",
+      "title": "Towards Robust Scaling Laws for Optimizers",
+      "url": "https://arxiv.org/html/2602.07712v2",
+      "visibility": "full",
+      "use": "Share scaling exponents across optimizers. Give each optimizer its own scale factor."
+    },
+    {
+      "id": "hu-2021",
+      "direction": "deep_learning",
+      "year": 2021,
+      "authors": "Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, Weizhu Chen",
+      "title": "LoRA: Low-Rank Adaptation of Large Language Models",
+      "url": "https://arxiv.org/abs/2106.09685",
+      "visibility": "full",
+      "use": "Adapt a pretrained model with low-rank increments. It does not create the pretrained model."
+    },
+    {
+      "id": "yang-2025-lora-review",
+      "direction": "deep_learning",
+      "year": 2025,
+      "authors": "Menglin Yang, Jialin Chen, Jinkai Tao, et al.",
+      "title": "Low-Rank Adaptation for Foundation Models: A Comprehensive Review",
+      "url": "https://arxiv.org/html/2501.00365",
+      "visibility": "full",
+      "use": "Map of LoRA beyond language models. Formulas stay with Hu et al. 2021."
+    },
+    {
+      "id": "prottasha-2025",
+      "direction": "deep_learning",
+      "year": 2025,
+      "authors": "Nusrat Jahan Prottasha, et al.",
+      "title": "PEFT A2Z: Parameter-Efficient Fine-Tuning Survey for Large Language and Vision Models",
+      "url": "https://arxiv.org/html/2504.14117",
+      "visibility": "full",
+      "use": "Name list of parameter-efficient methods as of 2025. Not a formula source."
+    },
+    {
+      "id": "rafailov-2023",
+      "direction": "deep_learning",
+      "year": 2023,
+      "authors": "Rafael Rafailov, Archit Sharma, Eric Mitchell, Stefano Ermon, Christopher D. Manning, Chelsea Finn",
+      "title": "Direct Preference Optimization: Your Language Model is Secretly a Reward Model",
+      "url": "https://arxiv.org/abs/2305.18290",
+      "visibility": "full",
+      "use": "Preference tuning as a classification loss. Requires a model that already generates and a set of pairwise preferences."
+    },
+    {
+      "id": "vaswani-2017",
+      "direction": "deep_learning",
+      "year": 2017,
+      "authors": "Ashish Vaswani, et al.",
+      "title": "Attention Is All You Need",
+      "url": "https://arxiv.org/abs/1706.03762",
+      "visibility": "id-confirmed",
+      "use": "Architecture the later adaptation and scaling papers assume. The arXiv id was confirmed by retrieval on this date; the PDF was not re-read."
+    },
+    {
+      "id": "emerson-2020",
+      "direction": "computational_semantics",
+      "year": 2020,
+      "authors": "Guy Emerson",
+      "title": "What are the Goals of Distributional Semantics?",
+      "venue": "ACL 2020",
+      "url": "https://aclanthology.org/2020.acl-main.663.pdf",
+      "visibility": "full",
+      "use": "Distributional semantics needs a top-down goal. Downstream scores alone do not say where the field is going."
+    },
+    {
+      "id": "boleda-2020",
+      "direction": "computational_semantics",
+      "year": 2020,
+      "authors": "Gemma Boleda",
+      "title": "Distributional Semantics and Linguistic Theory",
+      "venue": "Annual Review of Linguistics 6:213-234",
+      "url": "https://doi.org/10.1146/annurev-linguistics-011619-030303",
+      "doi": "10.1146/annurev-linguistics-011619-030303",
+      "visibility": "abstract",
+      "use": "Graded corpus-derived word vectors, reviewed for semantic change, polysemy, composition, and the grammar interface."
+    },
+    {
+      "id": "pennington-2014",
+      "direction": "computational_semantics",
+      "year": 2014,
+      "authors": "Jeffrey Pennington, Richard Socher, Christopher D. Manning",
+      "title": "GloVe: Global Vectors for Word Representation",
+      "venue": "EMNLP 2014",
+      "url": "https://nlp.stanford.edu/pubs/glove.pdf",
+      "visibility": "full",
+      "use": "Linear analogies come from a global co-occurrence regression, not from a local window average."
+    },
+    {
+      "id": "bender-koller-2020",
+      "direction": "computational_semantics",
+      "year": 2020,
+      "authors": "Emily M. Bender, Alexander Koller",
+      "title": "Climbing towards NLU: On Meaning, Form, and Understanding in the Age of Data",
+      "venue": "ACL 2020",
+      "url": "https://aclanthology.org/2020.acl-main.463/",
+      "visibility": "full",
+      "use": "Training on form alone does not establish that a system has meaning."
+    },
+    {
+      "id": "apidianaki-2024",
+      "direction": "computational_semantics",
+      "year": 2024,
+      "authors": "Marianna Apidianaki",
+      "title": "From Words to Instances and Back: A Survey of Approaches to Meaning Representation and Interpretation",
+      "venue": "Computational Linguistics",
+      "url": "https://submissions.cljournal.org/index.php/cljournal/article/view/1946",
+      "visibility": "abstract",
+      "use": "Token vectors and word-type meaning are different layers. Current work moves between them."
+    },
+    {
+      "id": "morin-2016",
+      "direction": "transmission",
+      "year": 2016,
+      "authors": "Olivier Morin",
+      "title": "Reasons to be fussy about cultural evolution",
+      "venue": "Biology and Philosophy 31:447-458",
+      "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC4944120/",
+      "doi": "10.1007/s10539-016-9516-4",
+      "visibility": "full",
+      "use": "States the split between cultural attraction and selectionist cultural evolution without collapsing them."
+    },
+    {
+      "id": "buskell-attractors",
+      "direction": "transmission",
+      "year": 2017,
+      "authors": "Andrew Buskell",
+      "title": "What are cultural attractors?",
+      "url": "https://doi.org/10.1007/s10539-017-9570-6",
+      "doi": "10.1007/s10539-017-9570-6",
+      "visibility": "publisher-page",
+      "use": "An attractor is a bias in transformation outcomes, not an object stored in a graph."
+    },
+    {
+      "id": "scott-phillips-2018",
+      "direction": "transmission",
+      "year": 2018,
+      "authors": "Thom Scott-Phillips, Stefaan Blancke, Christophe Heintz",
+      "title": "Four misunderstandings about cultural attraction",
+      "venue": "Evolutionary Anthropology",
+      "url": "https://doi.org/10.1002/evan.21716",
+      "doi": "10.1002/evan.21716",
+      "visibility": "abstract",
+      "use": "Attraction theory is a causal research program about changing type frequencies, not a synonym for replication plus selection."
+    },
+    {
+      "id": "acerbi-2021",
+      "direction": "transmission",
+      "year": 2021,
+      "authors": "Alberto Acerbi, Mathieu Charbonneau, Helena Miton, Thom Scott-Phillips",
+      "title": "Culture without copying or selection",
+      "venue": "Evolutionary Human Sciences",
+      "url": "https://doi.org/10.1017/ehs.2021.47",
+      "doi": "10.1017/ehs.2021.47",
+      "visibility": "full",
+      "use": "Population stability can come from convergent transformation with neither copying nor selection."
+    },
+    {
+      "id": "kempe-2015",
+      "direction": "transmission",
+      "year": 2015,
+      "authors": "David Kempe, Jon Kleinberg, Eva Tardos",
+      "title": "Maximizing the Spread of Influence through a Social Network",
+      "venue": "Theory of Computing 11(4):105-147",
+      "url": "https://www.theoryofcomputing.org/articles/v011a004/v011a004.pdf",
+      "doi": "10.4086/toc.2015.v011a004",
+      "visibility": "full",
+      "use": "Submodular influence maximization on a known network. A different problem from copy fidelity."
+    }
+  ]
+}

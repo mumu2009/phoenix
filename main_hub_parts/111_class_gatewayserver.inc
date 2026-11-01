@@ -2,6 +2,8 @@
 // Segment: class_GatewayServer
 // Original lines: 13037-13883
 
+#include "peer_hot_update.hpp"
+
 class GatewayServer : public IGatewayServer {
 public:
   /* Forward decl only - definition is out-of-line after GatewayServer closes
@@ -212,6 +214,158 @@ public:
             try {
               const std::string msnId =
                   phoenix::memory::missionIdFromWorkspaceScope(scope);
+              /* Deterministic force driver: the schedule is carried in the
+                 goal (k=<number>); the carrier index is parsed from the
+                 scope (q0..qN).  No model is called, so p is exactly k/N.
+                 A per-round schedule file (runtime_store/force_schedule.txt:
+                 first line = start loop tick, then one k per round) overrides
+                 the goal k so three consecutive rounds can follow
+                 0.375 -> 0.4375 -> 0.46875 in one run. */
+              if (goal.find("FORCE-EXPERIMENT") != std::string::npos &&
+                  phoenix::cfgOr<bool>("research.force.enabled", false)) {
+                int scheduleK = 0;
+                const int loopTick =
+                    static_cast<int>(cognitionManager_.loopTickCount());
+                {
+                  /* One schedule line per loop round.  The first tick of a
+                     round advances the round index; every carrier in that
+                     tick reads the same index (no start-tick lookup).  A
+                     missing trace account (the harness cleared it) resets
+                     the round counter, so the measured run starts at line 0. */
+                  static std::atomic<int> forceLastTick{-1};
+                  static std::atomic<int> forceRound{-1};
+                  {
+                    std::ifstream acct(
+                        "runtime_store/replica_trace/account.json");
+                    if (!acct) {
+                      forceRound.store(-1, std::memory_order_relaxed);
+                      forceLastTick.store(-1, std::memory_order_relaxed);
+                    }
+                  }
+                  int prev = forceLastTick.load(std::memory_order_relaxed);
+                  if (loopTick != prev &&
+                      forceLastTick.compare_exchange_strong(prev, loopTick)) {
+                    /* First carrier of this round advances the round index;
+                       every carrier in the same tick reads the same value. */
+                    forceRound.fetch_add(1, std::memory_order_relaxed);
+                  }
+                  const int r = forceRound.load(std::memory_order_relaxed);
+                  std::ifstream sf(phoenix::cfgOr<std::string>(
+                      "research.force.schedulePath",
+                      std::string("runtime_store/force_schedule.txt")));
+                  std::string line;
+                  int cur = 0;
+                  while (std::getline(sf, line)) {
+                    if (cur == r) {
+                      scheduleK = std::atoi(line.c_str());
+                      break;
+                    }
+                    ++cur;
+                  }
+                }
+                if (scheduleK <= 0) {
+                  const auto kp = goal.find("k=");
+                  if (kp != std::string::npos)
+                    scheduleK = std::atoi(goal.c_str() + kp + 2);
+                }
+                if (scheduleK <= 0) {
+                  auto keyAt = [&](const char *key) -> size_t {
+                    const std::string needle(key);
+                    size_t pos = 0;
+                    while ((pos = goal.find(needle, pos)) != std::string::npos) {
+                      if (pos == 0 || goal[pos - 1] == ' ' ||
+                          goal[pos - 1] == '\n')
+                        return pos;
+                      pos += needle.size();
+                    }
+                    return std::string::npos;
+                  };
+                  const auto rulePos = keyAt("rule=");
+                  const auto nPos = keyAt("n=");
+                  const auto pPos = keyAt("p=");
+                  const auto paramPos = keyAt("param=");
+                  if (rulePos != std::string::npos &&
+                      nPos != std::string::npos &&
+                      pPos != std::string::npos &&
+                      paramPos != std::string::npos) {
+                    const auto ruleEnd = goal.find_first_of(" \n", rulePos + 5);
+                    const std::string rule = goal.substr(
+                        rulePos + 5, ruleEnd == std::string::npos
+                                         ? std::string::npos
+                                         : ruleEnd - (rulePos + 5));
+                    const int n = std::atoi(goal.c_str() + nPos + 2);
+                    const double p = std::atof(goal.c_str() + pPos + 2);
+                    const double param =
+                        std::atof(goal.c_str() + paramPos + 6);
+                    if (!rule.empty() && n > 0 && p >= 0.0)
+                      scheduleK = phoenix::memetic::plannedEditCount(
+                          rule, p, n, param);
+                  }
+                }
+                int carrierIndex = 0;
+                const auto qp = scope.rfind('q');
+                if (qp != std::string::npos)
+                  carrierIndex = std::atoi(scope.c_str() + qp + 1);
+                const bool edit = carrierIndex < scheduleK;
+                phoenix::memetic::ReplicaTick forceTick;
+                forceTick.instance = scope;
+                forceTick.mission = msnId;
+                forceTick.replyClass = edit ? "source-edit" : "prose";
+                forceTick.replyChars = edit ? 104 : 22;
+                forceTick.sourceEdit = edit;
+                /* Generation 0 is filtered by the series; the first measured
+                   round is 1. */
+                forceTick.generation = loopTick + 1;
+                phoenix::memetic::appendReplicaTick(
+                    "runtime_store/replica_trace", forceTick);
+                return edit
+                           ? "FILE active_inference.cpp\nOLD\n"
+                             "  surpriseEma_ = 0.0;\nNEW\n"
+                             "  surpriseEma_ = 0.0;  // deterministic force tick\n"
+                           : "Reviewed: no edit.";
+              }
+              /* Edit boxes in a force experiment need no model call: a
+                 deterministic patch makes the generation frequency exactly
+                 k/N, so the force identification is not contaminated by the
+                 coder's ~85% patch rate or by timeouts. */
+              if (phoenix::cfgOr<bool>("research.deterministicCarriers",
+                                       false) &&
+                  goal.find("make one small clarifying code edit") !=
+                      std::string::npos) {
+                phoenix::memetic::ReplicaTick editTick;
+                editTick.instance = scope;
+                editTick.mission = msnId;
+                editTick.replyClass = "source-edit";
+                editTick.replyChars = 104;
+                editTick.sourceEdit = true;
+                editTick.generation = static_cast<int>(
+                    cognitionManager_.loopTickCount());
+                phoenix::memetic::appendReplicaTick(
+                    "runtime_store/replica_trace", editTick);
+                return "FILE active_inference.cpp\nOLD\n"
+                       "  surpriseEma_ = 0.0;\nNEW\n"
+                       "  surpriseEma_ = 0.0;  // deterministic force tick\n";
+              }
+              /* Review boxes need no model call: their verdict is "no
+                 edit".  A deterministic prose tick keeps an N-carrier round
+                 at CPU speed and keeps the force frequency honest (a review
+                 tick never contributes a source edit). */
+              if (phoenix::cfgOr<bool>("research.deterministicCarriers",
+                                       false) &&
+                  (goal.find("do not edit") != std::string::npos ||
+                   goal.find("summarize") != std::string::npos)) {
+                phoenix::memetic::ReplicaTick reviewTick;
+                reviewTick.instance = scope;
+                reviewTick.mission = msnId;
+                reviewTick.replyClass = "prose";
+                reviewTick.replyChars = 22;
+                reviewTick.sourceEdit = false;
+                reviewTick.generation = static_cast<int>(
+                    cognitionManager_.loopTickCount());
+                phoenix::memetic::appendReplicaTick(
+                    "runtime_store/replica_trace", reviewTick);
+                return "Reviewed: no edit.";
+              }
               phoenix::memory::MemoryScopeGuard memGuard(
                   phoenix::memory::makeMissionScope(msnId));
               static std::mutex gDelibSkipMu;
@@ -239,13 +393,74 @@ public:
               std::string currentFile = readRes.value("ok", false)
                                             ? readRes.value("content", std::string())
                                             : std::string();
+              const bool peerEvolveGoal =
+                  goal.find("PEER-EVOLVE") != std::string::npos;
+              const bool selfModGoal =
+                  goal.find("SELF-MOD") != std::string::npos;
+              const bool codeMission =
+                  !selfModGoal &&
+                  goal.find("ALGO-OPT") != std::string::npos;
+              /* Plain-continuation worker: the reply is prose appended to
+                 the document, with no JSON/tool/plan parsing.  This makes
+                 the per-tick output length a function of num_predict, so
+                 the genome's tokensPerTick is the only live lever. */
+              const bool plainTextOnly =
+                  phoenix::cfgOr<bool>("mission.plainTextOnly", false);
+              /* Same-process router-order override: runtime_store/
+                 router_order.cfg (true/false) beats the config, so a new
+                 and an old order can be compared inside ONE gateway
+                 process instead of two separate logs. */
+              auto routerOrderFromFiles = [&]() -> bool {
+                bool first = phoenix::cfgOr<bool>(
+                    "mission.routerBeforeCond", true);
+                std::ifstream rf("runtime_store/router_order.cfg");
+                if (rf) {
+                  std::string v;
+                  std::getline(rf, v);
+                  if (v.find("false") != std::string::npos)
+                    first = false;
+                  else if (v.find("true") != std::string::npos)
+                    first = true;
+                }
+                return first;
+              };
+              bool pendingScore = false;
+              float pendingScoreReward = 0.f;
+              std::string pendingScoreReply;
               if (currentFile.empty() && !deliverable.empty())
                 currentFile = deliverable; /* before the first write */
-              /* If the in-memory prior grew past a stale/shorter workspace
-                 snapshot, prefer the longer body so the model is not stuck
-                 rewriting only the first 256KB forever. */
-              if (deliverable.size() > currentFile.size())
+              /* A code submission is one function. The document rule that
+                 a longer in-memory body wins would paste earlier failed
+                 attempts back over the function they just wrote. */
+              if (!peerEvolveGoal && deliverable.size() > currentFile.size())
                 currentFile = deliverable;
+              /* One function. A shorter rewrite used to be glued back onto
+                 the previous failed attempt, so the causal tip never moved. */
+              std::string peerEditBase = currentFile;
+              /* Real source span for SELF-MOD. Filled when the file is read.
+                 The causal tip and the summoned expert both use this carrier,
+                 so the expert is not handed the score paragraph. */
+              std::string ownCarrier;
+              /* The self-mod target path, hoisted so the summon-tool can
+                 name it in a retry prompt ("FILE <path>") when the coder's
+                 first reply is prose instead of a patch. */
+              std::string focusTarget;
+              static std::vector<std::string> explorePaths;
+              static std::string namedRealPath;
+              std::string exploreMark = "none";
+              std::string summonMark = "none";
+              if (peerEvolveGoal && !codeMission &&
+                  phoenix::peer::evolveHasControl(peerEditBase))
+                phoenix::peer::evolveTrimToDeclaration(peerEditBase);
+              /* A draft that only grows pushes the earlier lines out of
+                 the window. Keep the tail they are still writing. */
+              if (codeMission && peerEditBase.size() > 1800)
+                peerEditBase = peerEditBase.substr(peerEditBase.size() - 1800);
+              if (selfModGoal && peerEditBase.size() > 16000) {
+                const auto cut = peerEditBase.rfind("\ndiff ");
+                if (cut != std::string::npos)
+                  peerEditBase = peerEditBase.substr(cut + 1);
+              }
 
               const bool draftEmpty = currentFile.empty();
 
@@ -296,10 +511,11 @@ public:
                           << " stillDrafting=" << (stillDrafting ? 1 : 0)
                           << std::endl;
               /* GNN pretrain gap: empty meme graph => empty diffusion prior.
-                 Graph the same recent window infer sees, not a 2k tail and
-                 not the human assignment. Pin-only is not a draft to graph.
-                 A 160–250 char first write used to fall into this block and
-                 pin the heartbeat (no second tokBudget for minutes). */
+                 The graph covers the whole deliverable. Only the unseen
+                 suffix is linked; the outline query still sees every
+                 character. Pin-only is not a draft to graph. A 160–250
+                 char first write used to fall into this block and pin
+                 the heartbeat (no second tokBudget for minutes). */
               if (!pinOnly && !stillDrafting &&
                   (packOpt.includeGnnSummary || unitPipelineEnabled)) {
                 if (config_.httpLog)
@@ -310,30 +526,99 @@ public:
                       phoenix::cfgOr<int>("mission.gnnPretrainDocs", 48);
                   seedGnnGraphFromRobotsCorpus(lim, "gnn-pretrain");
                   if (unitPipelineEnabled) {
-                    std::string gnnSrc = packed.recentFull.empty()
-                                             ? currentFile
-                                             : packed.recentFull;
-                    /* Cap is an upper bound. max(cap, window) made a 50k
-                       draft the graph input and stalled the tick for minutes
-                       before llama was called. */
-                    const size_t gnnCap = static_cast<size_t>(std::max(
-                        256, phoenix::cfgOr<int>("mission.gnnSourceChars", 2000)));
-                    if (gnnSrc.size() > gnnCap)
-                      gnnSrc = gnnSrc.substr(gnnSrc.size() - gnnCap);
+                    const auto gnnT0 = std::chrono::steady_clock::now();
+                    /* The graph is the outline of the whole deliverable.
+                       packed.recentFull is only the causal window for the
+                       llama continuation; it must not replace the document. */
+                    const std::string gnnSrc = currentFile;
+                    struct GnnCursor {
+                      size_t chars{0};
+                      uint64_t hash{0};
+                      nlohmann::json graph = nlohmann::json::object();
+                      bool haveGraph{false};
+                    };
+                    static std::mutex gnnCursorMu;
+                    static std::unordered_map<std::string, GnnCursor> gnnCursors;
+                    auto fnvPrefix = [](const std::string &s, size_t n) {
+                      uint64_t h = 1469598103934665603ull;
+                      const size_t lim = std::min(n, s.size());
+                      for (size_t i = 0; i < lim; ++i) {
+                        h ^= static_cast<unsigned char>(s[i]);
+                        h *= 1099511628211ull;
+                      }
+                      return h;
+                    };
+                    std::string delta = gnnSrc;
+                    bool reuseGraph = false;
+                    {
+                      std::lock_guard<std::mutex> lk(gnnCursorMu);
+                      auto &cur = gnnCursors[scope];
+                      if (cur.chars > 0 && cur.chars <= gnnSrc.size() &&
+                          fnvPrefix(gnnSrc, cur.chars) == cur.hash) {
+                        if (cur.chars == gnnSrc.size()) {
+                          delta.clear();
+                          reuseGraph = cur.haveGraph;
+                          if (reuseGraph)
+                            missionGraphResult = cur.graph;
+                        } else {
+                          /* Keep one sentence of overlap so the new suffix
+                             stays linked to the graph of the earlier text. */
+                          const size_t overlap = std::min(cur.chars, size_t{256});
+                          delta = gnnSrc.substr(cur.chars - overlap);
+                        }
+                      } else {
+                        cur.chars = 0;
+                        cur.hash = 0;
+                        cur.haveGraph = false;
+                      }
+                    }
                     if (config_.httpLog)
                       std::cout << "[mission-deliberate] gnnSrc="
-                                << gnnSrc.size() << std::endl;
+                                << gnnSrc.size() << " delta=" << delta.size()
+                                << std::endl;
                     if (!pinOnly && currentFile.size() >= 2500 &&
                         !gnnSrc.empty() &&
                         !phoenix::mission::draftTailLooksCollapsed(gnnSrc)) {
-                      auto rt = activeRuntime();
-                      auto st = rt ? std::dynamic_pointer_cast<RuntimeState>(rt)
-                                   : nullptr;
-                      if (st)
-                        st->ingestDocument(
-                            nlohmann::json{{"text", gnnSrc},
-                                           {"source", "mission-draft"}});
-                      missionGraphResult = buildMissionGraphResult(gnnSrc);
+                      if (!reuseGraph) {
+                        auto rt = activeRuntime();
+                        auto st = rt ? std::dynamic_pointer_cast<RuntimeState>(rt)
+                                     : nullptr;
+                        if (st && !delta.empty()) {
+                          const auto ingestT0 = std::chrono::steady_clock::now();
+                          st->ingestDocument(
+                              nlohmann::json{{"text", delta},
+                                             {"source", "mission-draft"},
+                                             {"mode", "chain"}});
+                          if (config_.httpLog) {
+                            const auto ingestMs =
+                                std::chrono::duration_cast<
+                                    std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - ingestT0)
+                                    .count();
+                            std::cout << "[mission-deliberate] gnnIngestMs="
+                                      << ingestMs << std::endl;
+                          }
+                        }
+                        const auto queryT0 = std::chrono::steady_clock::now();
+                        missionGraphResult = buildMissionGraphResult(gnnSrc);
+                        if (config_.httpLog) {
+                          const auto queryMs =
+                              std::chrono::duration_cast<
+                                  std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - queryT0)
+                                  .count();
+                          std::cout << "[mission-deliberate] gnnQueryMs="
+                                    << queryMs << std::endl;
+                        }
+                        {
+                          std::lock_guard<std::mutex> lk(gnnCursorMu);
+                          auto &cur = gnnCursors[scope];
+                          cur.chars = gnnSrc.size();
+                          cur.hash = fnvPrefix(gnnSrc, gnnSrc.size());
+                          cur.graph = missionGraphResult;
+                          cur.haveGraph = true;
+                        }
+                      }
                       const int llamaDim = phoenix::cfgOr<int>(
                           "main.inference.llamaEmbDim", 4096);
                       auto gnnRows =
@@ -347,6 +632,14 @@ public:
                             missionGnnPkts,
                             phoenix::inference::unitQueryFromRows(
                                 std::move(gnnRows), "unit"));
+                    }
+                    if (config_.httpLog) {
+                      const auto gnnMs =
+                          std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - gnnT0)
+                              .count();
+                      std::cout << "[mission-deliberate] gnnMs=" << gnnMs
+                                << std::endl;
                     }
                   }
                   /* Do not invent a document outline from GNN memes.
@@ -412,24 +705,37 @@ public:
                  is not a chapter table. Full assignment is RAG hint. */
               std::string staticPrompt =
                   phoenix::mission::extractGoalWorkingContext(goalClip);
-              /* The working brief stops before the chapter table, so a long
-                 assignment otherwise keeps regenerating the requirements
-                 preamble. Name the one section the draft has not opened. */
-              {
-                const std::string missing =
-                    phoenix::mission::firstMissingGoalChapter(goal, currentFile);
-                if (!missing.empty()) {
-                  staticPrompt =
-                      std::string("Write this unopened section next. Do not "
-                                  "restate requirements already in the draft.\n") +
-                      missing + "\n\n" + staticPrompt;
-                  if (config_.httpLog) {
-                    std::string shown = missing;
-                    if (shown.size() > 120) shown.resize(120);
-                    std::cout << "[mission-deliberate] next-section=" << shown
-                              << std::endl;
-                  }
+              /* The model continues the END of the causal text. The working
+                 brief is context. The tip is the one chapter whose body is
+                 still missing or only a requirements list. A heading alone
+                 is not a finished section. */
+              const std::string sectionFocus =
+                  phoenix::mission::firstUnderfilledGoalChapter(goal,
+                                                                currentFile);
+              static std::map<std::string, int> sectionDropStreak;
+              std::string sectionTip;
+              if (!sectionFocus.empty()) {
+                sectionTip = phoenix::mission::chapterContinuationTip(
+                    sectionFocus, currentFile, sectionDropStreak[scope]);
+                if (config_.httpLog && sectionDropStreak[scope] > 0)
+                  std::cout << "[mission-deliberate] section-variant="
+                            << sectionDropStreak[scope] << std::endl;
+                if (config_.httpLog) {
+                  std::string shown = sectionFocus;
+                  if (shown.size() > 120) shown.resize(120);
+                  std::cout << "[mission-deliberate] next-section=" << shown
+                            << std::endl;
                 }
+              } else if (!phoenix::mission::collectGoalChapterHeadings(goal)
+                              .empty() &&
+                         !stillDrafting && !isChildBox) {
+                std::string msnId = scope;
+                const auto spDone = msnId.find("/children/");
+                if (spDone != std::string::npos) msnId = msnId.substr(0, spDone);
+                cognitionManager_.reportMissionOutcome(
+                    nlohmann::json{{"goalAchieved", true},
+                                   {"missionId", msnId}});
+                return "[auto-complete] every required section has a body";
               }
               {
                 const std::string expPath = phoenix::resolveConfig<std::string>(
@@ -536,8 +842,10 @@ public:
                    text or unit-query packets. Both become unit queries
                    on the RAG stream. They are not a third protocol and
                    they are not concatenated onto the causal prefix. */
+                /* Self-evolve DLLs hot-load on this path. A short task is
+                   still drafting, and that used to skip the reload entirely. */
                 if (phoenix::cfgOr<bool>("mission.pluginOffers", true) &&
-                    !goal.empty() && !stillDrafting) {
+                    !goal.empty()) {
                   if (config_.httpLog)
                     std::cout << "[mission-deliberate] stage=plugin-offers"
                               << std::endl;
@@ -609,6 +917,25 @@ public:
                               << (missionMemorySnippets.size() - before)
                               << " reply=" << off.result.reply.size()
                               << std::endl;
+                        const bool selfEvolve =
+                            off.name.find("self_evolve") != std::string::npos ||
+                            off.type.find("self-evolve") != std::string::npos ||
+                            off.type.find("self_evolve") != std::string::npos;
+                        /* A quiz plugin's return value is not a
+                           self-modification. SELF-MOD keeps the source. */
+                        if (selfEvolve && !selfModGoal &&
+                            !off.result.reply.empty()) {
+                          std::string hot = off.result.reply;
+                          if (hot.size() > 4000) hot.resize(4000);
+                          phoenix::mission::workspaceExecute(
+                              workspaceRoot, scope,
+                              nlohmann::json{{"action", "write"},
+                                             {"path", "hot_result.txt"},
+                                             {"content", hot}});
+                          if (config_.httpLog)
+                            std::cout << "[mission-deliberate] hot-result bytes="
+                                      << hot.size() << std::endl;
+                        }
                       }
                       if (config_.httpLog && seeded > 0)
                         std::cout
@@ -641,6 +968,974 @@ public:
                 /* C1: the model's own plan.md is RAG emphasis, not a
                    [NEXT] block on the causal stream. Resume stays the
                    file tail. Skip on pin-only — there is no draft yet. */
+                if (selfModGoal) {
+                  const auto measured = phoenix::mission::workspaceExecute(
+                      workspaceRoot, scope,
+                      nlohmann::json{{"action", "read"},
+                                     {"path", "measure.md"}});
+                  if (measured.value("ok", false)) {
+                    std::string line = measured.value("content", std::string());
+                    if (line.rfind("score ", 0) == 0) {
+                      phoenix::inference::appendUnitQuery(
+                          missionMemorySnippets,
+                          phoenix::inference::unitQueryFromText(line, "text"));
+                      const auto seen = phoenix::mission::workspaceExecute(
+                          workspaceRoot, scope,
+                          nlohmann::json{{"action", "read"},
+                                         {"path", "score_seen.txt"}});
+                      const std::string prev =
+                          seen.value("content", std::string());
+                      if (prev != line) {
+                        float reward = -0.35f;
+                        try {
+                          if (std::stod(line.substr(6)) > 0) reward = 0.6f;
+                        } catch (...) {
+                        }
+                        pendingScore = true;
+                        pendingScoreReward = reward;
+                        pendingScoreReply =
+                            currentFile.empty() ? line : currentFile;
+                        phoenix::mission::workspaceExecute(
+                            workspaceRoot, scope,
+                            nlohmann::json{{"action", "write"},
+                                           {"path", "score_seen.txt"},
+                                           {"content", line}});
+                      }
+                    }
+                  }
+                  const char *peerEnv = std::getenv("AI_PEER_NAME");
+                  std::ifstream otherEdit(
+                      std::string("runtime_store/peers/") +
+                      (peerEnv ? peerEnv : "") + "/self_edit.diff");
+                  std::string other((std::istreambuf_iterator<char>(otherEdit)),
+                                    std::istreambuf_iterator<char>());
+                  if (other.find("diff ") != std::string::npos ||
+                      other.find("@@") != std::string::npos ||
+                      other.find("FILE ") != std::string::npos) {
+                    if (other.size() > 4000)
+                      other = other.substr(other.size() - 4000);
+                    phoenix::inference::appendUnitQuery(
+                        missionMemorySnippets,
+                        phoenix::inference::unitQueryFromText(
+                            "other edit\n" + other, "text"));
+                  }
+                  std::string focus;
+                  /* Alias-probe mode: keep the source-edit focus empty so
+                     the description-only alias recall runs instead of the
+                     source-edit tool (the tool otherwise wins whenever the
+                     goal or a reply names a file). */
+                  const bool aliasProbe =
+                      phoenix::cfgOr<bool>("mission.aliasProbe", false);
+                  if (!aliasProbe) {
+                  auto takePath = [&](const std::string &mark) {
+                    const auto at0 = currentFile.rfind(mark);
+                    if (at0 == std::string::npos) return;
+                    size_t at = at0 + mark.size();
+                    while (at < currentFile.size() &&
+                           std::isspace(static_cast<unsigned char>(
+                               currentFile[at])))
+                      ++at;
+                    auto end = currentFile.find_first_of("\r\n", at);
+                    if (end == std::string::npos) end = currentFile.size();
+                    const std::string rel = currentFile.substr(at, end - at);
+                    if (rel.find("..") != std::string::npos) return;
+                    if (rel.find("runtime_store") != std::string::npos) return;
+                    if (rel.find("peer_hot") != std::string::npos) return;
+                    const bool hub =
+                        rel.rfind("main_hub_parts/", 0) == 0 &&
+                        rel.find(".inc") != std::string::npos;
+                    const bool nested =
+                        rel.rfind("phoenix/", 0) == 0 ||
+                        rel.rfind("addons/", 0) == 0 ||
+                        rel.rfind("module_overrides/", 0) == 0;
+                    const bool top =
+                        rel.find('/') == std::string::npos &&
+                        (rel.find(".cpp") != std::string::npos ||
+                         rel.find(".hpp") != std::string::npos ||
+                         rel.find(".inc") != std::string::npos);
+                    if (hub || nested || top) focus = rel;
+                  };
+                  /* The goal itself names the target.  It is authoritative
+                     over the workspace: a stale deliverable (or a seed-write
+                     race) can still carry "FILE ActiveInferenceController.cpp"
+                     from a previous run, which made ownCarrier 0 on the very
+                     tick that had to edit. */
+                  if (focus.empty()) {
+                    for (const std::string ext :
+                         {std::string(".cpp"), std::string(".hpp"),
+                          std::string(".inc")}) {
+                      const auto at = goal.find(ext);
+                      if (at == std::string::npos) continue;
+                      size_t begin = at;
+                      while (begin > 0 &&
+                             (std::isalnum(static_cast<unsigned char>(
+                                  goal[begin - 1])) ||
+                              goal[begin - 1] == '_' || goal[begin - 1] == '/' ||
+                              goal[begin - 1] == '.'))
+                        --begin;
+                      focus = goal.substr(begin, at + ext.size() - begin);
+                      break;
+                    }
+                  }
+                  if (focus.empty()) takePath("FILE ");
+                  /* A previous reply named a real repository path. The body
+                     stays off the causal tip; only the expert receives it. */
+                  if (focus.empty() && !namedRealPath.empty() &&
+                      namedRealPath.find("..") == std::string::npos) {
+                    std::error_code namedEc;
+                    if (fs::is_regular_file(namedRealPath, namedEc))
+                      focus = namedRealPath;
+                  }
+                  /* Persist the target per scope: after the first patch the
+                     deliverable no longer carries "FILE <path>", so the
+                     next tick used to lose ownCarrier and the expert idled
+                     ("no-file-yet").  A stable target keeps the source-edit
+                     rate constant, which is what the force fit needs. */
+                  {
+                    static std::mutex focusMu;
+                    static std::unordered_map<std::string, std::string>
+                        focusByScope;
+                    std::lock_guard<std::mutex> flock(focusMu);
+                    if (focus.empty()) {
+                      auto it = focusByScope.find(scope);
+                      if (it != focusByScope.end()) focus = it->second;
+                    } else {
+                      focusByScope[scope] = focus;
+                    }
+                  }
+                  if (!focus.empty()) focusTarget = focus;
+                  /* An explicit path still opens a file for the expert only.
+                     A description with no path is ranked after the explore
+                     list exists. The file body is not pasted here. */
+                  if (!focus.empty()) {
+                  std::ifstream ownSrc(focus, std::ios::binary);
+                  std::string src((std::istreambuf_iterator<char>(ownSrc)),
+                                  std::istreambuf_iterator<char>());
+                  if (!src.empty()) {
+                    const auto mark = src.find("processMessage");
+                    if (mark != std::string::npos && mark + 1500 < src.size())
+                      src = src.substr(mark, 1500);
+                    else if (src.size() > 1500)
+                      src = src.substr(src.size() - 1500);
+                    ownCarrier =
+                        phoenix::memetic::exclusiveEditCarrier(focus, src);
+                  }
+                  }
+                  }
+                  if (config_.httpLog)
+                    std::cout << "[sig] focus scope=" << scope
+                              << " path="
+                              << (focus.empty() ? std::string("-") : focus)
+                              << " own=" << ownCarrier.size() << std::endl;
+                  if (explorePaths.empty()) {
+                    const char *fixed[] = {
+                        "emotion_system.cpp", "instinct.cpp",
+                        "autonomy_stack.cpp", "self_mind.cpp",
+                        "active_inference.cpp", "mission_lifecycle.cpp",
+                        "memetic_existence.hpp"};
+                    for (const char *rel : fixed) {
+                      std::error_code ec;
+                      if (fs::is_regular_file(rel, ec))
+                        explorePaths.push_back(rel);
+                    }
+                    std::error_code ec;
+                    if (fs::is_directory("main_hub_parts", ec)) {
+                      int n = 0;
+                      for (const auto &ent :
+                           fs::directory_iterator("main_hub_parts", ec)) {
+                        if (ec || !ent.is_regular_file())
+                          continue;
+                        const std::string name = ent.path().filename().string();
+                        if (name.size() < 5 ||
+                            name.find(".inc") == std::string::npos)
+                          continue;
+                        explorePaths.push_back("main_hub_parts/" + name);
+                        if (++n >= 12)
+                          break;
+                      }
+                    }
+                    std::sort(explorePaths.begin(), explorePaths.end());
+                  }
+                  const auto ranked = phoenix::memetic::rankExplorePaths(
+                      goal, explorePaths, 1);
+                  std::string note;
+                  if (!ranked.empty()) {
+                    note = "repository file\n" + ranked.front();
+                  } else {
+                    note = "repository files\n";
+                    int shown = 0;
+                    for (const auto &rel : explorePaths) {
+                      note += rel;
+                      note += "\n";
+                      if (++shown >= 8)
+                        break;
+                    }
+                  }
+                  phoenix::inference::appendUnitQuery(
+                      missionMemorySnippets,
+                      phoenix::inference::unitQueryFromText(note, "text"));
+                  exploreMark = ranked.empty()
+                                    ? "listed"
+                                    : std::string("pick ") + ranked.front();
+                  /* The draft is the recommender context. File profiles are
+                     the items. A unique top score names the file the expert
+                     receives. Echoes of the goal are not a new conception.
+                     The body stays in ownCarrier, off the causal tip. */
+                  if (config_.httpLog)
+                    std::cout << "[sig] latent-guard focus="
+                              << (focus.empty() ? 0 : 1) << " selfMod="
+                              << (selfModGoal ? 1 : 0) << " curLen="
+                              << currentFile.size() << " classify="
+                              << phoenix::memetic::classifyReplicaReply(
+                                     goal, currentFile, false)
+                              << std::endl;
+                  if (focus.empty() && selfModGoal && !currentFile.empty() &&
+                      phoenix::memetic::classifyReplicaReply(
+                          goal, currentFile, false) != "echo") {
+                    struct AliasFile {
+                      std::string path;
+                      std::vector<phoenix::memetic::GlossTerm> terms;
+                      phoenix::memetic::GlossLineage line;
+                      std::vector<std::string> pending;
+                      std::vector<std::string> links;
+                      std::vector<std::string> pendingLinks;
+                      /* Recent independent conditional hits for this
+                         file. A repeat of any of the last four is not a
+                         second witness (confirmCondWords checks it);
+                         keeping four closes the A,B,A alternation. */
+                      std::vector<std::string> condRecent;
+                    };
+                    std::vector<AliasFile> aliasRows;
+                    {
+                      std::ifstream aliasIn("runtime_store/meme_alias.json");
+                      if (aliasIn) {
+                        try {
+                          nlohmann::json saved;
+                          aliasIn >> saved;
+                          if (saved.is_array()) {
+                            for (const auto &row : saved) {
+                              if (!row.is_object())
+                                continue;
+                              AliasFile file;
+                              file.path = row.value("path", std::string());
+                              if (file.path.empty() || !row.contains("words") ||
+                                  !row["words"].is_array())
+                                continue;
+                              for (const auto &w : row["words"]) {
+                                phoenix::memetic::GlossTerm term;
+                                if (w.is_string())
+                                  term.word = w.get<std::string>();
+                                else if (w.is_object())
+                                  term.word = w.value("word", std::string());
+                                if (term.word.empty())
+                                  continue;
+                                term.tf = w.is_object() ? w.value("tf", 1) : 1;
+                                if (term.tf < 1)
+                                  term.tf = 1;
+                                file.terms.push_back(std::move(term));
+                              }
+                              file.line.state.fecundity =
+                                  row.value("fecundity", 0);
+                              file.line.state.longevity =
+                                  row.value("longevity", 1);
+                              file.line.state.streak = row.value("streak", 0);
+                              if (row.contains("carriers") &&
+                                  row["carriers"].is_array()) {
+                                for (const auto &c : row["carriers"]) {
+                                  if (c.is_string())
+                                    file.line.carriers.push_back(
+                                        c.get<std::string>());
+                                }
+                              }
+                              if (row.contains("pending") &&
+                                  row["pending"].is_array()) {
+                                for (const auto &w : row["pending"]) {
+                                  if (w.is_string())
+                                    file.pending.push_back(w.get<std::string>());
+                                }
+                              }
+                              if (row.contains("blocked") &&
+                                  row["blocked"].is_array()) {
+                                for (const auto &w : row["blocked"]) {
+                                  if (w.is_string())
+                                    file.links.push_back(w.get<std::string>());
+                                }
+                              }
+                              if (row.contains("blockedPending") &&
+                                  row["blockedPending"].is_array()) {
+                                for (const auto &w : row["blockedPending"]) {
+                                  if (w.is_string())
+                                    file.pendingLinks.push_back(
+                                        w.get<std::string>());
+                                }
+                              }
+                              if (row.contains("condRecent") &&
+                                  row["condRecent"].is_array()) {
+                                for (const auto &w : row["condRecent"]) {
+                                  if (w.is_string())
+                                    file.condRecent.push_back(
+                                        w.get<std::string>());
+                                }
+                              } else if (row.contains("condLast") &&
+                                         row["condLast"].is_string()) {
+                                const std::string legacy =
+                                    row["condLast"].get<std::string>();
+                                if (!legacy.empty())
+                                  file.condRecent.push_back(legacy);
+                              }
+                              aliasRows.push_back(std::move(file));
+                            }
+                          }
+                        } catch (const std::exception &) {
+                        }
+                      }
+                    }
+                    auto saveAliases = [&]() {
+                      nlohmann::json rows = nlohmann::json::array();
+                      for (const auto &file : aliasRows) {
+                        nlohmann::json words = nlohmann::json::array();
+                        for (const auto &term : file.terms)
+                          words.push_back(
+                              {{"word", term.word}, {"tf", term.tf}});
+                        rows.push_back(
+                            {{"path", file.path},
+                             {"words", words},
+                             {"pending", file.pending},
+                             {"blocked", file.links},
+                             {"blockedPending", file.pendingLinks},
+                             {"condRecent", file.condRecent},
+                             {"regime",
+                              phoenix::memetic::lineageRegime(
+                                  file.line.carriers)
+                                  .name},
+                             {"fecundity", file.line.state.fecundity},
+                             {"longevity", file.line.state.longevity},
+                             {"streak", file.line.state.streak},
+                             {"carriers", file.line.carriers}});
+                      }
+                      /* Continuous replicator flow at t = 1.  The
+                         discrete map p'_i = p_i f_i / sum p_j f_j is the
+                         unit-time solution of dp_i/dt = p_i (f_i - fbar),
+                         so the flow share must order the rows exactly as
+                         fecundity x longevity does.  This connects the
+                         continuous equation to the same population the
+                         recall ordering already uses; it does not change
+                         the ordering. */
+                      if (aliasRows.size() >= 2) {
+                        const size_t n = aliasRows.size();
+                        std::vector<double> freq(n, 1.0 / static_cast<double>(n));
+                        std::vector<double> fit(n, 1.0);
+                        for (size_t i = 0; i < n; ++i) {
+                          const int f = std::max(1, aliasRows[i].line.state.fecundity);
+                          const int l = std::max(1, aliasRows[i].line.state.longevity);
+                          fit[i] = static_cast<double>(f) *
+                                   static_cast<double>(l);
+                        }
+                        const auto share =
+                            phoenix::memetic::replicatorFlow(freq, fit, 1.0);
+                        std::vector<size_t> byFit(n), byFlow(n);
+                        for (size_t i = 0; i < n; ++i) {
+                          byFit[i] = i;
+                          byFlow[i] = i;
+                        }
+                        std::sort(byFit.begin(), byFit.end(),
+                                  [&](size_t a, size_t b) {
+                                    return fit[a] > fit[b];
+                                  });
+                        std::sort(byFlow.begin(), byFlow.end(),
+                                  [&](size_t a, size_t b) {
+                                    return share[a] > share[b];
+                                  });
+                        bool sameOrder = true;
+                        for (size_t i = 0; i < n; ++i)
+                          if (byFit[i] != byFlow[i]) sameOrder = false;
+                        if (config_.httpLog) {
+                          std::cout << "[flow]";
+                          for (size_t i = 0; i < n; ++i)
+                            std::cout << " " << aliasRows[i].path << "="
+                                      << share[i];
+                          std::cout << " orderEqual=" << (sameOrder ? 1 : 0)
+                                    << std::endl;
+                        }
+                      }
+                      std::vector<double> fit;
+                      std::vector<double> trait;
+                      fit.reserve(aliasRows.size());
+                      for (const auto &file : aliasRows) {
+                        fit.push_back(
+                            static_cast<double>(file.line.state.fecundity));
+                        trait.push_back(
+                            phoenix::memetic::lineageAdmitted(file.line.state)
+                                ? 1.0
+                                : 0.0);
+                      }
+                      const double selection =
+                          phoenix::memetic::priceSelectionOf(fit, trait);
+                      if (config_.httpLog)
+                        std::cout << "[gloss-price] selection=" << selection
+                                  << std::endl;
+                      std::error_code dirEc;
+                      fs::create_directories("runtime_store", dirEc);
+                      std::ofstream aliasOut("runtime_store/meme_alias.json",
+                                             std::ios::trunc);
+                      if (aliasOut)
+                        aliasOut << rows.dump();
+                    };
+                    /* Independent alias recall: the persistent alias table
+                       (path + learned words) is a file set of its own.  It
+                       does NOT depend on the self-mod explore list, so a
+                       normal code-description mission can exercise the
+                       MLP-before-cond order.  The router is trained on the
+                       alias words; the teacher profiles are the same words. */
+                    bool aliasFromMlp = false;
+                    bool aliasFromCond = false;
+                    bool aliasCondStable = false;
+                    std::string aliasChosen;
+                    {
+                      /* Signal trace: the alias query is the workspace
+                         deliverable.md (the user's description), NOT the
+                         self-mod source body that may have replaced
+                         currentFile/deliverable by this point. */
+                      std::string aliasQuery;
+                      try {
+                        const auto qr = phoenix::mission::workspaceExecute(
+                            workspaceRoot, scope,
+                            nlohmann::json{{"action", "read"},
+                                           {"path", "deliverable.md"}});
+                        if (qr.value("ok", false))
+                          aliasQuery = qr.value("content", std::string());
+                      } catch (...) {
+                      }
+                      /* Trace found: the self-mod worker overwrites
+                         deliverable.md/currentFile with the 1-2 KB source
+                         body, so the user's short description signal is
+                         lost before the alias recall.  A long deliverable
+                         is a work product, not a description: fall back to
+                         the goal (the stable description). */
+                      if (aliasQuery.empty() || aliasQuery.size() > 400)
+                        aliasQuery = goal;
+                      if (config_.httpLog)
+                        std::cout << "[sig] alias-query len="
+                                  << aliasQuery.size() << " delivLen="
+                                  << deliverable.size() << " curLen="
+                                  << currentFile.size() << " focus="
+                                  << (focus.empty() ? 0 : 1) << " selfMod="
+                                  << (selfModGoal ? 1 : 0) << " rows="
+                                  << aliasRows.size() << std::endl;
+                      const auto q = phoenix::memetic::condTokens(aliasQuery);
+                      if (q.size() >= 2 && q.size() <= 40 &&
+                          aliasRows.size() >= 2) {
+                        if (config_.httpLog)
+                          std::cout << "[sig] alias-recall q=" << q.size()
+                                    << " rows=" << aliasRows.size()
+                                    << std::endl;
+                        std::vector<std::pair<std::string,
+                                              std::vector<std::string>>>
+                            aliasBags;
+                        std::vector<std::pair<std::string, std::string>>
+                            aliasProfiles;
+                        std::unordered_set<std::string> aliasVocab;
+                        int bodyBags = 0;
+                        for (const auto &row : aliasRows) {
+                          std::vector<std::string> toks;
+                          std::string words;
+                          /* The router bag comes from the SOURCE TEXT of the
+                             candidate file (distinctive words vs the other
+                             candidates), not from the alias table's stored
+                             terms.  The table only supplies the candidate path
+                             list; this is what makes the MLP train the
+                             file<->word mapping from the project itself. */
+                          std::string body;
+                          {
+                            std::ifstream af(row.path, std::ios::binary);
+                            body.assign(
+                                (std::istreambuf_iterator<char>(af)),
+                                std::istreambuf_iterator<char>());
+                          }
+                          if (!body.empty()) {
+                            std::vector<std::pair<std::string, std::string>>
+                                others;
+                            for (const auto &r2 : aliasRows) {
+                              if (r2.path == row.path) continue;
+                              std::ifstream bf(r2.path, std::ios::binary);
+                              others.emplace_back(
+                                  r2.path,
+                                  std::string(
+                                      (std::istreambuf_iterator<char>(bf)),
+                                      std::istreambuf_iterator<char>()));
+                            }
+                            const std::string prof =
+                                phoenix::memetic::distinctiveProfile(
+                                    row.path, body, others);
+                            for (const auto &t :
+                                 phoenix::memetic::glossTokens(prof)) {
+                              toks.push_back(t);
+                              aliasVocab.insert(t);
+                              if (!words.empty()) words.push_back(' ');
+                              words += t;
+                            }
+                          }
+                          const bool fromBody = !toks.empty();
+                          if (toks.empty()) {
+                            for (const auto &term : row.terms) {
+                              auto tt = phoenix::memetic::glossTokens(term.word);
+                              for (const auto &t : tt) {
+                                toks.push_back(t);
+                                aliasVocab.insert(t);
+                                if (!words.empty()) words.push_back(' ');
+                                words += t;
+                              }
+                            }
+                          }
+                          if (toks.empty()) continue;
+                          if (fromBody) ++bodyBags;
+                          aliasBags.emplace_back(row.path, std::move(toks));
+                          aliasProfiles.emplace_back(row.path, words);
+                        }
+                        auto runAliasRouter = [&]() -> bool {
+                          if (aliasBags.size() < 2) return false;
+                          phoenix::memetic::OpenColumnRouter ar;
+                          ar.init(std::max(
+                              64, static_cast<int>(aliasVocab.size()) + 8));
+                          ar.enableBackground();
+                          for (const auto &b : aliasBags)
+                            ar.addFileCe(b.first, b.second);
+                          const auto r = ar.route(
+                              phoenix::memetic::glossTokens(aliasQuery));
+                          if (config_.httpLog)
+                            std::cout << "[sig] alias-router idx=" << r.index
+                                      << " margin=" << r.margin
+                                      << " known=" << r.knownTokens
+                                      << " bags=" << aliasBags.size()
+                                      << std::endl;
+                          if (r.index < 0) return false;
+                          aliasChosen = ar.fileId(r.index);
+                          aliasFromMlp = !aliasChosen.empty();
+                          if (config_.httpLog && aliasFromMlp) {
+                            const char *src =
+                                (bodyBags ==
+                                 static_cast<int>(aliasBags.size()))
+                                    ? "body"
+                                    : "alias-terms";
+                            std::cout << "[open-column] mode=ce alias=1 source="
+                                      << src << " path=" << aliasChosen
+                                      << " margin=" << r.margin
+                                      << " known=" << r.knownTokens
+                                      << std::endl;
+                            /* Explicit zero: the teacher was NOT called on
+                               this tick.  Absence of a line is not used.
+                               source=body means every bag came from
+                               distinctiveProfile of the file text. */
+                            std::cout << "[cond-count] alias=1 source=" << src
+                                      << " path=" << aliasChosen
+                                      << " calls=0" << std::endl;
+                          }
+                          return aliasFromMlp;
+                        };
+                        auto runAliasCond = [&]() -> bool {
+                          if (aliasProfiles.size() < 2) return false;
+                          const int cb =
+                              phoenix::memetic::condProfileExchangeCount()
+                                  .load();
+                          aliasChosen =
+                              phoenix::memetic::condProfilePathAudited(
+                                  aliasQuery, aliasProfiles,
+                                  &aliasCondStable);
+                          const int calls =
+                              phoenix::memetic::condProfileExchangeCount()
+                                  .load() -
+                              cb;
+                          aliasFromCond = !aliasChosen.empty();
+                          if (config_.httpLog)
+                            std::cout << "[cond-count] alias=1 path="
+                                      << aliasChosen << " calls=" << calls
+                                      << std::endl;
+                          return aliasFromCond;
+                        };
+                        const bool routerFirst = routerOrderFromFiles();
+                        if (routerFirst) {
+                          if (!runAliasRouter()) runAliasCond();
+                        } else {
+                          if (!runAliasCond()) runAliasRouter();
+                        }
+                      }
+                    }
+                    std::vector<phoenix::memetic::OrderedMeme> items;
+                    std::vector<std::pair<std::string, std::string>> rawBodies;
+                    std::vector<int> fecundity;
+                    items.reserve(explorePaths.size());
+                    for (const auto &rel : explorePaths) {
+                      std::error_code relEc;
+                      if (!fs::is_regular_file(rel, relEc))
+                        continue;
+                      std::ifstream in(rel, std::ios::binary);
+                      std::string body((std::istreambuf_iterator<char>(in)),
+                                       std::istreambuf_iterator<char>());
+                      if (body.size() > 48000)
+                        body.resize(48000);
+                      rawBodies.emplace_back(rel, body);
+                      int fileFecundity = 0;
+                      for (const auto &file : aliasRows)
+                        if (file.path == rel)
+                          fileFecundity = file.line.state.fecundity;
+                      fecundity.push_back(fileFecundity);
+                      std::string profile = rel + "\n" + body;
+                      for (const auto &file : aliasRows) {
+                        if (file.path != rel)
+                          continue;
+                        for (const auto &term : file.terms) {
+                          profile.push_back('\n');
+                          profile += term.word;
+                        }
+                      }
+                      items.push_back(
+                          phoenix::memetic::OrderedMeme{rel, profile});
+                    }
+                    const auto edit = phoenix::memetic::rankLatentEdit(
+                        currentFile, items, fecundity);
+                    std::string chosen =
+                        !aliasChosen.empty() ? aliasChosen : edit.path;
+                    bool fromMlp = aliasFromMlp;
+                    bool fromCond = aliasFromCond;
+                    bool fromLink = false;
+                    bool condStable = aliasCondStable;
+                    if (chosen.empty()) {
+                      std::vector<std::pair<std::string, std::vector<std::string>>>
+                          linkRows;
+                      std::vector<int> linkFecundity;
+                      for (const auto &file : aliasRows) {
+                        if (file.links.empty())
+                          continue;
+                        linkRows.emplace_back(file.path, file.links);
+                        linkFecundity.push_back(file.line.state.fecundity);
+                      }
+                      chosen = phoenix::memetic::rankBlockedLinks(
+                          currentFile, linkRows, linkFecundity);
+                      fromLink = !chosen.empty();
+                    }
+                    /* Router before the conditional teacher: the open-column
+                       MLP is trained from the file bodies themselves (no
+                       teacher call); it resolves the descriptions the
+                       lexical index and the side table cannot, and only
+                       the rest reaches the 8107 conditional model.
+                       mission.routerBeforeCond=false restores the old
+                       order for a same-mission call-count comparison. */
+                    auto tryRouter = [&]() -> bool {
+                      if (!chosen.empty() || rawBodies.size() < 2) return false;
+                      std::vector<std::pair<std::string, std::vector<std::string>>>
+                          routerBags;
+                      std::unordered_set<std::string> routerVocab;
+                      for (const auto &body : rawBodies) {
+                        const std::string profile =
+                            phoenix::memetic::distinctiveProfile(
+                                body.first, body.second, rawBodies);
+                        auto tokens = phoenix::memetic::glossTokens(profile);
+                        for (const auto &t : tokens)
+                          routerVocab.insert(t);
+                        routerBags.emplace_back(body.first, std::move(tokens));
+                      }
+                      const int routerHidden = std::max(
+                          64, static_cast<int>(routerVocab.size()) + 8);
+                      std::string mode;
+                      phoenix::memetic::OpenColumnRouter router;
+                      router.init(routerHidden);
+                      router.enableBackground();
+                      for (const auto &row : routerBags)
+                        router.addFileCe(row.first, row.second);
+                      const auto route =
+                          router.route(phoenix::memetic::glossTokens(currentFile));
+                      if (route.index >= 0) {
+                        chosen = router.fileId(route.index);
+                        fromMlp = !chosen.empty();
+                        mode = "ce";
+                        if (config_.httpLog)
+                          std::cout << "[open-column] mode=ce source=body path="
+                                    << chosen
+                                    << " margin=" << route.margin
+                                    << " known=" << route.knownTokens
+                                    << " hidden=" << routerHidden
+                                    << std::endl;
+                      }
+                      if (!fromMlp) {
+                        phoenix::memetic::OpenColumnRouter hebb;
+                        hebb.init(routerHidden);
+                        for (const auto &row : routerBags)
+                          hebb.addFile(row.first, row.second);
+                        const auto h = hebb.route(
+                            phoenix::memetic::glossTokens(currentFile));
+                        if (h.index >= 0) {
+                          chosen = hebb.fileId(h.index);
+                          fromMlp = !chosen.empty();
+                          mode = "hebb";
+                          if (config_.httpLog)
+                            std::cout << "[open-column] mode=hebb path=" << chosen
+                                      << " margin=" << h.margin
+                                      << " known=" << h.knownTokens
+                                      << std::endl;
+                        }
+                      }
+                      if (fromMlp && config_.httpLog)
+                        std::cout << "[cond-count] source=body path=" << chosen
+                                  << " calls=0" << std::endl;
+                      (void)mode;
+                      return fromMlp;
+                    };
+                    const bool routerFirst = routerOrderFromFiles();
+                    if (routerFirst) tryRouter();
+                    const auto condWords = phoenix::memetic::condTokens(currentFile);
+                    if (chosen.empty() && condWords.size() >= 2 &&
+                        condWords.size() <= 40) {
+                      std::vector<std::pair<std::string, std::string>> condProfiles;
+                      for (const auto &body : rawBodies) {
+                        const std::string words =
+                            phoenix::memetic::distinctiveProfile(
+                                body.first, body.second, rawBodies);
+                        if (!words.empty())
+                          condProfiles.emplace_back(body.first, words);
+                      }
+                      /* Stability audit: the same description with the
+                         profile words in the opposite order must point
+                         at the same file.  An unstable teacher hit does
+                         not open a file and does not publish words. */
+                      const int condBefore =
+                          phoenix::memetic::condProfileExchangeCount().load();
+                      chosen = phoenix::memetic::condProfilePathAudited(
+                          currentFile, condProfiles, &condStable);
+                      const int condCalls =
+                          phoenix::memetic::condProfileExchangeCount().load() -
+                          condBefore;
+                      fromCond = !chosen.empty();
+                      if (config_.httpLog)
+                        std::cout << "[cond-count] path=" << chosen
+                                  << " calls=" << condCalls << std::endl;
+                    }
+                    if (!routerFirst && chosen.empty()) tryRouter();
+                    if (!chosen.empty()) {
+                      AliasFile *slot = nullptr;
+                      for (auto &file : aliasRows)
+                        if (file.path == chosen)
+                          slot = &file;
+                      if (fromMlp) {
+                        /* The router picked the file; it did not witness
+                           a new conditional pair, so no promotion and no
+                           alias growth. */
+                      } else if (!fromCond && !fromLink) {
+                        if (slot == nullptr) {
+                          aliasRows.push_back(AliasFile{chosen, {}, {}});
+                          slot = &aliasRows.back();
+                        }
+                        std::vector<std::string> prior;
+                        prior.reserve(slot->terms.size());
+                        for (const auto &term : slot->terms)
+                          prior.push_back(term.word);
+                        const auto grown = phoenix::memetic::witnessedAliases(
+                            currentFile, items, chosen, prior);
+                        const bool grew = grown.size() > prior.size();
+                        if (grew) {
+                          std::unordered_set<std::string> have;
+                          for (const auto &term : slot->terms)
+                            have.insert(term.word);
+                          for (const auto &w : grown) {
+                            if (!have.insert(w).second)
+                              continue;
+                            slot->terms.push_back(
+                                phoenix::memetic::GlossTerm{w, 1});
+                          }
+                          slot->line = phoenix::memetic::GlossLineage{};
+                        }
+                        std::string raw;
+                        for (const auto &body : rawBodies)
+                          if (body.first == chosen)
+                            raw = body.second;
+                        const int fecundityBefore = slot->line.state.fecundity;
+                        if (!grew && phoenix::memetic::glossCarried(
+                                         currentFile, raw, slot->terms))
+                          phoenix::memetic::reinforceGloss(
+                              slot->terms, slot->line, currentFile);
+                        if (grew ||
+                            slot->line.state.fecundity != fecundityBefore)
+                          saveAliases();
+                        if (config_.httpLog &&
+                            slot->line.state.fecundity != fecundityBefore)
+                          std::cout << "[gloss-lineage] path=" << chosen
+                                    << " fecundity="
+                                    << slot->line.state.fecundity
+                                    << " admitted="
+                                    << (phoenix::memetic::lineageAdmitted(
+                                            slot->line.state)
+                                            ? 1
+                                            : 0)
+                                    << std::endl;
+                      } else if (fromCond) {
+                        if (slot == nullptr) {
+                          aliasRows.push_back(AliasFile{chosen, {}, {}, {}});
+                          slot = &aliasRows.back();
+                        }
+                        std::vector<std::string> active;
+                        active.reserve(slot->terms.size());
+                        for (const auto &term : slot->terms)
+                          active.push_back(term.word);
+                        const auto pendingBefore = slot->pending.size();
+                        const auto activeBefore = active.size();
+                        /* Two distinct observations are required.  A
+                           repeat of any of the last four hits is not a
+                           second teacher hit; it is dropped before it
+                           can publish words.  The recent window closes
+                           the A,B,A alternation. */
+                        /* Student cross-check: the self-supervised
+                           open-column router (trained on the file bodies,
+                           independent of the 8107 teacher) must not point
+                           at a different file.  If it does, the teacher
+                           hits are not published (the pending list is
+                           kept).  No student opinion = allow: local
+                           ignorance is not evidence against the hit. */
+                        bool studentAgrees = true;
+                        {
+                          std::vector<std::pair<std::string,
+                                                std::vector<std::string>>>
+                              sbags;
+                          std::unordered_set<std::string> svocab;
+                          for (const auto &body : rawBodies) {
+                            const std::string profile =
+                                phoenix::memetic::distinctiveProfile(
+                                    body.first, body.second, rawBodies);
+                            auto toks = phoenix::memetic::glossTokens(profile);
+                            for (const auto &t : toks) svocab.insert(t);
+                            sbags.emplace_back(body.first, std::move(toks));
+                          }
+                          if (sbags.size() >= 2) {
+                            phoenix::memetic::OpenColumnRouter sr;
+                            sr.init(std::max(
+                                64, static_cast<int>(svocab.size()) + 8));
+                            sr.enableBackground();
+                            for (const auto &row : sbags)
+                              sr.addFileCe(row.first, row.second);
+                            const auto srR = sr.route(
+                                phoenix::memetic::glossTokens(currentFile));
+                            if (srR.index >= 0) {
+                              const std::string sp = sr.fileId(srR.index);
+                              if (!sp.empty() && sp != chosen)
+                                studentAgrees = false;
+                            }
+                          }
+                        }
+                        if (!studentAgrees && config_.httpLog)
+                          std::cout << "[cond-veto] path=" << chosen
+                                    << " student=other" << std::endl;
+                        bool condIndependent =
+                            studentAgrees &&
+                            phoenix::memetic::condRecentIndependent(
+                                slot->condRecent, currentFile);
+                        const int promoted =
+                            condIndependent
+                                ? phoenix::memetic::confirmCondWords(
+                                      currentFile, items, active,
+                                      slot->pending,
+                                      slot->condRecent.empty()
+                                          ? nullptr
+                                          : &slot->condRecent.back())
+                                : 0;
+                        if (condIndependent) {
+                          slot->condRecent.push_back(currentFile);
+                          if (slot->condRecent.size() > 4)
+                            slot->condRecent.erase(slot->condRecent.begin());
+                        }
+                        if (config_.httpLog)
+                          std::cout << "[cond-hit] path=" << chosen
+                                    << " independent="
+                                    << (condIndependent ? 1 : 0)
+                                    << " stable=" << (condStable ? 1 : 0)
+                                    << " promoted=" << promoted
+                                    << " pending=" << slot->pending.size()
+                                    << std::endl;
+                        if (active.size() != activeBefore) {
+                          std::unordered_set<std::string> have;
+                          for (const auto &term : slot->terms)
+                            have.insert(term.word);
+                          for (const auto &w : active) {
+                            if (!have.insert(w).second)
+                              continue;
+                            slot->terms.push_back(
+                                phoenix::memetic::GlossTerm{w, 1});
+                          }
+                          slot->line = phoenix::memetic::GlossLineage{};
+                        }
+                        const auto linksBefore = slot->links.size();
+                        const auto pendingLinksBefore = slot->pendingLinks.size();
+                        const int linked = phoenix::memetic::confirmBlockedLinks(
+                            currentFile, items, slot->links, slot->pendingLinks);
+                        if (promoted > 0 || condIndependent ||
+                            slot->pending.size() != pendingBefore ||
+                            linked > 0 ||
+                            slot->pendingLinks.size() != pendingLinksBefore)
+                          saveAliases();
+                        if (config_.httpLog && promoted > 0)
+                          std::cout << "[cond-promote] path=" << chosen
+                                    << " words=" << promoted << std::endl;
+                        if (config_.httpLog && linked > 0)
+                          std::cout << "[link-step] path=" << chosen
+                                    << " words=" << linked
+                                    << " kept=" << slot->links.size()
+                                    << " before=" << linksBefore << std::endl;
+                      }
+                      std::ifstream ownSrc(chosen, std::ios::binary);
+                      std::string src((std::istreambuf_iterator<char>(ownSrc)),
+                                      std::istreambuf_iterator<char>());
+                      if (!src.empty()) {
+                        src = phoenix::memetic::latentCarrierSpan(currentFile,
+                                                                 src);
+                        if (!src.empty())
+                          ownCarrier = phoenix::memetic::exclusiveEditCarrier(
+                              chosen, src);
+                      }
+                      if (!ownCarrier.empty()) {
+                        focus = chosen;
+                        exploreMark = std::string(fromMlp ? "mlp "
+                                                    : fromLink ? "link "
+                                                    : fromCond ? "cond "
+                                                               : "latent ") +
+                                      chosen;
+                      }
+                      if (config_.httpLog)
+                        std::cout << "[latent-edit] path=" << chosen
+                                  << " present=" << edit.presentCount
+                                  << " cond=" << (fromCond ? 1 : 0)
+                                  << " link=" << (fromLink ? 1 : 0)
+                                  << " mlp=" << (fromMlp ? 1 : 0)
+                                  << " carrier=" << ownCarrier.size()
+                                  << std::endl;
+                    }
+                  }
+                  if (config_.httpLog)
+                    std::cout << "[explore-tool] " << exploreMark
+                              << " candidates=" << explorePaths.size()
+                              << std::endl;
+                }
+                if (codeMission) {
+                  const auto measured = phoenix::mission::workspaceExecute(
+                      workspaceRoot, scope,
+                      nlohmann::json{{"action", "read"},
+                                     {"path", "measure.md"}});
+                  if (measured.value("ok", false)) {
+                    std::string line = measured.value("content", std::string());
+                    if (line.size() > 400) line.resize(400);
+                    if (!line.empty())
+                      phoenix::inference::appendUnitQuery(
+                          missionMemorySnippets,
+                          phoenix::inference::unitQueryFromText(line, "text"));
+                  }
+                  std::string peerSrc = phoenix::peer::latestIncomingSource();
+                  const bool showPeer = peerSrc.find("384") != std::string::npos;
+                  if (showPeer) {
+                    if (peerSrc.size() > 1800)
+                      peerSrc = peerSrc.substr(peerSrc.size() - 1800);
+                    phoenix::inference::appendUnitQuery(
+                        missionMemorySnippets,
+                        phoenix::inference::unitQueryFromText(
+                            "peer function\n" + peerSrc,
+                            "text"));
+                  }
+                }
                 if (!pinOnly) {
                   const auto planRes = phoenix::mission::workspaceExecute(
                       workspaceRoot, scope,
@@ -713,7 +2008,8 @@ public:
                         : recallDraft;
                 nlohmann::json esOpts = nlohmann::json::object();
                 nlohmann::json esTensor = nlohmann::json::object();
-                if (!pinOnly && !stillDrafting && !emoSrc.empty()) {
+                if (!pinOnly && (!stillDrafting || peerEvolveGoal) &&
+                    !emoSrc.empty()) {
                   if (config_.httpLog)
                     std::cout << "[mission-deliberate] stage=emotion"
                               << std::endl;
@@ -773,33 +2069,35 @@ public:
               (void)isChildBox;
               if (pinOnly)
                 opts["repeat_penalty"] = 1.0;
-              std::string dynamicPrompt;
+              std::string dynamicPrompt = sectionTip;
               (void)listClip;
               std::string resumeSuffix;
-              /* Resume is the recent draft (the window being continued).
-                 Empty draft: working brief on the prefix is the context. */
-              if (!draftEmpty) {
+              /* The causal tip is the unfinished section, not the requirements
+                 tail. Continuing that tail writes another "shall" list. */
+              if (!sectionTip.empty())
+                resumeSuffix = sectionTip;
+              else if (!draftEmpty)
                 resumeSuffix = packed.recentFull.empty() ? currentFile
                                                          : packed.recentFull;
-              }
               if (onesJunkDraft) {
                 resumeSuffix.clear();
                 opts.erase("resume_suffix");
-              }
-              /* The causal tip is what the model continues. Any tail of the
-                 current requirements loop makes the next sentence another
-                 restatement. When a chapter is still unopened, continue from
-                 that heading alone. */
-              if (!resumeSuffix.empty()) {
-                const std::string missing =
-                    phoenix::mission::firstMissingGoalChapter(goal, currentFile);
-                if (!missing.empty())
-                  resumeSuffix = missing + "\n";
               }
               if (draftEmpty) {
                 opts.erase("gnn_units");
                 opts.erase("gnn_content");
               }
+              /* SELF-MOD does not paste a source span or the previous
+                 fictional draft onto the causal tip. A file body goes only
+                 to the expert, and only after the draft names a real path. */
+              if (selfModGoal && ownCarrier.empty()) {
+                resumeSuffix.clear();
+                opts.erase("resume_suffix");
+              } else if (peerEvolveGoal && !peerEditBase.empty()) {
+                resumeSuffix = peerEditBase;
+              }
+              if (selfModGoal && ownCarrier.empty() && resumeSuffix.size() > 1800)
+                resumeSuffix = resumeSuffix.substr(resumeSuffix.size() - 1800);
               if (!resumeSuffix.empty())
                 opts["resume_suffix"] = resumeSuffix;
               if (config_.httpLog) {
@@ -953,8 +2251,26 @@ public:
               }
               }
 
+              /* Heritable per-tick generation budget.  The mission's
+                 genome (or the helper box's own genome, for a child
+                 scope) decides how many tokens this tick asks for.  The
+                 genome is read before the prompt reserve is computed so
+                 a large budget still leaves room for the prompt. */
+              float genomeTokens = 0.0f;
+              try {
+                const auto genomeJson =
+                    cognitionManager_.missionGenomeFor(scope);
+                if (genomeJson.is_object())
+                  genomeTokens = genomeJson.value("tokensPerTick", 0.0f);
+              } catch (...) {
+              }
+              if (config_.httpLog)
+                std::cout << "[mission-genome] scope=" << scope
+                          << " tokensPerTick=" << genomeTokens << std::endl;
               const int genReserve = std::max(
-                  16, phoenix::cfgOr<int>("mission.deliberateMaxTokens", 48));
+                  16, genomeTokens > 0.0f
+                          ? std::min(512, static_cast<int>(genomeTokens + 0.5f))
+                          : phoenix::cfgOr<int>("mission.deliberateMaxTokens", 48));
               const int tmplReserve =
                   phoenix::cfgOr<int>("mission.templateOverheadTokens", 64);
               const int safePromptTokens = std::max(
@@ -968,6 +2284,15 @@ public:
                   static_cast<size_t>(safePromptTokens) *
                   phoenix::context::charsPerPackedToken() *
                   static_cast<size_t>(ngramFac);
+              /* Plain-continuation contract.  The goal text is not enough;
+                 the worker's RAG stream advertises tools, so the system
+                 side has to say no. */
+              if (plainTextOnly) {
+                staticPrompt +=
+                    "\n\nWRITE PLAIN PROSE ONLY. Continue the document with "
+                    "new sentences. Do not emit JSON, tool calls, plans, "
+                    "markdown headings, or code fences.\n";
+              }
               /* Split path: staticPrompt is the document head.
                  Tail is resume_suffix, not a second prompt protocol. */
               {
@@ -1046,19 +2371,28 @@ public:
               }
               int tokBudget = std::max(16, maxTokens > 0 ? maxTokens : 48);
               {
-                const int deliberateTok = phoenix::cfgOr<int>(
-                    "mission.deliberateMaxTokens", tokBudget);
+                const int draftCap = phoenix::cfgOr<int>(
+                    "mission.draftTickMaxTokens", 64);
+                const int genomeBudget =
+                    genomeTokens > 0.0f
+                        ? phoenix::mission::missionTickBudget(
+                              genomeTokens, 512, false, draftCap)
+                        : 0;
                 /* 192-token ticks plus a fat prompt ate the 8–15 min
                    short-test window (one 160-char write, no second
                    body). Cap while the draft is still under min chars
                    so a second tick can finish and complete can wait
                    the last generate out in << 180s. */
-                if (stillDrafting) {
-                  const int draftCap = phoenix::cfgOr<int>(
-                      "mission.draftTickMaxTokens", 64);
+                if (peerEvolveGoal && (codeMission || selfModGoal)) {
+                  tokBudget = std::max(tokBudget, 512);
+                } else if (genomeBudget > 0) {
+                  tokBudget = genomeBudget;
+                } else if (stillDrafting) {
                   tokBudget = std::min(std::max(tokBudget, 32),
                                        std::max(32, draftCap));
                 } else {
+                  const int deliberateTok = phoenix::cfgOr<int>(
+                      "mission.deliberateMaxTokens", tokBudget);
                   tokBudget = std::max(tokBudget, std::max(16, deliberateTok));
                 }
                 opts["num_predict"] = tokBudget;
@@ -1069,6 +2403,7 @@ public:
                 opts["cache_prompt"] = false;
                 if (config_.httpLog)
                   std::cout << "[mission-deliberate] tokBudget=" << tokBudget
+                            << " genome=" << (genomeBudget > 0 ? 1 : 0)
                             << " stillDrafting=" << (stillDrafting ? 1 : 0)
                             << " onesJunk=" << (onesJunkDraft ? 1 : 0)
                             << " deliv=" << currentFile.size() << std::endl;
@@ -1087,15 +2422,237 @@ public:
                       ? nullptr
                       : phoenix::summon::SummonRegistry::instance().find(
                             summonModel);
+              phoenix::summon::ModelEndpoint toolSummoned;
+              bool summonedByTool = false;
+              if (summonEp == nullptr && selfModGoal) {
+                /* The model is not told that summon or field training exist.
+                   The tools look at the source-edit situation and run. */
+                const std::string fieldText =
+                    currentFile.empty() ? goal : currentFile;
+                try {
+                  const auto trained =
+                      cognitionManager_.noteFieldOpportunity(fieldText);
+                  if (config_.httpLog)
+                    std::cout << "[field-train] unit="
+                              << (trained.value("unitLearn", false) ? 1 : 0)
+                              << " live="
+                              << (trained.value("liveTurns", false) ? 1 : 0)
+                              << " expert="
+                              << trained.value("expert", std::string())
+                              << " mode="
+                              << trained.value("expertMode", std::string())
+                              << " acc="
+                              << trained.value("expertAccuracy", 0.0)
+                              << " params="
+                              << trained.value("expertParams", 0)
+                              << " trainLmax="
+                              << trained.value("expertLmax", 0.0)
+                              << std::endl;
+                } catch (const std::exception &ex) {
+                  if (config_.httpLog)
+                    std::cout << "[field-train] FAIL " << ex.what()
+                              << std::endl;
+                } catch (...) {
+                  if (config_.httpLog)
+                    std::cout << "[field-train] FAIL" << std::endl;
+                }
+                toolSummoned = phoenix::summon::SummonRegistry::instance()
+                                   .selectForSourceEdit();
+                if (!toolSummoned.name.empty()) {
+                  summonEp = &toolSummoned;
+                  summonedByTool = true;
+                  if (config_.httpLog)
+                    std::cout << "[summon-tool] source-edit model="
+                              << toolSummoned.name
+                              << " kind=" << toolSummoned.kind << std::endl;
+                } else if (config_.httpLog) {
+                  std::cout << "[summon-tool] source-edit idle "
+                               "reason=no-programming-moe"
+                            << std::endl;
+                }
+              }
               opts["system_content"] = staticPrompt;
+              /* Code has to keep its spaces. The global pack/ngram path
+                 glues identifiers together, so this mission sends plain tokens. */
+              if (peerEvolveGoal && (codeMission || selfModGoal)) {
+                opts["pack_prompt"] = false;
+                opts["group_n"] = 1;
+                opts["ngram_merge"] = 1;
+                opts["n_parallel"] = 1;
+                opts["speculative"] = false;
+                opts["parallel_mode"] = "";
+              }
+              if (summonedByTool && ownCarrier.empty()) {
+                summonMark = "idle:no-file-yet";
+                if (config_.httpLog)
+                  std::cout << "[summon-tool] idle reason=no-file-yet"
+                            << std::endl;
+                summonEp = nullptr;
+                summonedByTool = false;
+              } else if (summonedByTool) {
+                summonMark = "called";
+              }
               if (summonEp) {
                 if (config_.httpLog)
                   std::cout << "[mission-deliberate] summon scope=" << scope
                             << " model=" << summonEp->name
                             << " kind=" << summonEp->kind
                             << " url=" << summonEp->url << std::endl;
-                r = chatWithSummonEndpoint(*summonEp, dynamicPrompt,
-                                           staticPrompt, tokBudget, opts);
+                const int summonTokens =
+                    summonedByTool ? std::max(summonEp->maxTokens, 256)
+                                   : tokBudget;
+                /* Declared outside the carrier guard so the 8B fallback
+                   can reuse the same patch instruction. */
+                std::string editPrompt;
+                json expertOpts = opts;
+                expertOpts["temperature"] = 0.0;
+                expertOpts["top_p"] = 0.9;
+                expertOpts["repeat_penalty"] = 1.05;
+                if (summonedByTool && !ownCarrier.empty()) {
+                  if (config_.httpLog)
+                    std::cout << "[summon-tool] carrier bytes="
+                              << ownCarrier.size() << std::endl;
+                  /* Expert side: ask the programming model for exactly one
+                     patch.  The plugin side (code_edit_parser) normalises
+                     a fenced/raw code reply into the same FILE/OLD/NEW
+                     form, so both paths reach the source-edit detector.
+                     A 1B expert degenerates on the full 1.5 KB carrier
+                     (token salad observed live), so send a bounded tail and
+                     greedy decoding. */
+                  std::string expertCode = ownCarrier;
+                  if (expertCode.size() > 600)
+                    expertCode = expertCode.substr(expertCode.size() - 600);
+                  editPrompt =
+                      "You edit C++ source. Reply with only one patch for "
+                      "the file `" +
+                      (focusTarget.empty() ? std::string("the given file")
+                                           : focusTarget) +
+                      "`, no prose. Example reply for a file a.cpp:\n"
+                      "FILE a.cpp\nOLD\nint x = 1;\nNEW\nint x = 2;\n\n"
+                      "Now edit this code the same way:\n" +
+                      expertCode;
+                  /* p-injection (the controlled variable of the live force
+                     experiment): the goal carries "[population-rate <p>]";
+                     the carrier's decision context then sees the current
+                     trait frequency, which is the conformity term's input. */
+                  const auto ratePos = goal.find("[population-rate ");
+                  if (ratePos != std::string::npos &&
+                      phoenix::cfgOr<bool>("research.forceLive.enabled",
+                                           false)) {
+                    editPrompt += "\n[population] the current share of "
+                                  "carriers that produced a source edit in "
+                                  "the previous round is: " +
+                                  goal.substr(ratePos) + "\n";
+                  }
+                  r = chatWithSummonEndpoint(*summonEp, editPrompt,
+                                             std::string(), summonTokens,
+                                             expertOpts);
+                } else {
+                  r = chatWithSummonEndpoint(*summonEp, dynamicPrompt,
+                                             staticPrompt, summonTokens, opts);
+                }
+                if (summonedByTool) {
+                  std::string summonedReply =
+                      r.value("reply", std::string());
+                  bool patch =
+                      summonedReply.find("diff --git ") != std::string::npos ||
+                      summonedReply.find("--- a/") != std::string::npos ||
+                      (summonedReply.find("FILE ") != std::string::npos &&
+                       summonedReply.find("\nOLD") != std::string::npos &&
+                       summonedReply.find("\nNEW") != std::string::npos);
+                  if (!patch && r.value("ok", false)) {
+                    const std::string normalised =
+                        phoenix::code_edit::extractCodeEdit(summonedReply,
+                                                            std::string());
+                    if (!normalised.empty()) {
+                      r["reply"] = normalised;
+                      summonedReply = normalised;
+                      patch = true;
+                      if (config_.httpLog)
+                        std::cout << "[summon-tool] plugin-normalised code "
+                                  << normalised.size() << " bytes"
+                                  << std::endl;
+                    }
+                  }
+                  /* One pointed retry before the base fallback: the coder's
+                     first answer is sometimes prose.  Naming the target and
+                     the exact three-part shape lifts the source-edit rate. */
+                  if (!patch && r.value("ok", false) && !focusTarget.empty()) {
+                    std::string retryCode = ownCarrier;
+                    if (retryCode.size() > 600)
+                      retryCode = retryCode.substr(retryCode.size() - 600);
+                    const std::string retryPrompt =
+                        "Reply with ONLY this exact format, no prose and no "
+                        "fences:\nFILE " + focusTarget +
+                        "\nOLD\n<one original line>\nNEW\n<one changed line>\n\n"
+                        "Edit this code:\n" + retryCode;
+                    json r2 = chatWithSummonEndpoint(
+                        *summonEp, retryPrompt, std::string(), summonTokens,
+                        expertOpts);
+                    std::string rr = r2.value("reply", std::string());
+                    bool p2 = rr.find("--- a/") != std::string::npos ||
+                              (rr.find("FILE ") != std::string::npos &&
+                               rr.find("\nOLD") != std::string::npos &&
+                               rr.find("\nNEW") != std::string::npos);
+                    if (!p2 && r2.value("ok", false)) {
+                      const std::string nz =
+                          phoenix::code_edit::extractCodeEdit(rr, focusTarget);
+                      if (!nz.empty()) {
+                        rr = nz;
+                        p2 = true;
+                      }
+                    }
+                    if (p2) {
+                      r = r2;
+                      r["reply"] = rr;
+                      patch = true;
+                      if (config_.httpLog)
+                        std::cout << "[summon-tool] retry-ok bytes="
+                                  << rr.size() << std::endl;
+                    } else if (config_.httpLog) {
+                      std::cout << "[summon-tool] retry-fail len="
+                                << rr.size() << std::endl;
+                    }
+                  }
+                  /* Live-force instrument (research.forceLive.enabled):
+                     the source-edit tool has run and `patch` is the actual
+                     outcome, so the tick is honest (prose replies count as
+                     non-edits).  The generation is the global loop round. */
+                  if (phoenix::cfgOr<bool>("research.forceLive.enabled",
+                                           false)) {
+                    phoenix::memetic::ReplicaTick liveTick;
+                    liveTick.instance = scope;
+                    liveTick.mission = scope;
+                    liveTick.replyClass = patch ? "source-edit" : "prose";
+                    liveTick.replyChars = static_cast<int>(
+                        r.value("reply", std::string()).size());
+                    liveTick.sourceEdit = patch;
+                    liveTick.generation = static_cast<int>(
+                        cognitionManager_.loopTickCount());
+                    phoenix::memetic::appendReplicaTick(
+                        "runtime_store/replica_trace", liveTick);
+                  }
+                  if (!r.value("ok", false) || !patch) {
+                    if (config_.httpLog) {
+                      std::string head = summonedReply.substr(
+                          0, std::min<size_t>(120, summonedReply.size()));
+                      for (char &c : head)
+                        if (c == '\n' || c == '\r') c = ' ';
+                      std::cout << "[summon-tool] fallback base reason="
+                                << (!r.value("ok", false)
+                                        ? "call-failed"
+                                        : "not-a-source-edit")
+                                << " replyLen=" << summonedReply.size()
+                                << " head=" << head << std::endl;
+                    }
+                    /* The 1B programming MoE degenerates on the carrier;
+                       the 8B base is the stronger code writer.  Ask it
+                       with the SAME patch instruction, not the generic
+                       mission prompt, so a source edit can come back. */
+                    r = chatWithLlamaCpp(editPrompt, std::string(),
+                                         tokBudget, expertOpts);
+                  }
+                }
               } else {
                 r = chatWithLlamaCpp(dynamicPrompt, staticPrompt, tokBudget,
                                      opts);
@@ -1157,6 +2714,22 @@ public:
                       lower.rfind("chapter ", 0) == 0 ||
                       lower.find("\n**") != std::string::npos ||
                       lower.find("\n#") != std::string::npos;
+                  auto wholeToken = [&](const std::string &word) {
+                    if (word.empty()) return false;
+                    std::size_t pos = 0;
+                    while ((pos = lower.find(word, pos)) != std::string::npos) {
+                      const bool left =
+                          pos == 0 ||
+                          !std::isalnum(static_cast<unsigned char>(lower[pos - 1]));
+                      const bool right =
+                          pos + word.size() >= lower.size() ||
+                          !std::isalnum(static_cast<unsigned char>(
+                              lower[pos + word.size()]));
+                      if (left && right) return true;
+                      pos += word.size();
+                    }
+                    return false;
+                  };
                   if (!looksLikeDocument) {
                     for (const auto &t : toolList) {
                       const std::string nm = t.value("name", std::string());
@@ -1167,29 +2740,29 @@ public:
                                      [](unsigned char c) {
                                        return static_cast<char>(::tolower(c));
                                      });
-                      if (lower.find(nmLower) != std::string::npos) {
+                      /* The tool name has to occur as its own token.
+                         "research" is not the token "search". A synonym
+                         list is not a copy of the tool name. */
+                      if (wholeToken(nmLower)) {
                         toolName = nm;
                         break;
                       }
                     }
                   }
-                  /* 2) intent keywords - ONLY for short imperative turns.
-                     Long markdown prose (mission deliverable drafts) often
-                     contains words like "research" / "box" / "helper"; treating
-                     those as tool calls swallowed every tick (deliv stayed 0). */
-                  if (toolName.empty() && !looksLikeDocument) {
-                    if (lower.find("calculate") != std::string::npos ||
-                        lower.find("compute") != std::string::npos ||
-                        lower.find("math") != std::string::npos)
-                      toolName = "math";
-                    else if (lower.find("search for") != std::string::npos ||
-                             lower.find("web search") != std::string::npos ||
-                             lower.find("look up") != std::string::npos)
-                      toolName = "search";
-                    else if (lower.find("summon") != std::string::npos ||
-                             lower.find("spawn a") != std::string::npos ||
-                             lower.find("replicate") != std::string::npos)
-                      toolName = "replicate";
+                  /* Index over ordered niches. Not a replicator test:
+                     lift and word order can name a tool, and one shared
+                     word cannot. A mention of a tool name above is still
+                     only the name token; this branch does not add synonyms. */
+                  if (toolName.empty()) {
+                    const auto guess = phoenix::memetic::inferLatentTool(text);
+                    if (!guess.name.empty()) {
+                      toolName = guess.name;
+                      if (config_.httpLog)
+                        std::cout << "[index-tool] niche=" << guess.name
+                                  << " lift=" << guess.share
+                                  << " order=" << guess.ipr
+                                  << " hits=" << guess.hits << std::endl;
+                    }
                   }
                   if (toolName.empty()) return false;
                   /* 3) argument: longest quoted span, else the text itself */
@@ -1244,6 +2817,24 @@ public:
                       nlohmann::json{{"text", rd.value("content", std::string())},
                                      {"missionId", missionIdFromScope()}});
                 };
+                /* Outcome -> existing vocab weights, then the table is
+                   saved. Not a reflection paragraph in the prompt. */
+                auto learnReply = [&](const std::string &reply, float reward) {
+                  if (!emotionSystem_ || reply.empty() || reward == 0.f) return;
+                  try {
+                    const std::string tag = "mission:" + missionIdFromScope();
+                    emotionSystem_->updateVocabFromResponse(
+                        tag, phoenix::mission::splitEmotionVocabTokens(goal),
+                        phoenix::mission::splitEmotionVocabTokens(reply), reward,
+                        static_cast<int>(reply.size()));
+                    if (config_.httpLog)
+                      std::cout << "[peer-evolve] vocab reward=" << reward
+                                << " saved" << std::endl;
+                  } catch (...) {
+                  }
+                };
+                if (pendingScore)
+                  learnReply(pendingScoreReply, pendingScoreReward);
                 const auto trim = [](const std::string &s) -> std::string {
                   return phoenix::mission::trimCopy(s);
                 };
@@ -1271,6 +2862,12 @@ public:
                       act["content"] = safe;
                     }
                   }
+                  if (peerEvolveGoal) {
+                    const std::string path = act.value("path", std::string());
+                    if (path.empty() ||
+                        phoenix::mission::isDeliverablePath(path))
+                      act["allowShrink"] = true;
+                  }
                   return phoenix::mission::workspaceExecute(workspaceRoot, scope,
                                                             act);
                 };
@@ -1281,7 +2878,7 @@ public:
                               << embedded.size() << std::endl;
                   embedded.clear();
                 }
-                if (!embedded.empty()) {
+                if (!plainTextOnly && !embedded.empty()) {
                   for (const auto &act : embedded) {
                     if (!act.is_object() || !act.contains("plan") ||
                         !act["plan"].is_string())
@@ -1360,7 +2957,8 @@ public:
                       trimmed = trim(reply.substr(brace));
                   }
                 }
-                if (!trimmed.empty() && trimmed.front() == '{') {
+                if (!plainTextOnly && !trimmed.empty() &&
+                    trimmed.front() == '{') {
                   try {
                     nlohmann::json act = nlohmann::json::parse(trimmed);
                     if (!act.is_object()) throw 0;
@@ -1527,6 +3125,12 @@ public:
                        a box verdict marks the box done (loop skips it, the
                        parent merges its file). */
                     if (act.contains("done") && act["done"].is_boolean() &&
+                        act["done"].get<bool>() &&
+                        (codeMission || selfModGoal)) {
+                      learnReply(reply, -0.2f);
+                      return std::string();
+                    }
+                    if (act.contains("done") && act["done"].is_boolean() &&
                         act["done"].get<bool>()) {
                       std::string summary = act.value("summary", std::string());
                       if (summary.size() > 400)
@@ -1649,6 +3253,18 @@ public:
                     std::string tName;
                     nlohmann::json tCtx;
                     if (resolveToolIntent(reply, tName, tCtx)) {
+                      if (barrier_) {
+                        const auto insp = barrier_->inspectText(reply);
+                        if (insp.blocked) {
+                          if (config_.httpLog)
+                            std::cout << "[meme-tool] safety block "
+                                      << insp.reason << std::endl;
+                          writeToolFeedback(
+                              "blocked by safety module before any tool ran; "
+                              "continue without that material.");
+                          return std::string();
+                        }
+                      }
                       if (isChildBox) {
                         const auto slash = scope.rfind('/');
                         if (slash != std::string::npos &&
@@ -1696,6 +3312,18 @@ public:
                 std::string tName;
                 nlohmann::json tCtx;
                 if (resolveToolIntent(reply, tName, tCtx)) {
+                  if (barrier_) {
+                    const auto insp = barrier_->inspectText(reply);
+                    if (insp.blocked) {
+                      if (config_.httpLog)
+                        std::cout << "[meme-tool] safety block "
+                                  << insp.reason << std::endl;
+                      writeToolFeedback(
+                          "blocked by safety module before any tool ran; "
+                          "continue without that material.");
+                      return std::string();
+                    }
+                  }
                   if (isChildBox) {
                     const auto slash = scope.rfind('/');
                     if (slash != std::string::npos &&
@@ -1798,7 +3426,7 @@ public:
                             << chunk.substr(0, 120) << std::endl;
                 return std::string();
               }
-              {
+              if (!peerEvolveGoal) {
                 std::string kept =
                     phoenix::mission::keepUniqueContinuation(chunk,
                                                              currentFile);
@@ -1811,7 +3439,7 @@ public:
                     chunk = std::move(kept);
                 }
               }
-              if (!closingOddFence) {
+              if (!peerEvolveGoal && !closingOddFence) {
                 const std::string raw = chunk;
                 const std::string kept =
                     phoenix::mission::keepCompleteParagraphIo(chunk);
@@ -1835,7 +3463,7 @@ public:
                             << std::endl;
                 return std::string();
               }
-              {
+              if (!peerEvolveGoal) {
                 const std::string stripped =
                     phoenix::mission::stripRewriteInstructionParagraphs(chunk);
                 if (stripped != chunk) {
@@ -1898,38 +3526,259 @@ public:
                   writeToolFeedback(
                       phoenix::mission::onesJunkRewriteHint());
                   return std::string();
+                } else if (peerEvolveGoal && selfModGoal) {
+                  const std::string body = phoenix::mission::trimCopy(chunk);
+                  /* Population generation: one round in which each carrier
+                     ticks once.  The force is fitted per generation, not
+                     per carrier tick (a per-tick series is a first-
+                     appearance ramp). */
+                  /* Population generation = the global loop round.  A
+                     per-scope ++ drifted (a scope re-assigned earlier got a
+                     higher counter), splitting one 8-carrier round into
+                     several generations. */
+                  const int genNow = static_cast<int>(
+                      cognitionManager_.loopTickCount());
+                  /* A review box whose goal says "do not edit" counts as
+                     prose even if its reply happens to contain patch
+                     markers.  The word "summarize" alone does not: an
+                     ordinary writing mission can use that word and still
+                     be a real edit. */
+                  const bool reviewRole =
+                      goal.find("do not edit") != std::string::npos;
+                  const bool sourceEdit = !reviewRole && [&]() {
+                    if (body.rfind("diff --git ", 0) == 0 ||
+                        body.find("\ndiff --git ") != std::string::npos)
+                      return true;
+                    if (body.rfind("--- a/", 0) == 0 ||
+                        body.find("\n--- a/") != std::string::npos)
+                      return true;
+                    const auto fileAt = body.find("FILE ");
+                    if (fileAt == std::string::npos) return false;
+                    const auto oldAt = body.find("\nOLD", fileAt);
+                    const auto newAt = body.find("\nNEW", fileAt);
+                    return oldAt != std::string::npos &&
+                           newAt != std::string::npos && oldAt < newAt;
+                  }();
+                  if (!sourceEdit) {
+                    learnReply(chunk, -0.2f);
+                    if (selfModGoal) {
+                      for (const auto &rel : explorePaths) {
+                        if (!rel.empty() &&
+                            chunk.find(rel) != std::string::npos) {
+                          namedRealPath = rel;
+                          break;
+                        }
+                      }
+                      double projectScore = 0.0;
+                      try {
+                        const auto scored =
+                            cognitionManager_.projectPathScore(chunk);
+                        projectScore = scored.value("project", 0.0);
+                      } catch (...) {
+                      }
+                      const char *inst = std::getenv("AI_INSTANCE_ID");
+                      const auto copied = phoenix::memetic::judgeCopy(goal, chunk);
+                      phoenix::memetic::ReplicaTick mark;
+                      /* No AI_INSTANCE_ID: use the mission scope as the
+                         carrier id, so two concurrent missions still give
+                         an interior frequency instead of an all-unknown
+                         binary series.  Explicit alpha/beta still wins. */
+                      mark.instance = inst ? inst : ("scope:" + scope);
+                      mark.mission = scope;
+                      mark.explore = exploreMark;
+                      mark.summon = summonMark;
+                      mark.replyClass = phoenix::memetic::classifyReplicaReply(
+                          goal, chunk, false);
+                      mark.replyChars = static_cast<int>(chunk.size());
+                      mark.sourceEdit = false;
+                      mark.generation = genNow;
+                      mark.projectScore = projectScore;
+                      mark.copyFidelity = copied.fidelity;
+                      mark.indexOverlap = copied.indexOverlap;
+                      mark.replicator = copied.replicator;
+                      std::string peerDraft;
+                      if (mark.instance == "alpha" || mark.instance == "beta") {
+                        const char *peerName =
+                            mark.instance == "alpha" ? "beta" : "alpha";
+                        const char *peerMission =
+                            mark.instance == "alpha" ? "self-mod-b"
+                                                     : "self-mod-a";
+                        std::ifstream peerIn(
+                            std::string("runtime_store/peer_") + peerName +
+                                "/mission_workspace/" + peerMission +
+                                "/deliverable.md",
+                            std::ios::binary);
+                        if (peerIn)
+                          peerDraft.assign(std::istreambuf_iterator<char>(peerIn),
+                                           std::istreambuf_iterator<char>());
+                      }
+                      const auto population = phoenix::memetic::relatePopulation(
+                          goal, {chunk, peerDraft});
+                      mark.attractionBias = population.attractionBias;
+                      mark.peerCopies = population.peerCopies;
+                      mark.mechanism = population.mechanism;
+                      const auto account = phoenix::memetic::appendReplicaTick(
+                          "runtime_store/replica_trace", mark);
+                      if (config_.httpLog)
+                        std::cout << "[replica-trace] instance=" << mark.instance
+                                  << " reply=" << mark.replyClass
+                                  << " explore=" << mark.explore
+                                  << " summon=" << mark.summon
+                                  << " q=" << account.fidelity
+                                  << " Lmax=" << account.eigenLmax
+                                  << " selection=" << account.priceSelection
+                                  << " transmission=" << account.priceTransmission
+                                  << " binding=" << account.binding
+                                  << " copyF=" << mark.copyFidelity
+                                  << " index=" << mark.indexOverlap
+                                  << " replicator=" << (mark.replicator ? 1 : 0)
+                                  << " attract=" << mark.attractionBias
+                                  << " peerCopies=" << mark.peerCopies
+                                  << " mechanism=" << mark.mechanism
+                                  << " force=" << account.force
+                                  << " forceResidual=" << account.forceResidual
+                                  << " forceSamples=" << account.forceSamples
+                                  << " replicators=" << account.replicators
+                                  << std::endl;
+                    }
+                    if (config_.httpLog)
+                      std::cout << "[peer-evolve] not a source edit"
+                                << std::endl;
+                    return std::string();
+                  }
+                  {
+                    const char *inst = std::getenv("AI_INSTANCE_ID");
+                    phoenix::memetic::ReplicaTick mark;
+                    mark.instance = inst ? inst : ("scope:" + scope);
+                    mark.mission = scope;
+                    mark.explore = exploreMark;
+                    mark.summon = summonMark;
+                    mark.replyClass = "source-edit";
+                    mark.replyChars = static_cast<int>(body.size());
+                    mark.sourceEdit = true;
+                    mark.generation = genNow;
+                    const auto account = phoenix::memetic::appendReplicaTick(
+                        "runtime_store/replica_trace", mark);
+                    if (config_.httpLog)
+                      std::cout << "[replica-trace] instance=" << mark.instance
+                                << " reply=source-edit q=" << account.fidelity
+                                << " Lmax=" << account.eigenLmax
+                                << " binding=" << account.binding << std::endl;
+                  }
+                  const bool fresh = body.find("diff ") != std::string::npos ||
+                                     body.find("--- ") != std::string::npos ||
+                                     body.find("FILE ") != std::string::npos;
+                  if (!peerEditBase.empty() && !fresh) {
+                    edited = peerEditBase;
+                    if (!edited.empty() && !body.empty() &&
+                        !std::isspace(
+                            static_cast<unsigned char>(edited.back())) &&
+                        !std::isspace(static_cast<unsigned char>(body.front())))
+                      edited.push_back('\n');
+                    edited += body;
+                  } else {
+                    edited = body;
+                  }
+                  if (edited.size() > 16000) {
+                    const auto cut = edited.rfind("\ndiff ");
+                    if (cut != std::string::npos) edited = edited.substr(cut + 1);
+                  }
+                } else if (peerEvolveGoal && codeMission) {
+                  const std::string body = phoenix::mission::trimCopy(chunk);
+                  const bool shortBrace =
+                      body.size() < 80 &&
+                      (body.find('{') != std::string::npos ||
+                       body.find('}') != std::string::npos);
+                  const bool codeish =
+                      body.find("384") != std::string::npos ||
+                      body.find("int64") != std::string::npos ||
+                      body.find("for") != std::string::npos ||
+                      body.find(';') != std::string::npos ||
+                      body.find("return") != std::string::npos ||
+                      body.find("evolveCompute") != std::string::npos ||
+                      shortBrace;
+                  if (!codeish) {
+                    learnReply(chunk, -0.2f);
+                    if (config_.httpLog)
+                      std::cout << "[peer-evolve] kept source; non-code reply "
+                                   "not appended"
+                                << std::endl;
+                    return std::string();
+                  }
+                  /* A later tick that still says evolveCompute is a new
+                     draft. Anything else continues the function already
+                     on disk, including a for-loop that was cut mid-line. */
+                  const bool fresh =
+                      body.find("evolveCompute") != std::string::npos;
+                  if (!peerEditBase.empty() && !fresh) {
+                    edited = peerEditBase;
+                    if (!edited.empty() && !body.empty() &&
+                        !std::isspace(static_cast<unsigned char>(edited.back())) &&
+                        !std::isspace(static_cast<unsigned char>(body.front())))
+                      edited.push_back('\n');
+                    edited += body;
+                  } else {
+                    edited = body;
+                  }
+                } else if (peerEvolveGoal &&
+                           phoenix::peer::evolveHasControl(chunk)) {
+                  edited = phoenix::mission::trimCopy(chunk);
+                } else if (peerEvolveGoal &&
+                           phoenix::peer::evolveHasControl(peerEditBase)) {
+                  const std::string cont = phoenix::mission::trimCopy(chunk);
+                  const bool codeCont =
+                      cont.find(';') != std::string::npos ||
+                      cont.find('}') != std::string::npos ||
+                      cont.find("return") != std::string::npos ||
+                      cont.find(">>") != std::string::npos ||
+                      cont.find("<<") != std::string::npos ||
+                      cont.find("^=") != std::string::npos ||
+                      cont.find("state") != std::string::npos;
+                  if (!codeCont) {
+                    learnReply(chunk, -0.2f);
+                    if (config_.httpLog)
+                      std::cout << "[peer-evolve] kept source; non-code reply "
+                                   "not appended"
+                                << std::endl;
+                    return std::string();
+                  }
+                  edited = phoenix::mission::joinDeliverableText(peerEditBase,
+                                                                 cont);
+                } else if (peerEvolveGoal) {
+                  learnReply(chunk, -0.2f);
+                  if (config_.httpLog)
+                    std::cout << "[peer-evolve] kept source; non-code reply "
+                                 "not appended"
+                              << std::endl;
+                  return std::string();
                 } else if (!currentFile.empty() &&
-                           phoenix::mission::continuationRestatesDraft(
-                               chunk, currentFile)) {
-                  const std::string missing =
-                      phoenix::mission::firstMissingGoalChapter(goal,
-                                                                currentFile);
+                           (phoenix::mission::continuationRestatesDraft(
+                                chunk, currentFile) ||
+                            phoenix::mission::deliverableInformationChars(
+                                phoenix::mission::stripRequirementBoilerplate(
+                                    chunk)) < 40)) {
                   if (config_.httpLog)
                     std::cout << "[mission-deliberate] drop restate len="
                               << chunk.size() << std::endl;
+                  sectionDropStreak[scope] += 1;
                   writeToolFeedback(
-                      missing.empty()
+                      sectionFocus.empty()
                           ? "That paragraph restates text already in the draft. Continue from the last new sentence."
-                          : "That paragraph restates text already in the draft. Write this unopened section next: " +
-                                missing);
+                          : "That paragraph is a requirements list. Continue this section in prose: " +
+                                sectionFocus);
                   return std::string();
                 } else {
-                  std::string toWrite = chunk;
-                  const std::string missing =
-                      phoenix::mission::firstMissingGoalChapter(goal, currentFile);
-                  if (!missing.empty()) {
-                    std::string key = missing;
-                    const auto colon = key.find(':');
-                    if (colon != std::string::npos)
-                      key = phoenix::mission::trimCopy(key.substr(0, colon));
-                    if (phoenix::mission::lowerCopy(toWrite).find(
-                            phoenix::mission::lowerCopy(key)) == std::string::npos)
-                      toWrite = missing + "\n\n" + toWrite;
-                  }
-                  edited = currentFile.empty()
-                      ? toWrite
-                      : phoenix::mission::joinDeliverableText(currentFile,
-                                                              toWrite);
+                  std::string toWrite =
+                      phoenix::mission::stripRequirementBoilerplate(chunk);
+                  if (toWrite.empty()) toWrite = chunk;
+                  if (!sectionFocus.empty())
+                    edited = phoenix::mission::insertChapterProse(
+                        currentFile, sectionFocus, toWrite);
+                  else
+                    edited = currentFile.empty()
+                        ? toWrite
+                        : phoenix::mission::joinDeliverableText(currentFile,
+                                                                toWrite);
                   if (phoenix::mission::isZeroInformationGrowth(currentFile,
                                                                 edited) ||
                       phoenix::mission::looksLikeRewriteInstructionEcho(
@@ -1943,7 +3792,9 @@ public:
                     return std::string();
                   }
                 }
-                if (edited == currentFile) {
+                if (edited == currentFile ||
+                    (peerEvolveGoal && edited == peerEditBase)) {
+                  if (peerEvolveGoal) learnReply(chunk, -0.2f);
                   if (config_.httpLog)
                     std::cout << "[mission-deliberate] drop no-file-edit"
                               << std::endl;
@@ -1953,14 +3804,89 @@ public:
                   std::cout << "[mission-deliberate] file-edit "
                             << currentFile.size() << "->" << edited.size()
                             << std::endl;
-                phoenix::mission::workspaceExecute(
-                    workspaceRoot, scope,
-                    nlohmann::json{{"action", "write"},
-                                   {"path", deliverablePath},
-                                   {"content", edited}});
+                sectionDropStreak[scope] = 0;
+                nlohmann::json writeAct = {
+                    {"action", "write"},
+                    {"path", deliverablePath},
+                    {"content", edited}};
+                if (peerEvolveGoal) writeAct["allowShrink"] = true;
+                phoenix::mission::workspaceExecute(workspaceRoot, scope,
+                                                   writeAct);
                 /* Sync memory before optional CCM/emotion so a hang
                    there cannot hide the write from the next tick. */
                 syncDeliverableFromWorkspace();
+                phoenix::peer::PeerPushResult peerPush;
+                /* An unfinished draft has no return yet. Compiling it
+                   only teaches the weight table that a loop is wrong. */
+                bool algoReady = true;
+                if (selfModGoal) {
+                  algoReady = false;
+                  std::ofstream own("runtime_store/peers/" +
+                                    std::string(std::getenv("AI_INSTANCE_ID")
+                                                    ? std::getenv("AI_INSTANCE_ID")
+                                                    : "alpha") +
+                                    "/self_edit.diff",
+                                    std::ios::binary);
+                  own << edited;
+                } else if (codeMission) {
+                  const std::string fn =
+                      phoenix::peer::extractEvolve(goal, edited);
+                  algoReady = fn.find("return") != std::string::npos;
+                }
+                if (algoReady) try {
+                  peerPush = phoenix::peer::pushEvolveToPeer(goal, edited);
+                } catch (const std::exception &ex) {
+                  std::cout << "[peer-evolve] " << ex.what() << std::endl;
+                } catch (...) {
+                  std::cout << "[peer-evolve] failed" << std::endl;
+                }
+                if (codeMission &&
+                    peerPush.kind != phoenix::peer::PeerPushResult::Kind::Idle) {
+                  long long us = -1;
+                  if (peerPush.detail.rfind("OK ", 0) == 0) {
+                    try {
+                      us = std::stoll(peerPush.detail.substr(3));
+                    } catch (...) {
+                      us = -1;
+                    }
+                  }
+                  long long best = -1;
+                  const auto bestRd = phoenix::mission::workspaceExecute(
+                      workspaceRoot, scope,
+                      nlohmann::json{{"action", "read"}, {"path", "best_us.txt"}});
+                  if (bestRd.value("ok", false)) {
+                    try {
+                      best = std::stoll(bestRd.value("content", std::string()));
+                    } catch (...) {
+                      best = -1;
+                    }
+                  }
+                  std::string note = peerPush.detail;
+                  if (note.size() > 180) note.resize(180);
+                  if (best >= 0) note += "\nbest " + std::to_string(best);
+                  phoenix::mission::workspaceExecute(
+                      workspaceRoot, scope,
+                      nlohmann::json{{"action", "write"},
+                                     {"path", "measure.md"},
+                                     {"content", note}});
+                  if (us >= 0 && (best < 0 || us < best)) {
+                    phoenix::mission::workspaceExecute(
+                        workspaceRoot, scope,
+                        nlohmann::json{{"action", "write"},
+                                       {"path", "best_us.txt"},
+                                       {"content", std::to_string(us)}});
+                    learnReply(edited, 0.6f);
+                  } else if (us >= 0) {
+                    learnReply(edited, 0.15f);
+                  } else {
+                    learnReply(edited, -0.35f);
+                  }
+                } else if (peerPush.kind ==
+                           phoenix::peer::PeerPushResult::Kind::Rejected)
+                  learnReply(edited, -0.35f);
+                else if (peerPush.kind ==
+                         phoenix::peer::PeerPushResult::Kind::Loaded)
+                  learnReply(edited, 0.6f);
                 if (!stillDrafting) try {
                   phoenix::mission::depositMissionProgress(
                       phoenix::instance::ccmStorePath(),
@@ -1970,7 +3896,7 @@ public:
                       "mission:" + scope, goal, edited, chunk);
                 } catch (...) {
                 }
-                if (emotionSystem_ && !stillDrafting) {
+                if (emotionSystem_ && !stillDrafting && !peerEvolveGoal) {
                   try {
                     std::string msnId = scope;
                     const auto spE = msnId.find("/children/");
@@ -2050,12 +3976,16 @@ public:
       /* v8.x concurrent missions: 0 = advance ALL running missions each tick */
       loopCfg["maxMissionsPerTick"] = phoenix::cfgOr<int>("autonomyLoop.maxMissionsPerTick", 0);
       loopCfg["persistEveryTicks"] = phoenix::cfgOr<int>("autonomyLoop.persistEveryTicks", 5);
-      loopCfg["persistPath"] = phoenix::cfgOr<std::string>(
-          "autonomyLoop.persistPath", "runtime_store/autonomy_state.json");
+      loopCfg["persistPath"] = phoenix::resolveConfig<std::string>(
+          "autonomyLoop.persistPath",
+          std::string("runtime_store/autonomy_state.json"),
+          "AI_AUTONOMY_PERSIST");
       loopCfg["deliberateMaxTokens"] =
           phoenix::cfgOr<int>("mission.deliberateMaxTokens", 192);
       loopCfg["childDeliberateMaxTokens"] =
           phoenix::cfgOr<int>("mission.childDeliberateMaxTokens", 96);
+      loopCfg["stallWarnSec"] =
+          phoenix::cfgOr<int>("autonomyLoop.stallWarnSec", 1800);
       cognitionManager_.configureAutonomyLoop(loopCfg);
       if (phoenix::cfgOr<bool>("autonomyLoop.enabled", false)) {
         cognitionManager_.startAutonomyLoop();
@@ -2226,7 +4156,8 @@ public:
                   quoteArg(serverExe.string()) + " -m " +
                   quoteArg(modelAbs.string()) +
                   " --host 127.0.0.1 --port " + std::to_string(moePort) +
-                  " --ctx-size 4096 --parallel 1 --threads 6 --n-gpu-layers 0";
+                  " --ctx-size 4096 --parallel 1 --threads 6 --n-gpu-layers 0"
+                  " --batch-size 4096 --ubatch-size 512";
               std::string envBlock;
               if (LPCH env = GetEnvironmentStringsA()) {
                 for (LPCH p = env; *p;) {
@@ -3150,13 +5081,20 @@ private:
       req->setPath(path);
       req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
       req->setBody(body.dump());
-      std::promise<std::pair<drogon::ReqResult, drogon::HttpResponsePtr>> pr;
-      auto fut = pr.get_future();
+      /* The promise must outlive a timed-out wait: the client callback runs
+         on its own thread and used to write through a dangling reference
+         after the local promise was destroyed on timeout (the queue/crash
+         seen when several carriers hit a slow coder).  A shared_ptr keeps it
+         alive for the callback; the future is intentionally dropped on
+         timeout. */
+      auto pr = std::make_shared<
+          std::promise<std::pair<drogon::ReqResult, drogon::HttpResponsePtr>>>();
+      auto fut = pr->get_future();
       client->sendRequest(
-          req, [&pr](drogon::ReqResult result,
-                     const drogon::HttpResponsePtr &resp) {
+          req, [pr](drogon::ReqResult result,
+                    const drogon::HttpResponsePtr &resp) {
             try {
-              pr.set_value({result, resp});
+              pr->set_value({result, resp});
             } catch (...) {
             }
           });
@@ -3400,3 +5338,4 @@ private:
                                const std::string &graphContext, int maxTokens,
                                const json &inferenceOptions = json::object()) {
     json out = json::object();
+

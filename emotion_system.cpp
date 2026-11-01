@@ -597,6 +597,10 @@ void EmotionSystem::updateVocabFromResponse(
     if (!impl_->vocabTable) return;
     impl_->vocabTable->updateFromResponse(sessionId, promptTokens, replyTokens,
                                           reward, turnNumber);
+    try {
+        impl_->vocabTable->save();
+    } catch (...) {
+    }
 }
 
 // Plugin manager implementation
@@ -990,6 +994,7 @@ bool EmotionVocabWeightTable::load() {
 bool EmotionVocabWeightTable::save() const {
     namespace fs = std::filesystem;
     try {
+        std::lock_guard<std::mutex> lock(mu_);
         fs::create_directories(fs::path(cfg_.vocabTablePath).parent_path());
         std::ofstream f(cfg_.vocabTablePath);
         if (!f.good()) return false;

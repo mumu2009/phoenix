@@ -129,11 +129,9 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
-  const [chatProvider, setChatProvider] = useState(() => loadJson('phoenix.chatProvider', 'core'));
   const [providerStats, setProviderStats] = useState(() =>
     loadJson('phoenix.providerStats', {
-      core: { count: 0, totalLatency: 0 },
-      openclaw: { count: 0, totalLatency: 0 }
+      core: { count: 0, totalLatency: 0 }
     })
   );
   const [imageInfo, setImageInfo] = useState(null);
@@ -170,14 +168,12 @@ function App() {
     saveJson('phoenix.activePage', activePage);
   }, [activePage]);
   useEffect(() => {
-    saveJson('phoenix.chatProvider', chatProvider);
-  }, [chatProvider]);
-  useEffect(() => {
     saveJson('phoenix.providerStats', providerStats);
   }, [providerStats]);
 
   const trackProviderStat = useCallback((provider, latency) => {
-    const key = String(provider || 'core').toLowerCase() === 'openclaw' ? 'openclaw' : 'core';
+    const key = 'core';
+    void provider;
     const n = Number(latency);
     setProviderStats((prev) => {
       const current = prev?.[key] || { count: 0, totalLatency: 0 };
@@ -316,7 +312,7 @@ function App() {
     });
     setMessage('');
     try {
-      const r = await api.chat(text, sid, { ...(imagePayload || {}), provider: chatProvider });
+      const r = await api.chat(text, sid, { ...(imagePayload || {}) });
       const disconnected = r?.connected === false || r?.error === 'disconnected' || r?.result?.error === 'disconnected';
       if (disconnected) {
         setStatus({ ok: false, error: 'disconnected' });
@@ -329,27 +325,7 @@ function App() {
         return;
       }
       setStatus({ ok: true });
-      const isWeakReply = (textOut) => {
-        const t = String(textOut || '').trim();
-        if (!t) return true;
-        const low = t.toLowerCase();
-        if (low === 'unk' || low === '<unk>') return true;
-        const parts = low.split(/\s+/g).filter(Boolean);
-        if (!parts.length) return true;
-        const unkCount = parts.filter((x) => x === 'unk' || x === '<unk>').length;
-        return unkCount / parts.length >= 0.35;
-      };
-      let reply = r?.result?.reply ?? '';
-      if (isWeakReply(reply) && chatProvider !== 'openclaw') {
-        try {
-          const fallback = await api.chat(text, sid, { provider: 'openclaw' });
-          const fallbackReply = fallback?.result?.reply ?? '';
-          if (!isWeakReply(fallbackReply) && fallbackReply) {
-            reply = fallbackReply;
-          }
-        } catch (_e) {
-        }
-      }
+      const reply = r?.result?.reply ?? '';
       if (!reply) {
         return;
       }
@@ -359,7 +335,7 @@ function App() {
         text: reply,
         ts: Date.now(),
         meta: {
-          provider: r?.provider || chatProvider,
+          provider: r?.provider || 'core',
           latency: r?.result?.latency,
           seeds: r?.result?.seeds,
           memes: r?.result?.memes,
@@ -368,7 +344,7 @@ function App() {
           imageEmbeddingCount: r?.result?.imageEmbeddingCount
         }
       });
-      trackProviderStat(r?.provider || chatProvider, r?.result?.latency);
+      trackProviderStat(r?.provider || 'core', r?.result?.latency);
       if (ttsEnabled && reply) {
         try {
           window.speechSynthesis.cancel();
@@ -388,7 +364,7 @@ function App() {
       setBusy(false);
       setTimeout(() => inputRef.current?.focus(), 0);
     }
-  }, [message, busy, imageInfo, imagePreview, chatProvider, ttsEnabled, ensureSession, appendMessage, trackProviderStat]);
+  }, [message, busy, imageInfo, imagePreview, ttsEnabled, ensureSession, appendMessage, trackProviderStat]);
 
   const onToggleVoice = useCallback(() => {
     if (!voiceReady || !recognitionRef.current) return;
@@ -591,12 +567,8 @@ function App() {
             <header className="topbar">
               <div className="topbar-title">{activeSession ? activeSession.title : '请选择或新建会话'}</div>
               <div className="topbar-actions">
-                <select className="provider-select" value={chatProvider} onChange={(e) => setChatProvider(e.target.value)}>
-                  <option value="core">core</option>
-                  <option value="openclaw">openclaw</option>
-                </select>
                 <span className="provider-summary">
-                  core={providerStats?.core?.count || 0} / openclaw={providerStats?.openclaw?.count || 0}
+                  core={providerStats?.core?.count || 0}
                 </span>
                 <button
                   className="btn btn-ghost"
@@ -739,8 +711,6 @@ function App() {
             <section className="cfg-wrap">
               <ConfigPanel
                 onError={(msg) => setError(msg)}
-                chatProvider={chatProvider}
-                onChatProviderChange={setChatProvider}
                 providerStats={providerStats}
               />
               {error ? <div className="error">{error}</div> : null}

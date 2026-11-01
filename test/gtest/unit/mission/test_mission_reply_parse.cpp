@@ -649,6 +649,31 @@ TEST(MissionReplyParse, PinAndSeedAreNotAssignmentBrief) {
   EXPECT_EQ(firstMissingGoalChapter(goal, ""), chs.front());
   EXPECT_NE(firstMissingGoalChapter(goal, chs.front()).find("Chapter 2"),
             std::string::npos);
+  EXPECT_EQ(firstMissingGoalChapter(goal, "Chapter 10: later\n"), chs.front());
+  const std::string thin =
+      std::string(chs.front()) + "\n\nThe station must also adapt.\n";
+  EXPECT_NE(firstUnderfilledGoalChapter(goal, thin).find("Chapter 1"),
+            std::string::npos);
+  const std::string filled =
+      std::string(chs.front()) + "\n\n" + std::string(600, 'A') +
+      "rchitecture of the onboard executive keeps a delay buffer and a "
+      "local planner.\n";
+  EXPECT_NE(firstUnderfilledGoalChapter(goal, filled).find("Chapter 2"),
+            std::string::npos);
+  const std::string inserted = insertChapterProse(
+      thin, chs.front(),
+      "The onboard executive keeps a delay buffer beside the planner.");
+  EXPECT_NE(inserted.find("delay buffer"), std::string::npos);
+  EXPECT_EQ(inserted.find("Chapter 2"), std::string::npos);
+  EXPECT_TRUE(lineIsRequirementBoilerplate(
+      "The station must also adapt to dust storms."));
+  EXPECT_TRUE(lineIsRequirementBoilerplate(
+      "4. To develop and demonstrate the onboard planner."));
+  EXPECT_FALSE(lineIsRequirementBoilerplate(
+      "The onboard executive keeps a delay buffer."));
+  const std::string tip = chapterContinuationTip(chs.front(), thin);
+  EXPECT_NE(tip.find("relies on "), std::string::npos);
+  EXPECT_EQ(tip.find("must also"), std::string::npos);
   const std::string restated =
       "The system shall autonomously plan and schedule scientific "
       "experiments and observations. The system shall monitor and control "

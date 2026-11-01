@@ -1,0 +1,22 @@
+{
+  "research": {
+    "name": "force_conformity",
+    "profile": "force_conformity",
+    "description": "Goal 2 research profile: deterministic force driver. The gateway deliberator returns a fixed patch for carrier i when i < k (schedule per loop round) and local prose otherwise; no model is called, so the generation frequency is exactly k/N. Bundles the parameter combination of the FORCE-EXPERIMENT run (force_det7).",
+    "force": {
+      "enabled": true,
+      "schedulePath": "runtime_store/force_schedule.txt",
+      "population": 32,
+      "schedule": [12, 14, 15]
+    },
+    "deterministicCarriers": true,
+    "routerOrderSequence": [false]
+  },
+  "mission": {
+    "aliasProbe": false,
+    "maxReplicas": 0
+  },
+  "autonomyLoop": {
+    "intervalSec": 60
+  }
+}

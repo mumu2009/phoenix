@@ -23,12 +23,14 @@
 */
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <random>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include <nlohmann/json.hpp>
 
 #include "pressure_expr.hpp"
@@ -69,6 +71,9 @@ struct Mission {
   MissionState state{MissionState::Idle};
   uint64_t startMs{0};
   uint64_t endMs{0};
+  /* Sum of this mission's own deliberation times (excluding queue/wait).
+     Used by the (1+lambda) selection when >0; 0 = legacy wall clock. */
+  uint64_t workMs{0};
 
   /** Elapsed seconds since start (0 if not started or clock skew). */
   double elapsedSec(uint64_t nowMs) const {
@@ -138,6 +143,14 @@ struct Mission {
 struct MissionGenome {
   subconscious::SubconsciousProfile profile;
   float learningRate{0.05f};
+  /* Heritable per-tick generation budget.  The mission worker asks the
+     language model for at most this many tokens per tick; the wall clock
+     of a fixed deliverable therefore depends on it (more tokens per tick
+     means fewer ticks and less repeated prompt prefill).  It is mutated
+     in log space so the step is multiplicative, and clamped to
+     [32, 1024].  Before 2026-10-26 the genome changed only the value
+     learner's step size, which no generation ever read. */
+  float tokensPerTick{256.0f};
 
   /** Gaussian mutation of all heritable scalars, rate = sigma (clamped). */
   MissionGenome mutate(float rate, std::mt19937 &rng) const;
@@ -153,8 +166,10 @@ struct MissionGenome {
  * decides (through its planner) WHEN to replicate.  There is no fixed trigger
  * and no hand-off - before the goal completes the pressure only grows and the
  * instance does not end; the child is simply another instance working the
- * same goal with a mutated genome.  Mutation provides diversity only; there
- * is no fitness comparison and no culling (not natural selection).
+ * same goal with a mutated genome.  When evolution is enabled and the parent
+ * has completed, the finished genome with the strictly shorter completion
+ * time becomes the next parent.  A tie keeps the earlier genome.  Children
+ * are not removed.  Emergency stop is outside this object.
  */
 struct MissionChild {
   std::string id;        /*!< "child-<generation>-<n>" */
@@ -174,8 +189,88 @@ struct MissionChild {
   /* v8.3 self-verdict: the box itself declared its sub-task done (the parent
      still merges/verifies; a done box is skipped by the loop). */
   bool done{false};
+  /* Elapsed ms from birth to done. 0 until the box finishes. Fitness is
+     the negative of this time: lower completion is kept. */
+  uint64_t completionMs{0};
+  /* Own deliberation time (sum of this box's ticks), excluding the parent
+     tick/queue wait.  >0 selects on work time; 0 = legacy birth clock. */
+  uint64_t workMs{0};
   nlohmann::json toJson() const;
 };
+
+/* (1+lambda) parent retention. Index 0 is the parent. A later index is
+   kept only when its completion time is strictly smaller. A tie keeps
+   the earlier index, so the parent stays unless a child is faster.
+   Empty input returns -1. */
+inline int selectOnePlusLambda(const std::vector<double> &completionMs) {
+  if (completionMs.empty()) return -1;
+  int best = 0;
+  for (int i = 1; i < static_cast<int>(completionMs.size()); ++i) {
+    if (completionMs[static_cast<size_t>(i)] < completionMs[static_cast<size_t>(best)])
+      best = i;
+  }
+  return best;
+}
+
+/* Phenotype of learningRate on a deterministic chain. State `length-1`
+   is a fixed target of 1. Each episode sweeps backward and applies
+   v <- v + alpha * (target - v). Returns how many episodes pass before
+   the start state reaches 0.5. alpha <= 0 never moves and returns the
+   cap 100000. A larger step inside (0, 1] reaches the criterion sooner.
+   This is not a fitted curve. */
+inline int episodesToCriterion(float learningRate, int length = 8) {
+  if (length < 2) return 0;
+  if (!(learningRate > 0.0f)) return 100000;
+  std::vector<float> value(static_cast<size_t>(length - 1), 0.0f);
+  for (int episode = 1; episode <= 100000; ++episode) {
+    for (int i = length - 2; i >= 0; --i) {
+      const float target = (i + 1 == length - 1)
+                               ? 1.0f
+                               : value[static_cast<size_t>(i + 1)];
+      float &cell = value[static_cast<size_t>(i)];
+      cell += learningRate * (target - cell);
+    }
+    if (value[0] >= 0.5f) return episode;
+  }
+  return 100000;
+}
+
+inline constexpr float kGenomeTokensFloor = 32.0f;
+inline constexpr float kGenomeTokensCeil = 1024.0f;
+
+inline float clampGenomeTokens(float v) {
+  if (!(v > 0.0f)) return 256.0f;
+  if (v < kGenomeTokensFloor) return kGenomeTokensFloor;
+  if (v > kGenomeTokensCeil) return kGenomeTokensCeil;
+  return v;
+}
+
+/* One shared policy for the genome's per-tick generation budget.
+
+   The same function is called by the live gateway worker (111) and by
+   the real-model wall-clock probe, so the probe measures the policy the
+   running program executes rather than a copy of it.
+
+   safetyCap is the caller's context-derived ceiling (the worker still
+   has to leave room for the prompt).  stillDrafting keeps the existing
+   short-draft cap.  There is deliberately no target-length term: the
+   worker does not know how many characters remain and a budget that
+   overshoots is charged to the wall clock, which is exactly the
+   trade-off the evolution experiment measures. */
+inline int missionTickBudget(float tokensPerTick, int safetyCap,
+                             bool stillDrafting, int draftCap) {
+  int want = static_cast<int>(std::lround(clampGenomeTokens(tokensPerTick)));
+  if (want < 16) want = 16;
+  int cap = safetyCap > 0 ? safetyCap : want;
+  if (cap < 16) cap = 16;
+  int budget = std::min(want, cap);
+  if (stillDrafting) {
+    const int draft = draftCap > 0 ? draftCap : 32;
+    budget = std::min(budget, draft);
+  }
+  if (budget < 16) budget = 16;
+  return budget;
+}
 
 /** @brief Lifecycle state machine + reproduction bookkeeping. */
 class MissionLifecycle {
@@ -185,6 +280,7 @@ class MissionLifecycle {
   void assign(const Mission &m);
   void assign(const Mission &m, const MissionGenome &genome); /*!< bind heredity */
   Mission mission() const;   /*!< snapshot copy (mutex-guarded). */
+  MissionGenome genome() const;
   bool active() const;       /*!< true while Running (mutex-guarded). */
   float pressureNow() const;
   /** v8.0 mission worker: append the LLM-produced work product (capped at
@@ -217,8 +313,14 @@ class MissionLifecycle {
   void setMaxReplicas(size_t n);
   std::vector<MissionChild> children() const; /*!< successors (observability) */
   /* v8.3: the box declared its sub-task complete (self-verdict).  Returns
-     false when the id is unknown. */
-  bool markChildDone(const std::string &childId);
+     false when the id is unknown.  workMs>0 records the box's own
+     deliberation time; 0 uses the accumulated noteChildWorkMs or, when
+     that is also 0, the birth-based elapsed time (legacy). */
+  bool markChildDone(const std::string &childId, uint64_t workMs = 0);
+  /* Fair-selection clocks: the work actually spent by the parent's own
+     ticks and by each box's ticks, excluding queue/wait time. */
+  void noteWorkMs(uint64_t ms);
+  void noteChildWorkMs(const std::string &childId, uint64_t ms);
 
   /* ===================== v8.x C3 autonomous evolution =====================
    * Historical selection loop (NOT online culling): every completed mission
@@ -242,6 +344,9 @@ class MissionLifecycle {
 
   void markComplete();
   void markFailed();
+  /* Run the same retention markComplete uses, after a restored record.
+     Does nothing while evolution is off or the parent is not completed. */
+  void retainFinishedGenome();
 
   /** Amend the goal mid-flight (human interjection): keeps Running and the
       original start time, so pressure keeps growing - the mission is
@@ -257,6 +362,10 @@ class MissionLifecycle {
 
  private:
   nlohmann::json statsLocked() const; /*!< stats body without locking */
+  /* When evolution is enabled and the parent mission has completed,
+     replace this genome with the finished parent or child that has the
+     strictly lowest completion time. */
+  void adoptEliteLocked();
   mutable std::mutex mu_;
   Mission mission_;
   MissionGenome genome_;      /*!< heredity of THIS instance */

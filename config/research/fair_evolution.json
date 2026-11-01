@@ -1,0 +1,21 @@
+{
+  "research": {
+    "name": "fair_evolution",
+    "profile": "fair_evolution",
+    "description": "Goal 1 research profile: fair (1+lambda) genome search on the plain/temp0 Granite path, fresh child tasks, auto child verdict by letter count. Bundles exactly the parameter combination that was applied by hand for fair_evo64_current / g64x5 runs.",
+    "deterministicCarriers": false,
+    "force": { "enabled": false },
+    "routerOrderSequence": [false]
+  },
+  "mission": {
+    "temperature": 0.0,
+    "plainTextOnly": true,
+    "autoChildDoneChars": 1200,
+    "childFreshTask": true,
+    "aliasProbe": false,
+    "maxReplicas": 4
+  },
+  "autonomyLoop": {
+    "intervalSec": 10
+  }
+}

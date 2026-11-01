@@ -8,6 +8,8 @@
 #include "rdk_x5_bpu.hpp"
 #include "semantic_unit.hpp"
 
+#include <cstdio>
+
 #ifndef PHOENIX_EDGE_SPEECH_ENABLED
 #define PHOENIX_EDGE_SPEECH_ENABLED 1
 #endif
@@ -29,6 +31,8 @@ namespace phoenix {
 namespace io {
 
 namespace {
+
+static bool onnxRuntimeAvailable();
 
 constexpr int kFixedInputSamples = 16000;
 constexpr int kEncoderOutputDim = 128;
@@ -1243,7 +1247,7 @@ class AudioLocalOnnxModel : public AudioModel {
                           {"sampleRate", cfg_.sampleRate}, {"targetDim", targetDim_},
                           {"conceptDim", conceptDim_}, {"samples", samples_},
                           {"modelPath", modelPath_}, {"decoderPath", decoderPath_},
-                          {"ready", modelReady},
+                          {"ready", modelReady && onnxRuntimeAvailable()},
                           {"decoderReady", decoderReady},
                           {"error", lastError_}};
   }
@@ -1401,6 +1405,26 @@ static bool bpuModelAvailable(const std::string &variantId) {
          std::filesystem::is_regular_file(additiveBpuDir / "model_decoder.bin", ec);
 }
 
+/* The ONNX model's runner needs the onnxruntime module in the spawned
+   python; a stale .onnx alone is not a usable model.  Probe once so the
+   factory falls to the deterministic CPU fallback instead of an ONNX
+   encode that fails at runtime. */
+static bool onnxRuntimeAvailable() {
+#ifdef _WIN32
+  std::string py = pythonExecutable();
+  if (py.empty() || py.find_first_of(" \t") != std::string::npos) return false;
+  std::string probe = py + " -c \"import onnxruntime\" 2>NUL";
+  FILE *p = _popen(probe.c_str(), "r");
+  if (!p) return false;
+  char buf[64];
+  bool ok = (fgets(buf, sizeof(buf), p) != nullptr);
+  _pclose(p);
+  return ok;
+#else
+  return true;
+#endif
+}
+
 static phoenix::deployment::LocalBackendType detectLocalBackend(const std::string &variantId) {
   using phoenix::deployment::LocalBackendType;
   std::error_code ec;
@@ -1465,14 +1489,15 @@ std::unique_ptr<AudioModel> createAudioModel(
     if (hbdnn->status().value("ready", false)) return hbdnn;
 #endif
     // Graceful fallback: if the BPU runtime or compiled .bin is unavailable,
-    // use the local ONNX model so the deployment is still feasible.
+    // use the local ONNX model; if that is missing too, the deterministic CPU
+    // fallback keeps the deployment feasible without a model (the factory
+    // contract: the CPU fallback is the last resort, not Unavailable).
     std::error_code ec;
     auto additiveDir = std::filesystem::path("runtime_store") / "models" / "additive_jepa" / speechIjepaDir(variantId);
     if (std::filesystem::is_regular_file(additiveDir / "best.onnx", ec)) {
       return std::make_unique<AudioLocalOnnxModel>(*v, targetDim, false);
     }
-    return std::make_unique<AudioUnavailableModel>(
-        *v, targetDim, "local BPU audio backend is unavailable and no ONNX fallback found");
+    return std::make_unique<AudioFallbackModel>(*v, targetDim);
   }
 
   if (backend == phoenix::deployment::LocalBackendType::Cpu ||

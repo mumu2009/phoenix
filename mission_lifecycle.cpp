@@ -59,7 +59,8 @@ nlohmann::json Mission::toJson() const {
           {"deliverable", deliverable},
           {"state", static_cast<int>(state)},
           {"startMs", startMs},
-          {"endMs", endMs}};
+          {"endMs", endMs},
+          {"workMs", workMs}};
 }
 
 Mission Mission::fromJson(const nlohmann::json &j) {
@@ -95,6 +96,7 @@ Mission Mission::fromJson(const nlohmann::json &j) {
   }
   if (j.contains("startMs") && j["startMs"].is_number()) m.startMs = j["startMs"].get<uint64_t>();
   if (j.contains("endMs") && j["endMs"].is_number()) m.endMs = j["endMs"].get<uint64_t>();
+  if (j.contains("workMs") && j["workMs"].is_number()) m.workMs = j["workMs"].get<uint64_t>();
   return m;
 }
 
@@ -122,11 +124,29 @@ MissionGenome MissionGenome::mutate(float rate, std::mt19937 &rng) const {
   }
   // Learning rate of the value learner.
   g.learningRate = mutateScalar(g.learningRate, rate * 0.05f, 0.001f, 0.5f, rng);
+  // Per-tick generation budget: multiplicative (log-space) mutation so a
+  // small rate still explores the [32, 1024] range. One rate unit moves
+  // one natural log of the whole admissible range:
+  //   sigma = rate * ln(ceil / floor) = rate * ln(32) ~= 3.47 rate.
+  // The draw is taken from a COPY of the rng so the pre-registered 9.11
+  // sequence (which predates this field) consumes exactly the same draws
+  // and reproduces its recorded numbers. The copy still gives a fresh
+  // pseudo-random step for every child.
+  constexpr float kTokenLogRange = 3.4657359f; /* ln(1024/32) */
+  if (rate > 0.0f) {
+    std::mt19937 peek = rng;
+    std::normal_distribution<float> step(0.0f, rate * kTokenLogRange);
+    g.tokensPerTick = clampGenomeTokens(g.tokensPerTick * std::exp(step(peek)));
+  } else {
+    g.tokensPerTick = clampGenomeTokens(g.tokensPerTick);
+  }
   return g;
 }
 
 nlohmann::json MissionGenome::toJson() const {
-  return {{"profile", profile.toJson()}, {"learningRate", learningRate}};
+  return {{"profile", profile.toJson()},
+          {"learningRate", learningRate},
+          {"tokensPerTick", tokensPerTick}};
 }
 
 MissionGenome MissionGenome::fromJson(const nlohmann::json &j) {
@@ -135,6 +155,9 @@ MissionGenome MissionGenome::fromJson(const nlohmann::json &j) {
   if (j.contains("profile")) g.profile = subconscious::SubconsciousProfile::fromJson(j["profile"]);
   if (j.contains("learningRate") && j["learningRate"].is_number()) {
     g.learningRate = j["learningRate"].get<float>();
+  }
+  if (j.contains("tokensPerTick") && j["tokensPerTick"].is_number()) {
+    g.tokensPerTick = clampGenomeTokens(j["tokensPerTick"].get<float>());
   }
   return g;
 }
@@ -149,7 +172,9 @@ nlohmann::json MissionChild::toJson() const {
           {"depth", depth},
           {"bornMs", bornMs},
           {"generation", generation},
-          {"done", done}};
+          {"done", done},
+          {"completionMs", completionMs},
+          {"workMs", workMs}};
 }
 
 MissionLifecycle::MissionLifecycle()
@@ -176,6 +201,11 @@ void MissionLifecycle::assign(const Mission &m, const MissionGenome &genome) {
 Mission MissionLifecycle::mission() const {
   std::lock_guard<std::mutex> lock(mu_);
   return mission_;
+}
+
+MissionGenome MissionLifecycle::genome() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return genome_;
 }
 
 bool MissionLifecycle::active() const {
@@ -223,6 +253,7 @@ void MissionLifecycle::markComplete() {
       1.0, static_cast<double>(mission_.deliverable.size()) / 5000.0);
   lineage_.push_back({genomeFingerprint(genome_), elapsed, coverage});
   if (lineage_.size() > 1000) lineage_.erase(lineage_.begin());
+  adoptEliteLocked();
 }
 
 void MissionLifecycle::markFailed() {
@@ -230,6 +261,11 @@ void MissionLifecycle::markFailed() {
   if (mission_.state != MissionState::Running) return;
   mission_.state = MissionState::Failed;
   mission_.endMs = sysNowMs();
+}
+
+void MissionLifecycle::retainFinishedGenome() {
+  std::lock_guard<std::mutex> lock(mu_);
+  adoptEliteLocked();
 }
 
 bool MissionLifecycle::amendGoal(const std::string &newGoal) {
@@ -341,15 +377,38 @@ std::vector<MissionChild> MissionLifecycle::children() const {
   return children_;
 }
 
-bool MissionLifecycle::markChildDone(const std::string &childId) {
+bool MissionLifecycle::markChildDone(const std::string &childId,
+                                     uint64_t workMs) {
   std::lock_guard<std::mutex> lock(mu_);
   for (auto &box : children_) {
     if (box.id == childId) {
       box.done = true;
+      const uint64_t now = sysNowMs();
+      if (workMs > 0) box.workMs = workMs;
+      box.completionMs = box.workMs > 0
+                             ? box.workMs
+                             : (now >= box.bornMs ? now - box.bornMs : 0);
+      adoptEliteLocked();
       return true;
     }
   }
   return false;
+}
+
+void MissionLifecycle::noteWorkMs(uint64_t ms) {
+  std::lock_guard<std::mutex> lock(mu_);
+  mission_.workMs += ms;
+}
+
+void MissionLifecycle::noteChildWorkMs(const std::string &childId,
+                                       uint64_t ms) {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (auto &box : children_) {
+    if (box.id == childId) {
+      box.workMs += ms;
+      return;
+    }
+  }
 }
 
 void MissionLifecycle::recordLineage(uint64_t completionMs, double coverage) {
@@ -414,12 +473,37 @@ float MissionLifecycle::effectiveMutationRate(float baseRate) const {
   return effectiveMutationRateLocked(baseRate);
 }
 
+void MissionLifecycle::adoptEliteLocked() {
+  if (!evolutionEnabled_) return;
+  if (mission_.state != MissionState::Completed) return;
+  if (mission_.endMs < mission_.startMs) return;
+  /* Fair selection: prefer measured work time (own deliberation only,
+     excluding queue/wait).  When the parent has no measured work (legacy
+     callers), fall back to the wall clock for it. */
+  const bool parentWork = mission_.workMs > 0;
+  double best = parentWork
+                    ? static_cast<double>(mission_.workMs)
+                    : static_cast<double>(mission_.endMs - mission_.startMs);
+  const MissionGenome *bestGenome = &genome_;
+  for (const auto &box : children_) {
+    if (!box.done) continue;
+    const double t = box.workMs > 0
+                         ? static_cast<double>(box.workMs)
+                         : static_cast<double>(box.completionMs);
+    if (t < best) {
+      best = t;
+      bestGenome = &box.genome;
+    }
+  }
+  genome_ = *bestGenome;
+}
+
 nlohmann::json MissionLifecycle::statsLocked() const {
-  /* completionTimeMs is the SELECTION signal for the human supervisor: the
-     model exists to serve human needs, so the decision to spawn a mutated
-     retry (or to keep a genome) is made OUTSIDE this process, from this
-     number.  There is deliberately no in-process fitness field, no elite
-     retention and no autonomous cross-generation loop. */
+  /* completionTimeMs is fitness: lower is better. When evolution is
+     enabled, adoptEliteLocked keeps the finished parent or child with the
+     strictly smallest time. maxReplicas still caps children. Emergency
+     stop lives outside this object. When evolution is disabled the genome
+     is left as it is. */
   const bool terminal = (mission_.state == MissionState::Completed ||
                          mission_.state == MissionState::Failed);
   const int64_t completionTimeMs =
@@ -435,6 +519,7 @@ nlohmann::json MissionLifecycle::statsLocked() const {
           {"pressure", mission_.pressure(sysNowMs())},
           {"completionTimeMs", completionTimeMs},
           {"maxReplicas", maxReplicas_},
+          {"genome", genome_.toJson()},
           {"children", childArr}};
 }
 
@@ -473,6 +558,8 @@ void MissionLifecycle::fromJson(const nlohmann::json &j) {
       rec.model = ch.value("model", std::string());
       rec.depth = ch.value("depth", 0);
       rec.done = ch.value("done", false);
+      rec.completionMs = ch.value("completionMs", 0ull);
+      rec.workMs = ch.value("workMs", 0ull);
       rec.bornMs = ch.value("bornMs", 0ull);
       rec.generation = ch.value("generation", 0);
       if (!rec.id.empty()) children_.push_back(std::move(rec));

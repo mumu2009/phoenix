@@ -1,6 +1,7 @@
 /* autonomy_stack.cpp - Autonomy stack implementation */
 
 #include "autonomy_stack.hpp"
+#include "replica_trace.hpp"
 #include "inference_abort.hpp"
 #include "mission_reply_parse.hpp"
 #include "mission_workspace.hpp"
@@ -1023,9 +1024,10 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
         (spec.addonType == "script" || spec.name == "script")) {
         const json ctx = context.is_object() ? context : json::object();
         const std::string mid = ctx.value("missionId", std::string());
-        const std::string root = phoenix::cfgOr<std::string>(
+        const std::string root = phoenix::resolveConfig<std::string>(
             "mission.workspaceDir",
-            std::string("./runtime_store/mission_workspace"));
+            std::string("./runtime_store/mission_workspace"),
+            "AI_MISSION_WORKSPACE");
         std::string path = ctx.value("path", std::string());
         if (path.empty())
             path = ctx.value("userPrompt", std::string());
@@ -1773,9 +1775,24 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
             }
             /* Self-evolution stays inside this MemoryScope.  A Helios
                observeRewarded must not retune the ops / chat forward model. */
+            double stepAlpha = agiAlpha_;
+            if (ctxTag.rfind("mission:", 0) == 0) {
+                std::string missionId = ctxTag.substr(8);
+                const auto slash = missionId.find('/');
+                if (slash != std::string::npos)
+                    missionId = missionId.substr(0, slash);
+                auto missionIt = missions_.find(missionId);
+                if (missionIt != missions_.end() &&
+                    missionIt->second.evolutionEnabled()) {
+                    stepAlpha = std::clamp(
+                        static_cast<double>(
+                            missionIt->second.genome().learningRate),
+                        0.001, 0.5);
+                }
+            }
             const double agiSurprise = scopeAgi.observeRewarded(
                 scopeLatent, aPrev, zNow, static_cast<double>(bh.netUtility),
-                0.01f, agiAlpha_, agiGamma_);
+                0.01f, stepAlpha, agiGamma_);
             /* Metacognitive loop: the forward-model prediction error becomes a
                Novelty primal sensation, so Curiosity/Exploration receive a real
                epistemic signal instead of a hard-coded match. */
@@ -2142,6 +2159,23 @@ json CognitionAutonomyManager::importState(const json &state) {
     if (state.contains("missionGenome") && state["missionGenome"].is_object()) {
         missionGenome_ = phoenix::mission::MissionGenome::fromJson(state["missionGenome"]);
     }
+    /* Restored records: apply the same retention markComplete uses.  A
+       mission that was already completed when the process stopped must
+       still adopt the strictly faster finished child, and the manager's
+       genome/learning rate must follow it.  Without this the restored
+       mission kept evolutionEnabled=false and the recorded elite was
+       never adopted. */
+    if (missionEvolutionEnabled_ && !missions_.empty()) {
+        for (auto &kv : missions_) {
+            kv.second.setEvolutionEnabled(true);
+            kv.second.retainFinishedGenome();
+            if (kv.first == defaultMissionId_) {
+                missionGenome_ = kv.second.genome();
+                agiAlpha_ = std::clamp(
+                    static_cast<double>(missionGenome_.learningRate), 0.001, 0.5);
+            }
+        }
+    }
     if (state.contains("goals") && state["goals"].is_array()) {
         goals_.clear();
         for (const auto &g : state["goals"])
@@ -2229,6 +2263,32 @@ float CognitionAutonomyManager::missionPressureFor(const std::string &missionId)
     std::lock_guard<std::mutex> lock(mu_);
     phoenix::mission::MissionLifecycle *msn = missionByIdLocked(missionId);
     return msn ? msn->pressureNow() : 0.0f;
+}
+
+/* scope is "<missionId>" for the root worker or
+   "<missionId>/children/<childId>" for a helper box.  The box's own
+   genome is returned, which is what makes a child's heritable per-tick
+   budget take effect before it is ever selected as a parent. */
+json CognitionAutonomyManager::missionGenomeFor(const std::string &scope) {
+    std::string id = scope;
+    std::string child;
+    const auto slash = id.find("/children/");
+    if (slash != std::string::npos) {
+        child = id.substr(slash + 10);
+        id = id.substr(0, slash);
+    }
+    if (!child.empty()) {
+        const auto end = child.find('/');
+        if (end != std::string::npos) child = child.substr(0, end);
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    phoenix::mission::MissionLifecycle *msn = missionByIdLocked(id);
+    if (!msn) return json::object();
+    if (child.empty()) return msn->genome().toJson();
+    for (const auto &box : msn->children()) {
+        if (box.id == child) return box.genome.toJson();
+    }
+    return json::object();
 }
 
 json CognitionAutonomyManager::configureAgi(const json &payload) {
@@ -2509,6 +2569,53 @@ json CognitionAutonomyManager::summonTinyExpert(const json &payload) {
     return trained;
 }
 
+json CognitionAutonomyManager::noteFieldOpportunity(const std::string &text) {
+    json out = json{{"ok", true},
+                    {"unitLearn", false},
+                    {"liveTurns", false},
+                    {"expert", "skipped"}};
+    if (text.empty()) return out;
+    const std::string slice =
+        text.size() > 512 ? text.substr(text.size() - 512) : text;
+    bool runExpert = false;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (unitLearner_.enabled()) {
+            const auto learned = unitLearner_.learnEpisode(slice);
+            out["unitLearn"] = learned.value("ok", false);
+        }
+        if (selfMind_.enabled() && selfMind_.learnFromLiveTurns()) {
+            const auto seen = selfMind_.observeUtterance("self", slice);
+            out["liveTurns"] = seen.value("ok", false);
+        }
+        if (tinyExpert_.enabled() && lastFieldGoal_.empty()) {
+            lastFieldGoal_ = slice;
+            runExpert = true;
+        }
+    }
+    if (runExpert) {
+        auto trained = tinyExpert_.trainProjectTree(".");
+        if (!trained.value("ok", false)) {
+            trained = summonTinyExpert(
+                json{{"goal", slice}, {"name", std::string("tiny-expert")}});
+        }
+        out["expert"] = trained.value("ok", false)
+                            ? std::string("trained")
+                            : trained.value("reason", std::string("failed"));
+        out["expertMode"] = trained.value("mode", std::string());
+        out["expertAccuracy"] = trained.value("accuracy", 0.0);
+        out["expertParams"] = trained.value("paramCount", 0);
+        out["expertLmax"] = phoenix::memetic::eigenMasterLength(
+            trained.value("accuracy", 0.0), 2.0);
+        out["expertRegistered"] = trained.value("registered", false);
+    }
+    return out;
+}
+
+json CognitionAutonomyManager::projectPathScore(const std::string &text) const {
+    return tinyExpert_.scoreProjectText(text);
+}
+
 json CognitionAutonomyManager::assignMission(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
     const json &p = payload.is_null() ? json::object() : payload;
@@ -2604,8 +2711,10 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
        alongside the others without touching them. */
     defaultMissionId_ = m.id;
     try {
-        const std::string wsRoot = phoenix::cfgOr<std::string>(
-            "mission.workspaceDir", std::string("./runtime_store/mission_workspace"));
+        const std::string wsRoot = phoenix::resolveConfig<std::string>(
+            "mission.workspaceDir",
+            std::string("./runtime_store/mission_workspace"),
+            "AI_MISSION_WORKSPACE");
         phoenix::mission::workspaceResetScope(wsRoot, m.id);
         phoenix::mission::workspaceCacheClearScope(m.id);
     } catch (...) {
@@ -2617,6 +2726,23 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
     it->second.setMaxReplicaDepth(missionMaxReplicaDepth_);
     it->second.setEvolutionEnabled(missionEvolutionEnabled_);
     it->second.assign(m, missionGenome_);
+    /* Optional parent-scope model route (same registry the helper boxes
+       use).  A mission assigned with model=granite_moe_e0 runs its own
+       ticks on that endpoint, so a budget A/B can be measured on the same
+       model that the (1+lambda) selection runs on. */
+    {
+        const std::string parentModel = p.value("model", std::string());
+        if (!parentModel.empty())
+            phoenix::summon::SummonRegistry::instance().setScopeModel(
+                m.id, parentModel);
+        else
+            /* An assign without a model must NOT inherit the model of the
+               previous generation of this scope: a carrier that was a Granite
+               reviewer in gen0 kept the Granite override in gen1, so its edit
+               tick went to the reviewer model (prose / timeout) instead of the
+               source-edit tool. */
+            phoenix::summon::SummonRegistry::instance().clearScopeModel(m.id);
+    }
     phoenix::inference::blockLowPriorityGenerates().store(
         false, std::memory_order_release);
     return json{{"ok", true}, {"result", it->second.stats()}};
@@ -2729,6 +2855,11 @@ json CognitionAutonomyManager::reportMissionOutcome(const json &payload) {
            the children list (observability); judgement stays with the caller. */
         if (achieved) {
             msn->markComplete();
+            if (msn->evolutionEnabled()) {
+                missionGenome_ = msn->genome();
+                agiAlpha_ = std::clamp(
+                    static_cast<double>(missionGenome_.learningRate), 0.001, 0.5);
+            }
         } else {
             msn->markFailed();
         }
@@ -2866,7 +2997,16 @@ json CognitionAutonomyManager::spawnMissionChild(const json &payload) {
        external endpoint instead of the base model.  Empty = base.  An
        unregistered name is rejected so a typo never silently falls back
        to the base model. */
-    const std::string model = p.value("model", std::string());
+    std::string model = p.value("model", std::string());
+    /* Fair-selection default: a helper box runs on the same model as its
+       parent mission unless the caller names one.  Otherwise the parent
+       (8B) and the boxes (Granite) have incomparable work times. */
+    if (model.empty()) {
+        const std::string pm =
+            phoenix::summon::SummonRegistry::instance().modelForScope(
+                msn->mission().id);
+        if (!pm.empty()) model = pm;
+    }
     if (!model.empty() &&
         !phoenix::summon::SummonRegistry::instance().find(model)) {
         return json{{"ok", false},
@@ -2893,6 +3033,11 @@ json CognitionAutonomyManager::markMissionChildDone(const json &payload) {
         return json{{"ok", false}, {"error", "no such mission"}};
     if (!msn->markChildDone(childId))
         return json{{"ok", false}, {"error", "unknown child: " + childId}};
+    if (msn->evolutionEnabled()) {
+        missionGenome_ = msn->genome();
+        agiAlpha_ = std::clamp(static_cast<double>(missionGenome_.learningRate),
+                               0.001, 0.5);
+    }
     return json{{"ok", true}, {"result", msn->stats()}};
 }
 
@@ -3109,7 +3254,7 @@ json CognitionAutonomyManager::configureAutonomyLoop(const json &payload) {
         loopPersistPath_ = p["persistPath"].get<std::string>();
     }
     loopStallWarnSec_ = clampInt(
-        p.value("stallWarnSec", phoenix::cfgOr<int>("autonomyLoop.stallWarnSec", 180)),
+        p.value("stallWarnSec", phoenix::cfgOr<int>("autonomyLoop.stallWarnSec", 1800)),
         30, 3600);
     return json{{"ok", true},
                 {"result", json{{"enabled", loopEnabled_},
@@ -3433,6 +3578,7 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
                             std::memory_order_acquire))
                         return;
                     std::string work;
+                    const int64_t parentWorkT0 = nowMs();
                     try {
                         work = missionDeliberator_(
                             sn.goal, sn.prior, loopDeliberateMaxTokens_, sn.id);
@@ -3442,6 +3588,14 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
                         std::cout << "[mission-loop] deliberator EXCEPTION id="
                                   << sn.id << std::endl;
                         work.clear();
+                    }
+                    {
+                        const int64_t dt = nowMs() - parentWorkT0;
+                        std::lock_guard<std::mutex> lock(mu_);
+                        auto live = missions_.find(sn.id);
+                        if (live != missions_.end() && dt > 0)
+                            live->second.noteWorkMs(
+                                static_cast<uint64_t>(dt));
                     }
                     if (work.empty()) return;
                     if (loopStop_.load(std::memory_order_acquire) ||
@@ -3485,19 +3639,40 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
                             break;
                         const size_t idx = (childRoundRobin_ + n) % sn.helpers.size();
                         const auto &box = sn.helpers[idx];
+                        /* Fair selection: a fresh-task box runs the SAME
+                           goal from an EMPTY workspace, with no parent
+                           draft merged in, so its work time is comparable
+                           to a fresh parent run. */
+                        const bool freshChild = phoenix::cfgOr<bool>(
+                            "mission.childFreshTask", false);
                         std::string childGoal = box.goal;
+                        if (freshChild) childGoal = sn.goal;
                         if (childGoal.empty()) childGoal = sn.goal;
+                        const std::string childPrior =
+                            freshChild ? std::string() : sn.prior;
                         const std::string childScope = sn.id + "/children/" + box.id;
                         try {
                             /* Child continues the parent draft, then we
                                merge only the new span. Voiding boxWork
                                made replicate a no-op for evolution. */
+                            const int64_t childWorkT0 = nowMs();
                             const std::string boxWork = missionDeliberator_(
-                                childGoal, sn.prior, loopChildDeliberateMaxTokens_,
+                                childGoal, childPrior, loopChildDeliberateMaxTokens_,
                                 childScope);
-                            const std::string root = phoenix::cfgOr<std::string>(
+                            {
+                                const int64_t dt = nowMs() - childWorkT0;
+                                if (dt > 0) {
+                                    std::lock_guard<std::mutex> lock(mu_);
+                                    auto live = missions_.find(sn.id);
+                                    if (live != missions_.end())
+                                        live->second.noteChildWorkMs(
+                                            box.id, static_cast<uint64_t>(dt));
+                                }
+                            }
+                            const std::string root = phoenix::resolveConfig<std::string>(
                                 "mission.workspaceDir",
-                                std::string("./runtime_store/mission_workspace"));
+                                std::string("./runtime_store/mission_workspace"),
+                                "AI_MISSION_WORKSPACE");
                             const auto childRd = phoenix::mission::workspaceExecute(
                                 root, childScope,
                                 nlohmann::json{{"action", "read"},
@@ -3512,7 +3687,58 @@ void CognitionAutonomyManager::loopRun(uint64_t gen) {
                             std::string parentBody = parentRd.value("ok", false)
                                 ? parentRd.value("content", std::string())
                                 : sn.prior;
-                            if (childBody.size() > parentBody.size()) {
+                            /* A fresh child skips the parent merge, so its own
+                               deliverable must accumulate every tick.  Before
+                               this, only the last reply was visible to the
+                               auto-verdict and a 250-char tick could never
+                               reach mission.autoChildDoneChars. */
+                            if (freshChild && !boxWork.empty()) {
+                              std::string cur = childRd.value("ok", false)
+                                                    ? childRd.value(
+                                                          "content", std::string())
+                                                    : std::string();
+                              if (cur.size() > 200000)
+                                cur = cur.substr(cur.size() - 100000);
+                              if (!cur.empty() && cur.back() != '\n')
+                                cur.push_back('\n');
+                              const std::string next = cur + boxWork;
+                              const auto wr =
+                                  phoenix::mission::workspaceExecute(
+                                      root, childScope,
+                                      nlohmann::json{{"action", "write"},
+                                                     {"path", "deliverable.md"},
+                                                     {"content", next}});
+                              if (wr.value("ok", false)) childBody = next;
+                            }
+                            /* Autonomous box verdict from the measured
+                               deliverable: when a helper's document reaches
+                               a configured letter count, mark it finished
+                               without a human call and without asking the
+                               model to emit {"done":true}.  The count is the
+                               selection-relevant property, not the model's
+                               self-report. */
+                            {
+                                const int autoDoneChars = phoenix::cfgOr<int>(
+                                    "mission.autoChildDoneChars", 0);
+                                if (autoDoneChars > 0 && !box.done) {
+                                    const size_t childChars =
+                                        phoenix::mission::deliverableInformationChars(
+                                            childBody);
+                                    if (static_cast<int>(childChars) >=
+                                        autoDoneChars) {
+                                        const auto md = markMissionChildDone(
+                                            nlohmann::json{{"missionId", sn.id},
+                                                           {"childId", box.id}});
+                                        if (md.value("ok", false))
+                                            std::cout << "[auto-child-done] mission="
+                                                      << sn.id << " child=" << box.id
+                                                      << " chars=" << childChars
+                                                      << std::endl;
+                                    }
+                                }
+                            }
+                            if (!freshChild &&
+                                childBody.size() > parentBody.size()) {
                                 const std::string kept =
                                     phoenix::mission::keepUniqueContinuation(
                                         childBody, parentBody);

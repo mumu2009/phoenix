@@ -716,10 +716,6 @@
   padding: 14px;
 }
 
-.openclaw-card {
-  grid-column: span 12;
-}
-
 .card-title {
   font-weight: 800;
   margin-bottom: 10px;
@@ -756,10 +752,6 @@
   flex-wrap: wrap;
 }
 
-.openclaw-toolbar {
-  width: 100%;
-}
-
 .input {
   height: 38px;
   border-radius: 12px;
@@ -773,10 +765,6 @@
 
 .input:focus {
   border-color: rgba(88, 101, 242, 0.6);
-}
-
-.openclaw-url-input {
-  flex: 1 1 360px;
 }
 
 .textarea {
@@ -830,26 +818,6 @@
   padding: 8px 10px;
 }
 
-.openclaw-note {
-  white-space: normal;
-  line-height: 1.5;
-}
-
-.openclaw-frame-wrap {
-  min-height: 720px;
-  border-radius: 16px;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(7, 10, 18, 0.72);
-}
-
-.openclaw-frame {
-  width: 100%;
-  min-height: 720px;
-  border: 0;
-  background: #050812;
-}
-
 .cfg-checklist {
   margin-top: 10px;
   display: grid;
@@ -881,11 +849,6 @@
   }
   .card {
     grid-column: span 12;
-  }
-
-  .openclaw-frame-wrap,
-  .openclaw-frame {
-    min-height: 560px;
   }
 
   .cfg-row {

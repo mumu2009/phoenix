@@ -8,6 +8,22 @@ static Config loadConfig(int argc, char **argv) {
   // Load the single authoritative runtime parameter file.
   phoenix::PhoenixConfig::instance().load(rootDir / "config" / "phoenix.json");
 
+  // Optional research profile overlay (config/research/<name>.json), selected
+  // by config key research.profile or env AI_RESEARCH_PROFILE.  It deep-merges
+  // a parameter combination over the base config; nothing is loaded when the
+  // name is empty, so the production path is unchanged.
+  {
+    const std::string profileName =
+        phoenix::cfgOr<std::string>("research.profile", std::string());
+    const char *profileEnv = std::getenv("AI_RESEARCH_PROFILE");
+    const std::string chosen =
+        profileEnv && profileEnv[0] != '\0' ? profileEnv : profileName;
+    if (!chosen.empty())
+      phoenix::PhoenixConfig::instance().loadOverlay(
+          rootDir / "config" / "research" / (chosen + ".json"));
+  }
+
+
   // Load the optional auto-tuned override file.
   phoenix::tuned::loadTunedConfig(rootDir / "config" / "phoenix_tuned.json");
   auto arg = [&](const std::string &k,

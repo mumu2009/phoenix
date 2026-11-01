@@ -444,6 +444,30 @@ TEST(WorkspaceSandbox, WriteRefusesToShrinkDeliverable) {
   EXPECT_NE(got.find("fragment from json write"), std::string::npos);
 }
 
+TEST(WorkspaceSandbox, AllowShrinkReplacesDeliverable) {
+  const std::string root = "./runtime_store/gtest_mission_workspace";
+  const std::string scope = "mission-allow-shrink";
+  ASSERT_TRUE(phoenix::mission::workspaceResetScope(root, scope));
+  ASSERT_TRUE(phoenix::mission::workspaceExecute(
+                  root, scope,
+                  json{{"action", "write"},
+                       {"path", "deliverable.md"},
+                       {"content", "uint32_t state = 1; for (;;) { state 17; }"}})
+                  .value("ok", false));
+  const auto wr = phoenix::mission::workspaceExecute(
+      root, scope,
+      json{{"action", "write"},
+           {"path", "deliverable.md"},
+           {"allowShrink", true},
+           {"content", "uint32_t state = 1; for (;;) { state ^= state >> 17; }"}});
+  ASSERT_TRUE(wr.value("ok", false));
+  EXPECT_FALSE(wr.value("refusedShrink", false));
+  const auto rd = phoenix::mission::workspaceExecute(
+      root, scope, json{{"action", "read"}, {"path", "deliverable.md"}});
+  EXPECT_EQ(rd.value("content", std::string()),
+            "uint32_t state = 1; for (;;) { state ^= state >> 17; }");
+}
+
 TEST(WorkspaceSandbox, RunRejectsNonPython) {
   const std::string root = "./runtime_store/gtest_mission_workspace";
   const std::string scope = "mission-run-test";

@@ -1,0 +1,17 @@
+{
+  "_comment": "p-injection live conformity experiment (pre-registered in doc/v8.3/memetics_library/protocols_2026-10-31.md): the only controlled variable is the current population frequency p injected into each carrier's edit prompt; model temperature 0, plain-text replies, 8-carrier fixed population.",
+  "mission": {
+    "temperature": 0.0,
+    "plainTextOnly": true,
+    "autoChildDoneChars": 1200,
+    "childFreshTask": true,
+    "aliasProbe": false,
+    "maxReplicas": 8
+  },
+  "autonomyLoop": { "intervalSec": 60 },
+  "research": {
+    "force": { "enabled": false },
+    "deterministicCarriers": false,
+    "forceLive": { "enabled": true }
+  }
+}

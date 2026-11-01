@@ -222,12 +222,15 @@ void ConceptMatrix::propagate(size_t steps) {
       for (size_t c = 0; c < chunkCount; ++c) {
         const size_t start = c * allUnits.size() / chunkCount;
         const size_t end = (c + 1) * allUnits.size() / chunkCount;
+        /* allUnits.data()+end is the valid one-past pointer; &allUnits[end]
+           used operator[] with end==size() and tripped the checked-iterator
+           assertion (the last chunk aborted the whole process). */
         auto *local = &chunkBoosts[c];
         std::future<void> f = ats.submitWithFuture(
             phoenix::v7::TaskModule::Encoder,
             phoenix::v7::TaskPriority::High,
-            [this, gatherBoosts, &allUnits, local, start, end]() {
-              gatherBoosts(&allUnits[start], &allUnits[end], *local);
+            [this, gatherBoosts, data = allUnits.data(), local, start, end]() {
+              gatherBoosts(data + start, data + end, *local);
             },
             "propagate_chunk");
         futures.push_back(std::move(f));

@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -38,6 +39,29 @@ class PhoenixConfig {
     }
     f >> cfg_;
     loaded_ = true;
+  }
+
+  /* Deep-merge one JSON object over the loaded config.  Research profiles
+     (config/research/<name>.json) are the only caller: a parameter
+     combination overlays config/phoenix.json without touching the base
+     file or any production code path.  Object leaves merge recursively;
+     everything else is replaced. */
+  void loadOverlay(const std::filesystem::path& path) {
+    std::ifstream f(path);
+    if (!f.good()) {
+      std::cerr << "[config] research profile missing: " << path.string()
+                << " (base config unchanged)" << std::endl;
+      return;
+    }
+    nlohmann::json ov;
+    try {
+      f >> ov;
+    } catch (const std::exception& e) {
+      std::cerr << "[config] research profile unreadable: " << path.string()
+                << ": " << e.what() << " (base config unchanged)" << std::endl;
+      return;
+    }
+    mergeInto(cfg_, ov);
   }
 
   bool loaded() const { return loaded_; }
@@ -76,6 +100,21 @@ class PhoenixConfig {
 
  private:
   PhoenixConfig() = default;
+
+  static void mergeInto(nlohmann::json& base, const nlohmann::json& ov) {
+    if (!ov.is_object() || !base.is_object()) {
+      base = ov;
+      return;
+    }
+    for (auto it = ov.begin(); it != ov.end(); ++it) {
+      if (it.value().is_object() && base.contains(it.key()) &&
+          base[it.key()].is_object()) {
+        mergeInto(base[it.key()], it.value());
+      } else {
+        base[it.key()] = it.value();
+      }
+    }
+  }
 
   const nlohmann::json* getPath(const std::string& dotPath) const {
     const nlohmann::json* cur = &cfg_;

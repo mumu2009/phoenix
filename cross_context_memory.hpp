@@ -25,6 +25,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "replica_trace.hpp"
+
 namespace phoenix {
 namespace memory {
 
@@ -34,6 +36,10 @@ struct CcmEntry {
     uint64_t atMs{0};
     std::string modality{"text"}; /* text | audio | video | image | unit */
     std::vector<std::vector<float>> unitQuery; /* E-space rows when already enc'd */
+    /* Copy lineage. Overlap retrieval does not set these. */
+    int fecundity{0};
+    int longevity{1};
+    int streak{0};
 };
 
 inline std::vector<CcmEntry> ccmLoad(const std::string &storePath) {
@@ -56,7 +62,10 @@ inline std::vector<CcmEntry> ccmLoad(const std::string &storePath) {
                     e.value("text", std::string()),
                     e.value("atMs", 0ull),
                     e.value("modality", std::string("text")),
-                    {}};
+                    {},
+                    e.value("fecundity", 0),
+                    e.value("longevity", 1),
+                    e.value("streak", 0)};
         if (e.contains("unitQuery") && e["unitQuery"].is_array()) {
             for (const auto &row : e["unitQuery"]) {
                 if (!row.is_array()) continue;
@@ -82,7 +91,10 @@ inline void ccmSave(const std::string &storePath,
         nlohmann::json item{{"sourceTag", e.sourceTag},
                             {"text", e.text},
                             {"atMs", e.atMs},
-                            {"modality", e.modality.empty() ? "text" : e.modality}};
+                            {"modality", e.modality.empty() ? "text" : e.modality},
+                            {"fecundity", e.fecundity},
+                            {"longevity", e.longevity},
+                            {"streak", e.streak}};
         if (!e.unitQuery.empty())
             item["unitQuery"] = e.unitQuery;
         arr.push_back(std::move(item));
@@ -136,8 +148,21 @@ inline void ccmRememberUnit(const std::string &storePath,
     static std::mutex mu;
     std::lock_guard<std::mutex> lock(mu);
     auto entries = ccmLoad(storePath);
+    /* A new deposit is a later text. It can copy an older entry. Word
+       overlap is not that event. */
+    for (auto &older : entries) {
+        phoenix::memetic::LineageState life{older.fecundity, older.longevity,
+                                            older.streak};
+        phoenix::memetic::lineageObserve(
+            life, phoenix::memetic::judgeCopy(older.text, text),
+            !sourceTag.empty() && sourceTag != older.sourceTag);
+        older.fecundity = life.fecundity;
+        older.longevity = life.longevity;
+        older.streak = life.streak;
+    }
     entries.push_back({sourceTag, text, 0,
-                       modality.empty() ? "text" : modality, unitQuery});
+                       modality.empty() ? "text" : modality, unitQuery, 0, 1,
+                       0});
     if (entries.size() > 500) entries.erase(entries.begin());
     ccmSave(storePath, entries);
 }
@@ -296,9 +321,11 @@ inline std::string eraseForeignChatCanaries(const std::string &text,
     return out;
 }
 
-/* Recall the top-k most similar entries. callerTag isolates chat↔chat:
-   chat:A never receives chat:B/C dialog increments (the soak canary hole).
-   Chat callers also lose SCOPECANARY-MISSION-* from mission deposits. */
+/* Recall the top-k entries the query touches. Overlap is the index.
+   An admitted lineage (copied by two distinct carriers, and alive for
+   at least one copy) sorts ahead of a one-off entry with the same
+   overlap floor. callerTag isolates chat↔chat. Chat callers also lose
+   SCOPECANARY-MISSION-* from mission deposits. */
 inline std::vector<CcmEntry> ccmRecall(const std::string &storePath,
                                        const std::string &query, size_t k = 3,
                                        const std::string &callerTag = {}) {
@@ -310,7 +337,29 @@ inline std::vector<CcmEntry> ccmRecall(const std::string &storePath,
         scored.push_back({ccmOverlap(query, e.text), e});
     }
     std::sort(scored.begin(), scored.end(),
-              [](const auto &a, const auto &b) { return a.first > b.first; });
+              [](const auto &a, const auto &b) {
+                const bool am = phoenix::memetic::lineageAdmitted(
+                    {a.second.fecundity, a.second.longevity, a.second.streak});
+                const bool bm = phoenix::memetic::lineageAdmitted(
+                    {b.second.fecundity, b.second.longevity, b.second.streak});
+                if (am != bm)
+                  return am;
+                if (a.first != b.first)
+                  return a.first > b.first;
+                /* Same overlap. Among admitted lineages the two-type
+                   replicator step ranks fecundity * longevity first.
+                   Fitness is longevity. Frequency is fecundity. */
+                if (am && bm) {
+                  const double as =
+                      static_cast<double>(a.second.fecundity) *
+                      static_cast<double>(a.second.longevity);
+                  const double bs =
+                      static_cast<double>(b.second.fecundity) *
+                      static_cast<double>(b.second.longevity);
+                  if (as != bs) return as > bs;
+                }
+                return false;
+              });
     std::vector<CcmEntry> out;
     const bool chatCaller = callerTag.rfind("chat:", 0) == 0;
     for (size_t i = 0; i < scored.size() && i < k; ++i) {

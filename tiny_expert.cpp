@@ -6,6 +6,7 @@
 #include "summon_registry.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -431,6 +432,197 @@ void TinyExpert::fromJson(const nlohmann::json &j) {
              static_cast<int>(b1_.size()) == hidden_ &&
              static_cast<int>(W2_.size()) == classes_ * hidden_ &&
              static_cast<int>(b2_.size()) == classes_;
+}
+
+std::vector<float> projectTrigramBins(const std::string &text, int vocab) {
+    std::vector<float> x(static_cast<size_t>(std::max(vocab, 1)), 0.f);
+    std::string s;
+    s.reserve(text.size());
+    for (unsigned char c : text) {
+        if (std::isalnum(c))
+            s.push_back(static_cast<char>(std::tolower(c)));
+        else
+            s.push_back(' ');
+    }
+    if (s.size() < 3) {
+        unsigned h = 2166136261u;
+        for (unsigned char c : s)
+            h = (h ^ c) * 16777619u;
+        if (!x.empty())
+            x[h % x.size()] = 1.f;
+        return x;
+    }
+    for (size_t i = 0; i + 2 < s.size(); ++i) {
+        unsigned h = 2166136261u;
+        h = (h ^ static_cast<unsigned char>(s[i])) * 16777619u;
+        h = (h ^ static_cast<unsigned char>(s[i + 1])) * 16777619u;
+        h = (h ^ static_cast<unsigned char>(s[i + 2])) * 16777619u;
+        x[h % x.size()] = 1.f;
+    }
+    return x;
+}
+
+/* Word order reversed. The word types stay; the contiguous order does not.
+   A stem scramble was an easier negative for the trigram net. */
+std::string reversedWords(const std::string &text) {
+    std::vector<std::string> words;
+    std::string cur;
+    for (unsigned char c : text) {
+        if (std::isalnum(c))
+            cur.push_back(static_cast<char>(std::tolower(c)));
+        else if (!cur.empty()) {
+            words.push_back(cur);
+            cur.clear();
+        }
+    }
+    if (!cur.empty())
+        words.push_back(cur);
+    std::string out;
+    for (int i = static_cast<int>(words.size()) - 1; i >= 0; --i) {
+        if (!out.empty())
+            out.push_back(' ');
+        out += words[static_cast<size_t>(i)];
+    }
+    return out;
+}
+
+nlohmann::json TinyExpert::trainProjectTree(const std::string &root) {
+    std::vector<std::string> paths;
+    const char *fixed[] = {
+        "emotion_system.cpp", "instinct.cpp", "autonomy_stack.cpp",
+        "self_mind.cpp", "active_inference.cpp", "mission_lifecycle.cpp",
+        "memetic_existence.hpp", "tiny_expert.cpp"};
+    for (const char *rel : fixed) {
+        std::error_code ec;
+        const std::string path = root.empty() ? rel : root + "/" + rel;
+        if (std::filesystem::is_regular_file(path, ec))
+            paths.push_back(rel);
+    }
+    std::error_code ec;
+    const std::string dir = root.empty() ? "main_hub_parts" : root + "/main_hub_parts";
+    if (std::filesystem::is_directory(dir, ec)) {
+        int n = 0;
+        for (const auto &ent : std::filesystem::directory_iterator(dir, ec)) {
+            if (ec || !ent.is_regular_file())
+                continue;
+            const std::string name = ent.path().filename().string();
+            if (name.size() < 5 || name.find(".inc") == std::string::npos)
+                continue;
+            paths.push_back("main_hub_parts/" + name);
+            if (++n >= 16)
+                break;
+        }
+    }
+    std::unique_lock<std::mutex> lock(mu_);
+    if (!enabled_)
+        return nlohmann::json{{"ok", false}, {"ran", false}, {"reason", "disabled"}};
+    if (paths.size() < 8)
+        return nlohmann::json{{"ok", false},
+                              {"ran", false},
+                              {"reason", "too-few-paths"},
+                              {"paths", static_cast<int>(paths.size())}};
+    vocab_ = 32;
+    if (hidden_ < 2)
+        hidden_ = 16;
+    classes_ = 32;
+    std::vector<Sample> data;
+    auto push = [&](const std::string &text, int y) {
+        Sample sample;
+        sample.x = projectTrigramBins(text, vocab_);
+        sample.y = y;
+        data.push_back(std::move(sample));
+    };
+    for (const auto &path : paths) {
+        push(path, 1);
+        push(reversedWords(path), 0);
+    }
+    const char *prose[] = {
+        "the river stone is cold",
+        "a violet willow grew",
+        "ordinary text about bread",
+        "people carried the same sentence",
+        "this line is not a path",
+        "copy the structure not the word list",
+        "training should skip a repeated line",
+        "regular sentences fill the other class"};
+    for (const char *line : prose)
+        push(line, 0);
+    push("phoenix_main.cpp", 0);
+    push("index.html", 0);
+    push("get_alpha_status.cpp", 0);
+    initWeightsLocked(1u);
+    const int epochCap = std::max(1, std::min(8, epochs_));
+    const double initial = epochLocked(data, 0.f, 1u);
+    double last = initial;
+    int epochsRun = 0;
+    for (int ep = 0; ep < epochCap; ++ep) {
+        last = epochLocked(data, lr_, 17u + static_cast<unsigned>(ep));
+        epochsRun = ep + 1;
+        int correctNow = 0;
+        for (const auto &sample : data) {
+            const auto got = predictLocked(sample.x);
+            if (got.value("class", -1) == sample.y)
+                ++correctNow;
+        }
+        const double accNow = data.empty()
+                                  ? 0.0
+                                  : static_cast<double>(correctNow) /
+                                        static_cast<double>(data.size());
+        if (accNow >= 0.95)
+            break;
+    }
+    lastLoss_ = last;
+    ready_ = true;
+    int correct = 0;
+    for (const auto &sample : data) {
+        const auto got = predictLocked(sample.x);
+        if (got.value("class", -1) == sample.y)
+            ++correct;
+    }
+    const double acc = data.empty()
+                           ? 0.0
+                           : static_cast<double>(correct) / static_cast<double>(data.size());
+    goal_ = "project-paths";
+    nlohmann::json out{{"ok", true},
+                       {"ran", true},
+                       {"mode", "project-paths"},
+                       {"samples", static_cast<int>(data.size())},
+                       {"paths", static_cast<int>(paths.size())},
+                       {"epochs", epochsRun},
+                       {"epochCap", epochCap},
+                       {"negatives", "reversed-words-plus-prose"},
+                       {"initialLoss", initial},
+                       {"finalLoss", last},
+                       {"accuracy", acc},
+                       {"paramCount", paramCount()},
+                       {"vocab", vocab_},
+                       {"hidden", hidden_},
+                       {"classes", classes_}};
+    const std::string outPath = weightsPath_;
+    lock.unlock();
+    if (!outPath.empty()) {
+        out["saved"] = save(outPath).value("ok", false);
+        out["weightsPath"] = outPath;
+    }
+    return out;
+}
+
+nlohmann::json TinyExpert::scoreProjectText(const std::string &text) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!ready_)
+        return nlohmann::json{{"ok", false}, {"reason", "not-ready"}};
+    const auto x = projectTrigramBins(text, vocab_);
+    const auto got = predictLocked(x);
+    if (!got.value("ok", false))
+        return got;
+    double p1 = 0.0;
+    if (got.contains("probs") && got["probs"].is_array() && got["probs"].size() > 1 &&
+        got["probs"][1].is_number())
+        p1 = got["probs"][1].get<double>();
+    return nlohmann::json{{"ok", true},
+                          {"class", got.value("class", -1)},
+                          {"project", p1},
+                          {"paramCount", paramCount()}};
 }
 
 }  // namespace study

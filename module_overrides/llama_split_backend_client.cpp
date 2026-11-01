@@ -989,6 +989,19 @@ json hiddenStatePipeline(const std::string &host, int port,
         return out;
       }
     }
+    /* The running server binary does not read resume_suffix. The draft
+       tail has to be the end of the causal text, or every tick repeats
+       the same completion of the goal and never sees its own function. */
+    if (!resume.empty()) {
+      const std::string r = trimWsCopy(resume);
+      const std::string p = trimWsCopy(formattedPrompt);
+      const bool already =
+          !r.empty() && p.size() >= r.size() &&
+          p.compare(p.size() - r.size(), r.size(), r) == 0;
+      if (!r.empty() && !already)
+        formattedPrompt = assembleCausalText(formattedPrompt, r);
+      genOpts.erase("resume_suffix");
+    }
 
     const int ctxBudget =
         inferenceOptions.is_object() &&

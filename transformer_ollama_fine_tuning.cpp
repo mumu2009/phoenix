@@ -19270,6 +19270,14 @@ static bool ollama_ft_bridge_ensure_python(std::string &err) {
       }
       g_ollama_ft_bridge_builtin_registered = true;
     }
+    /* Point the embedded interpreter at a real Python home before init,
+       otherwise Py_Initialize cannot import 'encodings' and aborts. */
+    const char *pyHomeEnv = std::getenv("AI_PYTHON_HOME");
+    if (pyHomeEnv && pyHomeEnv[0]) {
+      static std::wstring gPyHomeW;
+      gPyHomeW.assign(pyHomeEnv, pyHomeEnv + std::strlen(pyHomeEnv));
+      Py_SetPythonHome(const_cast<wchar_t *>(gPyHomeW.c_str()));
+    }
     Py_Initialize();
     if (!Py_IsInitialized()) {
       err = "Py_Initialize failed";

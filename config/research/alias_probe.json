@@ -1,0 +1,17 @@
+{
+  "research": {
+    "name": "alias_probe",
+    "profile": "alias_probe",
+    "description": "Goal 3 research profile: same-process router-before-cond A/B on a description-only mission. aliasProbe clears the source-edit focus so the description-only alias recall runs instead of the source-edit tool; routerOrderSequence toggles the new/old order inside one gateway process. Bundles the parameter combination of the live_gateway70 run.",
+    "force": { "enabled": false },
+    "deterministicCarriers": false,
+    "routerOrderSequence": [true, false]
+  },
+  "mission": {
+    "aliasProbe": true,
+    "maxReplicas": 4
+  },
+  "autonomyLoop": {
+    "intervalSec": 10
+  }
+}

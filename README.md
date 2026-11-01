@@ -1,8 +1,8 @@
-# Phoenix v9.0 "Tristan"
+# Phoenix v10.0 "Gareth"
 
 A set of facilities based on LLM, which can efficiently boost the speed and accuracy of LLM in long context, making it more like a person.
 
-> This branch is the **v9.0 "Tristan"** release: the experimental security-module era, built on the v8.0 "Lancelot" autonomous-agent stack — a local **MemeBarrier/GNN security observatory** (statistics, identification, defense only), an in-process inert meme existence probe, and the **meme existence lab**: exclusive-carrier screening, require-exclusive carrier composition, and wipe-reingest dialogue serials on a frozen instrument graph. The lab's first full survivor: meme `17e6cec4` held its ordered (word, α) typical set through all 6 serial rounds.
+> This branch is the **v10.0 "Gareth"** release: the memetics-account era, built on the v9.0 "Tristan" security-module stack. A text is a meme only when some offspring meets the binary replicator predicate and the lineage is admitted at a named call site. Calibration stays separate from model output: the pre-registered N=64 conformity check remains a failure, N=1024 is exploratory, and the model-layer result is that output does not follow the injected value.
 
 ---
 

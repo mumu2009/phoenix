@@ -3,6 +3,7 @@
 #include "builtin_registry.hpp"
 
 #include "cli_json_addon.hpp"
+#include "code_edit_addon.hpp"
 #include "computer_shell_addon.hpp"
 #include "math_addon.hpp"
 #include "search_addon.hpp"
@@ -68,6 +69,9 @@ bool wantsAddon(const std::unordered_set<std::string> &selected, const std::stri
 } // namespace
 
 std::shared_ptr<Addon> createBuiltinAddon(const std::string &type, const std::string &name, std::string *error) {
+	if (type == "code-edit" || type == "code_edit" || type == "codeedit") {
+		return createCodeEditAddon(name.empty() ? std::string("code-edit") : name);
+	}
 	if (type == "math") {
 		return createMathAddon(name.empty() ? std::string("math") : name);
 	}

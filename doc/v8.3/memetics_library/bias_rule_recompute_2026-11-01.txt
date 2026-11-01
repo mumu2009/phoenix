@@ -1,0 +1,70 @@
+Recomputation of plannedEditCount and identifyForce.
+Date: 2026-11-01.
+Source transcribed from replica_trace.hpp in the working tree.
+SHA256 replica_trace.hpp: 09435c295d610662feeba40cc12510837d9da18ea825c4245de9be5aa34358ca
+git HEAD: 1bbb7f681d8337d9dd1713dd01b572da2e3ec798
+The original probe .cpp files are not in the tree. This file is the archived stdout of a Python transcription. Half-integers use round-half-away-from-zero, matching std::lround. The N=64 counts and the printed coefficients match protocols_2026-10-31.md sections 5 and 6.
+
+Series fed to identifyForce are the measured k_edit/N values. The configured start is not prepended.
+
+N=64
+conformity D=-0.8 start=0.40
+  k_edit=28,30,31,31
+  p=0.437500,0.468750,0.484375,0.484375
+  force=conformity coef=-1.0158730158730158 residual=0.008020560629125983
+  residuals content=0.04774303798073465 conformity=0.008020560629125983 replicator=0.04736711066849253
+content B=-0.5 start=0.40
+  k_edit=18,12,7,4
+  p=0.281250,0.187500,0.109375,0.062500
+  force=content coef=-0.463768115942029 residual=0.007472826086956527
+replicator w=2 start=0.30
+  k_edit=30,41,50,56
+  p=0.468750,0.640625,0.781250,0.875000
+  force=replicator coef=2.020289855072464 residual=0.004166404775760135
+fixed 0.5
+  k_edit=32,32,32,32
+  p=0.5,0.5,0.5,0.5
+  force=fixed residual=0
+zigzag p=0.2,0.9,0.3
+  force=undetermined
+  B=4.375 residual_content=0.99375
+  D=-7.291666666666665  |D|>=2 so residual_conformity is the sentinel samples+1 = 4
+  w=36 residual_replicator=0.696923076923077
+
+N=1024
+conformity D=-0.8 start=0.40
+  k_edit=449,474,489,498
+  p=0.438477,0.462891,0.477539,0.486328
+  force=conformity coef=-0.8058518200863509 residual=0.0003755716742623316
+content B=-0.5 start=0.40
+  k_edit=287,184,109,60
+  p=0.280273,0.179688,0.106445,0.058594
+  force=content coef=-0.4986407840430411 residual=0.0002671392543603171
+replicator w=2 start=0.30
+  k_edit=473,647,793,894
+  p=0.461914,0.631836,0.774414,0.873047
+  force=replicator coef=1.999186859651976 residual=0.00028724974895055766
+fixed 0.5
+  k_edit=512,512,512,512
+  force=fixed residual=0
+zigzag same three residuals as N=64, because the series is supplied directly.
+
+Rate-tag readability check, 2026-11-01, temperature 0, max_tokens 64 or 80.
+Servers started for this check only, then stopped. Ports 8093 and 8100.
+Models: qwen2.5-coder-1.5b-instruct-q4_k_m ; granite-3.1-1b-a400m-instruct-Q4_K_M.
+This prompt is not the self-mod goal used in the frequency experiment.
+
+Qwen, "Read the tag and reply with only the number."
+  [population-rate 0.37] -> 0.37
+  [population-rate 0.50] -> 0.50
+  [population-rate 0.13] -> 0.13
+Granite, same instruction:
+  [population-rate 0.37] -> prose containing 0.37, then "Answer: 37"
+  [population-rate 0.50] -> prose that sets an initial population of 1000 and a rate of change 0.50
+  [population-rate 0.13] -> prose containing 0.13, then boxed 13
+Qwen, "Continue the task."
+  [population-rate 0.37] -> sentence containing 0.37
+  [population-rate 0.61] -> sentence containing 0.61
+Granite, "Continue the task."
+  [population-rate 0.37] -> list item "The population rate is given as 0.37."
+  [population-rate 0.61] -> list item "The population rate is given as 0.61."

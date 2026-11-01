@@ -182,7 +182,10 @@ inline nlohmann::json workspaceExecute(const std::string &workspaceRoot,
             if (trimmed) res["trimmedToCap"] = true;
             return res;
         }
-        if (isDeliverablePath(rel)) {
+        /* allowShrink: a code mission replaces the function. Document
+           missions still refuse a shorter write so a fragment cannot
+           wipe the draft. */
+        if (isDeliverablePath(rel) && !payload.value("allowShrink", false)) {
           const nlohmann::json existing = readFile(target);
           const std::string prev = existing.value("ok", false)
                                        ? existing.value("content", std::string())

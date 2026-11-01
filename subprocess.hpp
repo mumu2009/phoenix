@@ -35,5 +35,15 @@ struct RunRequest {
 /* Run one command to completion (or timeout).  Direct exec (no shell). */
 RunResult run(const RunRequest &req);
 
+/* Start a process and return. The child is not waited on. Direct exec. */
+bool spawnDetached(const std::string &command, const std::vector<std::string> &args);
+
+/* True when a TCP connection to host:port is accepted within timeoutMs. */
+bool tcpReachable(const std::string &host, int port, int timeoutMs);
+
+/* Send one line and read one line. Empty means the exchange failed. */
+std::string tcpExchange(const std::string &host, int port,
+                        const std::string &line, int timeoutMs);
+
 } /* namespace subprocess */
 } /* namespace phoenix */

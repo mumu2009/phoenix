@@ -1,8 +1,6 @@
 import { humanizeAuthError } from './authMessages';
 
 const API_BASE = process.env.REACT_APP_API_BASE || '';
-const OPENCLAW_CHAT_PATH = process.env.REACT_APP_OPENCLAW_CHAT_PATH || '/openclaw/chat';
-const DEFAULT_CHAT_PROVIDER = process.env.REACT_APP_CHAT_PROVIDER || 'core';
 const REQUEST_TIMEOUT_MS = Number(process.env.REACT_APP_REQUEST_TIMEOUT_MS || 300000);
 const TOKEN_KEY = 'phoenix_auth_token';
 
@@ -70,35 +68,9 @@ async function request(path, { method = 'GET', body, headers } = {}) {
   return json;
 }
 
-function normalizeChatResponse(raw, provider) {
-  if (provider !== 'openclaw') return raw;
-  if (!raw || typeof raw !== 'object') {
-    return { ok: false, result: { reply: '' }, provider: 'openclaw' };
-  }
-  if (raw.result && typeof raw.result === 'object') {
-    return { ...raw, provider: 'openclaw' };
-  }
-  const reply = raw.reply ?? raw.text ?? raw.output ?? '';
-  const latency = raw.latency ?? raw.costMs;
-  return {
-    ok: raw.ok !== false,
-    provider: 'openclaw',
-    result: {
-      reply,
-      latency,
-      raw
-    }
-  };
-}
-
 async function chatWithProvider(text, sessionId, extra) {
-  const provider = String(extra?.provider || DEFAULT_CHAT_PROVIDER || 'core').toLowerCase();
   const payload = { text, sessionId, ...(extra || {}) };
   delete payload.provider;
-  if (provider === 'openclaw') {
-    const out = await request(OPENCLAW_CHAT_PATH, { method: 'POST', body: payload });
-    return normalizeChatResponse(out, 'openclaw');
-  }
   return request('/api/chat', { method: 'POST', body: payload });
 }
 

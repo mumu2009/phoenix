@@ -5,9 +5,13 @@
    RuntimeState::buildMemeSequenceFromTokens). A sample is a meme id,
    not a carrier sentence and not an invented nonce.
 
-   A meme is an ordered (word, α) set on the official graph, not a
-   bare lexicon. α(w|m) = tf(w,m)/df(w) from ingest counts (old
-   snapshots with no TF load as tf=1, so α is collection 1/df).
+   The graph stores an ordered (word, α) index, not a replicator.
+   α(w|m) = tf(w,m)/df(w) changes when the collection changes, so the
+   same copied sentence does not have a stable weight set. α locates
+   a carrier. A meme, when the word is kept, is a later copy whose
+   contiguous token fidelity clears Eigen's threshold. That test is
+   judgeCopy in replica_trace.hpp. Old snapshots with no TF load as
+   tf=1, so α on those snapshots is collection 1/df.
    Query seeds allocate each word as a distribution over its memes,
    conditioned on how much of the rest of the query already matches
    that meme, after collection-IDF scales the word's total budget.
@@ -33,8 +37,8 @@
         (no chat template, no system/task/persona wrapper)
      -> detectMemeInText on the same frozen graph (do not ingest the
         model output into the instrument; do not write the meme id back)
-     Wipe-reingest asks whether a fresh graph grew the same ordered
-     (word, α) typical set, not whether the bag-hash id is identical.
+   Wipe-reingest asks whether a fresh graph grew the same index, not
+   whether a replicator was copied. Bag-hash identity is neither.
      carrierOfMeme remains the KVM word bag (diagnostic / fallback).
 
    expressActivated can name a payload when the cluster is active. That
@@ -44,6 +48,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -53,6 +58,8 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include "replica_trace.hpp"
 
 namespace phoenix {
 namespace memetic {
@@ -293,6 +300,1005 @@ inline void mappingConcentrateSeeds(
         kept.push_back(id);
     }
     *order = std::move(kept);
+  }
+}
+
+/* One index entry. id addresses a carrier. text is its word order.
+   alpha inside the scorer is tf/df on this collection. Matching this
+   index does not make the entry a meme. */
+struct OrderedMeme {
+  std::string id;
+  std::string text;
+};
+
+struct OrderedMemeScore {
+  std::string id;
+  double mass{0.0};
+  double lift{0.0};
+  double orderLift{1.0};
+  int overlap{0};
+  bool present{false};
+};
+
+/* Declared here, defined after kGnnPresentLift. Present requires the
+   existing lift cut (mass over the high-df prior) and Kendall tau > 0
+   on the meme's word order. A tie or a reversal is not present. */
+inline std::vector<OrderedMemeScore>
+scoreOrderedMemes(const std::string &query,
+                  const std::vector<OrderedMeme> &memes);
+
+/* Latent tool desire. The model is not shown these niches. This is an
+   index: lift over the high-df prior at least 2, overlap at least 2,
+   and Kendall tau > 0. It is not judgeCopy, and a hit is not a meme.
+   A single anchor word, or the same words in the wrong order, does not
+   open a call. Empty name means no tool. */
+struct LatentTool {
+  std::string name;
+  double share{0.0};
+  double ipr{0.0};
+  int hits{0};
+};
+
+inline LatentTool inferLatentTool(const std::string &text) {
+  LatentTool none;
+  if (text.size() < 8 || text.size() > 600)
+    return none;
+  int rawTokens = 0;
+  {
+    std::string cur;
+    auto flush = [&]() {
+      if (!cur.empty())
+        ++rawTokens;
+      cur.clear();
+    };
+    for (unsigned char c : text) {
+      if (std::isalnum(c))
+        cur.push_back(static_cast<char>(std::tolower(c)));
+      else
+        flush();
+    }
+    flush();
+  }
+  if (rawTokens < 2 || rawTokens > 40)
+    return none;
+  /* Digits and operators become ordered tokens. "0.0.0 b 1.0." has
+     numbers and no operator, so it does not match number-operator-number. */
+  std::string norm;
+  std::string num;
+  auto flushNum = [&]() {
+    bool digit = false;
+    for (unsigned char c : num) {
+      if (std::isdigit(c))
+        digit = true;
+    }
+    if (digit)
+      norm += " number ";
+    num.clear();
+  };
+  for (unsigned char c : text) {
+    if (std::isdigit(c) || c == '.') {
+      num.push_back(static_cast<char>(c));
+      continue;
+    }
+    flushNum();
+    if (c == '+' || c == '*' || c == '/' || c == '=')
+      norm += " operator ";
+    else if (std::isalpha(c))
+      norm.push_back(static_cast<char>(std::tolower(c)));
+    else
+      norm.push_back(' ');
+  }
+  flushNum();
+  const std::vector<OrderedMeme> memes = {
+      {"math", "derivative squared polynomial equation factorial matrix"},
+      {"math-expr", "number operator number"},
+      {"search", "according wikipedia citation bibliography reference"},
+      {"replicate", "delegate subgoal helper summon"},
+  };
+  const auto scored = scoreOrderedMemes(norm, memes);
+  std::string tool;
+  const OrderedMemeScore *best = nullptr;
+  for (const auto &s : scored) {
+    if (!s.present)
+      continue;
+    const std::string name = s.id == "math-expr" ? "math" : s.id;
+    if (!tool.empty() && name != tool)
+      return none;
+    tool = name;
+    if (!best || s.lift > best->lift)
+      best = &s;
+  }
+  if (!best)
+    return none;
+  LatentTool got;
+  got.name = tool;
+  got.share = best->lift;
+  got.ipr = best->orderLift;
+  got.hits = best->overlap;
+  return got;
+}
+
+/* Exclusive carrier for a source edit. The score-formula words stay in
+   the goal prefix; they are a hub spray and must not be the text the
+   model continues. The carrier is one file span, cut on a line boundary.
+   Empty when the path is unsafe or the span is missing. */
+inline std::string exclusiveEditCarrier(const std::string &path,
+                                       const std::string &span) {
+  if (path.empty() || span.empty())
+    return std::string();
+  if (path.find("..") != std::string::npos)
+    return std::string();
+  if (path.find('\n') != std::string::npos ||
+      path.find('\r') != std::string::npos)
+    return std::string();
+  std::string body = span;
+  if (body.size() > 1400) {
+    body.resize(1400);
+    const auto nl = body.rfind('\n');
+    if (nl != std::string::npos && nl > 200)
+      body.resize(nl);
+  }
+  return "FILE " + path + "\n" + body +
+         "\nEdit only the file named above. One diff, or FILE, OLD, and NEW "
+         "for one exact span of that text. The measure is a number, not a "
+         "program.\n";
+}
+
+/* Span of a chosen file that actually carries the description.
+   The file is already selected. This only places the 1400-byte
+   window. A window starts at byte 0 or after a newline, then ends
+   on a newline once it passes 200 bytes, and never passes 1400.
+   Score is the number of distinct description tokens, lowercase
+   alphanumeric runs of length at least 3, that occur as whole
+   tokens in the window. The earliest maximum wins. Fewer than 2
+   shared tokens returns empty: the tail and a processMessage
+   anchor are not substitutes. */
+inline std::string latentCarrierSpan(const std::string &description,
+                                    const std::string &body) {
+  std::vector<std::string> need;
+  {
+    std::string cur;
+    std::unordered_set<std::string> seen;
+    auto flush = [&]() {
+      if (cur.size() >= 3 && seen.insert(cur).second)
+        need.push_back(cur);
+      cur.clear();
+    };
+    for (unsigned char c : description) {
+      if (std::isalnum(c))
+        cur.push_back(static_cast<char>(std::tolower(c)));
+      else
+        flush();
+    }
+    flush();
+  }
+  if (body.empty() || need.size() < 2)
+    return std::string();
+  auto wordsIn = [](const std::string &text) {
+    std::unordered_set<std::string> have;
+    std::string cur;
+    auto flush = [&]() {
+      if (cur.size() >= 3)
+        have.insert(cur);
+      cur.clear();
+    };
+    for (unsigned char c : text) {
+      if (std::isalnum(c))
+        cur.push_back(static_cast<char>(std::tolower(c)));
+      else
+        flush();
+    }
+    flush();
+    return have;
+  };
+  std::string best;
+  int bestScore = 0;
+  auto consider = [&](std::size_t begin) {
+    if (begin >= body.size())
+      return;
+    std::string window = body.substr(begin, 1400);
+    if (window.size() == 1400) {
+      const auto nl = window.rfind('\n');
+      if (nl != std::string::npos && nl > 200)
+        window.resize(nl);
+    }
+    const auto have = wordsIn(window);
+    int score = 0;
+    for (const auto &w : need)
+      if (have.count(w))
+        ++score;
+    if (score > bestScore) {
+      bestScore = score;
+      best = std::move(window);
+    }
+  };
+  consider(0);
+  for (std::size_t i = 0; i < body.size(); ++i) {
+    if (body[i] == '\n')
+      consider(i + 1);
+  }
+  if (bestScore < 2)
+    return std::string();
+  return best;
+}
+
+/* Repository explore. A path is present only when the goal lifts it
+   over the collection's high-df prior and the goal's word order agrees
+   with the path. A word that sits in many paths cannot open one file.
+   Empty means the tool looked and did not find one ordered carrier. */
+inline std::vector<std::string> rankExplorePaths(
+    const std::string &goal, const std::vector<std::string> &paths, int keep) {
+  std::vector<std::string> none;
+  if (goal.empty() || paths.empty() || keep < 1)
+    return none;
+  std::vector<OrderedMeme> memes;
+  memes.reserve(paths.size());
+  for (const auto &path : paths)
+    memes.push_back(OrderedMeme{path, path});
+  const auto scored = scoreOrderedMemes(goal, memes);
+  std::vector<const OrderedMemeScore *> present;
+  for (const auto &s : scored) {
+    if (s.present)
+      present.push_back(&s);
+  }
+  if (present.empty())
+    return none;
+  if (keep == 1 && present.size() != 1)
+    return none;
+  std::sort(present.begin(), present.end(),
+            [](const OrderedMemeScore *a, const OrderedMemeScore *b) {
+              return a->mass * a->orderLift > b->mass * b->orderLift;
+            });
+  std::vector<std::string> out;
+  for (const auto *s : present) {
+    out.push_back(s->id);
+    if (static_cast<int>(out.size()) >= keep)
+      break;
+  }
+  return out;
+}
+
+inline constexpr double kGnnPresentPeakFrac = 0.05;
+inline constexpr double kGnnPresentLift = 2.0;
+
+/* One latent edit from a base description. path is empty when no file
+   is eligible or the top two masses tie. presentCount is how many files
+   were eligible. The description is the context; file profiles are the
+   items. Eligible means overlap >= 2, lift >= kGnnPresentLift, and
+   mass > 0. Forward word order is not required: a conception is not a
+   copy of the source, so Kendall tau is not a veto. The pick is the
+   unique maximum mass. A filename does not have to occur in the
+   description. This does not copy a file. */
+struct LatentEdit {
+  std::string path;
+  double mass{0.0};
+  double orderLift{0.0};
+  int overlap{0};
+  int presentCount{0};
+};
+
+inline LatentEdit rankLatentEdit(const std::string &description,
+                                 const std::vector<OrderedMeme> &files,
+                                 const std::vector<int> &fecundity = {}) {
+  LatentEdit out;
+  const auto scored = scoreOrderedMemes(description, files);
+  const OrderedMemeScore *best = nullptr;
+  const OrderedMemeScore *second = nullptr;
+  for (const auto &s : scored) {
+    if (!(s.mass > 0.0 && s.lift >= kGnnPresentLift && s.overlap >= 2))
+      continue;
+    ++out.presentCount;
+    if (!best || s.mass > best->mass) {
+      second = best;
+      best = &s;
+    } else if (!second || s.mass > second->mass) {
+      second = &s;
+    }
+  }
+  if (!best)
+    return out;
+  if (second && !(best->mass > second->mass)) {
+    /* Mass does not see fecundity: an exclusive word's share is 1
+       however often it is repeated. A tie is broken only by a unique
+       strictly positive fecundity. Equal counts, or a missing vector,
+       still open no file. */
+    if (fecundity.size() == scored.size()) {
+      int topF = 0;
+      const OrderedMemeScore *pick = nullptr;
+      int ties = 0;
+      for (size_t i = 0; i < scored.size(); ++i) {
+        const auto &s = scored[i];
+        if (!(s.mass > 0.0 && s.lift >= kGnnPresentLift && s.overlap >= 2))
+          continue;
+        if (best->mass > s.mass || s.mass > best->mass)
+          continue;
+        const int f = fecundity[i];
+        if (pick == nullptr || f > topF) {
+          pick = &s;
+          topF = f;
+          ties = 1;
+        } else if (f == topF) {
+          ++ties;
+        }
+      }
+      if (ties == 1 && pick != nullptr && topF > 0) {
+        out.path = pick->id;
+        out.mass = pick->mass;
+        out.orderLift = pick->orderLift;
+        out.overlap = pick->overlap;
+        return out;
+      }
+    }
+    return out;
+  }
+  out.path = best->id;
+  out.mass = best->mass;
+  out.orderLift = best->orderLift;
+  out.overlap = best->overlap;
+  return out;
+}
+
+/* One witnessed gloss. A short description that already selected a
+   file contributes its content words, except words that already sit
+   in some candidate file. The union is one insertion. A later text
+   made only of those words can then pass the same ranker, which
+   still has no new output column. More than 40 content tokens does
+   not write, and the same word is not written twice. The cap is 32
+   words per file. */
+inline std::vector<std::string> witnessedAliases(
+    const std::string &description,
+    const std::vector<OrderedMeme> &files, const std::string &chosenId,
+    const std::vector<std::string> &already) {
+  auto tokenize = [](const std::string &s) {
+    std::vector<std::string> out;
+    std::string cur;
+    auto flush = [&]() {
+      if (cur.size() >= 3)
+        out.push_back(cur);
+      cur.clear();
+    };
+    for (unsigned char c : s) {
+      if (std::isalnum(c))
+        cur.push_back(static_cast<char>(std::tolower(c)));
+      else
+        flush();
+    }
+    flush();
+    return out;
+  };
+  std::vector<std::string> out = already;
+  const auto desc = tokenize(description);
+  if (desc.size() < 2 || desc.size() > 40)
+    return out;
+  std::unordered_set<std::string> inAny;
+  for (const auto &file : files)
+    for (const auto &w : tokenize(file.text))
+      inAny.insert(w);
+  std::unordered_set<std::string> have(out.begin(), out.end());
+  for (const auto &w : desc) {
+    if (static_cast<int>(out.size()) >= 32)
+      break;
+    if (have.count(w) || inAny.count(w))
+      continue;
+    if (chosenId.empty())
+      continue;
+    out.push_back(w);
+    have.insert(w);
+  }
+  return out;
+}
+
+inline std::vector<std::string> glossTokens(const std::string &text) {
+  std::vector<std::string> out;
+  std::string cur;
+  auto flush = [&]() {
+    if (cur.size() >= 3)
+      out.push_back(cur);
+    cur.clear();
+  };
+  for (unsigned char c : text) {
+    if (std::isalnum(c))
+      cur.push_back(static_cast<char>(std::tolower(c)));
+    else
+      flush();
+  }
+  flush();
+  return out;
+}
+
+inline bool condFunctionWord(const std::string &w) {
+  return w == "the" || w == "and" || w == "for" || w == "that" || w == "this" ||
+         w == "with" || w == "from" || w == "are" || w == "was" || w == "were" ||
+         w == "been" || w == "have" || w == "not" || w == "but" || w == "you" ||
+         w == "your" || w == "into" || w == "about" || w == "would" ||
+         w == "could" || w == "should" || w == "there" || w == "their" ||
+         w == "which" || w == "when" || w == "where" || w == "what" ||
+         w == "will" || w == "shall" || w == "than" || w == "then" ||
+         w == "also" || w == "only" || w == "such" || w == "some" ||
+         w == "any" || w == "all" || w == "can" || w == "may";
+}
+
+/* Two descriptions are the same hit when their content-token sets are
+   almost the same. A repeat of one sentence is not a second witness:
+   the promotion rule below needs two distinct observations. */
+inline double condDescriptionSimilarity(const std::string &a,
+                                        const std::string &b) {
+  std::unordered_set<std::string> sa;
+  std::unordered_set<std::string> sb;
+  for (const auto &w : glossTokens(a))
+    if (!condFunctionWord(w))
+      sa.insert(w);
+  for (const auto &w : glossTokens(b))
+    if (!condFunctionWord(w))
+      sb.insert(w);
+  if (sa.empty() && sb.empty())
+    return 1.0;
+  int inter = 0;
+  for (const auto &w : sa)
+    if (sb.count(w))
+      ++inter;
+  const int uni = static_cast<int>(sa.size() + sb.size()) - inter;
+  if (uni <= 0)
+    return 1.0;
+  return static_cast<double>(inter) / static_cast<double>(uni);
+}
+
+inline bool condNearDuplicate(const std::string &a, const std::string &b) {
+  return condDescriptionSimilarity(a, b) >= 0.9;
+}
+
+/* Recent-hit window: a description is independent only when it is not a
+   near duplicate of ANY of the last few hits. Checking only the last hit
+   would let A, B, A count A twice. */
+inline bool condRecentIndependent(const std::vector<std::string> &recent,
+                                  const std::string &current) {
+  for (const auto &prev : recent) {
+    if (condNearDuplicate(prev, current))
+      return false;
+  }
+  return true;
+}
+
+/* A conditional hit is not yet an index term. The first short
+   description only parks its new content words. Function words are
+   not parked. Words already in a candidate file are not parked.
+   A later description that shares at least two parked words promotes
+   that intersection. Calendar paraphrases usually share no two
+   content words, so a second hit with a smaller intersection instead
+   promotes up to four parked words and four new words. That is one
+   insertion, W += y x^T on those words, not an extra training epoch.
+
+   Two observations must be distinct: repeating one description is not
+   a second witness (condNearDuplicate). The mixed branch requires at
+   least two words from each observation, otherwise it only parks the
+   new words: a promotion that leaves one side with a single word
+   cannot route that side later, so it would be an update the local
+   student cannot use. */
+inline int confirmCondWords(const std::string &description,
+                            const std::vector<OrderedMeme> &files,
+                            std::vector<std::string> &active,
+                            std::vector<std::string> &pending,
+                            const std::string *lastDescription = nullptr) {
+  if (lastDescription != nullptr && !lastDescription->empty() &&
+      condNearDuplicate(*lastDescription, description))
+    return 0;
+  const auto eligible = witnessedAliases(description, files, "cond", active);
+  std::unordered_set<std::string> already(active.begin(), active.end());
+  std::vector<std::string> fresh;
+  for (const auto &w : eligible) {
+    if (already.count(w) || condFunctionWord(w))
+      continue;
+    fresh.push_back(w);
+  }
+  std::unordered_set<std::string> parked(pending.begin(), pending.end());
+  std::vector<std::string> shared;
+  for (const auto &w : fresh) {
+    if (parked.count(w))
+      shared.push_back(w);
+  }
+  auto dropMoved = [&](const std::unordered_set<std::string> &moved) {
+    std::vector<std::string> kept;
+    for (const auto &w : pending) {
+      if (!moved.count(w))
+        kept.push_back(w);
+    }
+    pending.swap(kept);
+  };
+  if (shared.size() >= 2 &&
+      static_cast<int>(active.size()) + 2 <= 32) {
+    std::unordered_set<std::string> moved;
+    for (const auto &w : shared) {
+      if (static_cast<int>(active.size()) >= 32)
+        break;
+      active.push_back(w);
+      moved.insert(w);
+    }
+    dropMoved(moved);
+    return static_cast<int>(moved.size());
+  }
+  if (!pending.empty() && !fresh.empty() &&
+      static_cast<int>(active.size()) < 32) {
+    /* At least two words from each observation, or this is not yet a
+       usable two-sided witness. */
+    const int room = std::min(32 - static_cast<int>(active.size()), 8);
+    const int fromParkWanted = std::min(4, static_cast<int>(pending.size()));
+    const int fromFreshWanted = std::min(4, static_cast<int>(fresh.size()));
+    if (fromParkWanted >= 2 && fromFreshWanted >= 2 &&
+        fromParkWanted + fromFreshWanted <= std::max(room, 4)) {
+      std::unordered_set<std::string> moved;
+      int fromPark = 0;
+      for (const auto &w : pending) {
+        if (fromPark == 4 || static_cast<int>(active.size()) >= 32)
+          break;
+        active.push_back(w);
+        moved.insert(w);
+        ++fromPark;
+      }
+      int fromFresh = 0;
+      std::unordered_set<std::string> act(active.begin(), active.end());
+      for (const auto &w : fresh) {
+        if (fromFresh == 4 || static_cast<int>(active.size()) >= 32)
+          break;
+        if (!act.insert(w).second)
+          continue;
+        active.push_back(w);
+        ++fromFresh;
+      }
+      dropMoved(moved);
+      return fromPark + fromFresh;
+    }
+    /* Not enough on both sides: keep parking, do not publish. */
+    std::unordered_set<std::string> placed;
+    for (const auto &w : fresh) {
+      if (static_cast<int>(pending.size()) >= 32)
+        break;
+      if (placed.insert(w).second)
+        pending.push_back(w);
+    }
+    return 0;
+  }
+  for (const auto &w : fresh) {
+    if (static_cast<int>(pending.size()) >= 32)
+      break;
+    if (parked.insert(w).second)
+      pending.push_back(w);
+  }
+  return 0;
+}
+
+inline void appendNeighborPairs(const std::string &description,
+                                const std::unordered_set<std::string> &justAdded,
+                                std::vector<std::string> &active);
+
+/* Words that already sit in two or more candidate texts cannot be
+   exclusive aliases: tf/df splits them and the lexical rank ties.
+   The side table is a linear score, score_f = sum_w z_{f,w} x_w,
+   with z in {0,1}. The first teacher hit only parks those shared
+   words. The second hit writes z=1 for the same intersection rule
+   used by confirmCondWords, or up to four parked and four new words
+   when the intersection is smaller. That write is one saturating
+   step. It does not enter the lexical profile and it does not admit
+   a meme. A later query needs a unique score of at least 2. */
+inline int confirmBlockedLinks(const std::string &description,
+                               const std::vector<OrderedMeme> &files,
+                               std::vector<std::string> &active,
+                               std::vector<std::string> &pending) {
+  std::unordered_map<std::string, int> df;
+  for (const auto &file : files) {
+    std::unordered_set<std::string> seen;
+    for (const auto &w : glossTokens(file.text)) {
+      if (seen.insert(w).second)
+        df[w] += 1;
+    }
+  }
+  std::unordered_set<std::string> already(active.begin(), active.end());
+  std::vector<std::string> fresh;
+  std::unordered_set<std::string> freshSeen;
+  for (const auto &w : glossTokens(description)) {
+    if (condFunctionWord(w) || already.count(w) || df[w] < 2)
+      continue;
+    if (freshSeen.insert(w).second)
+      fresh.push_back(w);
+  }
+  std::unordered_set<std::string> parked(pending.begin(), pending.end());
+  std::vector<std::string> shared;
+  for (const auto &w : fresh) {
+    if (parked.count(w))
+      shared.push_back(w);
+  }
+  auto dropMoved = [&](const std::unordered_set<std::string> &moved) {
+    std::vector<std::string> kept;
+    for (const auto &w : pending) {
+      if (!moved.count(w))
+        kept.push_back(w);
+    }
+    pending.swap(kept);
+  };
+  if (shared.size() >= 2 &&
+      static_cast<int>(active.size()) + 2 <= 32) {
+    std::unordered_set<std::string> moved;
+    for (const auto &w : shared) {
+      if (static_cast<int>(active.size()) >= 32)
+        break;
+      active.push_back(w);
+      moved.insert(w);
+    }
+    dropMoved(moved);
+    appendNeighborPairs(description, moved, active);
+    return static_cast<int>(moved.size());
+  }
+  if (!pending.empty() && !fresh.empty() &&
+      static_cast<int>(active.size()) < 32) {
+    std::unordered_set<std::string> moved;
+    int fromPark = 0;
+    for (const auto &w : pending) {
+      if (fromPark == 4 || static_cast<int>(active.size()) >= 32)
+        break;
+      active.push_back(w);
+      moved.insert(w);
+      ++fromPark;
+    }
+    int fromFresh = 0;
+    std::unordered_set<std::string> act(active.begin(), active.end());
+    for (const auto &w : fresh) {
+      if (fromFresh == 4 || static_cast<int>(active.size()) >= 32)
+        break;
+      if (!act.insert(w).second)
+        continue;
+      active.push_back(w);
+      ++fromFresh;
+    }
+    dropMoved(moved);
+    appendNeighborPairs(description, moved, active);
+    return fromPark + fromFresh;
+  }
+  for (const auto &w : fresh) {
+    if (static_cast<int>(pending.size()) >= 32)
+      break;
+    if (parked.insert(w).second)
+      pending.push_back(w);
+  }
+  return 0;
+}
+
+/* A neighbor pair is two content tokens with nothing between them.
+   The stored key is "left+right". It is a replicator span of length 2,
+   not an extra unigram. Pairs live in the same link vector.
+
+   Longer contiguous spans of the witnessed words (length 3 and 4) are
+   stored as "a>b>c" / "a>b>c>d". They are the conjunctive hidden units
+   of HiddenLinkNet: a unit fires only when the whole ordered span is
+   present, which a sum of unigram indicators cannot express. */
+inline void appendNeighborPairs(const std::string &description,
+                                const std::unordered_set<std::string> &justAdded,
+                                std::vector<std::string> &active) {
+  const auto tokens = glossTokens(description);
+  std::unordered_set<std::string> have(active.begin(), active.end());
+  auto spansAllowed = [&](size_t begin, size_t len) {
+    for (size_t k = 0; k < len; ++k) {
+      const std::string &w = tokens[begin + k];
+      if (condFunctionWord(w) || !justAdded.count(w))
+        return false;
+    }
+    return true;
+  };
+  for (size_t i = 1; i < tokens.size(); ++i) {
+    if (static_cast<int>(active.size()) >= 32)
+      break;
+    const std::string &left = tokens[i - 1];
+    const std::string &right = tokens[i];
+    if (condFunctionWord(left) || condFunctionWord(right))
+      continue;
+    if (!justAdded.count(left) || !justAdded.count(right))
+      continue;
+    const std::string key = left + "+" + right;
+    if (have.insert(key).second && static_cast<int>(active.size()) < 32)
+      active.push_back(key);
+  }
+  for (size_t len = 3; len <= 4; ++len) {
+    for (size_t begin = 0; begin + len <= tokens.size(); ++begin) {
+      if (static_cast<int>(active.size()) >= 32)
+        break;
+      if (!spansAllowed(begin, len))
+        continue;
+      std::string key = tokens[begin];
+      for (size_t k = 1; k < len; ++k) {
+        key.push_back('>');
+        key += tokens[begin + k];
+      }
+      if (have.insert(key).second)
+        active.push_back(key);
+    }
+  }
+}
+
+/* HiddenLinkNet score. The hidden units are the conjunctive keys stored
+   in the row: length-2 pairs (left+right) and ordered spans of length
+   3..4 (a>b>c). The output layer is linear with weight 1 on every unit
+   the row wrote, so the score is the number of matched units. This is a
+   one-hidden-layer network with fixed binary hidden units and a trained
+   linear readout (the write is the one-step update). It is used only
+   after the unigram and pair stages tie; a unique unigram or pair score
+   never reaches it. */
+inline int hiddenLinkScore(const std::string &description,
+                           const std::vector<std::string> &links) {
+  std::unordered_set<std::string> units(links.begin(), links.end());
+  std::unordered_set<std::string> seen;
+  const auto tokens = glossTokens(description);
+  int n = 0;
+  for (size_t i = 1; i < tokens.size(); ++i) {
+    if (condFunctionWord(tokens[i - 1]) || condFunctionWord(tokens[i]))
+      continue;
+    const std::string key = tokens[i - 1] + "+" + tokens[i];
+    if (units.count(key) && seen.insert(key).second)
+      ++n;
+  }
+  for (size_t len = 3; len <= 4; ++len) {
+    for (size_t begin = 0; begin + len <= tokens.size(); ++begin) {
+      bool ok = true;
+      for (size_t k = 0; k < len; ++k) {
+        if (condFunctionWord(tokens[begin + k])) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok)
+        continue;
+      std::string key = tokens[begin];
+      for (size_t k = 1; k < len; ++k) {
+        key.push_back('>');
+        key += tokens[begin + k];
+      }
+      if (units.count(key) && seen.insert(key).second)
+        ++n;
+    }
+  }
+  return n;
+}
+
+inline int blockedPairScore(const std::string &description,
+                            const std::vector<std::string> &links) {
+  std::unordered_set<std::string> pairs;
+  for (const auto &link : links) {
+    if (link.find('+') != std::string::npos)
+      pairs.insert(link);
+  }
+  if (pairs.empty())
+    return 0;
+  const auto tokens = glossTokens(description);
+  std::unordered_set<std::string> seen;
+  int n = 0;
+  for (size_t i = 1; i < tokens.size(); ++i) {
+    if (condFunctionWord(tokens[i - 1]) || condFunctionWord(tokens[i]))
+      continue;
+    const std::string key = tokens[i - 1] + "+" + tokens[i];
+    if (pairs.count(key) && seen.insert(key).second)
+      ++n;
+  }
+  return n;
+}
+
+inline int blockedLinkScore(const std::string &description,
+                            const std::vector<std::string> &links) {
+  std::unordered_set<std::string> have(links.begin(), links.end());
+  std::unordered_set<std::string> seen;
+  int n = 0;
+  for (const auto &w : glossTokens(description)) {
+    if (condFunctionWord(w))
+      continue;
+    if (have.count(w) && seen.insert(w).second)
+      ++n;
+  }
+  return n;
+}
+
+inline std::string rankBlockedLinks(
+    const std::string &description,
+    const std::vector<std::pair<std::string, std::vector<std::string>>> &rows,
+    const std::vector<int> &fecundity = {}) {
+  int best = 0;
+  for (const auto &row : rows) {
+    const int score = blockedLinkScore(description, row.second);
+    if (score > best)
+      best = score;
+  }
+  if (best < 2)
+    return std::string();
+  std::vector<size_t> tied;
+  for (size_t i = 0; i < rows.size(); ++i) {
+    if (blockedLinkScore(description, rows[i].second) == best)
+      tied.push_back(i);
+  }
+  if (tied.size() == 1)
+    return rows[tied[0]].first;
+  if (fecundity.size() == rows.size()) {
+    int top = 0;
+    size_t pick = 0;
+    int winners = 0;
+    for (size_t index : tied) {
+      const int f = fecundity[index];
+      if (winners == 0 || f > top) {
+        top = f;
+        pick = index;
+        winners = 1;
+      } else if (f == top) {
+        ++winners;
+      }
+    }
+    if (winners == 1 && top > 0)
+      return rows[pick].first;
+  }
+  /* Unigram scores tied and fecundity did not separate them.
+     Neighbor pairs are the length-2 replicator. A unique pair score
+     of at least 2 picks that row. A unique unigram score never
+     reaches this branch. */
+  int pairBest = 0;
+  for (size_t index : tied) {
+    const int score = blockedPairScore(description, rows[index].second);
+    if (score > pairBest)
+      pairBest = score;
+  }
+  if (pairBest < 2)
+    return std::string();
+  size_t pairPick = 0;
+  int pairWinners = 0;
+  for (size_t index : tied) {
+    if (blockedPairScore(description, rows[index].second) != pairBest)
+      continue;
+    pairPick = index;
+    ++pairWinners;
+  }
+  if (pairWinners == 1)
+    return rows[pairPick].first;
+  /* Pair scores are tied too. The conjunctive hidden layer adds the
+     longer ordered spans (length 3 and 4). It can only add matches, so
+     a row that has no span beyond its pairs cannot win by accident. */
+  int hiddenBest = 0;
+  for (size_t index : tied) {
+    const int score = hiddenLinkScore(description, rows[index].second);
+    if (score > hiddenBest)
+      hiddenBest = score;
+  }
+  if (hiddenBest <= pairBest)
+    return std::string();
+  size_t hiddenPick = 0;
+  int hiddenWinners = 0;
+  for (size_t index : tied) {
+    if (hiddenLinkScore(description, rows[index].second) != hiddenBest)
+      continue;
+    hiddenPick = index;
+    ++hiddenWinners;
+  }
+  if (hiddenWinners == 1)
+    return rows[hiddenPick].first;
+  return std::string();
+}
+
+/* One-step bilinear memory. The first layer is a frozen one-hot
+   embedding of words. The second layer is W. A witnessed pair (x, y)
+   trains it by W += y x^T, which is one gradient step on -y^T W x
+   with step size 1. There is no epoch loop and no new output column.
+   With a single update and no repeated words,
+   score(query, file) = |query ∩ x| * |file ∩ y|. */
+inline double bilinearWitnessScore(
+    const std::vector<std::string> &query, const std::vector<std::string> &file,
+    const std::vector<std::string> &witnessQuery,
+    const std::vector<std::string> &witnessFile) {
+  std::unordered_set<std::string> qx(query.begin(), query.end());
+  std::unordered_set<std::string> fy(file.begin(), file.end());
+  int nq = 0;
+  int nf = 0;
+  std::unordered_set<std::string> seen;
+  for (const auto &w : witnessQuery)
+    if (qx.count(w) && seen.insert(w).second)
+      ++nq;
+  seen.clear();
+  for (const auto &w : witnessFile)
+    if (fy.count(w) && seen.insert(w).second)
+      ++nf;
+  return static_cast<double>(nq) * static_cast<double>(nf);
+}
+
+/* A gloss already written onto one file. tf is stored so the bilinear
+   weight can be shown. For a word that hits only one file, the index
+   mass does not depend on tf: the hit list has one alpha and the
+   normalized share is 1. Repeating the word is not a stronger index. */
+struct GlossTerm {
+  std::string word;
+  int tf{1};
+};
+
+struct GlossLineage {
+  LineageState state{};
+  std::vector<std::string> carriers;
+};
+
+inline int glossTokenOverlap(const std::string &text,
+                            const std::vector<GlossTerm> &terms) {
+  std::unordered_set<std::string> have;
+  for (const auto &t : terms)
+    if (!t.word.empty())
+      have.insert(t.word);
+  std::string cur;
+  std::unordered_set<std::string> seen;
+  int n = 0;
+  auto flush = [&]() {
+    if (cur.size() >= 3 && have.count(cur) && seen.insert(cur).second)
+      ++n;
+    cur.clear();
+  };
+  for (unsigned char c : text) {
+    if (std::isalnum(c))
+      cur.push_back(static_cast<char>(std::tolower(c)));
+    else
+      flush();
+  }
+  flush();
+  return n;
+}
+
+inline bool glossCarried(const std::string &description,
+                         const std::string &rawBody,
+                         const std::vector<GlossTerm> &terms) {
+  return glossTokenOverlap(description, terms) >= 2 &&
+         glossTokenOverlap(rawBody, terms) == 0;
+}
+
+inline std::string glossParent(const std::vector<GlossTerm> &terms) {
+  std::string out;
+  for (const auto &t : terms) {
+    if (t.word.empty())
+      continue;
+    if (!out.empty())
+      out.push_back(' ');
+    out += t.word;
+  }
+  return out;
+}
+
+/* A later text that copies the gloss is a generation. One copy does
+   not admit a meme. The index may already route on the inserted
+   words; admission is a separate count. indexWithoutCopy ends the
+   streak and does not increase fecundity. */
+inline void reinforceGloss(std::vector<GlossTerm> &terms, GlossLineage &line,
+                           const std::string &description) {
+  if (terms.empty() || description.empty())
+    return;
+  const auto judged = judgeCopy(glossParent(terms), description);
+  /* The stored list is the source identity. A string already stored is
+     the same source. Once eight strings are stored, further unseen
+     strings are not new sources: counting them without storing them
+     would count the same echo twice on the next call. The cost is that
+     a ninth distinct copy does not raise fecundity. */
+  bool seen = false;
+  for (const auto &stored : line.carriers) {
+    if (stored == description) {
+      seen = true;
+      break;
+    }
+  }
+  const bool distinct = !seen && line.carriers.size() < 8;
+  lineageObserve(line.state, judged, distinct);
+  if (!(judged.replicator && distinct))
+    return;
+  line.carriers.push_back(description);
+  std::unordered_set<std::string> offspring;
+  std::string cur;
+  auto flush = [&]() {
+    if (cur.size() >= 3)
+      offspring.insert(cur);
+    cur.clear();
+  };
+  for (unsigned char c : description) {
+    if (std::isalnum(c))
+      cur.push_back(static_cast<char>(std::tolower(c)));
+    else
+      flush();
+  }
+  flush();
+  for (auto &t : terms) {
+    if (t.tf < 4 && offspring.count(t.word))
+      t.tf += 1;
   }
 }
 
@@ -592,8 +1598,146 @@ inline AlphaIdentity mappingAlphaIdentity(
   return out;
 }
 
-inline constexpr double kGnnPresentPeakFrac = 0.05;
-inline constexpr double kGnnPresentLift = 2.0;
+namespace {
+
+inline std::vector<std::string> orderedMemeTokens(const std::string &s) {
+  std::vector<std::string> out;
+  std::string cur;
+  auto flush = [&]() {
+    if (cur.size() >= 3)
+      out.push_back(cur);
+    cur.clear();
+  };
+  for (unsigned char c : s) {
+    if (std::isalnum(c))
+      cur.push_back(static_cast<char>(std::tolower(c)));
+    else
+      flush();
+  }
+  flush();
+  return out;
+}
+
+inline bool orderedMemeHighDf(int df, int memeCount) {
+  if (memeCount <= 0)
+    return false;
+  int side = 1;
+  while (side * side < memeCount && side < 100000)
+    ++side;
+  return df > std::max(3, side);
+}
+
+/* Kendall tau on the query tokens that sit in the meme.
+   Positions are successive slots of that word in the meme.
+   tau = (n_concordant - n_discordant) / (n_concordant + n_discordant).
+   Ties do not enter the denominator. 0 when there is no ordered pair.
+   Kendall, M. G. (1938). Biometrika 30:81-93. */
+inline double orderedMemeOrderLift(const std::vector<std::string> &query,
+                                   const std::vector<std::string> &meme) {
+  if (query.size() < 2 || meme.size() < 2)
+    return 0.0;
+  std::unordered_map<std::string, std::vector<int>> at;
+  for (int i = 0; i < static_cast<int>(meme.size()); ++i)
+    at[meme[static_cast<size_t>(i)]].push_back(i);
+  std::unordered_map<std::string, int> used;
+  std::vector<int> pos;
+  pos.reserve(query.size());
+  for (const auto &w : query) {
+    auto it = at.find(w);
+    if (it == at.end() || it->second.empty())
+      continue;
+    int u = used[w]++;
+    if (u >= static_cast<int>(it->second.size()))
+      u = static_cast<int>(it->second.size()) - 1;
+    pos.push_back(it->second[static_cast<size_t>(u)]);
+  }
+  int concordant = 0;
+  int discordant = 0;
+  for (size_t i = 0; i < pos.size(); ++i) {
+    for (size_t j = i + 1; j < pos.size(); ++j) {
+      if (pos[i] < pos[j])
+        ++concordant;
+      else if (pos[i] > pos[j])
+        ++discordant;
+    }
+  }
+  if (concordant + discordant == 0)
+    return 0.0;
+  return static_cast<double>(concordant - discordant) /
+         static_cast<double>(concordant + discordant);
+}
+
+} // namespace
+
+inline std::vector<OrderedMemeScore>
+scoreOrderedMemes(const std::string &query,
+                  const std::vector<OrderedMeme> &memes) {
+  std::vector<OrderedMemeScore> out;
+  if (query.empty() || memes.empty())
+    return out;
+  const auto qTokens = orderedMemeTokens(query);
+  if (qTokens.size() < 2)
+    return out;
+  std::unordered_map<std::string, double> queryMass;
+  for (const auto &w : qTokens)
+    queryMass[w] += 1.0;
+  std::vector<std::vector<std::string>> memeToks;
+  memeToks.reserve(memes.size());
+  std::unordered_map<std::string, int> df;
+  for (const auto &m : memes) {
+    auto tok = orderedMemeTokens(m.text);
+    std::unordered_set<std::string> seen;
+    for (const auto &w : tok) {
+      if (seen.insert(w).second)
+        df[w] += 1;
+    }
+    memeToks.push_back(std::move(tok));
+  }
+  const int n = static_cast<int>(memes.size());
+  std::unordered_map<std::string, std::vector<MappingWordHit>> hits;
+  for (size_t i = 0; i < memes.size(); ++i) {
+    std::unordered_map<std::string, int> tf;
+    for (const auto &w : memeToks[i])
+      tf[w] += 1;
+    for (const auto &kv : tf) {
+      const int dfi = df[kv.first];
+      if (dfi <= 0)
+        continue;
+      hits[kv.first].push_back(MappingWordHit{
+          memes[i].id, static_cast<double>(kv.second) / static_cast<double>(dfi)});
+    }
+  }
+  std::unordered_map<std::string, double> seeds;
+  mappingAddConditionedSeeds(queryMass, hits, &seeds, nullptr, n);
+  std::unordered_map<std::string, double> nullMass;
+  for (const auto &kv : queryMass) {
+    if (orderedMemeHighDf(df[kv.first], n))
+      nullMass[kv.first] = kv.second;
+  }
+  std::unordered_map<std::string, double> nullSeeds;
+  if (!nullMass.empty())
+    mappingAddConditionedSeeds(nullMass, hits, &nullSeeds, nullptr, n);
+  out.reserve(memes.size());
+  for (size_t i = 0; i < memes.size(); ++i) {
+    OrderedMemeScore s;
+    s.id = memes[i].id;
+    auto it = seeds.find(s.id);
+    s.mass = it == seeds.end() ? 0.0 : it->second;
+    const double nullM = nullSeeds.count(s.id) ? nullSeeds[s.id] : 0.0;
+    s.lift = s.mass / std::max(nullM, 1e-6);
+    s.orderLift = orderedMemeOrderLift(qTokens, memeToks[i]);
+    std::unordered_set<std::string> inMeme(memeToks[i].begin(), memeToks[i].end());
+    std::unordered_set<std::string> seenQ;
+    for (const auto &w : qTokens) {
+      if (inMeme.count(w) && seenQ.insert(w).second)
+        ++s.overlap;
+    }
+    s.present = s.mass > 0.0 && s.lift >= kGnnPresentLift &&
+                s.orderLift > 0.0 && s.overlap >= 2;
+    out.push_back(std::move(s));
+  }
+  return out;
+}
 
 /* Word↔meme bindings used by official n-gram clustering. */
 class MemeClusterStore {

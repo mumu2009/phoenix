@@ -4,7 +4,6 @@ describe('api.chat provider routing', () => {
     localStorage.clear();
     global.fetch = jest.fn();
     delete process.env.REACT_APP_CHAT_PROVIDER;
-    delete process.env.REACT_APP_OPENCLAW_CHAT_PATH;
   });
 
   test('uses core provider by default', async () => {
@@ -19,25 +18,6 @@ describe('api.chat provider routing', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch.mock.calls[0][0]).toBe('/api/chat');
     expect(out?.result?.reply).toBe('ok-core');
-  });
-
-  test('routes openclaw provider and normalizes response', async () => {
-    process.env.REACT_APP_CHAT_PROVIDER = 'openclaw';
-    process.env.REACT_APP_OPENCLAW_CHAT_PATH = '/openclaw/chat';
-
-    fetch.mockResolvedValueOnce({
-      ok: true,
-      text: async () => JSON.stringify({ reply: 'ok-openclaw', costMs: 12 })
-    });
-
-    const { api } = require('./client');
-    const out = await api.chat('hello', 's2');
-
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(fetch.mock.calls[0][0]).toBe('/openclaw/chat');
-    expect(out?.provider).toBe('openclaw');
-    expect(out?.result?.reply).toBe('ok-openclaw');
-    expect(out?.result?.latency).toBe(12);
   });
 
   test('routes world runtime endpoints through the shared request helper', async () => {

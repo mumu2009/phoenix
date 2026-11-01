@@ -145,3 +145,13 @@ config/phoenix.json
 # local build scratch
 _tmp_*
 compile_keep_llama_next*.rsp
+
+# local tuner snapshots of phoenix.json (same class as config/phoenix.json)
+config/phoenix.pre*.json
+
+# harvested bibliographic dumps; regenerate with papers/harvest_open.py
+# (papers/collected/ccf_works.jsonl alone is about 300MB)
+papers/collected/
+
+# session handoff notes
+HANDOFF_*.md

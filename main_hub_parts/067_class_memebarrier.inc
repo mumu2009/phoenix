@@ -36,9 +36,10 @@ public:
         });
     phoenix::secamp::notifyMemeBarrierAttached();
     (void)phoenix::secamp::ensureProcessHardEmbed();
-    phoenix::secamp::noteWorkspaceRoot(phoenix::cfgOr<std::string>(
+    phoenix::secamp::noteWorkspaceRoot(phoenix::resolveConfig<std::string>(
         "mission.workspaceDir",
-        std::string("./runtime_store/mission_workspace")));
+        std::string("./runtime_store/mission_workspace"),
+        "AI_MISSION_WORKSPACE"));
   }
 
   void start() {

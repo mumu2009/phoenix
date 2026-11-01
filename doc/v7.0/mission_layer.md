@@ -96,6 +96,25 @@ Ng, Harada & Russell (1999) 证明：只有**势函数塑形**（potential-based
 
 **监督者信号**：`stats()` 暴露 `completionTimeMs`、`children`、`maxReplicas`；进程内**没有** fitness 字段、没有按完成时间的自动选择——选择（是否停用、是否采纳某变体）永远属于人。原"不受控 (1+λ)-ES 自进化"设想仍封存于 `doc/v7.0/archive/uncontrolled_evolution.md`。
 
+### 4.1 2026-10-26 更新：可遗传的每回合生成预算与被选中的父本
+
+上面那段“没有最优父本保留”记录的是 2026-08 的状态。之后的代码已经打开选择，
+以代码为准：
+
+- `MissionGenome` 新增 `tokensPerTick`（初始 256，夹在 [32,1024]）。变异是对数
+  空间的：`σ = rate × ln(1024/32) ≈ 3.47 rate`；rate=0 时逐位遗传。
+- 111 的 mission worker 每个回合从 `missionGenomeFor(scope)` 读父本（或子盒
+  自己的）基因组，用 `missionTickBudget(tokensPerTick, 512, false, draftCap)`
+  得到本回合的 `num_predict`。子代在被选成父本之前，自己的预算已经作用于它
+  自己的回合。
+- 父本完成时，`adoptEliteLocked` 在“父本的完成时间”和“已完成子盒的
+  `completionMs`”里保留严格最短的基因组（平局留父本）；`markChildDone` 也会
+  触发同一次保留。开关是 `mission.evolution.enabled`（默认 false，现场为 true）。
+- `retainFinishedGenome` 在 `importState` 之后被调用，恢复出来的已完成任务也会
+  再做一次同样的保留。阈值（严格更短、平局留早的）不改。
+- 真实墙钟的测量与选择实验在 `papers/transmission.md` 的 2026-10-26 一节；
+  第 9.11 节的记录数不因这个字段改变（新字段的抽样走 rng 的副本）。
+
 **为什么不是跨运行时层**：后继是同一进程内的新会话 + 一个 `MissionChild` 记录；`replicate` 是 O(基因组维数) 纯计算，无第二进程、无协议、无翻译损耗。
 ## 5. 实现映射与用法
 
@@ -131,6 +150,7 @@ HTTP API（v8.0 起，人工监督控制台——"生命周期开始时设立问
 | `/api/mission/status` | GET | `{enabled, stats{mission, pressure, generations, spawns, completions, completionTimeMs, children}, genome}` |
 | `/api/mission/assign` | POST | body `{goal, deadlineSec?, painGainPerSec?, maxPain?, mutationRate?, maxReplicas?, pressureMode?, pressureHorizonSec?, pressureTauSec?, pressureExpr?}`；goal 必填，自动置 `enabled=true` 并**自动启动自主心跳**。压力模式（§1）：`asymptotic`（默认，Pmax·tanh(t/τ)，永不宣称饱和）/ `linear` / `logarithmic` / `expression`（自定公式，失败回退 asymptotic） |
 | `/api/mission/report` | POST | body `{goalAchieved}`：进程外判定门（完成/失败），`completionTimeMs` 是给人类监督者的选择信号 |
+| `/api/mission/child/done` | POST | body `{childId, missionId?}`：人类监督者判**一个子盒**完成；写 `completionMs`，父任务完成时 `adoptEliteLocked` 可选中它。它不伪造模型自判，也不删活着的子盒（2026-10-27 现场 10.11 用它跑通了父本-子盒选择） |
 | `/api/mission/replicate` | POST | body `{mutationRate?, subgoal?, parentId?}`：召唤一个子任务盒子（§5.6）；空/相同目标自动降级为 "assist with: <父目标>"；`parentId` 为空=根级，否则挂在指定盒子下（任务树，深度默认无限、可用 `mission.maxReplicaDepth` 限制） |
 | `/api/mission/file` | POST/GET | body `{action: list\|read\|write\|append\|delete, path, content?}`：任务工作区的沙箱文件操作（§5.5） |
 

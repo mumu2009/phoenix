@@ -94706,7 +94706,11 @@ private:
       }
 
       try {
-        std::filesystem::path root = std::filesystem::current_path() / "Python314";
+        const char *pyHomeEnv = std::getenv("AI_PYTHON_HOME");
+        std::filesystem::path root =
+            (pyHomeEnv && pyHomeEnv[0])
+                ? std::filesystem::path(pyHomeEnv)
+                : std::filesystem::current_path() / "Python314";
         std::filesystem::path lib = root / "Lib";
         std::filesystem::path dlls = root / "DLLs";
         pythonHomeW_ = root.wstring();

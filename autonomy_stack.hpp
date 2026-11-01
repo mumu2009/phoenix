@@ -167,6 +167,12 @@ public:
     json learnUnits(const json &payload);
     json runPopulationGoal(const json &payload);
     json summonTinyExpert(const json &payload);
+    /* Tool-side live training. The caller detected a source-edit situation.
+       Unit learning, the live-turn self-model, and one tiny-expert fit run
+       as a side channel. Nothing returned here is a prompt. */
+    json noteFieldOpportunity(const std::string &text);
+    /* Project-path specialist score. Not a prompt and not a diff. */
+    json projectPathScore(const std::string &text) const;
 
     /* v7.0 mission layer (optional, config mission.*): Meeseeks-style goal
        pressure + instance reproduction.  In-process lifecycle state machine;
@@ -189,6 +195,12 @@ public:
     json evaluateInstinctsFor(const std::string &contextTag);
     /* current pressure of one mission (drives the steady-output loop). */
     float missionPressureFor(const std::string &missionId);
+    /* Heritable genome of the mission/box that owns `scope`
+       (scope = "<missionId>" or "<missionId>/children/<childId>").
+       Returns {} when the mission/box is not found.  The gateway worker
+       reads tokensPerTick from here so the per-tick generation budget is
+       the genome's, not a global constant. */
+    json missionGenomeFor(const std::string &scope);
 
     /* v8.0 mission worker: the gateway registers an LLM-backed deliberator.
        While a mission is Running the heartbeat calls it OUTSIDE the manager
@@ -232,6 +244,12 @@ public:
     json startAutonomyLoop(const json &opts = json::object()); /* spawn; never join */
     json stopAutonomyLoop(); /* flag+abort only; never join a long iterate */
     json autonomyLoopStatus() const;
+    /* Global loop tick: one generation is one loop round.  The trace uses
+       this instead of a per-scope ++ so all carriers in a round share the
+       generation even if one scope was re-assigned earlier. */
+    uint64_t loopTickCount() const {
+      return loopTickCount_.load(std::memory_order_relaxed);
+    }
 
     /* v7.0 external mixed-modal I/O */
     json ingestMixedModalPacket(const json &payload); /* Accept external mixed-modal input */
@@ -277,6 +295,7 @@ private:
     phoenix::study::UnitLearner unitLearner_;
     phoenix::study::PopulationLayer population_;
     phoenix::study::TinyExpert tinyExpert_;
+    std::string lastFieldGoal_;
 
     /* v7.0 mission layer (optional) */
     bool missionEnabled_{false};
@@ -314,7 +333,7 @@ size_t missionMaxReplicas_{4};            /* guardrail on free replication */
     std::atomic<int64_t> loopLastTickAtMs_{0};
     /* Stall watchdog: the loop thread publishes its current stage + the time
        it entered it; a separate watchdog thread logs [mission-stall] when a
-       stage exceeds autonomyLoop.stallWarnSec (default 180s).  The 4h speed
+       stage exceeds autonomyLoop.stallWarnSec (default 1800s).  The 4h speed
        baseline froze silently right after the deliverable crossed
        minDeliverableChars - stage markers make the next hang self-naming. */
     std::atomic<int> loopStage_{0};
@@ -322,7 +341,7 @@ size_t missionMaxReplicas_{4};            /* guardrail on free replication */
     std::atomic<uint64_t> loopStageTick_{0};
     std::thread loopWatchdogThread_;
     std::atomic<bool> loopWatchdogStop_{false};
-    int loopStallWarnSec_{180};
+    int loopStallWarnSec_{1800};
     void setLoopStage(int stage);
     static const char *loopStageName(int stage);
     void ensureLoopWatchdog();

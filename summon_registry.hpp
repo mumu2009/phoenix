@@ -70,6 +70,7 @@ struct ModelEndpoint {
   int port{0};                      /*!< endpoint port; 0 means unset. */
   int k{1};                         /*!< active expert count for kind "moe". */
   int pinnedExpert{-1};             /*!< forced expert id; -1 means not pinned. */
+  std::vector<std::string> roles;   /*!< tool-side tags, e.g. "programming". The base model is not shown these. */
 
   /** Fill MoE defaults. Does not open a socket or start a process. */
   void applyDefaults() {
@@ -99,7 +100,8 @@ struct ModelEndpoint {
             {"modelPath", modelPath},
             {"port", port},
             {"k", k},
-            {"pinnedExpert", pinnedExpert}};
+            {"pinnedExpert", pinnedExpert},
+            {"roles", roles}};
   }
 
   static int pickInt(const nlohmann::json &j, int fallback,
@@ -144,7 +146,23 @@ struct ModelEndpoint {
     ep.k = pickInt(j, ep.k, "k", "K", "activeExperts");
     ep.pinnedExpert = pickInt(j, ep.pinnedExpert, "pinnedExpert",
                               "forceExpert", "expertId");
+    if (j.contains("roles") && j["roles"].is_array()) {
+      for (const auto &role : j["roles"]) {
+        if (role.is_string() && !role.get<std::string>().empty())
+          ep.roles.push_back(role.get<std::string>());
+      }
+    }
     return ep;
+  }
+
+  /** True when a tool may treat this endpoint as the programming specialist.
+      Matching is on the configured role tag only. Description text is not
+      scanned, and nothing here is written into a prompt. */
+  bool servesProgramming() const {
+    for (const auto &role : roles) {
+      if (role == "programming" || role == "code") return true;
+    }
+    return false;
   }
 };
 
@@ -176,6 +194,9 @@ class SummonRegistry {
                                             : ep.name);
           continue;
         }
+        if (ep.kind == "moe" && item.is_object() && !item.contains("roles") &&
+            ep.roles.empty())
+          ep.roles.push_back("programming");
         if (ep.timeoutMs < 1000) ep.timeoutMs = 1000;
         if (ep.maxTokens < 1) ep.maxTokens = 1;
         endpoints_.push_back(std::move(ep));
@@ -223,6 +244,21 @@ class SummonRegistry {
     if (!enabled_) return std::string();
     const auto it = scopeOverrides_.find(scope);
     return it == scopeOverrides_.end() ? std::string() : it->second;
+  }
+
+  /** Tool-side pick for a source-edit situation. Empty name means no
+      programming MoE is registered. Does not start a process and does not
+      produce prompt text. */
+  ModelEndpoint selectForSourceEdit() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    ModelEndpoint none;
+    if (!enabled_) return none;
+    for (const auto &ep : endpoints_) {
+      if (ep.kind != "moe" || !ep.located() || !ep.servesProgramming())
+        continue;
+      return ep;
+    }
+    return none;
   }
 
   void clearScopeModel(const std::string &scope) {
@@ -286,6 +322,8 @@ class SummonRegistry {
     ModelEndpoint ep = ModelEndpoint::fromJson(spec);
     ep.kind = "moe";
     if (ep.name.empty()) ep.name = "moe";
+    if (!spec.contains("roles") && ep.roles.empty())
+      ep.roles.push_back("programming");
     return upsert(ep);
   }
 

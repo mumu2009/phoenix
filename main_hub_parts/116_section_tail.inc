@@ -662,6 +662,7 @@
       json body;
       body["text"] = goal;
       body["disableAddon"] = true;
+      body["graphMode"] = "chain";
       out = controller->respond(body);
     } catch (...) {
     }
@@ -4943,6 +4944,32 @@
         },
         {drogon::Post});
 
+    /* Human-supervisor verdict for ONE helper box.  The mission layer is
+       human-in-the-loop by design (completionTimeMs is the supervisor's
+       selection signal); this is the box counterpart of /report.  It
+       records completionMs and lets adoptEliteLocked see the finished
+       box when the parent completes.  It does not invent a model
+       verdict and does not delete any live box. */
+    drogon::app().registerHandler(
+        "/api/mission/child/done",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          if (!authOK(req))
+            return unauthorized(cb);
+          bool ok = true;
+          json payload = parseRequestBody(req, ok);
+          if (!ok)
+            return badRequest(cb, "invalid json");
+          if (payload.value("missionId", std::string()).empty()) {
+            try {
+              payload["missionId"] = cognitionManager_.defaultMissionId();
+            } catch (...) {
+            }
+          }
+          respondJson(cb, cognitionManager_.markMissionChildDone(payload));
+        },
+        {drogon::Post});
+
     drogon::app().registerHandler(
         "/api/mission/replicate",
         [this](const drogon::HttpRequestPtr &req,
@@ -5032,8 +5059,10 @@
           json payload = parseRequestBody(req, ok);
           if (!ok)
             return badRequest(cb, "invalid json");
-          const std::string workspaceRoot = phoenix::cfgOr<std::string>(
-              "mission.workspaceDir", "./runtime_store/mission_workspace");
+          const std::string workspaceRoot = phoenix::resolveConfig<std::string>(
+              "mission.workspaceDir",
+              std::string("./runtime_store/mission_workspace"),
+              "AI_MISSION_WORKSPACE");
           /* v8.x concurrent missions: explicit body/query missionId wins,
              else the default (most recently assigned) mission. */
           std::string missionId =
@@ -7970,12 +7999,55 @@ inline std::string GatewayServer::buildMissionOutline(const std::string &goal) {
             if (!to.empty())
               nbs.push_back(to);
           }
-          scored.push_back({id, wsum + 1.0 * (double)nbs.size()});
+          /* Specificity, not degree. A hub's edge mass is spread across
+             many neighbors, so it must not open the outline walk.
+             wsum/(1+degree) is the same idea as the typical-set cut:
+             hub spray stays out of the seed. */
+          scored.push_back(
+              {id, wsum / (1.0 + static_cast<double>(nbs.size()))});
           nb[id] = std::move(nbs);
         }
       }
       std::sort(scored.begin(), scored.end(),
                 [](const OS &a, const OS &b) { return a.score > b.score; });
+      /* Re-order the seed list by ordered presence against the goal.
+         A node whose words lift over the high-df prior, in the goal's
+         order, opens the walk. Nodes the goal does not make present
+         keep the specificity order above. */
+      if (!goal.empty() && scored.size() > 1 && runtime) {
+        const size_t cap = std::min<size_t>(scored.size(), 24);
+        std::vector<phoenix::memetic::OrderedMeme> memes;
+        memes.reserve(cap);
+        for (size_t i = 0; i < cap; ++i) {
+          auto ws = runtime->getMemeWords(scored[i].id);
+          std::string text;
+          int kc = 0;
+          for (auto &w : ws) {
+            if (w.empty())
+              continue;
+            text += w;
+            text.push_back(' ');
+            if (++kc >= 8)
+              break;
+          }
+          if (!text.empty())
+            memes.push_back(phoenix::memetic::OrderedMeme{scored[i].id, text});
+        }
+        std::unordered_map<std::string, double> boost;
+        for (const auto &s : phoenix::memetic::scoreOrderedMemes(goal, memes)) {
+          if (s.present)
+            boost[s.id] = s.mass * s.orderLift;
+        }
+        if (!boost.empty()) {
+          std::stable_sort(
+              scored.begin(), scored.begin() + static_cast<std::ptrdiff_t>(cap),
+              [&](const OS &a, const OS &b) {
+                const double ba = boost.count(a.id) ? boost.at(a.id) : 0.0;
+                const double bb = boost.count(b.id) ? boost.at(b.id) : 0.0;
+                return ba > bb;
+              });
+        }
+      }
       std::unordered_set<std::string> seen;
       std::vector<std::string> ordered;
       for (const auto &s : scored) {
@@ -8805,6 +8877,23 @@ int main(int argc, char **argv) {
   emotionConfig.emotionDecayRate = 0.95f;
   emotionConfig.emotionInfluence = 0.3f;
   emotionConfig.enableRuntimeFineTuning = true;
+  emotionConfig.vocabTableConfig.vocabTablePath =
+      phoenix::cfgOr<std::string>("emotion.vocabTablePath",
+                                  "./runtime_store/emotion_vocab_weight_table.json");
+  emotionConfig.vocabTableConfig.vocabCachePath =
+      phoenix::cfgOr<std::string>("emotion.vocabCachePath",
+                                  "./runtime_store/emotion_vocab_cache.json");
+  emotionConfig.vocabTableConfig.learningRate =
+      phoenix::cfgOr<float>("emotion.learningRate", 0.05f);
+  if (const char *inst = std::getenv("AI_INSTANCE_ID")) {
+    if (inst[0] != '\0') {
+      const std::string dir = std::string("./runtime_store/peers/") + inst;
+      emotionConfig.vocabTableConfig.vocabTablePath =
+          dir + "/emotion_vocab_weight_table.json";
+      emotionConfig.vocabTableConfig.vocabCachePath =
+          dir + "/emotion_vocab_cache.json";
+    }
+  }
   auto emotionSystem = std::make_shared<phoenix::emotion::EmotionSystem>(emotionConfig);
 
   std::cout << "Initializing LLM emotion weight adjuster..." << std::endl;
