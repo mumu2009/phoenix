@@ -64,6 +64,19 @@ class PhoenixConfig {
     mergeInto(cfg_, ov);
   }
 
+  /* Deep-merge an inline JSON object over the loaded config.  The feature
+     tab mechanism (featureTabs.active -> featureTabs.tabs.<name>) uses this:
+     a named tab is a parameter combination held inside config/phoenix.json,
+     selected by one key instead of a separate file + env var. */
+  void applyOverlay(const nlohmann::json& ov) {
+    if (!ov.is_object()) {
+      std::cerr << "[config] feature tab overlay is not an object (ignored)"
+                << std::endl;
+      return;
+    }
+    mergeInto(cfg_, ov);
+  }
+
   bool loaded() const { return loaded_; }
 
   const nlohmann::json& raw() const { return cfg_; }

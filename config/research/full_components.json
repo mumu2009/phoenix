@@ -1,0 +1,29 @@
+{
+  "_comment": "v10.1 large-scale testing profile: ALL research components on. The emotion modulation matrix, the evolution anneal/early-stop, the variant prefix slots, the alias probe. Everything else stays the base.",
+  "emotion": {
+    "modulationMatrixPath": "runtime_store/emotion_modulation_matrix.json"
+  },
+  "mission": {
+    "temperature": 0.0,
+    "plainTextOnly": true,
+    "autoChildDoneChars": 1200,
+    "childFreshTask": true,
+    "aliasProbe": true,
+    "maxReplicas": 4,
+    "evolution": {
+      "enabled": true,
+      "annealPerGen": 0.15,
+      "earlyStop": true
+    }
+  },
+  "autonomyLoop": { "intervalSec": 30 },
+  "main": {
+    "inference": { "llamaUseSplitBackend": false }
+  },
+  "research": {
+    "hotPath": { "prefixSlots": true },
+    "force": { "enabled": false },
+    "deterministicCarriers": false,
+    "forceLive": { "enabled": false }
+  }
+}

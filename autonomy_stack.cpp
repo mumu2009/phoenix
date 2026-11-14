@@ -1959,22 +1959,15 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
     }
     if (selfMindInfo.value("spontaneous", false)) {
         const std::string action = selfMindInfo.value("action", std::string());
-        const std::string thoughtText = selfMindInfo.value("text", std::string());
         const std::string scope = ctxTag.empty() ? iterMemScope.key() : ctxTag;
         const auto felt = phoenix::instinct::sensationFromThought(action, scope);
         if (felt.intensity > 0.0f)
             sensationEngine_.add(felt);
         memory.emotionTensor = phoenix::emotion::blendThoughtAffect(
-            memory.emotionTensor, action, thoughtText, 0.22f);
+            memory.emotionTensor, action, 0.22f);
     }
-    if (chatScope && !userText.empty()) {
-        const auto heard = phoenix::emotion::surfaceAffect(userText);
-        if (heard.distance(phoenix::emotion::EmotionTensor{}) > 1e-4f) {
-            memory.emotionTensor = phoenix::emotion::homeostaticUpdate(
-                memory.emotionTensor, heard, phoenix::emotion::EmotionTensor{},
-                0.75f, 0.05f);
-        }
-    }
+    /* v10.1: the chat affect is a signal/matrix transform (the appraisal/Unit
+       path), not a word layer; the user text is a session key only. */
     memory.driveVector = phoenix::emotion::tensorToDrive(memory.emotionTensor);
     memory.inferenceOptions = chatScope
         ? phoenix::emotion::mapChatSampling(memory.emotionTensor)
@@ -2066,7 +2059,9 @@ json CognitionAutonomyManager::exportState() const {
     for (const auto &entry : sessions_) {
         sessions[entry.first] = entry.second;
     }
-    return json{{"enabled", enabled_},
+    return json{{"schemaVersion", 2},
+                {"schemaTag", "v10.1"},
+                {"enabled", enabled_},
                 {"backgroundEnabled", backgroundEnabled_},
                 {"iteration", iteration_},
                 {"observations", observations_},
@@ -2079,10 +2074,28 @@ json CognitionAutonomyManager::exportState() const {
                 {"sensations", sensationEngine_.toJson()},
                 {"defaultMissionId", defaultMissionId_},
                 {"missions", [&]() {
+                    /* v10.1 bounded artifact: persist every RUNNING mission and
+                       only the most recent finished ones.  Without this the map
+                       grew to thousands (a multi-MB state file) and every tick
+                       paid for the history.  Pruning is in the SNAPSHOT only;
+                       live missions are untouched. */
                     nlohmann::json arr = nlohmann::json::array();
+                    std::vector<std::pair<std::string, nlohmann::json>> done;
                     for (const auto &kv : missions_) {
-                        arr.push_back(nlohmann::json{{"id", kv.first},
-                                                     {"state", kv.second.toJson()}});
+                        auto snap = kv.second.toJson();
+                        if (kv.second.active()) {
+                            arr.push_back(nlohmann::json{{"id", kv.first},
+                                                         {"state", snap}});
+                        } else {
+                            done.emplace_back(kv.first, std::move(snap));
+                        }
+                    }
+                    constexpr size_t kKeepFinished = 64;
+                    const size_t start =
+                        done.size() > kKeepFinished ? done.size() - kKeepFinished : 0;
+                    for (size_t i = start; i < done.size(); ++i) {
+                        arr.push_back(nlohmann::json{{"id", done[i].first},
+                                                     {"state", done[i].second}});
                     }
                     return arr;
                 }()},
@@ -2109,6 +2122,18 @@ json CognitionAutonomyManager::importState(const json &state) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!state.is_object()) {
         return json{{"ok", false}, {"error", "state must be an object"}};
+    }
+    /* v10.1 artifact contract: the state file carries a schema version so an
+       architecture change never silently invalidates learned state.  Missing
+       version = legacy v10.0 file (still accepted; unknown fields ignored by
+       the tolerant per-key readers below).  A FUTURE version is accepted too,
+       because every field read is defaulted - the worst case is that new
+       fields are ignored, never that the old training is discarded. */
+    const int schemaVersion = state.value("schemaVersion", 0);
+    if (schemaVersion > 2) {
+        std::cerr << "[autonomy-state] newer schemaVersion " << schemaVersion
+                  << " (this build is 2); reading the fields it knows"
+                  << std::endl;
     }
     if (!state.contains("sessions") || !state["sessions"].is_object()) {
         return json{{"ok", false}, {"error", "state.sessions object required"}};
@@ -2142,6 +2167,20 @@ json CognitionAutonomyManager::importState(const json &state) {
             auto it = missions_.find(id);
             if (it == missions_.end()) it = missions_.try_emplace(id).first;
             if (m.contains("state") && m["state"].is_object()) it->second.fromJson(m["state"]);
+        }
+        /* v10.1: the persisted artifact is already pruned (running + the last
+           64 finished).  Also prune this live map on import so a long history
+           file from an older build cannot re-inflate memory. */
+        {
+            std::vector<std::string> finished;
+            for (const auto &kv : missions_) {
+                if (!kv.second.active()) finished.push_back(kv.first);
+            }
+            constexpr size_t kKeep = 64;
+            if (finished.size() > kKeep) {
+                const size_t drop = finished.size() - kKeep;
+                for (size_t i = 0; i < drop; ++i) missions_.erase(finished[i]);
+            }
         }
         defaultMissionId_ = state.value("defaultMissionId", defaultMissionId_);
         retargetDefaultMissionLocked();
@@ -2588,9 +2627,21 @@ json CognitionAutonomyManager::noteFieldOpportunity(const std::string &text) {
             const auto seen = selfMind_.observeUtterance("self", slice);
             out["liveTurns"] = seen.value("ok", false);
         }
-        if (tinyExpert_.enabled() && lastFieldGoal_.empty()) {
-            lastFieldGoal_ = slice;
-            runExpert = true;
+        if (tinyExpert_.enabled()) {
+            /* v10.1: re-arm the expert on every CHANGED field goal (bounded
+               to one training run per 5 minutes).  The old code trained only
+               when lastFieldGoal_ was empty, i.e. once per process, so the
+               expert weights froze after the first message. */
+            const auto nowMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+            if (lastFieldGoal_ != slice &&
+                (lastFieldTrainMs_ == 0 || nowMs - lastFieldTrainMs_ > 300000)) {
+                lastFieldGoal_ = slice;
+                lastFieldTrainMs_ = nowMs;
+                runExpert = true;
+            }
         }
     }
     if (runExpert) {
@@ -2629,6 +2680,13 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
        way (audit); the softmax step factor only applies when enabled. */
     if (p.contains("evolutionEnabled")) {
         missionEvolutionEnabled_ = p.value("evolutionEnabled", false);
+    }
+    /* v10.1 evolution-efficiency knobs (default off = pre-v10.1 behaviour). */
+    if (p.contains("annealPerGen") && p["annealPerGen"].is_number()) {
+        missionAnnealPerGen_ = static_cast<double>(p["annealPerGen"].get<double>());
+    }
+    if (p.contains("earlyStop") && p["earlyStop"].is_boolean()) {
+        missionEarlyStop_ = p["earlyStop"].get<bool>();
     }
     /* Context packing: user chooses summary vs full+summary, optional GNN,
        and ctx size (4096 / 16384). */
@@ -2725,6 +2783,8 @@ json CognitionAutonomyManager::assignMission(const json &payload) {
     it->second.setMaxReplicas(missionMaxReplicas_);
     it->second.setMaxReplicaDepth(missionMaxReplicaDepth_);
     it->second.setEvolutionEnabled(missionEvolutionEnabled_);
+    it->second.setEvolutionAnnealPerGen(missionAnnealPerGen_);
+    it->second.setEvolutionEarlyStop(missionEarlyStop_);
     it->second.assign(m, missionGenome_);
     /* Optional parent-scope model route (same registry the helper boxes
        use).  A mission assigned with model=granite_moe_e0 runs its own

@@ -550,50 +550,71 @@ nlohmann::json TinyExpert::trainProjectTree(const std::string &root) {
     push("phoenix_main.cpp", 0);
     push("index.html", 0);
     push("get_alpha_status.cpp", 0);
+    /* v10.1 domain train/held-out split: the expert trains ONLY on the
+       training split; the held-out split is never seen during fitting and
+       measures generalisation.  Requirement: two test sets, train on one,
+       report BOTH (the held-out number is the one that matters). */
+    std::vector<Sample> trainSet;
+    std::vector<Sample> heldSplit;
+    trainSet.reserve(data.size());
+    for (size_t i = 0; i < data.size(); ++i) {
+        if (i % 5 == 4)
+            heldSplit.push_back(data[i]);
+        else
+            trainSet.push_back(data[i]);
+    }
     initWeightsLocked(1u);
     const int epochCap = std::max(1, std::min(8, epochs_));
-    const double initial = epochLocked(data, 0.f, 1u);
+    const double initial = epochLocked(trainSet, 0.f, 1u);
     double last = initial;
     int epochsRun = 0;
     for (int ep = 0; ep < epochCap; ++ep) {
-        last = epochLocked(data, lr_, 17u + static_cast<unsigned>(ep));
+        last = epochLocked(trainSet, lr_, 17u + static_cast<unsigned>(ep));
         epochsRun = ep + 1;
         int correctNow = 0;
-        for (const auto &sample : data) {
+        for (const auto &sample : trainSet) {
             const auto got = predictLocked(sample.x);
             if (got.value("class", -1) == sample.y)
                 ++correctNow;
         }
-        const double accNow = data.empty()
+        const double accNow = trainSet.empty()
                                   ? 0.0
                                   : static_cast<double>(correctNow) /
-                                        static_cast<double>(data.size());
+                                        static_cast<double>(trainSet.size());
         if (accNow >= 0.95)
             break;
     }
     lastLoss_ = last;
     ready_ = true;
-    int correct = 0;
-    for (const auto &sample : data) {
-        const auto got = predictLocked(sample.x);
-        if (got.value("class", -1) == sample.y)
-            ++correct;
-    }
-    const double acc = data.empty()
-                           ? 0.0
-                           : static_cast<double>(correct) / static_cast<double>(data.size());
+    auto accuracyOf = [&](const std::vector<Sample> &set) {
+        if (set.empty())
+            return 0.0;
+        int correct = 0;
+        for (const auto &sample : set) {
+            const auto got = predictLocked(sample.x);
+            if (got.value("class", -1) == sample.y)
+                ++correct;
+        }
+        return static_cast<double>(correct) / static_cast<double>(set.size());
+    };
+    const double trainAcc = accuracyOf(trainSet);
+    const double heldAcc = accuracyOf(heldSplit);
     goal_ = "project-paths";
     nlohmann::json out{{"ok", true},
                        {"ran", true},
                        {"mode", "project-paths"},
-                       {"samples", static_cast<int>(data.size())},
+                       {"samples", static_cast<int>(trainSet.size())},
+                       {"heldoutSamples", static_cast<int>(heldSplit.size())},
                        {"paths", static_cast<int>(paths.size())},
                        {"epochs", epochsRun},
                        {"epochCap", epochCap},
                        {"negatives", "reversed-words-plus-prose"},
                        {"initialLoss", initial},
                        {"finalLoss", last},
-                       {"accuracy", acc},
+                       {"accuracy", trainAcc},
+                       {"trainAccuracy", trainAcc},
+                       {"heldoutAccuracy", heldAcc},
+                       {"split", "train 4/5, held-out 1/5 (never fitted)"},
                        {"paramCount", paramCount()},
                        {"vocab", vocab_},
                        {"hidden", hidden_},

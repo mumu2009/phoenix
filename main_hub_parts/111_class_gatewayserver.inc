@@ -211,6 +211,20 @@ public:
         cognitionManager_.setMissionDeliberator(
             [this](const std::string &goal, const std::string &deliverable,
                  int maxTokens, const std::string &scope) -> std::string {
+            /* v10.1 concurrency guarantee: parallel missions (autonomyLoop
+               .parallelMissions) run this lambda on separate std::async
+               threads.  The body touches shared gateway state (outline cache,
+               experience/ccm stores, runtime graph, file workspaces) plus a
+               non-thread-safe llama channel.  Two layers exist:
+               - the FINE locks each shared resource already owns
+                 (llamaCallMu_, outlineMu_, graphMu_, gWsCacheMu, ...);
+               - this COARSE backstop, switchable with
+                 autonomyLoop.missionDelibLock (default true).  Set false only
+                 after the fine locks are proven sufficient; see
+                 doc/v10.1/artifact_contract.md. */
+            std::unique_lock<std::mutex> delibLock(missionDelibMu_, std::defer_lock);
+            if (phoenix::cfgOr<bool>("autonomyLoop.missionDelibLock", true))
+                delibLock.lock();
             try {
               const std::string msnId =
                   phoenix::memory::missionIdFromWorkspaceScope(scope);
@@ -2113,6 +2127,42 @@ public:
                           << " recentChars=" << packed.fullCharsUsed
                           << " tip=" << tip
                           << std::endl;
+              }
+              /* v10.1 hot-path: variant-aware prefix slots.  The hidden
+                 condition = the session-varying static-prefix shape (its
+                 length, the memory/GNN units, the pressure quantile).  The
+                 fingerprint is computed at runtime and never compiled in,
+                 so a changed session lands in its own slot and the server's
+                 KV reuse follows the variant instead of colliding across
+                 them.  Gated by research.hotPath.prefixSlots (default off =
+                 the pre-v10.1 single-slot behaviour). */
+              if (phoenix::cfgOr<bool>("research.hotPath.prefixSlots",
+                                       false)) {
+                std::string msnBase = scope;
+                const auto spP2 = msnBase.find("/children/");
+                if (spP2 != std::string::npos)
+                  msnBase = msnBase.substr(0, spP2);
+                const float slotPressure =
+                    cognitionManager_.missionPressureFor(msnBase);
+                const std::string fpInput =
+                    std::to_string(staticPrompt.size()) + "|" +
+                    std::to_string(packed.fullCharsUsed) + "|" +
+                    std::to_string(missionMemorySnippets.size()) + "|" +
+                    std::to_string(missionGnnPkts.size()) + "|" +
+                    std::to_string(static_cast<int>(slotPressure * 1000.0f));
+                uint64_t fp = 0xcbf29ce484222325ULL;
+                for (unsigned char c : fpInput) {
+                  fp ^= static_cast<uint64_t>(c);
+                  fp *= 0x100000001b3ULL;
+                }
+                opts["id_slot"] = "phx-" + std::to_string(fp);
+                if (config_.httpLog)
+                  std::cout << "[prefix-cache] slot=" << opts["id_slot"]
+                            << " staticLen=" << staticPrompt.size()
+                            << " recent=" << packed.fullCharsUsed
+                            << " mem=" << missionMemorySnippets.size()
+                            << " gnn=" << missionGnnPkts.size()
+                            << " press=" << slotPressure << std::endl;
               }
               if (config_.httpLog) {
                 std::string msnId = scope;
@@ -4461,6 +4511,12 @@ private:
      for a goal is built once and reused every deliberator tick. */
   mutable std::mutex outlineMu_;
   mutable std::unordered_map<std::string, std::string> missionOutlineCache_;
+  /* v10.1: serializes the whole mission-deliberator critical section.  Parallel
+     missions are scheduled on separate threads by loopRun (std::async), but the
+     deliberator touches non-thread-safe shared state (llama channel, workspace
+     file IO, experience/ccm stores, runtime graph); this mutex is the single
+     guarantee that no two missions corrupt it. */
+  mutable std::mutex missionDelibMu_;
   std::shared_ptr<IReinforcementLearner> rl_;
   std::shared_ptr<IAdversarialLearner> adv_;
   std::shared_ptr<IGnnGaLearner> gnnGa_;

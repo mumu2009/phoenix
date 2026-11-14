@@ -273,7 +273,12 @@ std::vector<std::string> SQLiteEmotionStorage::listSessions() {
 class RuleBasedEmotionAnalyzer : public EmotionAnalyzer {
 public:
     EmotionTensor analyzeText(const std::string& text) override {
-        return surfaceAffect(text);
+        (void)text;
+        // v10.1: the affect is a signal/matrix transform, not a word layer.
+        // The text is only a session key; the stimulus tensor supplies the
+        // affect (processMessage(stimulus)).  This analyzer's text path is a
+        // neutral no-op for the remaining callers of the interface.
+        return EmotionTensor();
     }
 
     EmotionTensor analyzeAudio(const std::vector<float>& audioFeatures) override {
@@ -331,6 +336,10 @@ public:
 };
 
 // Emotion system implementation
+/* Parses {"rows":[[8x8]]} or {"matrix":[[8x8]]}; the identity on any error. */
+static void loadModulationMatrixInto(const std::string &path,
+                                     std::array<float, 64> &out);
+
 struct EmotionSystem::Impl {
     Config config;
     std::unique_ptr<EmotionStorage> storage;
@@ -341,6 +350,9 @@ struct EmotionSystem::Impl {
     EmotionPluginManager pluginManager;
     std::shared_ptr<EmotionVocabWeightTable> vocabTable;
     std::mutex mutex;
+    /* v10.1: the trained modulation matrix (8x8 row-major).  Identity =
+       the untrained default (the pre-matrix behaviour). */
+    std::array<float, 64> modulationMatrix;
     
     Impl(const Config& cfg) : config(cfg) {
         if (cfg.storageBackend == "sqlite") {
@@ -364,8 +376,53 @@ struct EmotionSystem::Impl {
             };
         }
         vocabTable = std::make_shared<EmotionVocabWeightTable>(vcfg);
+        for (size_t i = 0; i < 64; ++i) modulationMatrix[i] = 0.0f;
+        for (size_t i = 0; i < 8; ++i) modulationMatrix[i * 8 + i] = 1.0f;
+        if (!cfg.modulationMatrixPath.empty()) {
+            loadModulationMatrixInto(cfg.modulationMatrixPath, modulationMatrix);
+        }
     }
 };
+
+/* Row-major 8x8 matrix times an 8-d vector; no allocation. */
+static std::array<float, 8> mat8x8Vec(const std::array<float, 64> &m,
+                                      const std::array<float, 8> &v) {
+    std::array<float, 8> out{};
+    for (int r = 0; r < 8; ++r) {
+        float acc = 0.0f;
+        for (int c = 0; c < 8; ++c) acc += m[r * 8 + c] * v[c];
+        out[r] = acc;
+    }
+    return out;
+}
+
+/* Parses {"rows":[[8x8]]} or {"matrix":[[8x8]]}; the identity on any error. */
+static void loadModulationMatrixInto(const std::string &path,
+                                     std::array<float, 64> &out) {
+    std::ifstream in(path);
+    if (!in) return;
+    nlohmann::json j;
+    try {
+        in >> j;
+    } catch (...) {
+        return;
+    }
+    const nlohmann::json *rows = nullptr;
+    if (j.contains("rows") && j["rows"].is_array()) rows = &j["rows"];
+    else if (j.contains("matrix") && j["matrix"].is_array()) rows = &j["matrix"];
+    if (!rows || rows->size() < 8) return;
+    std::array<float, 64> parsed{};
+    for (int r = 0; r < 8; ++r) {
+        const auto &row = (*rows)[static_cast<size_t>(r)];
+        if (!row.is_array() || row.size() < 8) return;
+        for (int c = 0; c < 8; ++c) {
+            const auto &cell = row[static_cast<size_t>(c)];
+            if (!cell.is_number()) return;
+            parsed[r * 8 + c] = cell.get<float>();
+        }
+    }
+    out = parsed;
+}
 
 EmotionSystem::EmotionSystem(const Config& config)
     : impl_(std::make_unique<Impl>(config)) {}
@@ -382,7 +439,8 @@ EmotionSystem::~EmotionSystem() {
 
 EmotionState EmotionSystem::processMessage(const std::string& sessionId,
                                            const std::string& text,
-                                           int64_t turnNumber) {
+                                           int64_t turnNumber,
+                                           const EmotionTensor *stimulus) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     
     if (!impl_->config.enabled) {
@@ -406,8 +464,20 @@ EmotionState EmotionSystem::processMessage(const std::string& sessionId,
     state.turnNumber = turnNumber;
     state.timestamp = std::chrono::system_clock::now();
     
-    // Analyze emotion from text
-    EmotionTensor newEmotion = impl_->analyzer->analyzeText(text);
+    // v10.1: the affect comes from the signal path (the stimulus tensor),
+    // not from the words.  A null stimulus is a neutral stimulus; the
+    // trained modulation matrix maps the tensor before the homeostatic
+    // dynamics.  The word layer is gone from this path.
+    EmotionTensor newEmotion;
+    if (stimulus != nullptr) {
+        const std::array<float, 8> v = {
+            stimulus->valence, stimulus->arousal, stimulus->dominance,
+            stimulus->trust, stimulus->joy, stimulus->fear, stimulus->anger,
+            stimulus->surprise};
+        const auto mod = mat8x8Vec(impl_->modulationMatrix, v);
+        newEmotion = EmotionTensor(mod[0], mod[1], mod[2], mod[3], mod[4],
+                                   mod[5], mod[6], mod[7]);
+    }
     
     // Apply plugin modifications
     for (const auto& pair : impl_->pluginManager.listPlugins()) {
@@ -536,6 +606,21 @@ std::string EmotionSystem::getEmotionContext(const std::string& sessionId) {
 void EmotionSystem::setEmotionAnalyzer(std::shared_ptr<EmotionAnalyzer> analyzer) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->analyzer = analyzer;
+}
+
+bool EmotionSystem::loadModulationMatrix(const std::string& path) {
+    std::array<float, 64> parsed{};
+    for (size_t i = 0; i < 8; ++i) parsed[i * 8 + i] = 1.0f;
+    loadModulationMatrixInto(path, parsed);
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->modulationMatrix = parsed;
+    }
+    // A parse that changed nothing is indistinguishable from the identity;
+    // report success when the file parsed to an 8x8 (the helper leaves the
+    // identity otherwise).
+    std::ifstream in(path);
+    return in.good();
 }
 
 void EmotionSystem::setEnabled(bool enabled) {

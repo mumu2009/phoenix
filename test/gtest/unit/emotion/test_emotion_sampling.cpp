@@ -68,9 +68,9 @@ TEST(EmotionSampling, ThoughtChangesAffectButNotTheCausalStringOrPolicy) {
     const auto snap = mind.toJson();
     const std::string thought = tick.value("text", std::string());
     const auto prefer = phoenix::emotion::blendThoughtAffect(
-        EmotionTensor{}, "prefer", thought, 0.22f);
+        EmotionTensor{}, "prefer", 0.22f);
     const auto service = phoenix::emotion::blendThoughtAffect(
-        EmotionTensor{}, "service", "", 0.22f);
+        EmotionTensor{}, "service", 0.22f);
     EXPECT_GT(prefer.valence, service.valence);
     EXPECT_EQ(mind.toJson(), snap);
     const std::string user = "What is two plus two?";

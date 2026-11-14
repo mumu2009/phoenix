@@ -23,6 +23,25 @@ static Config loadConfig(int argc, char **argv) {
           rootDir / "config" / "research" / (chosen + ".json"));
   }
 
+  // Feature tab (config-driven mode switch): featureTabs.active names one of
+  // featureTabs.tabs.<name>; the named tab's object deep-merges over the base
+  // config in place.  "default" (or an empty active) means no overlay.  This
+  // is the unified switch for whole feature sets ("全部组件" etc.) without
+  // a separate file or env var.
+  {
+    const std::string tabName =
+        phoenix::cfgOr<std::string>("featureTabs.active", std::string());
+    if (!tabName.empty() && tabName != "default") {
+      const auto tabs = phoenix::cfgOr<nlohmann::json>(
+          "featureTabs.tabs", nlohmann::json::object());
+      if (tabs.is_object() && tabs.contains(tabName)) {
+        phoenix::PhoenixConfig::instance().applyOverlay(tabs[tabName]);
+      } else {
+        std::cerr << "[config] feature tab missing: " << tabName << std::endl;
+      }
+    }
+  }
+
 
   // Load the optional auto-tuned override file.
   phoenix::tuned::loadTunedConfig(rootDir / "config" / "phoenix_tuned.json");

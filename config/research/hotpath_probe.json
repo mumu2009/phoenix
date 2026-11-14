@@ -1,0 +1,6 @@
+{
+  "_comment": "v10.1 hot-path probe: prefixSlots on; everything else base.",
+  "mission": { "temperature": 0.0, "maxReplicas": 2 },
+  "autonomyLoop": { "intervalSec": 30 },
+  "research": { "hotPath": { "prefixSlots": true } }
+}

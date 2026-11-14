@@ -362,6 +362,16 @@
   json callLlamaCppBackend(const std::string &text,
                            const std::string &graphContext, int maxTokens,
                            const json &inferenceOptions) {
+    /* v10.1: honor main.inference.llamaUseSplitBackend.  This function used to
+       call llamaSplitChat unconditionally, so the config key that selects the
+       text-only path was silently ignored and every request went through the
+       /phx split endpoints.  Those endpoints decode on the shared llama_context
+       from API threads; that is the path that produced the llama-server
+       0xC0000005 crashes.  When the flag is false we take the plain
+       /v1/chat/completions path (same model, same sampling options). */
+    if (!phoenix::cfgOr<bool>("main.inference.llamaUseSplitBackend", true)) {
+      return chatWithLlamaCpp(text, graphContext, maxTokens, inferenceOptions);
+    }
     int timeoutMs = config_.llamaCppRequestTimeoutMs;
     if (inferenceOptions.is_object() &&
         inferenceOptions.contains("timeoutMs") &&

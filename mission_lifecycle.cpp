@@ -441,6 +441,25 @@ void MissionLifecycle::setEvolutionEnabled(bool enabled) {
   evolutionEnabled_ = enabled;
 }
 
+void MissionLifecycle::setEvolutionAnnealPerGen(double perGen) {
+  std::lock_guard<std::mutex> lock(mu_);
+  annealPerGen_ = perGen < 0.0 ? 0.0 : perGen;
+}
+
+void MissionLifecycle::setEvolutionEarlyStop(bool enabled) {
+  std::lock_guard<std::mutex> lock(mu_);
+  earlyStop_ = enabled;
+  if (!enabled) {
+    stallCount_ = 0;
+    lastBestWorkMs_ = 0;
+  }
+}
+
+bool MissionLifecycle::evolutionStalled() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return earlyStop_ && stallCount_ >= 2;
+}
+
 bool MissionLifecycle::evolutionEnabled() const {
   std::lock_guard<std::mutex> lock(mu_);
   return evolutionEnabled_;
@@ -465,7 +484,15 @@ float MissionLifecycle::effectiveMutationRateLocked(float baseRate) const {
   const double factor = 2.0 - 1.5 * avg;
   const float clamped =
       static_cast<float>(std::max(0.5, std::min(2.0, factor)));
-  return baseRate * clamped;
+  /* v10.1 anneal: shrink the deviation from 1.0 per generation.
+     annealPerGen_ == 0 keeps the exact pre-v10.1 behaviour. */
+  double anneal = 1.0;
+  if (annealPerGen_ > 0.0) {
+    const double g = static_cast<double>(generation_);
+    anneal = std::max(0.0, 1.0 - annealPerGen_ * g);
+  }
+  const double annealed = 1.0 + (static_cast<double>(clamped) - 1.0) * anneal;
+  return baseRate * static_cast<float>(std::max(0.5, std::min(2.0, annealed)));
 }
 
 float MissionLifecycle::effectiveMutationRate(float baseRate) const {
@@ -496,6 +523,18 @@ void MissionLifecycle::adoptEliteLocked() {
     }
   }
   genome_ = *bestGenome;
+  /* v10.1 early-stop bookkeeping (inert unless earlyStop_ is on):
+     two consecutive adoptions without a strictly shorter measured workMs
+     mark the branch stalled. */
+  if (earlyStop_) {
+    const uint64_t bestMs = static_cast<uint64_t>(best);
+    if (lastBestWorkMs_ > 0 && bestMs >= lastBestWorkMs_) {
+      ++stallCount_;
+    } else {
+      stallCount_ = 0;
+    }
+    lastBestWorkMs_ = bestMs;
+  }
 }
 
 nlohmann::json MissionLifecycle::statsLocked() const {

@@ -296,12 +296,18 @@ private:
     phoenix::study::PopulationLayer population_;
     phoenix::study::TinyExpert tinyExpert_;
     std::string lastFieldGoal_;
+    /* v10.1: the expert used to train only once per process (lastFieldGoal_
+       was never re-armed).  Train on a CHANGED field goal, throttled to one
+       run per 5 minutes so trainProjectTree never hogs the mission loop. */
+    long long lastFieldTrainMs_{0};
 
     /* v7.0 mission layer (optional) */
     bool missionEnabled_{false};
     float missionMutationRate_{0.05f};
     size_t missionMaxReplicaDepth_{0};       /* v8.x config default for new missions */
 bool missionEvolutionEnabled_{false};      /* v8.x C3 gate (applied on assign) */
+    double missionAnnealPerGen_{0.0};       /* v10.1: mutation-factor anneal per gen */
+    bool missionEarlyStop_{false};          /* v10.1: stall after 2 flat adoptions */
 size_t missionMaxReplicas_{4};            /* guardrail on free replication */
 
     /* v7.0 human interjection queue (插话).  scopeKey isolates delivery: a

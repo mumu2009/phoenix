@@ -18,6 +18,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <nlohmann/json.hpp>
 
 namespace phoenix {
@@ -275,123 +276,6 @@ inline std::vector<float> tensorToDrive(const EmotionTensor &t) {
             t.joy, t.fear, t.anger, t.surprise};
 }
 
-/** Word -> (valence, arousal, dominance), each in [-1, 1]. */
-inline const std::unordered_map<std::string, std::array<float, 3>> &vadLexicon() {
-    static const std::unordered_map<std::string, std::array<float, 3>> lex = {
-        {"happy", {0.90f, 0.70f, 0.50f}},
-        {"glad", {0.80f, 0.50f, 0.40f}},
-        {"great", {0.80f, 0.60f, 0.40f}},
-        {"wonderful", {0.90f, 0.60f, 0.50f}},
-        {"excellent", {0.90f, 0.60f, 0.60f}},
-        {"love", {0.90f, 0.80f, 0.30f}},
-        {"joy", {0.90f, 0.80f, 0.50f}},
-        {"amazing", {0.90f, 0.80f, 0.40f}},
-        {"calm", {0.40f, -0.50f, 0.30f}},
-        {"peaceful", {0.55f, -0.40f, 0.20f}},
-        {"hopeful", {0.60f, 0.30f, 0.25f}},
-        {"proud", {0.70f, 0.45f, 0.65f}},
-        {"grateful", {0.75f, 0.25f, 0.20f}},
-        {"relief", {0.50f, -0.20f, 0.15f}},
-        {"safe", {0.45f, -0.30f, 0.35f}},
-        {"curious", {0.25f, 0.45f, 0.10f}},
-        {"sad", {-0.80f, -0.40f, -0.50f}},
-        {"bad", {-0.70f, 0.20f, -0.30f}},
-        {"terrible", {-0.90f, 0.40f, -0.40f}},
-        {"awful", {-0.90f, 0.30f, -0.50f}},
-        {"hate", {-0.90f, 0.60f, 0.20f}},
-        {"grief", {-0.85f, -0.20f, -0.55f}},
-        {"lonely", {-0.60f, -0.30f, -0.40f}},
-        {"ashamed", {-0.70f, 0.20f, -0.60f}},
-        {"guilty", {-0.65f, 0.25f, -0.45f}},
-        {"bored", {-0.30f, -0.60f, -0.10f}},
-        {"afraid", {-0.80f, 0.70f, -0.70f}},
-        {"scared", {-0.80f, 0.70f, -0.70f}},
-        {"fear", {-0.80f, 0.60f, -0.60f}},
-        {"worried", {-0.60f, 0.50f, -0.50f}},
-        {"anxious", {-0.60f, 0.60f, -0.50f}},
-        {"panic", {-0.85f, 0.95f, -0.80f}},
-        {"danger", {-0.70f, 0.75f, -0.40f}},
-        {"angry", {-0.80f, 0.80f, 0.70f}},
-        {"furious", {-0.90f, 0.90f, 0.80f}},
-        {"mad", {-0.70f, 0.70f, 0.60f}},
-        {"rage", {-0.90f, 0.95f, 0.75f}},
-        {"tense", {-0.40f, 0.55f, -0.15f}},
-        {"surprise", {0.20f, 0.80f, 0.00f}},
-        {"shock", {-0.40f, 0.90f, -0.60f}},
-        {"unexpected", {0.00f, 0.70f, -0.20f}},
-        {"confused", {-0.20f, 0.35f, -0.30f}},
-        {"trust", {0.60f, 0.10f, 0.40f}},
-        {"believe", {0.50f, 0.10f, 0.30f}},
-        {"confident", {0.70f, 0.40f, 0.80f}},
-        {"reliable", {0.60f, 0.10f, 0.50f}},
-        {"\xE5\xAE\xB3\xE6\x80\x95", {-0.80f, 0.70f, -0.70f}}, /* 害怕 */
-        {"\xE9\xAB\x98\xE5\x85\xB4", {0.85f, 0.70f, 0.40f}},   /* 高兴 */
-        {"\xE7\x94\x9F\xE6\xB0\x94", {-0.75f, 0.75f, 0.55f}}, /* 生气 */
-        {"\xE9\x9A\xBE\xE8\xBF\x87", {-0.75f, -0.35f, -0.45f}}, /* 难过 */
-        {"\xE5\xAE\x89\xE5\xBF\x83", {0.45f, -0.40f, 0.25f}}, /* 安心 */
-        {"\xE5\xA5\xBD\xE5\xA5\x87", {0.20f, 0.50f, 0.05f}},   /* 好奇 */
-        {"\xE8\xAE\xA8\xE5\x8E\x8C", {-0.80f, 0.55f, 0.15f}}, /* 讨厌 */
-        {"\xE4\xBF\xA1\xE4\xBB\xBB", {0.60f, 0.10f, 0.40f}},   /* 信任 */
-        {"\xE6\x83\x8A\xE8\xAE\xB6", {0.15f, 0.80f, -0.10f}}, /* 惊讶 */
-        {"\xE5\xAD\xA4\xE7\x8B\xAC", {-0.60f, -0.25f, -0.40f}}, /* 孤独 */
-    };
-    return lex;
-}
-
-/** Mean-pool lexicon hits. Unmatched ASCII tokens contribute 0.
-    CJK keys are substring hits and each adds one to the pool size. */
-inline EmotionTensor surfaceAffect(const std::string &text) {
-    std::string lower;
-    lower.reserve(text.size());
-    bool anyHigh = false;
-    for (unsigned char ch : text) {
-        if (ch < 128) {
-            lower.push_back(static_cast<char>(std::tolower(ch)));
-        } else {
-            lower.push_back(static_cast<char>(ch));
-            anyHigh = true;
-        }
-    }
-    std::vector<std::string> toks;
-    std::string cur;
-    for (unsigned char ch : lower) {
-        if (std::isalnum(ch) || ch == '\'') {
-            cur.push_back(static_cast<char>(ch));
-        } else if (!cur.empty()) {
-            toks.push_back(cur);
-            cur.clear();
-        }
-    }
-    if (!cur.empty()) toks.push_back(cur);
-    const auto &lex = vadLexicon();
-    float V = 0.0f, A = 0.0f, D = 0.0f;
-    float pool = static_cast<float>(toks.size());
-    for (const auto &t : toks) {
-        auto it = lex.find(t);
-        if (it == lex.end()) continue;
-        V += it->second[0];
-        A += it->second[1];
-        D += it->second[2];
-    }
-    if (anyHigh) {
-        for (const auto &kv : lex) {
-            bool cjk = false;
-            for (unsigned char c : kv.first) {
-                if (c >= 128) { cjk = true; break; }
-            }
-            if (!cjk) continue;
-            if (lower.find(kv.first) == std::string::npos) continue;
-            V += kv.second[0];
-            A += kv.second[1];
-            D += kv.second[2];
-            pool += 1.0f;
-        }
-    }
-    if (pool <= 0.0f) return EmotionTensor();
-    const float inv = 1.0f / pool;
-    return padToTensor(V * inv, A * inv, D * inv);
-}
-
 /** Continuous logit nudge. Neutral affect emits an empty object.
     Values stay in [-0.75, 0.75]. These words are sampler biases, not prompt text. */
 inline nlohmann::json affectLogitBias(const EmotionTensor &e, float strength = 1.0f) {
@@ -447,10 +331,11 @@ inline nlohmann::json mapChatSampling(const EmotionTensor &e, float biasStrength
     };
 }
 
-/** Read-only thought nudge. Does not accept a SelfMind and returns no text. */
+/** Read-only thought nudge.  The affect is a pure signal transform (the
+    action nudge), not a text word layer; the v10.1 matrix replaces the word
+    layer, so no text is tokenized here. */
 inline EmotionTensor blendThoughtAffect(const EmotionTensor &base,
                                         const std::string &action,
-                                        const std::string &text,
                                         float gain) {
     float v = 0.0f, a = 0.0f, d = 0.0f;
     if (action == "recall") { v = 0.15f; a = -0.10f; d = 0.12f; }
@@ -460,20 +345,18 @@ inline EmotionTensor blendThoughtAffect(const EmotionTensor &base,
     else if (action == "service") { v = -0.22f; a = 0.08f; d = -0.24f; }
     const float g = std::clamp(gain, 0.0f, 1.0f);
     const EmotionTensor nud = padToTensor(v, a, d);
-    const EmotionTensor lex = surfaceAffect(text);
-    const float lg = 0.50f * g;
-    auto mix = [&](float oldv, float nv, float lv) {
-        return std::clamp(oldv + g * nv + lg * lv, -1.0f, 1.0f);
+    auto mix = [&](float oldv, float nv) {
+        return std::clamp(oldv + g * nv, -1.0f, 1.0f);
     };
     EmotionTensor out;
-    out.valence = mix(base.valence, nud.valence, lex.valence);
-    out.arousal = mix(base.arousal, nud.arousal, lex.arousal);
-    out.dominance = mix(base.dominance, nud.dominance, lex.dominance);
-    out.trust = mix(base.trust, nud.trust, lex.trust);
-    out.joy = mix(base.joy, nud.joy, lex.joy);
-    out.fear = mix(base.fear, nud.fear, lex.fear);
-    out.anger = mix(base.anger, nud.anger, lex.anger);
-    out.surprise = mix(base.surprise, nud.surprise, lex.surprise);
+    out.valence = mix(base.valence, nud.valence);
+    out.arousal = mix(base.arousal, nud.arousal);
+    out.dominance = mix(base.dominance, nud.dominance);
+    out.trust = mix(base.trust, nud.trust);
+    out.joy = mix(base.joy, nud.joy);
+    out.fear = mix(base.fear, nud.fear);
+    out.anger = mix(base.anger, nud.anger);
+    out.surprise = mix(base.surprise, nud.surprise);
     return out;
 }
 
@@ -611,15 +494,26 @@ public:
         bool enableRuntimeFineTuning{true};       /* Enable runtime fine-tuning */
         int historyLength{10};                    /* How many emotion states to keep */
         EmotionVocabWeightTableConfig vocabTableConfig; /* Vocabulary-level weight table */
+        /* v10.1: the trained modulation matrix (8x8, JSON).  Empty path =
+           the untrained default (identity: the pre-matrix behaviour). */
+        std::string modulationMatrixPath;
     };
 
     explicit EmotionSystem(const Config& config);
     ~EmotionSystem();
 
-    /* Process a user message and update emotion state */
+    /* Process a user message and update emotion state.  The affect comes
+       from the stimulus tensor (the appraisal/Unit signal path); the text
+       is only a session key.  stimulus == nullptr means a neutral stimulus
+       (the word layer is gone; the v10.1 matrix path supplies the tensor). */
     EmotionState processMessage(const std::string& sessionId,
                                const std::string& text,
-                               int64_t turnNumber);
+                               int64_t turnNumber,
+                               const EmotionTensor *stimulus = nullptr);
+
+    /* Load the trained 8x8 modulation matrix from JSON; returns false and
+       leaves the identity on any parse error. */
+    bool loadModulationMatrix(const std::string& path);
 
     /* Get current emotion state for a session */
     std::optional<EmotionState> getEmotionState(const std::string& sessionId);

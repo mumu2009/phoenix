@@ -336,6 +336,12 @@ class MissionLifecycle {
   void resetLineage();
   void setEvolutionEnabled(bool enabled);
   bool evolutionEnabled() const;
+  /* v10.1 efficiency knobs (config-gated, default off). */
+  void setEvolutionAnnealPerGen(double perGen);
+  void setEvolutionEarlyStop(bool enabled);
+  /* True when earlyStop_ is on and two consecutive adoptions did not
+     shorten the measured workMs; the replicate action must no-op then. */
+  bool evolutionStalled() const;
   /* softmax-weighted mutation-step factor (1.0 = unchanged).  The Locked
      variant assumes mu_ is already held (recordChild calls it under the
      lock - calling the locking version there would self-deadlock). */
@@ -382,6 +388,14 @@ class MissionLifecycle {
   };
   std::vector<LineageEntry> lineage_;
   bool evolutionEnabled_{false};
+  /* v10.1 evolution-efficiency knobs (config-gated, default off):
+     annealPerGen_ shrinks the mutation-rate factor's deviation per
+     generation; earlyStop_ + stall tracking skip new children after two
+     consecutive generations without a strictly shorter measured workMs. */
+  double annealPerGen_{0.0};
+  bool earlyStop_{false};
+  uint64_t lastBestWorkMs_{0};
+  int stallCount_{0};
   std::mt19937 rng_;
   size_t spawnCount_{0};
   size_t completeCount_{0};

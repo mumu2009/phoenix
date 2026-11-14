@@ -8885,6 +8885,11 @@ int main(int argc, char **argv) {
                                   "./runtime_store/emotion_vocab_cache.json");
   emotionConfig.vocabTableConfig.learningRate =
       phoenix::cfgOr<float>("emotion.learningRate", 0.05f);
+  /* v10.1: the trained modulation matrix (8x8 JSON).  Empty = the identity
+     (the pre-matrix behaviour); the trained file is the opt-in. */
+  emotionConfig.modulationMatrixPath =
+      phoenix::cfgOr<std::string>("emotion.modulationMatrixPath",
+                                  std::string());
   if (const char *inst = std::getenv("AI_INSTANCE_ID")) {
     if (inst[0] != '\0') {
       const std::string dir = std::string("./runtime_store/peers/") + inst;
