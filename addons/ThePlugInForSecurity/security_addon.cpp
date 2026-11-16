@@ -2,6 +2,8 @@
 
 #include "security_addon.hpp"
 #include "security_core.hpp"
+#include "security_exempt.hpp"
+#include "phoenix_config.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -25,6 +27,22 @@ public:
   float consider(const json &situation) const override {
     const std::string text = situation.value("text", std::string()) + " " +
                              situation.value("goal", std::string());
+    /* v10.2 exemption areas: never flag our own trusted surfaces (plugin
+       sources, mission sandbox, build scratch, tests, tools).  Config
+       addons.security.exemptPrefixes extends the built-in list. */
+    {
+      std::vector<std::string> ex = phoenix::security::defaultExemptPrefixes();
+      try {
+        if (const auto *j = phoenix::PhoenixConfig::instance().getJsonPtr(
+                "addons.security.exemptPrefixes");
+            j && j->is_array()) {
+          for (const auto &e : *j)
+            if (e.is_string()) ex.push_back(e.get<std::string>());
+        }
+      } catch (...) {
+      }
+      if (phoenix::security::isExempt(text, ex)) return 0.f;
+    }
     std::string low = text;
     std::transform(low.begin(), low.end(), low.begin(), [](unsigned char c) {
       return static_cast<char>(std::tolower(c));
