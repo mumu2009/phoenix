@@ -43,6 +43,10 @@ private:
         int y{0};
     };
 
+    /* Locking split (same pattern as PopulationLayer / UnitLearner): the
+       public entry point locks, the internal one assumes the caller holds
+       mu_ (load() and the manager's importState path both need it). */
+    void fromJsonLocked(const nlohmann::json &j);
     nlohmann::json configureLocked(const nlohmann::json &payload);
     void initWeightsLocked(unsigned seed);
     double epochLocked(std::vector<Sample> &data, float lr, unsigned seed);

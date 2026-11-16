@@ -122,11 +122,90 @@ public:
         [this](const json &input, const json &options) {
           return this->onlineLookup(input, options);
         });
-    const float minScore = static_cast<float>(
-        phoenix::cfgOr<double>("addons.offerMinScore", 0.35));
+    const double offerMin = phoenix::cfgOr<double>("addons.offerMinScore", 0.35);
+    const double semanticWeight =
+        phoenix::cfgOr<double>("addons.semanticWeight", 0.5);
+    /* v10.2 memetic-semantic intent matching.
+       The old path let each plugin's keyword tally decide and dropped
+       everything below offerMinScore BEFORE the host could look at it, so a
+       plugin that matched the situation with different wording could never be
+       selected.  We now sample candidates down to addons.semanticFloor, score
+       them on two channels (lexical + meme-graph relatedness, see
+       plugin_semantics.hpp) and only then apply the real threshold. */
+    const double sampleFloor =
+        phoenix::cfgOr<double>("addons.semanticFloor", 0.10);
     const size_t maxOffers = static_cast<size_t>(
         std::max(1, phoenix::cfgOr<int>("addons.offerMax", 6)));
-    return addons_->collectOffers(situation, minScore, maxOffers);
+    const size_t maxCandidates = static_cast<size_t>(
+        std::max<int>(maxOffers * 3, phoenix::cfgOr<int>("addons.offerMax", 6)));
+    const float floorF =
+        static_cast<float>(std::max(0.0, std::min(offerMin, sampleFloor)));
+    auto cands = addons_->collectOffers(situation, floorF, maxCandidates);
+    if (cands.empty()) return cands;
+
+    std::string situationText = situation.value("goal", std::string());
+    {
+      const std::string draft = situation.value("draft", std::string());
+      if (!draft.empty()) {
+        situationText += ' ';
+        situationText += draft.size() > 800
+                             ? draft.substr(draft.size() - 800)
+                             : draft;
+      }
+      const std::string phase = situation.value("phase", std::string());
+      if (!phase.empty()) {
+        situationText += ' ';
+        situationText += phase;
+      }
+    }
+    /* Meme side of the decision: which meme clusters does the situation live
+       in?  A candidate token is "related" when its meme set intersects the
+       situation's, which is what lets different words reach the same plugin
+       (word vectors would need a model; meme clusters are the graph we
+       already maintain).  A cheap morphological fallback covers
+       consistent/consistency, which share no meme until the graph learns it. */
+    std::unordered_set<std::string> situationMemes;
+    {
+      const auto toks = phoenix::plugin::contentTokens(situationText);
+      int n = 0;
+      for (const auto &w : toks) {
+        if (++n > 64) break;
+        for (const auto &id : kvm_.getWordMemeSet(w)) situationMemes.insert(id);
+      }
+    }
+    std::unordered_map<std::string, std::vector<std::string>> profileMemeCache;
+    auto related = [&](const std::string &a,
+                       const std::string &b) -> double {
+      if (a == b) return 1.0;
+      auto it = profileMemeCache.find(b);
+      if (it == profileMemeCache.end())
+        it = profileMemeCache.emplace(b, kvm_.getWordMemeSet(b)).first;
+      for (const auto &id : it->second)
+        if (situationMemes.count(id)) return 1.0;
+      if (a.size() >= 4 && b.size() >= 4 &&
+          (a.rfind(b, 0) == 0 || b.rfind(a, 0) == 0))
+        return 0.6;
+      return 0.0;
+    };
+    std::vector<addon::AddonOffer> kept;
+    kept.reserve(cands.size());
+    for (auto &off : cands) {
+      const std::string profile = phoenix::plugin::pluginProfile(
+          off.name, off.type, off.reason, off.result.meta);
+      const double sem = phoenix::plugin::semanticAffinity(
+          situationText, profile, related, semanticWeight);
+      const double blended = phoenix::plugin::blendOfferScore(
+          static_cast<double>(off.score), sem, semanticWeight);
+      if (blended < offerMin) continue;
+      off.score = static_cast<float>(blended);
+      kept.push_back(std::move(off));
+    }
+    std::sort(kept.begin(), kept.end(),
+              [](const addon::AddonOffer &a, const addon::AddonOffer &b) {
+                return a.score > b.score;
+              });
+    if (kept.size() > maxOffers) kept.resize(maxOffers);
+    return kept;
   }
 
   void indexSearchDocument(const std::string &url, const std::string &title,

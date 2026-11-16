@@ -30,6 +30,16 @@
   - `autonomy_loop.md`：长期自主心跳 + 持久化 + 插话；`safety.md`：系统级急停（E-stop）；
   - `model_deployment.md` / `complexity_bounds.md` / `llamacpp_optimization.md` / `testing_methodology.md`（§1–§12 验证协议） / `testing_plan.md`；
   - `archive/uncontrolled_evolution.md`：封存的不受控进化设想（原因与重启条件）。
+- `v10.1/`：v10.1 "Gareth" 文档集：
+  - `artifact_contract.md`：产物契约（模式/版本/兼容/拆分/锁）；
+  - `plan_round1.md`：首轮计划；`implementation_2026-11-07.md`：实现记录（情绪矩阵、大规模测试、增长、并行数据竞争）；
+  - `crash_forensics_2026-11-15.md`：`0xC0000374` 堆损坏取证（共享状态审计表、四处竞争点、修复与验证方法）；
+  - `round_2026-11-15.md`：本轮总结（GPU 空转根因＝`callLlamaCppBackend` 递归占满 slot、异步训练、配置/状态分离、实测数据、残留缺陷）；
+  - `logic_engine.md`：符号推理层（Prolog/Datalog）设计与复杂度；
+  - `reasoning_research_plan.md`：符号推理的**决策门**（Q1 需求频率 / Q2 选择率 / Q3 A-B 效果，含通过阈值与最小集成方式）。
+- `architecture_v10.2.html`：**交互式架构图（Canvas）**。10 层 / 58 模块 / 327 文件条目，
+  覆盖从进程部署到基础设施的全部子系统；支持拖拽平移、滚轮缩放、点击查看模块的文件与职责、
+  按名称/文件/职责搜索、按层开关、全量文件索引。用浏览器直接打开即可（无外部依赖）。
 
 ## 适用场景
 

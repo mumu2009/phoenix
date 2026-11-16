@@ -55,6 +55,14 @@ private:
       aspectToUrls_;
   std::unordered_map<std::string, std::string> urlToContent_;
   mutable std::mutex indexMu_;
+  /* v10.2: the search cache/index containers are touched from every mission
+     thread (collectOffers -> contribute -> invokeAddonOnlineLookup ->
+     onlineLookup -> lookup/fromCache).  They were completely unsynchronised:
+     fromCache() ERASES from cache_ while another thread inserts, which is the
+     heap corruption the 0xC0000374 dump resolves to
+     (addon::invokeAddonOnlineLookup -> RuntimeState::onlineLookup ->
+     OnlineResearcher::lookup -> fromCache).  This mutex guards all of them. */
+  mutable std::mutex cacheMu_;
 
   std::string normalizeKey(const std::vector<std::string> &words) const;
   void pruneCache();

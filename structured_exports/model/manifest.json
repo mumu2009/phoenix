@@ -1,7 +1,7 @@
 {
   "fitResult": {
     "convergence": {
-      "generatedAtMs": 1793466427920,
+      "generatedAtMs": 1794579109883,
       "reached": false,
       "reason": "insufficient-semantic-units",
       "sampleCount": 0
@@ -18,7 +18,7 @@
     },
     "validationError": 0.0
   },
-  "generatedAtMs": 1793466427920,
+  "generatedAtMs": 1794579109883,
   "ggufModel": {
     "architecture": "transformer",
     "metadata": {

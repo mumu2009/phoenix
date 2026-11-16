@@ -6,6 +6,8 @@
 #include "mission_reply_parse.hpp"
 #include "mission_workspace.hpp"
 #include "summon_registry.hpp"
+#include "logic_engine.hpp"
+#include "study_population_features.hpp"
 
 #include "addons/builtin_registry.hpp"
 #include "phoenix_config.hpp"
@@ -757,7 +759,6 @@ CognitionAutonomyManager::CognitionAutonomyManager()
         unitCfg["steps"] = phoenix::cfgOr<int>("study.unitLearn.steps", 3);
         unitCfg["dim"] = phoenix::cfgOr<int>("study.unitLearn.dim", 16);
         unitCfg["maxMerges"] = phoenix::cfgOr<int>("study.unitLearn.maxMerges", 32);
-        unitLearner_.configure(unitCfg);
         nlohmann::json popCfg;
         const bool populationOn = phoenix::cfgOr<bool>("study.population.enabled", false);
         popCfg["enabled"] = populationOn;
@@ -765,7 +766,11 @@ CognitionAutonomyManager::CognitionAutonomyManager()
         popCfg["mutationScale"] = phoenix::cfgOr<double>("study.population.mutationScale", 0.05);
         popCfg["tolerance"] = phoenix::cfgOr<double>("study.population.tolerance", 0.2);
         if (populationOn) popCfg["n"] = phoenix::cfgOr<int>("study.population.n", 4);
-        population_.configure(popCfg);
+        /* v10.2 domain coupling: the layer must accept the 8-field state
+           vector produced by study_population_features.hpp. */
+        popCfg["inputDim"] = phoenix::cfgOr<int>("study.population.inputDim", 8);
+        popCfg["hidden"] = phoenix::cfgOr<int>("study.population.hidden", 6);
+        popCfg["outputDim"] = phoenix::cfgOr<int>("study.population.outputDim", 1);
         nlohmann::json expCfg;
         expCfg["enabled"] = phoenix::cfgOr<bool>("study.expert.enabled", false);
         expCfg["corpusPath"] = phoenix::cfgOr<std::string>(
@@ -775,7 +780,22 @@ CognitionAutonomyManager::CognitionAutonomyManager()
         expCfg["hidden"] = phoenix::cfgOr<int>("study.expert.hidden", 16);
         expCfg["vocab"] = phoenix::cfgOr<int>("study.expert.vocab", 32);
         expCfg["epochs"] = phoenix::cfgOr<int>("study.expert.epochs", 8);
-        tinyExpert_.configure(expCfg);
+        /* Cache the effective payload so importState() can replay it after
+           restoring weights (see reapplyStudyConfig). */
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            studyCfgCache_["unitLearn"] = unitCfg;
+            studyCfgCache_["population"] = popCfg;
+            studyCfgCache_["expert"] = expCfg;
+            studyCfgCache_["selfMind"] = nlohmann::json{
+                {"enabled", phoenix::cfgOr<bool>("selfMind.enabled", true)},
+                {"name", phoenix::cfgOr<std::string>("selfMind.name", std::string("self"))}};
+        }
+        applyStudyConfigPayload(
+            nlohmann::json{{"unitLearn", unitCfg},
+                           {"population", popCfg},
+                           {"expert", expCfg}},
+            /*afterRestore=*/false);
     } catch (...) {
     }
 }
@@ -787,6 +807,8 @@ CognitionAutonomyManager::~CognitionAutonomyManager() {
     if (loopThread_.joinable()) loopThread_.join();
     loopWatchdogStop_.store(true, std::memory_order_release);
     if (loopWatchdogThread_.joinable()) loopWatchdogThread_.join();
+    /* v10.2: join the background trainer before the expert dies with us. */
+    stopTrainingWorker();
     unregisterFromSafetyRegistry();
 }
 
@@ -802,6 +824,98 @@ void CognitionAutonomyManager::retargetDefaultMissionLocked() {
             defaultMissionId_ = kv.first;
             return;
         }
+    }
+}
+
+void CognitionAutonomyManager::applyStudyConfigPayload(const json &cfg, bool afterRestore) {
+    if (!cfg.is_object()) return;
+    if (cfg.contains("expert") && cfg["expert"].is_object())
+        tinyExpert_.configure(cfg["expert"]);
+    if (cfg.contains("population") && cfg["population"].is_object()) {
+        json p = cfg["population"];
+        if (afterRestore) {
+            /* keep the restored individuals: a size/dim change reseeds */
+            p.erase("n");
+            /* dims are re-applied: they are part of the feature contract and
+               no longer reseed unless they really changed. */
+        }
+        population_.configure(p);
+    }
+    if (cfg.contains("unitLearn") && cfg["unitLearn"].is_object())
+        unitLearner_.configure(cfg["unitLearn"]);
+    if (cfg.contains("selfMind") && cfg["selfMind"].is_object())
+        selfMind_.configure(cfg["selfMind"]);
+}
+
+/* Caller holds mu_ (only importState calls this). */
+void CognitionAutonomyManager::reapplyStudyConfig() {
+    /* The persisted state carries the learned parameters AND the enable
+       switches of the era that wrote them.  importState therefore used to
+       restore `enabled=false` over `study.expert.enabled=true`, so the expert
+       stayed disabled no matter what the config said: every field-train
+       opportunity reported expert=skipped and weights.json never advanced
+       past the previous session.  Config wins for switches and paths; state
+       wins for weights and counters. */
+    json cfg = json::object();
+    cfg["expert"] = json{
+        {"enabled", phoenix::cfgOr<bool>("study.expert.enabled", false)},
+        {"corpusPath",
+         phoenix::cfgOr<std::string>(
+             "study.expert.corpusPath",
+             std::string("./runtime_store/datasets/study_expert/corpus.txt"))},
+        {"weightsPath",
+         phoenix::cfgOr<std::string>(
+             "study.expert.weightsPath",
+             std::string("./runtime_store/experts/study_tiny/weights.json"))},
+        {"hidden", phoenix::cfgOr<int>("study.expert.hidden", 16)},
+        {"vocab", phoenix::cfgOr<int>("study.expert.vocab", 32)},
+        {"epochs", phoenix::cfgOr<int>("study.expert.epochs", 8)}};
+    cfg["population"] = json{
+        {"inputDim", phoenix::cfgOr<int>("study.population.inputDim", 8)},
+        {"hidden", phoenix::cfgOr<int>("study.population.hidden", 6)},
+        {"outputDim", phoenix::cfgOr<int>("study.population.outputDim", 1)},
+        {"enabled", phoenix::cfgOr<bool>("study.population.enabled", false)},
+        {"maxPopulation", phoenix::cfgOr<int>("study.population.maxPopulation", 8)},
+        {"mutationScale",
+         phoenix::cfgOr<double>("study.population.mutationScale", 0.05)},
+        {"tolerance", phoenix::cfgOr<double>("study.population.tolerance", 0.2)}};
+    cfg["unitLearn"] = json{
+        {"enabled", phoenix::cfgOr<bool>("study.unitLearn.enabled", true)},
+        {"steps", phoenix::cfgOr<int>("study.unitLearn.steps", 3)},
+        {"dim", phoenix::cfgOr<int>("study.unitLearn.dim", 16)},
+        {"maxMerges", phoenix::cfgOr<int>("study.unitLearn.maxMerges", 32)}};
+    cfg["selfMind"] = json{
+        {"enabled", phoenix::cfgOr<bool>("selfMind.enabled", true)},
+        {"name", phoenix::cfgOr<std::string>("selfMind.name", std::string("self"))}};
+    /* An explicit configureStudy() payload (what the gateway sends at startup)
+       overrides the global config key by key. */
+    if (studyCfgCache_.is_object()) {
+        for (auto it = studyCfgCache_.begin(); it != studyCfgCache_.end(); ++it)
+            cfg[it.key()] = it.value();
+    }
+    applyStudyConfigPayload(cfg, /*afterRestore=*/true);
+
+}
+
+/* Config wins for the behaviour switches; the state file only owns learned
+   state.  Called at the END of importState(), after that state restore -
+   applying these inside reapplyStudyConfig() was overwritten by the later
+   agiEnabled_/missionEnabled_/subconsciousEnabled_ restores.
+   Symptom it fixes: config/phoenix.json says agi.enabled=true and
+   subconscious.enabled=true, yet the runtime reported both as off. */
+void CognitionAutonomyManager::reapplyBehaviourSwitches() {
+    agiEnabled_ = phoenix::cfgOr<bool>("agi.enabled", agiEnabled_);
+    missionEnabled_ = phoenix::cfgOr<bool>("mission.enabled", missionEnabled_);
+    const bool subOn =
+        phoenix::cfgOr<bool>("subconscious.enabled", subconsciousEnabled_);
+    if (subOn && !subconsciousEnabled_) {
+        subconsciousEnabled_ = true;
+        /* same activation the import path performs */
+        subProfile_.applyTo(sensationEngine_);
+        subProfile_.applyTo(instinctEngine_);
+        subProfile_.applyTo(agiController_);
+    } else if (!subOn) {
+        subconsciousEnabled_ = false;
     }
 }
 
@@ -876,16 +990,32 @@ void CognitionAutonomyManager::registerDefaultAgiActions() {
         {"script", "tool", "script",
          "Run a .py file from the mission workspace sandbox", 2},
     };
-    for (const auto &d : defaults) {
-        if (agiActionRegistry_.find(d.name) != nullptr) continue;  // idempotent
+    /* v10.1 symbolic tool is OPT-IN (`logic.enabled`, default false).
+       It has not been through the research/evaluation gate yet: the engine
+       was still failing its own backward-chaining cases and there is no
+       evidence that a mission needs proofs, so the planner must not be able
+       to select it by accident.  Turning it on is an explicit experiment. */
+    const bool logicActionEnabled = [] {
+      try {
+        return phoenix::cfgOr<bool>("logic.enabled", false);
+      } catch (...) {
+        return false;
+      }
+    }();
+    auto registerOne = [&](const DefaultAction &d) {
+        if (agiActionRegistry_.find(d.name) != nullptr) return;  // idempotent
         phoenix::agi::AgiActionSpec spec;
         spec.name = d.name;
         spec.category = d.category;
         spec.addonType = d.addonType;
         spec.description = d.description;
-        spec.embedding = oneHotEmbedding(d.oneHotIndex, 5);
+        spec.embedding = oneHotEmbedding(d.oneHotIndex, 6);
         agiActionRegistry_.registerAction(std::move(spec));
-    }
+    };
+    for (const auto &d : defaults) registerOne(d);
+    if (logicActionEnabled)
+        registerOne({"logic", "tool", "logic",
+                     "Answer a rule query (facts + rules + query) exactly", 5});
 }
 
 nlohmann::json CognitionAutonomyManager::executeAgiAction(
@@ -896,6 +1026,11 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
 
     if (spec.category == "goal") {
         const std::string goal = context.value("userPrompt", spec.description);
+        /* executeAgiAction runs WITHOUT mu_ (both entry points release it:
+           iterate() unlocks before the executor, executeAgiActionByName now
+           copies the spec and releases).  Every branch that touches
+           mu_-owned state therefore takes the lock itself. */
+        std::lock_guard<std::mutex> lock(mu_);
         goals_.push_back(goal);
         if (goals_.size() > 1024) goals_.erase(goals_.begin());
         return json{{"ok", true},
@@ -917,6 +1052,13 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
            taught a call syntax (framework adapts to the model, not vice
            versa).  The model name must exist in summon.models. */
         std::string summonModel;
+        /* v10.2: this branch reads/writes mu_-owned state through
+           missionByIdLocked / sessions_ / missionGenome_ / missionMutationRate_.
+           iterate() calls the executor with mu_ RELEASED, so leaving the
+           branch unlocked was a data race on missions_ and on the sessions_
+           map (concurrent insert while the loop iterated it).  It only looked
+           safe because executeAgiActionByName happened to hold mu_. */
+        std::lock_guard<std::mutex> missionLock(mu_);
         if (spec.category == "summon") {
             summonModel = spec.name.size() > 7 ? spec.name.substr(7)
                                                : std::string();
@@ -1040,6 +1182,30 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
 
     if (spec.category != "tool" || !addonManager_) {
         return json{{"ok", false}, {"error", "no executor for category " + spec.category}};
+    }
+
+    /* v10.1 symbolic tool.  Kept out of the addon manager: it needs no
+       plugin mount, has no network side effects, and must stay exact. */
+    if (spec.addonType == "logic") {
+        json req = context;
+        if (context.contains("arguments") && context["arguments"].is_object())
+            req = context["arguments"];
+        else if (context.contains("logic") && context["logic"].is_object())
+            req = context["logic"];
+        const json r = phoenix::logic::runJson(req);
+        const bool ok = r.value("ok", false);
+        const std::string reply =
+            ok ? json{{"solutions", r.value("solutions", json::array())}}.dump()
+               : (std::string("logic error: ") +
+                  r.value("error", std::string("failed")));
+        return json{{"ok", ok},
+                    {"reply", reply},
+                    {"result",
+                     json{{"addon", "logic"},
+                          {"name", spec.name},
+                          {"reply", reply},
+                          {"meta", r},
+                          {"extraTokens", 0}}}};
     }
 
     std::string userPrompt = context.value("userPrompt", std::string());
@@ -2232,6 +2398,8 @@ json CognitionAutonomyManager::importState(const json &state) {
     if (state.contains("studyExpert") && state["studyExpert"].is_object()) {
         tinyExpert_.fromJson(state["studyExpert"]);
     }
+    /* Restored weights must not restore the old enable switches. */
+    reapplyStudyConfig();
     subconsciousEnabled_ = state.value("subconsciousEnabled", subconsciousEnabled_);
     if (state.contains("subconscious") && state["subconscious"].is_object()) {
         subProfile_ = phoenix::subconscious::SubconsciousProfile::fromJson(state["subconscious"]);
@@ -2254,6 +2422,10 @@ json CognitionAutonomyManager::importState(const json &state) {
         sessions_[sessionId] = std::move(record);
         sessionsLoaded += 1;
     }
+
+    /* Last word on the behaviour switches (see the method comment): the
+       state restore above already ran, so config wins here. */
+    reapplyBehaviourSwitches();
 
     return json{{"ok", true},
                 {"result", json{{"sessionsLoaded", sessionsLoaded},
@@ -2527,10 +2699,20 @@ void CognitionAutonomyManager::setAgiActionExecutor(AgiActionExecutor executor) 
 
 json CognitionAutonomyManager::executeAgiActionByName(const std::string &name,
                                                       const json &context) {
-    std::lock_guard<std::mutex> lock(mu_);
-    const auto *spec = agiActionRegistry_.find(name);
-    if (!spec) return json{{"ok", false}, {"error", "action not found: " + name}};
-    return executeAgiAction(*spec, context);
+    /* v10.2: do NOT hold mu_ across the tool run.  A web search / shell /
+       script call inside executeAgiAction can take seconds to minutes; holding
+       the manager lock that whole time blocked status() and every other
+       mission's instinct evaluation (observed: /api/cognition/autonomy/status
+       timing out at 60 s).  It was also a latent self-deadlock: the
+       replicate/summon branch reaches spawnMissionChild, which locks mu_. */
+    phoenix::agi::AgiActionSpec specCopy;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        const auto *spec = agiActionRegistry_.find(name);
+        if (!spec) return json{{"ok", false}, {"error", "action not found: " + name}};
+        specCopy = *spec;
+    }
+    return executeAgiAction(specCopy, context);
 }
 
 json CognitionAutonomyManager::configureSubconscious(const json &payload) {
@@ -2572,6 +2754,14 @@ json CognitionAutonomyManager::tickSelfThought() {
 json CognitionAutonomyManager::configureStudy(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
     json out = json::object();
+    /* Remember the effective payload: importState() replays it so a state
+       file cannot resurrect an older enable switch.  Plain per-key
+       assignment (no nested merge): simpler and it keeps the cached object
+       shaped exactly like the payload the gateway sent. */
+    if (payload.is_object()) {
+        for (auto it = payload.begin(); it != payload.end(); ++it)
+            studyCfgCache_[it.key()] = it.value();
+    }
     if (payload.contains("unitLearn")) out["unitLearn"] = unitLearner_.configure(payload["unitLearn"]);
     if (payload.contains("population")) out["population"] = population_.configure(payload["population"]);
     if (payload.contains("expert")) out["expert"] = tinyExpert_.configure(payload["expert"]);
@@ -2627,17 +2817,33 @@ json CognitionAutonomyManager::noteFieldOpportunity(const std::string &text) {
             const auto seen = selfMind_.observeUtterance("self", slice);
             out["liveTurns"] = seen.value("ok", false);
         }
+        /* v10.2 population domain coupling: feed the layer the 8-feature field
+           state so its individuals compete on real mission data.  Before this,
+           runGoal() was never called and goalsRun stayed 0 forever. */
+        if (population_.enabled()) {
+            json now = json::object();
+            now["deliverable"] = text;
+            now["tick"] = static_cast<double>(loopTickCount_.load());
+            if (lastFieldState_.is_object() && !lastFieldState_.empty()) {
+                const json goal =
+                    phoenix::study::populationGoal(lastFieldState_, now);
+                const auto ran = population_.runGoal(goal);
+                out["population"] = ran.value("ok", false);
+            }
+            lastFieldState_ = now;
+        }
         if (tinyExpert_.enabled()) {
-            /* v10.1: re-arm the expert on every CHANGED field goal (bounded
-               to one training run per 5 minutes).  The old code trained only
-               when lastFieldGoal_ was empty, i.e. once per process, so the
-               expert weights froze after the first message. */
+            /* v10.1: the expert accumulates on a pure 5-minute cadence.  The
+               previous gate also required the field text to CHANGE, but the
+               mission field text repeats (the same goal/deliverable tail), so
+               in practice it never fired and the weights froze for days.
+               Accumulation is the goal here; the changed-text condition is
+               removed, the throttle stays. */
             const auto nowMs =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch())
                     .count();
-            if (lastFieldGoal_ != slice &&
-                (lastFieldTrainMs_ == 0 || nowMs - lastFieldTrainMs_ > 300000)) {
+            if (lastFieldTrainMs_ == 0 || nowMs - lastFieldTrainMs_ > 300000) {
                 lastFieldGoal_ = slice;
                 lastFieldTrainMs_ = nowMs;
                 runExpert = true;
@@ -2645,22 +2851,76 @@ json CognitionAutonomyManager::noteFieldOpportunity(const std::string &text) {
         }
     }
     if (runExpert) {
-        auto trained = tinyExpert_.trainProjectTree(".");
-        if (!trained.value("ok", false)) {
-            trained = summonTinyExpert(
-                json{{"goal", slice}, {"name", std::string("tiny-expert")}});
-        }
-        out["expert"] = trained.value("ok", false)
-                            ? std::string("trained")
-                            : trained.value("reason", std::string("failed"));
-        out["expertMode"] = trained.value("mode", std::string());
-        out["expertAccuracy"] = trained.value("accuracy", 0.0);
-        out["expertParams"] = trained.value("paramCount", 0);
-        out["expertLmax"] = phoenix::memetic::eigenMasterLength(
-            trained.value("accuracy", 0.0), 2.0);
-        out["expertRegistered"] = trained.value("registered", false);
+        /* v10.2: hand the pass to the training worker instead of running it
+           inline.  The caller (a mission tick) returns immediately, so the
+           CPU-bound corpus scan + SGD epochs overlap with the next GPU
+           decode instead of stalling the mission loop. */
+        enqueueExpertTraining(slice);
+        out["expert"] = "queued";
     }
     return out;
+}
+
+void CognitionAutonomyManager::ensureTrainingWorker() {
+    std::lock_guard<std::mutex> lk(trainMu_);
+    if (trainThread_.joinable()) return;
+    trainStop_ = false;
+    trainThread_ = std::thread([this] { trainingWorkerLoop(); });
+}
+
+void CognitionAutonomyManager::stopTrainingWorker() {
+    {
+        std::lock_guard<std::mutex> lk(trainMu_);
+        trainStop_ = true;
+        trainQueue_.clear();
+    }
+    trainCv_.notify_all();
+    if (trainThread_.joinable()) trainThread_.join();
+}
+
+void CognitionAutonomyManager::enqueueExpertTraining(const std::string &slice) {
+    ensureTrainingWorker();
+    {
+        std::lock_guard<std::mutex> lk(trainMu_);
+        /* One pending pass is enough: every pass walks the same project tree,
+           so a backlog would just repeat itself (and would delay shutdown). */
+        if (!trainQueue_.empty()) return;
+        trainQueue_.push_back(slice);
+    }
+    trainCv_.notify_one();
+}
+
+void CognitionAutonomyManager::trainingWorkerLoop() {
+    for (;;) {
+        std::string slice;
+        {
+            std::unique_lock<std::mutex> lk(trainMu_);
+            trainCv_.wait(lk,
+                          [this] { return trainStop_ || !trainQueue_.empty(); });
+            if (trainStop_ && trainQueue_.empty()) return;
+            slice = trainQueue_.front();
+            trainQueue_.pop_front();
+        }
+        trainBusy_.store(true, std::memory_order_relaxed);
+        json trained = json::object();
+        try {
+            trained = tinyExpert_.trainProjectTree(".");
+            if (!trained.value("ok", false)) {
+                trained = summonTinyExpert(
+                    json{{"goal", slice}, {"name", std::string("tiny-expert")}});
+            }
+        } catch (const std::exception &e) {
+            trained = json{{"ok", false}, {"reason", e.what()}};
+        } catch (...) {
+            trained = json{{"ok", false}, {"reason", "exception"}};
+        }
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            lastExpertTrain_ = trained;
+        }
+        trainJobsDone_.fetch_add(1, std::memory_order_relaxed);
+        trainBusy_.store(false, std::memory_order_relaxed);
+    }
 }
 
 json CognitionAutonomyManager::projectPathScore(const std::string &text) const {
@@ -2878,9 +3138,10 @@ void CognitionAutonomyManager::setMissionGnnSummaryFor(
         if (id == defaultMissionId_)
             missionGnnSummary_ = s;
     }
-    auto &hot = phoenix::memory::ScopedTrainableMemory::instance().hot(
-        phoenix::memory::makeMissionScope(id));
-    hot.gnnSummary = s;
+    /* Thread-safe write (see ScopedTrainableMemory::setGnnSummary): the
+       gateway may write the same scope's summary concurrently. */
+    phoenix::memory::ScopedTrainableMemory::instance().setGnnSummary(
+        phoenix::memory::makeMissionScope(id), s);
 }
 
 std::string CognitionAutonomyManager::missionGnnSummaryFor(

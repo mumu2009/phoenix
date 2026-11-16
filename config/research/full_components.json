@@ -16,7 +16,7 @@
       "earlyStop": true
     }
   },
-  "autonomyLoop": { "intervalSec": 30 },
+  "autonomyLoop": { "intervalSec": 3 },
   "main": {
     "inference": { "llamaUseSplitBackend": false }
   },

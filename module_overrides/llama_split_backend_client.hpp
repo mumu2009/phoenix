@@ -40,6 +40,23 @@ nlohmann::json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
                                const std::string &graphContext, int maxTokens,
                                const nlohmann::json &inferenceOptions);
 
+/* Text-only completion against the STOCK /completion endpoint (no /phx).
+   This is the CUDA-stable path: the server owns decoding through its own
+   slots, instead of API threads decoding on one shared llama_context.
+   It builds the same causal prompt the split pipeline builds, so switching
+   main.inference.llamaUseSplitBackend does not change the text the model
+   sees - only the endpoint.
+
+   History: callLlamaCppBackend used to `return chatWithLlamaCpp(...)` here.
+   That re-entered the caller that had just taken a llama slot, so each
+   recursion level took another slot; after maxSlots levels every call
+   failed with llama-slot-busy and NO request ever reached the server
+   (nvidia-smi: 1% SM, llama-server log: "all slots are idle"). */
+nlohmann::json llamaTextChat(const std::string &baseUrl, int timeoutMs,
+                             const std::string &model, const std::string &text,
+                             const std::string &graphContext, int maxTokens,
+                             const nlohmann::json &inferenceOptions);
+
 /* Floor for /phx/generate and /completion n_predict. Tiny values (≤8)
    have tripped GGML_ASSERT(result_output) on the patched server. */
 inline int minPredictTokens() { return 16; }

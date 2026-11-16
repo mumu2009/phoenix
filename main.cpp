@@ -108,6 +108,9 @@ using ioctl_arg_t = unsigned long;
 #include "main_hub_parts/062_section_before_studyengine.inc"
 #include "main_hub_parts/063_class_studyengine.inc"
 #include "main_hub_parts/064_section_before_runtimestate.inc"
+/* v10.2 memetic-semantic plugin intent matching (used by
+   RuntimeState::collectAddonOffers). */
+#include "plugin_semantics.hpp"
 #include "main_hub_parts/065_class_runtimestate.inc"
 #include "main_hub_parts/066_section_before_memebarrier.inc"
 #include "main_hub_parts/067_class_memebarrier.inc"

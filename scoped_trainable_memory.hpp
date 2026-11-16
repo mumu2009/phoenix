@@ -142,6 +142,14 @@ struct TrainableMemoryBucket {
   std::string lastBenefitHarmBias;
   uint64_t createdAtMs{0};
   uint64_t lastAccessMs{0};
+  /* Guards the plain fields above when two components write the SAME scope
+     (e.g. the gateway summarising a chat scope while the manager writes the
+     mission scope's gnnSummary).  hot() returns a stable reference, but the
+     pointee's std::strings are not thread-safe on their own: two concurrent
+     assignments reallocate the same buffer and corrupt the heap
+     (0xC0000374).  Use ScopedTrainableMemory::setGnnSummary() rather than
+     assigning through hot(). */
+  mutable std::mutex fieldMu;
 };
 
 class ScopedTrainableMemory {
@@ -179,11 +187,30 @@ class ScopedTrainableMemory {
     return *it->second;
   }
 
+  /* Thread-safe write of a bucket field.  Two components can write the same
+     scope (chat summary vs mission summary), and mutating the bucket's
+     std::string through hot() while the other thread assigns it is a data
+     race that corrupts the heap. */
+  void setGnnSummary(const MemoryScope &scope, const std::string &text) {
+    TrainableMemoryBucket *b = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      const std::string k = scope.key();
+      auto it = live_.find(k);
+      if (it == live_.end()) {
+        auto bucket = std::make_unique<TrainableMemoryBucket>();
+        it = live_.emplace(k, std::move(bucket)).first;
+      }
+      b = it->second.get();
+    }
+    std::lock_guard<std::mutex> fieldLock(b->fieldMu);
+    b->gnnSummary = text;
+  }
+
   const TrainableMemoryBucket *peek(const MemoryScope &scope) const {
     const std::string k = scope.key();
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = live_.find(k);
-    return it == live_.end() ? nullptr : it->second.get();
+    auto it = live_.find(k);    return it == live_.end() ? nullptr : it->second.get();
   }
 
   bool hasLive(const MemoryScope &scope) const {

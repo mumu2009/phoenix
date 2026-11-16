@@ -345,7 +345,7 @@ nlohmann::json TinyExpert::load(const std::string &path) {
     if (!in) return nlohmann::json{{"ok", false}, {"reason", "io"}};
     try {
         const auto j = nlohmann::json::parse(in);
-        fromJson(j);
+        fromJsonLocked(j);
     } catch (const std::exception &e) {
         return nlohmann::json{{"ok", false}, {"reason", e.what()}};
     }
@@ -405,6 +405,11 @@ nlohmann::json TinyExpert::toJson() const {
 }
 
 void TinyExpert::fromJson(const nlohmann::json &j) {
+    std::lock_guard<std::mutex> lock(mu_);
+    fromJsonLocked(j);
+}
+
+void TinyExpert::fromJsonLocked(const nlohmann::json &j) {
     if (!j.is_object()) return;
     enabled_ = j.value("enabled", enabled_);
     vocab_ = j.value("vocab", vocab_);

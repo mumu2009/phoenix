@@ -9,11 +9,14 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -37,8 +40,11 @@ class PhoenixConfig {
     if (!f.good()) {
       throw std::runtime_error("Cannot open Phoenix config: " + path.string());
     }
-    f >> cfg_;
+    f >> base_;
+    basePath_ = path;
+    baseMtime_ = mtimeOf(path);
     loaded_ = true;
+    rebuild();
   }
 
   /* Deep-merge one JSON object over the loaded config.  Research profiles
@@ -61,7 +67,10 @@ class PhoenixConfig {
                 << ": " << e.what() << " (base config unchanged)" << std::endl;
       return;
     }
-    mergeInto(cfg_, ov);
+    profile_ = std::move(ov);
+    profilePath_ = path;
+    profileMtime_ = mtimeOf(path);
+    rebuild();
   }
 
   /* Deep-merge an inline JSON object over the loaded config.  The feature
@@ -74,16 +83,80 @@ class PhoenixConfig {
                 << std::endl;
       return;
     }
-    mergeInto(cfg_, ov);
+    tabOverlay_ = ov;
+    rebuild();
+  }
+
+  /* ---- v10.2 hot reload ------------------------------------------------
+     cfgOr() used to read a snapshot taken once at startup, so every
+     hyper-parameter needed a process restart.  The live config is now a
+     copy-on-write shared_ptr: readers take the atomic pointer (no lock on the
+     hot path), and reload() swaps in a freshly merged object.  A failed parse
+     keeps the previous snapshot, so a half-written file cannot break a
+     running system. */
+  bool reloadNow() {
+    if (basePath_.empty()) return false;
+    nlohmann::json base;
+    try {
+      std::ifstream f(basePath_);
+      if (!f.good()) return false;
+      f >> base;
+    } catch (...) {
+      return false;
+    }
+    nlohmann::json prof = profile_;
+    if (!profilePath_.empty()) {
+      try {
+        std::ifstream f(profilePath_);
+        if (f.good()) {
+          nlohmann::json o;
+          f >> o;
+          prof = std::move(o);
+        }
+      } catch (...) {
+        /* keep the previous profile on a bad edit */
+      }
+    }
+    base_ = std::move(base);
+    profile_ = std::move(prof);
+    baseMtime_ = mtimeOf(basePath_);
+    profileMtime_ = mtimeOf(profilePath_);
+    rebuild();
+    return true;
+  }
+
+  /* Cheap check used by the watcher thread: returns true when a watched file
+     changed and the reload succeeded. */
+  bool reloadIfChanged() {
+    const auto bm = mtimeOf(basePath_);
+    const auto pm = mtimeOf(profilePath_);
+    if (bm == baseMtime_ && pm == profileMtime_) return false;
+    return reloadNow();
+  }
+
+  void setReloadHook(std::function<void()> hook) {
+    reloadHook_ = std::move(hook);
+  }
+
+  /* Called by reloadNow() users after the swap so startup-cached subsystems
+     can re-read their parameters. */
+  void fireReloadHook() {
+    if (reloadHook_) {
+      try {
+        reloadHook_();
+      } catch (...) {
+      }
+    }
   }
 
   bool loaded() const { return loaded_; }
 
-  const nlohmann::json& raw() const { return cfg_; }
+  const nlohmann::json& raw() const { return *snap_.load(); }
 
   template <typename T>
   T get(const std::string& dotPath) const {
-    const nlohmann::json* p = getPath(dotPath);
+    const auto snap = snap_.load();
+    const nlohmann::json* p = getPathIn(*snap, dotPath);
     if (!p) {
       throw std::runtime_error("Missing config key: " + dotPath);
     }
@@ -96,7 +169,8 @@ class PhoenixConfig {
 
   template <typename T>
   T getOr(const std::string& dotPath, const T& fallback) const {
-    const nlohmann::json* p = getPath(dotPath);
+    const auto snap = snap_.load();
+    const nlohmann::json* p = getPathIn(*snap, dotPath);
     if (!p) {
       return fallback;
     }
@@ -108,7 +182,8 @@ class PhoenixConfig {
   }
 
   const nlohmann::json* getJsonPtr(const std::string& dotPath) const {
-    return getPath(dotPath);
+    const auto snap = snap_.load();
+    return getPathIn(*snap, dotPath);
   }
 
  private:
@@ -129,8 +204,9 @@ class PhoenixConfig {
     }
   }
 
-  const nlohmann::json* getPath(const std::string& dotPath) const {
-    const nlohmann::json* cur = &cfg_;
+  static const nlohmann::json* getPathIn(const nlohmann::json& root,
+                                         const std::string& dotPath) {
+    const nlohmann::json* cur = &root;
     std::size_t start = 0;
     while (start <= dotPath.size()) {
       std::size_t dot = dotPath.find('.', start);
@@ -147,7 +223,31 @@ class PhoenixConfig {
     return cur;
   }
 
-  nlohmann::json cfg_;
+  static std::filesystem::file_time_type mtimeOf(const std::filesystem::path& p) {
+    std::error_code ec;
+    if (p.empty()) return std::filesystem::file_time_type{};
+    auto t = std::filesystem::last_write_time(p, ec);
+    return ec ? std::filesystem::file_time_type{} : t;
+  }
+
+  void rebuild() {
+    nlohmann::json merged = base_;
+    mergeInto(merged, profile_);
+    mergeInto(merged, tabOverlay_);
+    if (!merged.is_object()) merged = nlohmann::json::object();
+    snap_.store(std::make_shared<const nlohmann::json>(std::move(merged)));
+  }
+
+  std::atomic<std::shared_ptr<const nlohmann::json>> snap_{
+      std::make_shared<const nlohmann::json>(nlohmann::json::object())};
+  nlohmann::json base_ = nlohmann::json::object();
+  nlohmann::json profile_ = nlohmann::json::object();
+  nlohmann::json tabOverlay_ = nlohmann::json::object();
+  std::filesystem::path basePath_;
+  std::filesystem::path profilePath_;
+  std::filesystem::file_time_type baseMtime_{};
+  std::filesystem::file_time_type profileMtime_{};
+  std::function<void()> reloadHook_;
   bool loaded_{false};
 };
 

@@ -367,11 +367,18 @@
        text-only path was silently ignored and every request went through the
        /phx split endpoints.  Those endpoints decode on the shared llama_context
        from API threads; that is the path that produced the llama-server
-       0xC0000005 crashes.  When the flag is false we take the plain
-       /v1/chat/completions path (same model, same sampling options). */
-    if (!phoenix::cfgOr<bool>("main.inference.llamaUseSplitBackend", true)) {
-      return chatWithLlamaCpp(text, graphContext, maxTokens, inferenceOptions);
-    }
+       0xC0000005 crashes.
+       v10.2 FIX: the "text-only" branch here used to be
+         `return chatWithLlamaCpp(text, ...)`
+       which re-enters the very function that had just claimed a llama slot.
+       Every recursion level took ANOTHER slot; after maxSlots levels the call
+       failed with `llama-slot-busy` and no request ever reached the server
+       (symptom: nvidia-smi 1% SM, llama-server "all slots are idle", mission
+       ticks silently producing nothing).  The text path is now a real client
+       call to the stock /completion endpoint (llamaTextChat), which is what
+       this branch was always meant to be. */
+    const bool splitBackend =
+        phoenix::cfgOr<bool>("main.inference.llamaUseSplitBackend", true);
     int timeoutMs = config_.llamaCppRequestTimeoutMs;
     if (inferenceOptions.is_object() &&
         inferenceOptions.contains("timeoutMs") &&
@@ -393,6 +400,16 @@
     if (config_.llamaCppBaseUrl.empty()) {
       return json{{"ok", false}, {"error", "llamaCppBaseUrl not configured"},
                   {"provider", "llamacpp"}};
+    }
+    if (!splitBackend) {
+      json rt = phoenix::v7::llamaTextChat(
+          config_.llamaCppBaseUrl, timeoutMs, config_.llamaCppModel, text,
+          graphContext, maxTokens, inferenceOptions);
+      if (config_.httpLog)
+        std::cout << "[chat] llamacpp(text) ok=" << rt.value("ok", false)
+                  << " replyLen=" << rt.value("reply", std::string()).size()
+                  << std::endl;
+      return rt;
     }
     json r = phoenix::v7::llamaSplitChat(
         config_.llamaCppBaseUrl, timeoutMs, config_.llamaCppModel, text,
@@ -474,7 +491,11 @@
         }
       }
       const int maxSlots = llamaMaxParallelSlots();
-      const int slotWaitCap = lowPriority ? 60000 : 180000;
+      /* v10.2: a mission tick must not park for a full minute on a busy
+         slot - it re-queues next tick anyway, and a 60s stall inside the
+         deliberator also blocks that mission's own progress reporting.
+         Interactive chat keeps the long budget. */
+      const int slotWaitCap = lowPriority ? 15000 : 180000;
       int slotWaited = 0;
       while (slotWaited < slotWaitCap &&
              !llamaSlotCv_.wait_for(

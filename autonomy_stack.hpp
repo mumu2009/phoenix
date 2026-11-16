@@ -26,6 +26,8 @@
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <map>
@@ -300,6 +302,32 @@ private:
        was never re-armed).  Train on a CHANGED field goal, throttled to one
        run per 5 minutes so trainProjectTree never hogs the mission loop. */
     long long lastFieldTrainMs_{0};
+    /* Last field state fed to the population layer (guarded by mu_). */
+    json lastFieldState_ = json::object();
+
+    /* v10.2 asynchronous field training.  Expert training is pure CPU work
+       (corpus scan + SGD epochs) and used to run inline in the caller, so a
+       training pass blocked the mission loop - and therefore the GPU - for
+       its whole duration.  It now runs on a single background worker: the
+       caller only enqueues, so CPU training and GPU decoding overlap. */
+    void ensureTrainingWorker();
+    void stopTrainingWorker();
+    void trainingWorkerLoop();
+    void enqueueExpertTraining(const std::string &slice);
+    /* queued-but-not-started passes (status() is const, so it locks). */
+    int trainingPending() const {
+        std::lock_guard<std::mutex> lk(trainMu_);
+        return static_cast<int>(trainQueue_.size());
+    }
+    std::thread trainThread_;
+    mutable std::mutex trainMu_;
+    std::condition_variable trainCv_;
+    std::deque<std::string> trainQueue_;
+    bool trainStop_{false};
+    std::atomic<bool> trainBusy_{false};
+    std::atomic<uint64_t> trainJobsDone_{0};
+    /* guarded by mu_ */
+    json lastExpertTrain_ = json::object();
 
     /* v7.0 mission layer (optional) */
     bool missionEnabled_{false};
@@ -360,6 +388,19 @@ size_t missionMaxReplicas_{4};            /* guardrail on free replication */
     /* Caller holds mu_. Point defaultMissionId_ at a Running mission,
        or clear it so observe/file do not keep reading a completed draft. */
     void retargetDefaultMissionLocked();
+    /* v10.1: config owns the enable switches / paths, persisted state owns
+       the learned parameters.  Called after importState() so a state file
+       written while a layer was disabled cannot switch it off again. */
+    void reapplyStudyConfig();
+    /* Config owns the behaviour switches too (agi/mission/subconscious).
+       Must run at the END of importState: the state restore of those three
+       flags happens after the study re-apply and used to overwrite it. */
+    void reapplyBehaviourSwitches();
+    /* Apply one study.* payload.  afterRestore keeps the restored population
+       size (a size change reseeds and would discard the individuals). */
+    void applyStudyConfigPayload(const json &cfg, bool afterRestore);
+    /* guarded by mu_ */
+    json studyCfgCache_ = json::object();
     /* v8.x concurrent missions: independent lifecycles keyed by mission id.
        Each task owns its state machine / deliverable / children / lineage;
        the ONLY shared layers are cross-context ones (AGI learner, genome

@@ -67,7 +67,8 @@ TEST_F(CognitionHardeningTest, Volume_DoubleToolDispatchLoop) {
 
     auto list = manager_->listAgiActions();
     ASSERT_TRUE(list.value("ok", false));
-    EXPECT_EQ(list["result"].size(), 6u);
+    /* 6 built-ins + the opt-in symbolic tool (logic.enabled=false by default) */
+  EXPECT_GE(list["result"].size(), 6u);
 }
 
 // 4. Extreme environment / special scenarios

@@ -173,6 +173,129 @@ public:
       selfCfg["holdoutEvery"] = phoenix::cfgOr<int>("selfMind.holdoutEvery", 4);
       cognitionManager_.configureSelfMind(selfCfg);
     }
+    /* v10.1 study layer (unitLearn / population / expert).  This was never
+       wired at startup, so tinyExpert_ kept its default disabled_=false and
+       every field-train opportunity reported expert=skipped while the expert
+       weights stayed frozen.  Configure all three from study.* config. */
+    {
+      json studyCfg;
+      studyCfg["unitLearn"] = json{
+          {"enabled", phoenix::cfgOr<bool>("study.unitLearn.enabled", true)},
+          {"steps", phoenix::cfgOr<int>("study.unitLearn.steps", 3)},
+          {"dim", phoenix::cfgOr<int>("study.unitLearn.dim", 16)},
+          {"maxMerges", phoenix::cfgOr<int>("study.unitLearn.maxMerges", 32)}};
+      studyCfg["population"] = json{
+          {"enabled", phoenix::cfgOr<bool>("study.population.enabled", false)},
+          {"n", phoenix::cfgOr<int>("study.population.n", 4)},
+          /* v10.2: the layer must accept the 8-feature field state vector.
+             Without these the gateway payload replaced the config-derived
+             population block, so the restored 4x2 dims survived and every
+             runGoal() was rejected with goal-dim (goalsRun stayed 0). */
+          {"inputDim", phoenix::cfgOr<int>("study.population.inputDim", 8)},
+          {"hidden", phoenix::cfgOr<int>("study.population.hidden", 6)},
+          {"outputDim", phoenix::cfgOr<int>("study.population.outputDim", 1)},
+          {"maxPopulation", phoenix::cfgOr<int>("study.population.maxPopulation", 8)},
+          {"mutationScale", phoenix::cfgOr<double>("study.population.mutationScale", 0.05)},
+          {"tolerance", phoenix::cfgOr<double>("study.population.tolerance", 0.2)}};
+      studyCfg["expert"] = json{
+          {"enabled", phoenix::cfgOr<bool>("study.expert.enabled", false)},
+          {"corpusPath", phoenix::cfgOr<std::string>("study.expert.corpusPath", std::string("./runtime_store/datasets/study_expert/corpus.txt"))},
+          {"weightsPath", phoenix::cfgOr<std::string>("study.expert.weightsPath", std::string("./runtime_store/experts/study_tiny/weights.json"))},
+          {"hidden", phoenix::cfgOr<int>("study.expert.hidden", 16)},
+          {"vocab", phoenix::cfgOr<int>("study.expert.vocab", 32)},
+          {"epochs", phoenix::cfgOr<int>("study.expert.epochs", 8)}};
+      cognitionManager_.configureStudy(studyCfg);
+    }
+    /* ---- v10.2 config hot reload -------------------------------------
+       cfgOr() reads an atomic copy-on-write snapshot, so every cfgOr-based
+       parameter (sampling temperatures, semantic floor/weight, recall
+       diversity, summon anneal, slot counts, plugin thresholds ...) is already
+       hot.  The parameters below are the ones CACHED at startup, so they need
+       an explicit re-apply: AGI, subconscious, the study layers, and the
+       autonomy-loop cadence.  A watcher thread stats the base config and the
+       research profile every 2 s and only fires on an mtime change; a failed
+       parse keeps the previous snapshot (a half-written file cannot break a
+       running gateway). */
+    if (phoenix::cfgOr<bool>("main.configHotReload", true)) {
+      phoenix::PhoenixConfig::instance().setReloadHook([this] {
+        try {
+          json agiCfg;
+          agiCfg["enabled"] = phoenix::cfgOr<bool>("agi.enabled", true);
+          agiCfg["dim"] = phoenix::cfgOr<int>("agi.dim", 128);
+          agiCfg["horizon"] = phoenix::cfgOr<int>("agi.horizon", 3);
+          agiCfg["pragmaticWeight"] = phoenix::cfgOr<double>("agi.pragmaticWeight", 1.0);
+          agiCfg["intrinsicWeight"] = phoenix::cfgOr<double>("agi.intrinsicWeight", 1.0);
+          agiCfg["epistemicWeight"] = phoenix::cfgOr<double>("agi.epistemicWeight", 0.25);
+          agiCfg["learningRate"] = phoenix::cfgOr<double>("agi.learningRate", 0.05);
+          agiCfg["discount"] = phoenix::cfgOr<double>("agi.discount", 0.9);
+          agiCfg["consolidateEvery"] = phoenix::cfgOr<int>("agi.consolidateEvery", 16);
+          agiCfg["adaptiveExploration"] =
+              phoenix::cfgOr<bool>("agi.adaptiveExploration", true);
+          cognitionManager_.configureAgi(agiCfg);
+          json subCfg;
+          subCfg["enabled"] = phoenix::cfgOr<bool>("subconscious.enabled", true);
+          subCfg["baselineValence"] =
+              phoenix::cfgOr<double>("subconscious.baselineValence", 0.0);
+          subCfg["baselineArousal"] =
+              phoenix::cfgOr<double>("subconscious.baselineArousal", 0.0);
+          subCfg["baselineDominance"] =
+              phoenix::cfgOr<double>("subconscious.baselineDominance", 0.0);
+          subCfg["temperamentStrength"] =
+              phoenix::cfgOr<double>("subconscious.temperamentStrength", 0.0);
+          subCfg["riskAversion"] =
+              phoenix::cfgOr<double>("subconscious.riskAversion", 1.0);
+          subCfg["anticipatoryGain"] =
+              phoenix::cfgOr<double>("subconscious.anticipatoryGain", 1.0);
+          cognitionManager_.configureSubconscious(subCfg);
+          json studyCfg;
+          studyCfg["unitLearn"] =
+              json{{"enabled", phoenix::cfgOr<bool>("study.unitLearn.enabled", true)},
+                   {"steps", phoenix::cfgOr<int>("study.unitLearn.steps", 3)},
+                   {"dim", phoenix::cfgOr<int>("study.unitLearn.dim", 16)},
+                   {"maxMerges", phoenix::cfgOr<int>("study.unitLearn.maxMerges", 32)}};
+          studyCfg["population"] =
+              json{{"enabled", phoenix::cfgOr<bool>("study.population.enabled", true)},
+                   {"inputDim", phoenix::cfgOr<int>("study.population.inputDim", 8)},
+                   {"hidden", phoenix::cfgOr<int>("study.population.hidden", 6)},
+                   {"outputDim", phoenix::cfgOr<int>("study.population.outputDim", 1)},
+                   {"maxPopulation", phoenix::cfgOr<int>("study.population.maxPopulation", 8)},
+                   {"mutationScale", phoenix::cfgOr<double>("study.population.mutationScale", 0.12)},
+                   {"tolerance", phoenix::cfgOr<double>("study.population.tolerance", 0.2)}};
+          studyCfg["expert"] =
+              json{{"enabled", phoenix::cfgOr<bool>("study.expert.enabled", true)},
+                   {"corpusPath", phoenix::cfgOr<std::string>("study.expert.corpusPath", std::string("./runtime_store/datasets/study_expert/corpus.txt"))},
+                   {"weightsPath", phoenix::cfgOr<std::string>("study.expert.weightsPath", std::string("./runtime_store/experts/study_tiny/weights.json"))},
+                   {"hidden", phoenix::cfgOr<int>("study.expert.hidden", 16)},
+                   {"vocab", phoenix::cfgOr<int>("study.expert.vocab", 32)},
+                   {"epochs", phoenix::cfgOr<int>("study.expert.epochs", 8)}};
+          cognitionManager_.configureStudy(studyCfg);
+          cognitionManager_.configureAutonomyLoop(
+              json{{"intervalSec", phoenix::cfgOr<int>("autonomyLoop.intervalSec", 3)},
+                   {"maxMissionsPerTick",
+                    phoenix::cfgOr<int>("autonomyLoop.maxMissionsPerTick", 8)},
+                   {"deliberateMaxTokens",
+                    phoenix::cfgOr<int>("mission.deliberateMaxTokens", 256)}});
+          std::cout << "[config] hot reload applied (agi/subconscious/study/"
+                       "autonomyLoop)" << std::endl;
+        } catch (const std::exception &ex) {
+          std::cout << "[config] hot reload apply failed: " << ex.what()
+                    << std::endl;
+        } catch (...) {
+          std::cout << "[config] hot reload apply failed" << std::endl;
+        }
+      });
+      std::thread([this] {
+        for (;;) {
+          std::this_thread::sleep_for(std::chrono::seconds(2));
+          if (phoenix::inference::shutdownRequested()) return;
+          try {
+            if (phoenix::PhoenixConfig::instance().reloadIfChanged())
+              phoenix::PhoenixConfig::instance().fireReloadHook();
+          } catch (...) {
+          }
+        }
+      }).detach();
+    }
     /* v7.0 mission layer: load mission.* config (disabled by default).  When
        enabled AND a goal is configured, this instance is born as a Meeseeks:
        ONE mission whose time-increasing pain ends only when the mission is
@@ -459,8 +582,32 @@ public:
                  name it in a retry prompt ("FILE <path>") when the coder's
                  first reply is prose instead of a patch. */
               std::string focusTarget;
-              static std::vector<std::string> explorePaths;
-              static std::string namedRealPath;
+              /* Repository explore list: immutable after the first build.
+                 A function-local magic static is the C++11 thread-safe way to
+                 publish it, so parallel missions only race the FIRST call and
+                 never the contents.  The old lazy `if (explorePaths.empty())`
+                 let two threads push_back into the same vector while a third
+                 iterated it - a use-after-free that the ntdll heap check
+                 reports as 0xC0000374. */
+              static const std::vector<std::string> &explorePaths =
+                  gatewayExplorePaths();
+              /* Last repository path a reply named.  Per mission scope: a
+                 process-global leaked mission A's target into mission B's
+                 focus, and the concurrent write was a data race on a
+                 std::string (realloc under a reader = heap corruption). */
+              static std::mutex namedPathMu;
+              static std::unordered_map<std::string, std::string>
+                  namedPathByScope;
+              auto namedPathGet = [&]() -> std::string {
+                std::lock_guard<std::mutex> lk(namedPathMu);
+                auto it = namedPathByScope.find(scope);
+                return it == namedPathByScope.end() ? std::string()
+                                                    : it->second;
+              };
+              auto namedPathSet = [&](const std::string &p) {
+                std::lock_guard<std::mutex> lk(namedPathMu);
+                namedPathByScope[scope] = p;
+              };
               std::string exploreMark = "none";
               std::string summonMark = "none";
               if (peerEvolveGoal && !codeMission &&
@@ -726,14 +873,37 @@ public:
               const std::string sectionFocus =
                   phoenix::mission::firstUnderfilledGoalChapter(goal,
                                                                 currentFile);
-              static std::map<std::string, int> sectionDropStreak;
+              /* Per-scope "the model restated instead of continuing this
+                 section" counter.  Guarded: parallel missions inserting into a
+                 bare std::map from several `std::async` threads rebalanced the
+                 tree under a reader - the second heap-corruption source that
+                 the coarse missionDelibMu_ had been masking. */
+              struct ScopeCounter {
+                std::mutex mu;
+                std::map<std::string, int> values;
+                int get(const std::string &k) {
+                  std::lock_guard<std::mutex> lk(mu);
+                  auto it = values.find(k);
+                  return it == values.end() ? 0 : it->second;
+                }
+                void set(const std::string &k, int v) {
+                  std::lock_guard<std::mutex> lk(mu);
+                  values[k] = v;
+                }
+                void inc(const std::string &k) {
+                  std::lock_guard<std::mutex> lk(mu);
+                  ++values[k];
+                }
+              };
+              static ScopeCounter sectionDropStreak;
               std::string sectionTip;
+              const int sectionStreak = sectionDropStreak.get(scope);
               if (!sectionFocus.empty()) {
                 sectionTip = phoenix::mission::chapterContinuationTip(
-                    sectionFocus, currentFile, sectionDropStreak[scope]);
-                if (config_.httpLog && sectionDropStreak[scope] > 0)
+                    sectionFocus, currentFile, sectionStreak);
+                if (config_.httpLog && sectionStreak > 0)
                   std::cout << "[mission-deliberate] section-variant="
-                            << sectionDropStreak[scope] << std::endl;
+                            << sectionStreak << std::endl;
                 if (config_.httpLog) {
                   std::string shown = sectionFocus;
                   if (shown.size() > 120) shown.resize(120);
@@ -1094,6 +1264,7 @@ public:
                   if (focus.empty()) takePath("FILE ");
                   /* A previous reply named a real repository path. The body
                      stays off the causal tip; only the expert receives it. */
+                  const std::string namedRealPath = namedPathGet();
                   if (focus.empty() && !namedRealPath.empty() &&
                       namedRealPath.find("..") == std::string::npos) {
                     std::error_code namedEc;
@@ -1141,40 +1312,30 @@ public:
                               << " path="
                               << (focus.empty() ? std::string("-") : focus)
                               << " own=" << ownCarrier.size() << std::endl;
-                  if (explorePaths.empty()) {
-                    const char *fixed[] = {
-                        "emotion_system.cpp", "instinct.cpp",
-                        "autonomy_stack.cpp", "self_mind.cpp",
-                        "active_inference.cpp", "mission_lifecycle.cpp",
-                        "memetic_existence.hpp"};
-                    for (const char *rel : fixed) {
-                      std::error_code ec;
-                      if (fs::is_regular_file(rel, ec))
-                        explorePaths.push_back(rel);
-                    }
-                    std::error_code ec;
-                    if (fs::is_directory("main_hub_parts", ec)) {
-                      int n = 0;
-                      for (const auto &ent :
-                           fs::directory_iterator("main_hub_parts", ec)) {
-                        if (ec || !ent.is_regular_file())
-                          continue;
-                        const std::string name = ent.path().filename().string();
-                        if (name.size() < 5 ||
-                            name.find(".inc") == std::string::npos)
-                          continue;
-                        explorePaths.push_back("main_hub_parts/" + name);
-                        if (++n >= 12)
-                          break;
-                      }
-                    }
-                    std::sort(explorePaths.begin(), explorePaths.end());
-                  }
+                  /* explorePaths is built once by gatewayExplorePaths() (see
+                     the magic static at the top of this lambda); no lazy
+                     mutation here any more. */
                   const auto ranked = phoenix::memetic::rankExplorePaths(
                       goal, explorePaths, 1);
+                  /* Width: rankExplorePaths only returns a path when EXACTLY
+                     one candidate matches (ambiguity guard).  When several
+                     match it returns nothing, so the mission never tried any
+                     of them and SELF-MOD kept re-editing whatever file it had
+                     already named.  Sample among the plausible files with a
+                     softmax whose temperature anneals per loop tick, so early
+                     ticks explore and late ticks converge. */
+                  std::string exploredPath =
+                      ranked.empty()
+                          ? phoenix::memetic::pickExplorePath(
+                                goal, explorePaths,
+                                phoenix::cfgOr<double>("mission.exploreTemperature",
+                                                       0.8),
+                                static_cast<unsigned>(
+                                    cognitionManager_.loopTickCount()))
+                          : ranked.front();
                   std::string note;
-                  if (!ranked.empty()) {
-                    note = "repository file\n" + ranked.front();
+                  if (!exploredPath.empty()) {
+                    note = "repository file\n" + exploredPath;
                   } else {
                     note = "repository files\n";
                     int shown = 0;
@@ -1188,9 +1349,9 @@ public:
                   phoenix::inference::appendUnitQuery(
                       missionMemorySnippets,
                       phoenix::inference::unitQueryFromText(note, "text"));
-                  exploreMark = ranked.empty()
+                  exploreMark = exploredPath.empty()
                                     ? "listed"
-                                    : std::string("pick ") + ranked.front();
+                                    : std::string("pick ") + exploredPath;
                   /* The draft is the recommender context. File profiles are
                      the items. A unique top score names the file the expert
                      receives. Echoes of the goal are not a new conception.
@@ -2541,6 +2702,10 @@ public:
                 summonedByTool = false;
               } else if (summonedByTool) {
                 summonMark = "called";
+                /* v10.2 scored summoning: count this call as in-flight so a
+                   busy expert is not picked again while it works. */
+                phoenix::summon::SummonRegistry::instance().noteSummonStart(
+                    summonEp->name);
               }
               if (summonEp) {
                 if (config_.httpLog)
@@ -2682,6 +2847,12 @@ public:
                     phoenix::memetic::appendReplicaTick(
                         "runtime_store/replica_trace", liveTick);
                   }
+                  /* v10.2: feed the scored selector.  A reply that yielded a
+                     patch is a success; prose/failure is a failure - which is
+                     what makes EndpointRanker stop summoning a degenerate
+                     expert after a couple of tries instead of forever. */
+                  phoenix::summon::SummonRegistry::instance().noteSummonOutcome(
+                      summonEp->name, patch);
                   if (!r.value("ok", false) || !patch) {
                     if (config_.httpLog) {
                       std::string head = summonedReply.substr(
@@ -3615,7 +3786,7 @@ public:
                       for (const auto &rel : explorePaths) {
                         if (!rel.empty() &&
                             chunk.find(rel) != std::string::npos) {
-                          namedRealPath = rel;
+                          namedPathSet(rel);
                           break;
                         }
                       }
@@ -3810,7 +3981,7 @@ public:
                   if (config_.httpLog)
                     std::cout << "[mission-deliberate] drop restate len="
                               << chunk.size() << std::endl;
-                  sectionDropStreak[scope] += 1;
+                  sectionDropStreak.inc(scope);
                   writeToolFeedback(
                       sectionFocus.empty()
                           ? "That paragraph restates text already in the draft. Continue from the last new sentence."
@@ -3854,7 +4025,7 @@ public:
                   std::cout << "[mission-deliberate] file-edit "
                             << currentFile.size() << "->" << edited.size()
                             << std::endl;
-                sectionDropStreak[scope] = 0;
+                sectionDropStreak.set(scope, 0);
                 nlohmann::json writeAct = {
                     {"action", "write"},
                     {"path", deliverablePath},
@@ -4207,6 +4378,11 @@ public:
                   quoteArg(modelAbs.string()) +
                   " --host 127.0.0.1 --port " + std::to_string(moePort) +
                   " --ctx-size 4096 --parallel 1 --threads 6 --n-gpu-layers 0"
+                  /* v10.1: the Granite MoE slot is a CPU helper; -dev none
+                     stops llama.cpp from creating a second CUDA context that
+                     otherwise shows up as an extra compute process on the GPU
+                     and steals VRAM from the 8B (the only real GPU consumer). */
+                  " -dev none"
                   " --batch-size 4096 --ubatch-size 512";
               std::string envBlock;
               if (LPCH env = GetEnvironmentStringsA()) {
@@ -4498,6 +4674,45 @@ private:
     json resultSummary = json::object();
   };
 
+  /* Repository file list for the SELF-MOD explore step.  Built once and then
+     read-only from every deliberator thread: the previous version mutated a
+     lambda-level static vector lazily, so two parallel missions could
+     push_back while a third iterated it (use-after-free -> 0xC0000374). */
+  static const std::vector<std::string> &gatewayExplorePaths() {
+    static const std::vector<std::string> paths = [] {
+      std::vector<std::string> out;
+      const char *fixed[] = {"emotion_system.cpp",
+                             "instinct.cpp",
+                             "autonomy_stack.cpp",
+                             "self_mind.cpp",
+                             "active_inference.cpp",
+                             "mission_lifecycle.cpp",
+                             "memetic_existence.hpp"};
+      for (const char *rel : fixed) {
+        std::error_code ec;
+        if (fs::is_regular_file(rel, ec))
+          out.push_back(rel);
+      }
+      std::error_code ec;
+      if (fs::is_directory("main_hub_parts", ec)) {
+        int n = 0;
+        for (const auto &ent : fs::directory_iterator("main_hub_parts", ec)) {
+          if (ec || !ent.is_regular_file())
+            continue;
+          const std::string name = ent.path().filename().string();
+          if (name.size() < 5 || name.find(".inc") == std::string::npos)
+            continue;
+          out.push_back("main_hub_parts/" + name);
+          if (++n >= 12)
+            break;
+        }
+      }
+      std::sort(out.begin(), out.end());
+      return out;
+    }();
+    return paths;
+  }
+
   std::shared_ptr<ControllerPoolBase> pool_;
   std::shared_ptr<ISnapshotManager> snapshots_;
   std::shared_ptr<IRedisSynchronizer> redis_;
@@ -4740,10 +4955,13 @@ private:
             {{"stage", "graphDiffusion"}, {"summary", diffSummary.toJson()}});
         if (!diffSummary.summaryText.empty()) {
           /* Chat graph diffusion stays in the chat bucket.  Never write
-             the default mission GNN summary from a chat turn. */
+             the default mission GNN summary from a chat turn.
+             v10.2: go through setGnnSummary so a concurrent writer of the
+             same scope cannot reallocate the string under us. */
+          phoenix::memory::ScopedTrainableMemory::instance().setGnnSummary(
+              chatScope, diffSummary.summaryText);
           auto &chatHot =
               phoenix::memory::ScopedTrainableMemory::instance().hot(chatScope);
-          chatHot.gnnSummary = diffSummary.summaryText;
           chatHot.graphHint = diffSummary.summaryText;
         }
       }

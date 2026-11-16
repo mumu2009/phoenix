@@ -53,6 +53,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -556,6 +557,69 @@ inline std::vector<std::string> rankExplorePaths(
       break;
   }
   return out;
+}
+
+/* Exploration width for the SELF-MOD explore step.
+
+   rankExplorePaths(paths, keep=1) is an AMBIGUITY GUARD: it returns a file
+   only when exactly one candidate matches, and nothing when several do.  The
+   mission read that as "no target", so it never tried any of the plausible
+   files and kept re-editing whatever it had already named - an exploration
+   collapse (greedy top-1 behaviour with width 0).
+
+   This picks ONE candidate by softmax over the same score
+   (mass * orderLift) with a temperature, so:
+     T -> 0   : deterministic argmax (old behaviour when a single match exists)
+     T large  : nearly uniform among the plausible files
+   Callers anneal T per tick (mission.exploreTemperature * decay^tick) so early
+   ticks explore and later ticks converge.  Deterministic for a given
+   seedShift, so a test can pin the distribution. */
+inline std::string pickExplorePath(const std::string &goal,
+                                   const std::vector<std::string> &paths,
+                                   double temperature,
+                                   unsigned seedShift) {
+  if (goal.empty() || paths.empty())
+    return std::string();
+  std::vector<OrderedMeme> memes;
+  memes.reserve(paths.size());
+  for (const auto &path : paths)
+    memes.push_back(OrderedMeme{path, path});
+  const auto scored = scoreOrderedMemes(goal, memes);
+  std::vector<const OrderedMemeScore *> present;
+  for (const auto &s : scored)
+    if (s.present)
+      present.push_back(&s);
+  if (present.empty())
+    return std::string();
+  if (present.size() == 1)
+    return present.front()->id;
+  std::sort(present.begin(), present.end(),
+            [](const OrderedMemeScore *a, const OrderedMemeScore *b) {
+              return a->mass * a->orderLift > b->mass * b->orderLift;
+            });
+  double t = temperature;
+  if (!(t > 0.0))
+    return present.front()->id; /* deterministic argmax */
+  std::mt19937 rng(seedShift ? seedShift : 1u);
+  std::uniform_real_distribution<double> jitter(0.0, 1.0);
+  const double top = present.front()->mass * present.front()->orderLift;
+  std::vector<double> w(present.size(), 0.0);
+  double total = 0.0;
+  for (size_t i = 0; i < present.size(); ++i) {
+    const double s = present[i]->mass * present[i]->orderLift;
+    w[i] = std::exp((s - top) / t);
+    total += w[i];
+  }
+  if (!(total > 0.0))
+    return present.front()->id;
+  const double r = jitter(rng) * total;
+  double acc = 0.0;
+  for (size_t i = 0; i < w.size(); ++i) {
+    acc += w[i];
+    if (r <= acc)
+      return present[i]->id;
+  }
+  return present.back()->id;
 }
 
 inline constexpr double kGnnPresentPeakFrac = 0.05;

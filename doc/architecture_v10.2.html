@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Phoenix v10.2 架构图（交互式 Canvas）</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#121a33; --panel2:#0e1630; --ink:#e8eeff; --dim:#8fa0c8;
+    --line:#26325c; --accent:#59b0ff; --ok:#3ddc97; --warn:#ffc857; --bad:#ff6b6b;
+    --opt:#b48cff;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font:13px/1.5 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;overflow:hidden}
+  #app{display:grid;grid-template-columns:238px 1fr 372px;grid-template-rows:52px 1fr;
+       height:100vh}
+  header{grid-column:1/4;display:flex;align-items:center;gap:14px;padding:0 16px;
+    background:linear-gradient(90deg,#0d1530,#101a38);border-bottom:1px solid var(--line)}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.3px}
+  header .ver{color:var(--accent);font-weight:600}
+  header .stat{color:var(--dim);font-size:12px}
+  header input{flex:0 0 280px;margin-left:auto;background:#0a1226;border:1px solid var(--line);
+    color:var(--ink);border-radius:6px;padding:6px 10px;outline:none}
+  header input:focus{border-color:var(--accent)}
+  header button{background:#16203f;border:1px solid var(--line);color:var(--ink);
+    border-radius:6px;padding:6px 10px;cursor:pointer}
+  header button:hover{border-color:var(--accent)}
+  aside{background:var(--panel2);border-right:1px solid var(--line);overflow:auto;padding:10px}
+  aside h2{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);
+    margin:14px 4px 6px}
+  .layerToggle{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:6px;
+    cursor:pointer;user-select:none}
+  .layerToggle:hover{background:#16203f}
+  .layerToggle .sw{width:11px;height:11px;border-radius:3px;flex:0 0 auto}
+  .layerToggle .n{flex:1;font-size:12px}
+  .layerToggle .c{color:var(--dim);font-size:11px}
+  .legendRow{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--dim);
+    padding:3px 6px}
+  .badge{display:inline-block;padding:1px 6px;border-radius:9px;font-size:10.5px;
+    border:1px solid currentColor;line-height:1.5}
+  main{position:relative;overflow:hidden;background:
+    radial-gradient(1200px 600px at 30% 0%,#101a38 0%,#0b1020 60%)}
+  canvas{display:block;width:100%;height:100%;cursor:grab}
+  canvas.dragging{cursor:grabbing}
+  #hint{position:absolute;left:12px;bottom:10px;color:var(--dim);font-size:11px;
+    pointer-events:none}
+  #panel{background:var(--panel);border-left:1px solid var(--line);overflow:auto;padding:14px}
+  #panel h3{margin:0 0 4px;font-size:14px}
+  #panel .sub{color:var(--dim);font-size:11.5px;margin-bottom:12px}
+  #panel .sec{margin:14px 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:1px;
+    color:var(--dim)}
+  #panel .files{display:flex;flex-wrap:wrap;gap:4px}
+  #panel .file{background:#0a1226;border:1px solid var(--line);border-radius:5px;
+    padding:2px 6px;font-family:Consolas,monospace;font-size:11px;color:#bfd0f0}
+  #panel p{margin:6px 0}
+  #panel code{font-family:Consolas,monospace;font-size:11.5px;color:#9fd0ff}
+  #panel .empty{color:var(--dim);font-size:12px}
+  #index{position:absolute;inset:auto 0 0 0;max-height:42%;overflow:auto;
+    background:rgba(8,13,28,.96);border-top:1px solid var(--line);padding:10px 14px;
+    display:none}
+  #index h4{margin:0 0 8px;font-size:12px}
+  #index .g{margin-bottom:8px}
+  #index .g b{font-size:11.5px;color:var(--accent)}
+  #index .g span{font-family:Consolas,monospace;font-size:11px;color:#a9bbe0;
+    margin-right:8px;white-space:nowrap}
+  .k{color:var(--dim)}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Phoenix <span class="ver">v10.2</span> 架构图</h1>
+    <span class="stat" id="stat"></span>
+    <input id="search" placeholder="搜索模块 / 文件 / 职责…  (Ctrl+K)">
+    <button id="fitBtn">复位视图</button>
+    <button id="indexBtn">全量文件索引</button>
+  </header>
+
+  <aside>
+    <h2>层次</h2>
+    <div id="layers"></div>
+    <h2>状态图例</h2>
+    <div class="legendRow"><span class="badge" style="color:#3ddc97">已验证</span>本轮实测通过</div>
+    <div class="legendRow"><span class="badge" style="color:#b48cff">默认关闭</span>opt-in / 需显式开启</div>
+    <div class="legendRow"><span class="badge" style="color:#ffc857">边界</span>绕开或有限制</div>
+    <div class="legendRow"><span class="badge" style="color:#8fa0c8">稳定</span>既有能力</div>
+    <h2>覆盖检查</h2>
+    <div id="audit" class="legendRow" style="display:block;line-height:1.7"></div>
+    <h2>操作</h2>
+    <div class="legendRow">拖拽平移 · 滚轮缩放 · 双击复位</div>
+    <div class="legendRow">点击节点看详情 · 左侧可开关层次</div>
+  </aside>
+
+  <main>
+    <canvas id="cv"></canvas>
+    <div id="hint">Phoenix v10.2 · 10 层 · 点击任意模块查看文件与职责</div>
+    <div id="index"></div>
+  </main>
+
+  <section id="panel">
+    <div class="empty">← 点击左侧画布中的任意模块查看详情</div>
+  </section>
+</div>
+
+<script>
+/* ============================================================
+   数据模型：每一层 = 若干模块节点。
+   每个节点：label 名称 / files 真实文件 / role 职责 / cfg 配置键 / st 状态
+   状态: ok=已验证 opt=默认关闭 warn=边界 ''=稳定
+   ============================================================ */
+const LAYERS = [
+{
+  id:"L0", name:"进程与部署", color:"#ff6b6b",
+  nodes:[
+    {label:"phoenix_main.exe", files:["main.cpp","build_success_flag.txt"],
+     role:"单进程网关：包含下面的全部 C++ 子系统（main.cpp 按行号切片为 117 个 .inc 依次 include）。",
+     cfg:"启动: --gateway-host/--gateway-port, AI_RESEARCH_PROFILE", st:"ok"},
+    {label:"前端子进程", files:["frontend_server.cpp","frontend_server.hpp"],
+     role:"phoenix_main --frontend-only：静态 UI + /api/* 反向代理（默认 :5081）。",
+     cfg:"frontend_server.port / FRONTEND_ENABLED", st:""},
+    {label:"llama-server ×3", files:["outsides/llamacpp","llama_server_mods","build-cuda"],
+     role:"8B 主模型（CUDA，-ngl 99，--parallel 3）、coder（-dev none）、granite（-dev none）。",
+     cfg:"llama_server.parallel / ctx_size / llama.instanceIsolation", st:"ok"},
+    {label:"长跑编排脚本", files:["build/tmp/supervisor.ps1","build/tmp/gateway_loop.ps1","build/tmp/soak_monitor.ps1","build/tmp/nightly_check.ps1"],
+     role:"60s 健康循环、训练批次、MMLU、端口轮转、soak 采样、夜间验证。全部独立进程（关浏览器不中断）。",
+     cfg:"autonomyLoop.* / 端口 5096–5299", st:"ok"},
+    {label:"附属可执行文件", files:["bug_shooter.cpp","phoenix_sql_cli.hpp","phoenix_sql_cli.cpp","phoenix_sql_cli_main.cpp","test.cpp"],
+     role:"内存看门狗、SQL CLI、遗留测试入口。",
+     cfg:"compile.bat 一并构建", st:""}
+  ]
+},
+{
+  id:"L1", name:"接入与 API", color:"#59b0ff",
+  nodes:[
+    {label:"HTTP 路由总表", files:["main_hub_parts/116_section_tail.inc"],
+     role:"/api/chat、/api/mission/{assign,report,replicate,file,status,lineage}、/api/gnn/outline、/api/cognition/autonomy/{interject,loop,status}、/api/safety/estop、/api/logic/query 预留。",
+     cfg:"api.* / chat.maxTokens", st:""},
+    {label:"鉴权", files:[],
+     role:"JWT-HS256 + local-* 本机令牌；fail-closed。实现于 111 的 verifyToken 路径。",
+     cfg:"auth.enabled / jwtSecret / acceptLocalToken", st:""},
+    {label:"Chat 管线", files:[],
+     role:"tokenizer→记忆/情绪前处理→GNN→主推理→采样地板→回复。含 sparkReply 注入与流式。实现位于 116（入口）与 112（LLM 调用）两个共享 TU。",
+     cfg:"chat.temperature/topP/penalty 地板", st:"ok"},
+    {label:"任务 API 适配", files:[],
+     role:"assign 自动开心跳、report 人工判定、file 沙盒读写/attachImage、lineage 审计。路由在 116，状态机在 111。",
+     cfg:"mission.* ", st:""},
+    {label:"安全与急停", files:["emergency_stop.hpp","emergency_stop.cpp"],
+     role:"闩锁式 E-stop：先闩锁→停止全部实例→持久化→退出进程。",
+     cfg:"safety.estop.enabled=true", st:"ok"}
+  ]
+},
+{
+  id:"L2", name:"网关核心", color:"#7ee081",
+  nodes:[
+    {label:"GatewayServer", files:["main_hub_parts/108_section_before_gatewaycontextservice.inc","main_hub_parts/109_class_gatewaycontextservice.inc","main_hub_parts/110_section_before_gatewayserver.inc","main_hub_parts/111_class_gatewayserver.inc"],
+     role:"五万行级核心：配置装配、chat 管线、任务 deliberator（4 种回复形态+plan/loop+自验收）、GNN 大纲、专家召唤、插件 offer 编排。",
+     cfg:"mission.* / autonomyLoop.* / addons.*", st:"ok"},
+    {label:"LLM 调用与槽位池", files:["main_hub_parts/112_section_before_contexthint.inc"],
+     role:"chatWithLlamaCpp：llama 槽位池 + chat 优先队列；split/text 两条后端选择；文本通路 llamaTextChat。",
+     cfg:"main.inference.llamaUseSplitBackend", st:"ok"},
+    {label:"上下文提示组装", files:["main_hub_parts/113_struct_contexthint.inc","main_hub_parts/114_section_before_gnnhintsummary.inc","main_hub_parts/115_struct_gnnhintsummary.inc","context_window_pack.hpp"],
+     role:"静态前缀（goal/tools/OUTLINE/回复契约）+ 动态后缀（workspace/pack/sections/boxes），命中 slot 前缀缓存。",
+     cfg:"mission.ctxSize / includeGnnSummary", st:"ok"},
+    {label:"SparkArray 主体交换", files:["main_hub_parts/094_section_before_sparkarray.inc","main_hub_parts/095_class_sparkarray.inc","main_hub_parts/092_section_before_personaforestaverager.inc","main_hub_parts/093_class_personaforestaverager.inc"],
+     role:"多主体独立应答→黑板交流→综合输出；exchangeRounds。",
+     cfg:"spark.scopes / exchangeRounds", st:""},
+    {label:"轮转/快照/Redis 同步", files:["main_hub_parts/102_section_before_redissynchronizer.inc","main_hub_parts/103_class_redissynchronizer.inc","main_hub_parts/104_section_before_rotationmanager.inc","main_hub_parts/105_class_rotationmanager.inc","main_hub_parts/106_section_before_snapshotmanager.inc","main_hub_parts/107_class_snapshotmanager.inc"],
+     role:"实例轮转、状态快照、Redis 跨实例同步。",
+     cfg:"redis.* / rotation.*", st:""}
+  ]
+},
+{
+  id:"L3", name:"编排与心智", color:"#b48cff",
+  nodes:[
+    {label:"CognitionAutonomyManager", files:["autonomy_stack.hpp","autonomy_stack.cpp"],
+     role:"心跳 iterate、多任务容器、AGI 动作执行、study 三层接线、异步训练 worker、人口层耦合、状态导入导出。",
+     cfg:"autonomyLoop.* / study.* / agi.*", st:"ok"},
+    {label:"任务生命周期", files:["mission_lifecycle.hpp","mission_lifecycle.cpp"],
+     role:"Running/Completed/Failed、子盒 recordChild、lineage、effectiveMutationRate（退火）。",
+     cfg:"mission.maxReplicas/maxReplicaDepth/evolution.*", st:"ok"},
+    {label:"任务沙盒与经验", files:["mission_workspace.hpp","mission_experience.hpp","mission_reply_parse.hpp","mission_unit_workflow.hpp","retrieval_diversity.hpp"],
+     role:"工作区读写（256KB 上限、防穿越）、L1 输出缓存、经验沉淀与 MMR 去重召回。",
+     cfg:"mission.workspaceDir / recallDiversity=0.7", st:"ok"},
+    {label:"AGI 主动推理", files:["active_inference.hpp","active_inference.cpp","agi_action_registry.hpp","agi_action_registry.cpp"],
+     role:"EFE + MPC 规划、TD(0) 价值学习、动作注册表（math/search/computer/script/replicate/{logic}）。",
+     cfg:"agi.* / logic.enabled=false", st:"opt"},
+    {label:"情绪/本能/潜意识", files:["emotion_system.hpp","emotion_system.cpp","emotion_influence.hpp","module_overrides/emotion_influence.cpp","llamacpp_emotion_adjuster.hpp","llamacpp_emotion_adjuster.cpp","instinct.hpp","instinct.cpp","primal_sensation.hpp","primal_sensation.cpp","subconscious_profile.hpp","subconscious_profile.cpp","mechanical_mind.hpp"],
+     role:"VAD 情绪、本能趋利避害、原始感觉衰减、PAD 气质与稳态调谐、机械心智文体。",
+     cfg:"subconscious.* / instinct.*", st:""},
+    {label:"自我层", files:["self_mind.hpp","self_mind.cpp"],
+     role:"人格 bandit、内部独白、live-turn 学习、镜子探针。",
+     cfg:"selfMind.*", st:""},
+    {label:"安全与实例", files:["memebarrier_phrase_blocklist.hpp","memebarrier_phrase_feedback.hpp","main_hub_parts/066_section_before_memebarrier.inc","main_hub_parts/067_class_memebarrier.inc","instance_registry.hpp","instance_registry.cpp","instance_isolation.hpp"],
+     role:"短语屏障（注入/有害内容）、实例注册与停止句柄、llama 隔离模式（exclusive/shared）。",
+     cfg:"memebarrier.* / llama.instanceIsolation", st:"ok"},
+    {label:"实验仪表", files:["replica_trace.hpp","pressure_expr.hpp","peer_hot_update.hpp","peer_hot_update.cpp","peer_evolve_extract.hpp"],
+     role:"模因实验 tick 记录、压力公式解析、同伴热更新与提取。",
+     cfg:"research.*", st:""}
+  ]
+},
+{
+  id:"L4", name:"推理运行时", color:"#3ddc97",
+  nodes:[
+    {label:"RuntimeState", files:["main_hub_parts/024_section_before_runtimebase.inc","main_hub_parts/025_class_runtimebase.inc","main_hub_parts/064_section_before_runtimestate.inc","main_hub_parts/065_class_runtimestate.inc"],
+     role:"processInput/ingestDocument（stateMu_ 保护）、KVM/meme 图/记忆/索引、插件 offer 收集（模因语义重排）。",
+     cfg:"mission.pluginOffers / pluginSearchWeb", st:"ok"},
+    {label:"控制器与池", files:["main_hub_parts/072_section_before_controllerpoolbase.inc","main_hub_parts/073_class_controllerpoolbase.inc","main_hub_parts/074_section_before_controller.inc","main_hub_parts/075_class_controller.inc","main_hub_parts/086_section_before_localcontroller.inc","main_hub_parts/087_class_localcontroller.inc","main_hub_parts/088_section_before_controllerpool.inc","main_hub_parts/089_class_controllerpool.inc","main_hub_parts/090_section_before_groupprocesspool.inc","main_hub_parts/091_class_groupprocesspool.inc"],
+     role:"LocalController→RuntimeState.processInput；进程池/组池；Proxy 变体。",
+     cfg:"runtime.*", st:""},
+    {label:"代理运行时与分片", files:["main_hub_parts/076_section_before_sharddescriptor.inc","main_hub_parts/077_class_sharddescriptor.inc","main_hub_parts/078_section_before_shardmanager.inc","main_hub_parts/079_class_shardmanager.inc","main_hub_parts/080_section_before_inferenceprocesspool.inc","main_hub_parts/081_class_inferenceprocesspool.inc","main_hub_parts/082_section_before_proxyruntime.inc","main_hub_parts/083_class_proxyruntime.inc","main_hub_parts/084_section_before_proxycontroller.inc","main_hub_parts/085_class_proxycontroller.inc"],
+     role:"分片描述/管理、推理进程池、代理运行时（跨进程 RPC）。",
+     cfg:"shards.*", st:""},
+    {label:"后端路由与单元管线", files:["inference_backend_router.hpp","inference_unit_pipeline.hpp","inference_abort.hpp","module_overrides/llama_split_backend_client.cpp","module_overrides/llama_split_backend_client.hpp"],
+     role:"split(/phx) 与 text(/completion) 两条后端；llamaTextChat 文本通路；单元查询管线；中止纪元。",
+     cfg:"main.inference.llamaUseSplitBackend=false", st:"ok"},
+    {label:"模型与产物", files:["model_deployment.hpp","model_deployment.cpp","model_lifecycle.hpp","model_lifecycle.cpp","gguf_tensor_parser.hpp","gguf_tensor_parser.cpp","local_onnx.hpp","local_onnx.cpp"],
+     role:"模型放置策略（本地/远端/客户端）、生命周期、GGUF 张量解析、ONNX Runtime 本地推理。",
+     cfg:"model_deployment.*", st:""},
+    {label:"微调桥", files:["transformer_main.cpp","transformer_ollama_fine_tuning.cpp","transformer_ollama_ft_stub.cpp","transformer_main_x5_stub.cpp","transformer.hpp","sparse_block_matmul.hpp","sparse_block_matmul.cpp"],
+     role:"Python/Cython 微调桥、X5 桩、块稀疏 matmul（tau=0 精确）。",
+     cfg:"model_deployment.training*", st:""},
+    {label:"输出核", files:["main_hub_parts/036_section_before_tensorengine.inc","main_hub_parts/037_class_tensorengine.inc","main_hub_parts/034_section_before_csrmatrix.inc","main_hub_parts/035_struct_csrmatrix.inc","main_hub_parts/032_section_before_exprtoken.inc","main_hub_parts/033_struct_exprtoken.inc"],
+     role:"张量引擎/CSR 矩阵/表达式 token，推理后处理与数值核。",
+     cfg:"—", st:""}
+  ]
+},
+{
+  id:"L5", name:"记忆与知识", color:"#5ec8d8",
+  nodes:[
+    {label:"分层记忆", files:["hierarchical_memory.hpp","hierarchical_memory.cpp","memory_scope.hpp","memory_module.hpp","module_overrides/memory_module.cpp","cross_context_memory.hpp","scoped_trainable_memory.hpp"],
+     role:"工作/短期/长期三层记忆、MemoryScope 上下文隔离、跨上下文记忆、按 scope 的可训练桶（含 fieldMu 保护）。",
+     cfg:"crossContextMemory.path", st:"ok"},
+    {label:"概念与语义", files:["concept_matrix.hpp","concept_matrix.cpp","semantic_unit.hpp","semantic_unit.cpp"],
+     role:"持久概念矩阵（SQLite）、语义单元检索（partial_sort）、投影缓存 shared_mutex。",
+     cfg:"conceptMatrix.*", st:""},
+    {label:"键值与存储", files:["main_hub_parts/018_section_before_lmdbstore.inc","main_hub_parts/019_class_lmdbstore.inc","main_hub_parts/020_section_before_jsonfilestore.inc","main_hub_parts/021_class_jsonfilestore.inc","main_hub_parts/022_section_before_namespacedstore.inc","main_hub_parts/023_class_namespacedstore.inc","main_hub_parts/038_section_before_kvmstore.inc","main_hub_parts/039_class_kvmstore.inc","DATABASE_079.hpp","DATABASE_079.cpp"],
+     role:"LMDB/JSON/命名空间存储、KVMStore（LRU 缓存，cacheMu_）、SQLite 主库。",
+     cfg:"lmdb.* / sqlite.*", st:""},
+    {label:"模因图与扩散", files:["main_hub_parts/040_section_before_memegraph.inc","main_hub_parts/041_class_memegraph.inc","main_hub_parts/042_section_before_graphexportbuilder.inc","main_hub_parts/043_class_graphexportbuilder.inc","main_hub_parts/044_section_before_graphtensorbridge.inc","main_hub_parts/045_class_graphtensorbridge.inc","main_hub_parts/048_section_before_patternmatrix.inc","main_hub_parts/049_class_patternmatrix.inc","main_hub_parts/050_section_before_memesurfacelexicon.inc","main_hub_parts/051_class_memesurfacelexicon.inc","main_hub_parts/046_section_before_dimreducer.inc","main_hub_parts/047_class_dimreducer.inc","graph_diffusion_summarizer.hpp","graph_diffusion_summarizer.cpp"],
+     role:"模因图、BFS 大纲导出、图-张量桥、模式矩阵、表层词典、降维；图扩散摘要（收敛早退）。",
+     cfg:"mission.outlineSize / gnnScheduler", st:""},
+    {label:"会话与对话记忆", files:["main_hub_parts/052_section_before_dialogmemory.inc","main_hub_parts/053_class_dialogmemory.inc","main_hub_parts/056_section_before_sessionmanager.inc","main_hub_parts/057_class_sessionmanager.inc","main_hub_parts/054_section_before_robotsdocument.inc","main_hub_parts/055_struct_robotsdocument.inc","modern_context_system.hpp","modern_context_system.cpp"],
+     role:"对话记忆、会话管理、语料文档（robots/wikitext）索引、现代上下文系统。",
+     cfg:"corpusPretrainStamp", st:""},
+    {label:"缓存与数据面", files:["main_hub_parts/002_section_before_sharedmemoryslice.inc","main_hub_parts/003_struct_sharedmemoryslice.inc","main_hub_parts/004_section_before_processreservedarena.inc","main_hub_parts/005_class_processreservedarena.inc","main_hub_parts/006_section_before_hotmatrixcache.inc","main_hub_parts/007_class_hotmatrixcache.inc","partial_matrix_cache.hpp","json_safe.hpp"],
+     role:"共享内存切片、进程保留区、热矩阵缓存、部分矩阵缓存、安全 JSON。",
+     cfg:"partial_cache.*", st:""}
+  ]
+},
+{
+  id:"L6", name:"学习与进化", color:"#ffc857",
+  nodes:[
+    {label:"study 三层", files:["study_unit_learn.hpp","study_unit_learn.cpp","population_layer.hpp","population_layer.cpp","tiny_expert.hpp","tiny_expert.cpp","study_population_features.hpp","main_hub_parts/062_section_before_studyengine.inc","main_hub_parts/063_class_studyengine.inc"],
+     role:"单元学习（BPE 合并）、人口层（8 维现场特征→信息增益，goalsRun>0）、tiny-expert（4:1 训练/留出）；StudyEngine 编排。",
+     cfg:"study.unitLearn/population/expert", st:"ok"},
+    {label:"强化/对抗/GNN-GA", files:["main_hub_parts/096_section_before_reinforcementlearner.inc","main_hub_parts/097_class_reinforcementlearner.inc","main_hub_parts/098_section_before_adversariallearner.inc","main_hub_parts/099_class_adversariallearner.inc","main_hub_parts/100_section_before_gnngalearner.inc","main_hub_parts/101_class_gnngalearner.inc","module_overrides/reinforcement_learner_advanced.cpp","module_overrides/adversarial_learner_advanced.cpp","module_overrides/gnn_ga_learner_advanced.cpp"],
+     role:"RL 策略提升、对抗学习、GNN 遗传搜索；advanced 变体覆盖。",
+     cfg:"learning.* / disableLearning", st:""},
+    {label:"模因层", files:["memetic_existence.hpp","memetic_existence.cpp","plugin_semantics.hpp","logic_engine.hpp"],
+     role:"模因读写/秩序、插件意图的词汇+模因簇双通道打分、Horn 子句推理（opt-in）。",
+     cfg:"addons.semanticFloor/Weight / logic.enabled", st:"opt"},
+    {label:"召唤与宽度选择", files:["summon_registry.hpp","summon_select.hpp"],
+     role:"EndpointRanker（role+可靠度−在途−连续失败+黏性）、pickSoftmax 退火保宽度、noteSummonOutcome 记账。",
+     cfg:"summon.selectTemperature/Anneal", st:"ok"},
+    {label:"NLP 与词形", files:["main_hub_parts/058_section_before_lemmacacheentry.inc","main_hub_parts/059_struct_lemmacacheentry.inc","main_hub_parts/060_section_before_lemmaworkerpool.inc","main_hub_parts/061_class_lemmaworkerpool.inc","main_hub_parts/014_section_before_rng32.inc","main_hub_parts/015_class_rng32.inc","main_hub_parts/016_section_before_surfacephrase.inc","main_hub_parts/017_struct_surfacephrase.inc","prompt_split.hpp","prompt_split.cpp"],
+     role:"词形还原缓存与工作池、RNG32、表层短语、提示词拆解（system/user 分离）。",
+     cfg:"—", st:"ok"}
+  ]
+},
+{
+  id:"L7", name:"工具与插件", color:"#ff9f6b",
+  nodes:[
+    {label:"插件框架", files:["addon.hpp","addon.cpp","plugin_system.hpp","plugin_system.cpp","addons/builtin_registry.cpp","addons/builtin_registry.hpp","addons/builtin_registry.py"],
+     role:"Addon/AddonManager：consider/contribute 自选、动态 DLL 加载、offer 收集（阈值由 065 做语义重排）。",
+     cfg:"addons.offerMinScore/semanticFloor", st:"ok"},
+    {label:"内置工具", files:["addons/math_addon.cpp","addons/math_addon.hpp","addons/math_exact.hpp","addons/search_addon.cpp","addons/search_addon.hpp","addons/computer_shell_addon.cpp","addons/computer_shell_addon.hpp","addons/cli_json_addon.cpp","addons/cli_json_addon.hpp","addons/code_edit_addon.cpp","addons/code_edit_addon.hpp","code_edit_parser.hpp"],
+     role:"精确数学（BigInt/Rational）、搜索、计算机 shell、CLI-JSON 桥（白名单 fail-closed）、代码编辑解析。",
+     cfg:"cliTools.* / search.*", st:""},
+    {label:"安全插件", files:["addons/ThePlugInForSecurity/security_addon.hpp","addons/ThePlugInForSecurity/security_addon.cpp","addons/ThePlugInForSecurity/security_core.hpp","addons/ThePlugInForSecurity/security_core.cpp","addons/ThePlugInForSecurity/meme_tensor.hpp","addons/ThePlugInForSecurity/meme_tensor.cpp","addons/ThePlugInForSecurity/meme_semantic_slicer.hpp","addons/ThePlugInForSecurity/meme_semantic_slicer.cpp","addons/ThePlugInForSecurity/meme_annealer.hpp","addons/ThePlugInForSecurity/meme_annealer.cpp","addons/ThePlugInForSecurity/hard_embed.hpp","addons/ThePlugInForSecurity/hard_embed.cpp"],
+     role:"模因张量/语义切片/退火的安全判据插件。",
+     cfg:"addons.security.enabled=false", st:"opt"},
+    {label:"外部协议", files:["mcp_client.hpp","mcp_client.cpp","subprocess.hpp","subprocess.cpp","web_search_engine.hpp","web_search_engine.cpp"],
+     role:"MCP JSON-RPC 客户端、无 shell 子进程执行、无依赖 HTTP/1.1 搜索引擎。MCP 由 mcp.enabled 控制（当前 false）。",
+     cfg:"mcp.enabled=false / search.endpoint", st:"opt"},
+    {label:"在线检索与爬取", files:["main_hub_parts/026_section_before_searchconfig.inc","main_hub_parts/027_struct_searchconfig.inc","main_hub_parts/028_section_before_modeldefaults.inc","main_hub_parts/029_struct_modeldefaults.inc","main_hub_parts/030_section_before_onlineresearcher.inc","main_hub_parts/031_class_onlineresearcher.inc","main_hub_parts/068_section_before_crawlitem.inc","main_hub_parts/069_struct_crawlitem.inc","main_hub_parts/070_section_before_crawlitem.inc","main_hub_parts/071_struct_crawlitem.inc"],
+     role:"OnlineResearcher（缓存/索引/回退/爬取）、搜索配置、模型默认值。cache_ 已加 cacheMu_（本轮第 5 处竞争修复）。",
+     cfg:"search.* / search.crawl", st:"ok"},
+    {label:"工具探针", files:["tools/dump_stack_resolve.py","tools/reasoning_demand_probe.py","tools/flamegraph.py","tools/auto_tune_phoenix_params.py","tools/memory_tier_benchmark_v1.py"],
+     role:"dump→map 栈解析、符号需求调研、火焰图、参数调优、记忆分层基准。",
+     cfg:"—", st:"ok"}
+  ]
+},
+{
+  id:"L8", name:"感知与世界模型", color:"#c0e070",
+  nodes:[
+    {label:"多模态桥", files:["external_mixed_modal_io.hpp","external_mixed_modal_io.cpp","multimodal_world_model.hpp","multimodal_world_model.cpp","video_model.hpp","video_model.cpp","audio_model.hpp","audio_model.cpp","rdk_x5_bpu.hpp","rdk_x5_bpu.cpp"],
+     role:"文本/图像/语音互转、视频与音频 BPU/ONNX 推理、概念头。",
+     cfg:"PHOENIX_EDGE_*_ENABLED / video.* / audio.*", st:""},
+    {label:"世界模型", files:["world_model.hpp","physics_world_runtime.hpp","physics_world_runtime.cpp","physics_world.hpp"],
+     role:"预测→对齐→校准（worldUncertainty 回流 AGI）、物理世界仿真。",
+     cfg:"world.* / FRONTEND_WORLDMODEL_*", st:""},
+    {label:"交互 IO", files:["speak_io.hpp","speak_io.cpp","motion_adapter.hpp"],
+     role:"语音 IO、动作适配、原始感觉输入。",
+     cfg:"speech.* / motion.*", st:""},
+    {label:"开放式列/前瞻", files:["open_column_router.hpp","open_column_step.hpp","ahead_module.hpp","module_overrides/ahead_module.cpp","cond_profile.hpp","controller_layout.hpp","product_ops.hpp","component_config.hpp"],
+     role:"列式路由与步进、前瞻模块、条件画像、控制器布局、产物操作、组件配置。",
+     cfg:"runtimeTunedConfig", st:""},
+    {label:"边缘/嵌入式", files:["edge_platform.hpp","edge_platform.cpp","mcu_posix_compat.hpp","mcu_posix_compat.cpp","mcu_virtual_memory.hpp","mcu_wolfssh_adapter.hpp","mcu_wolfssh_adapter.cpp","v51_runtime.hpp","v51_runtime.cpp","external_runtime.hpp","external_runtime.cpp"],
+     role:"RDK X5 边缘平台、MCU POSIX 兼容/虚拟内存/WolfSSH、v5.1 运行时兼容、外部运行时。",
+     cfg:"edge_platform.*", st:""}
+  ]
+},
+{
+  id:"L9", name:"基础设施与配置", color:"#8fa0c8",
+  nodes:[
+    {label:"配置系统", files:["phoenix_config.hpp","runtime_tuned_config.hpp","main_hub_parts/000_section_before_config.inc","main_hub_parts/001_struct_config.inc","config/phoenix.json","config/research/*.json"],
+     role:"cfgOr/resolveConfig/loadOverlay：env→profile→config→fallback，dot-path 全量覆盖。",
+     cfg:"AI_RESEARCH_PROFILE", st:"ok"},
+    {label:"日志与版本", files:["loggerCXX.cpp","loggerCXXH.hpp","version.hpp","emutls_once_compat.cpp"],
+     role:"日志（debug/release/off）、版本号、MinGW emutls 兼容。",
+     cfg:"main.logMode / main.httpLog", st:""},
+    {label:"任务与异步", files:["async_task_system.hpp","module_overrides/async_task_system.cpp"],
+     role:"异步任务系统、推理中止纪元（abort epoch）。",
+     cfg:"—", st:""},
+    {label:"构建系统", files:["compile.bat","compile_gtest.bat","build/conan_*","llama_server_mods/apply_patches.bat"],
+     role:"单 TU 巨型链接（-O3 + -Wl,-Map=phoenix_main.map）、conan 依赖、llama.cpp 子构建与补丁栈。",
+     cfg:"PHOENIX_NEW_BUILD / PHOENIX_KEEP_LLAMA", st:"ok"},
+    {label:"测试基线", files:["tests/gtest/unit/**","test/gtest/**","gtest_runner.exe"],
+     role:"58 定向 + 268 宽回归（37 套件）全绿；新增 logic/plugin/summon/explore/population/retrieval 套件。",
+     cfg:"AI_PYTHON_HOME / PYTHONHOME", st:"ok"},
+    {label:"遗留兼容", files:["main_hub_parts/008_section_before_fetchresult.inc","main_hub_parts/009_struct_fetchresult.inc","main_hub_parts/010_section_before_curlwritectx.inc","main_hub_parts/011_struct_curlwritectx.inc","main_hub_parts/012_section_before_torchtextembedder.inc","main_hub_parts/013_struct_torchtextembedder.inc","module_mount.hpp"],
+     role:"遗留 fetch/curl 写上下文、Torch 文本嵌入（已由 llama/ONNX 取代，保留编译但不再被调用；没有配置开关）。",
+     cfg:"—（无开关，编译期保留）", st:"warn"}
+  ]
+}
+];
+
+/* ================= 画布 ================= */
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const panel = document.getElementById('panel');
+const statEl = document.getElementById('stat');
+const auditEl = document.getElementById('audit');
+const layersEl = document.getElementById('layers');
+
+const BOX_W = 232, BOX_H = 62, GAP_X = 14, GAP_Y = 12, PAD = 24, HEAD = 30;
+const visible = {}; LAYERS.forEach(l => visible[l.id] = true);
+
+let view = { x: 0, y: 0, k: 1 };
+let nodes = [];   // {rect,layer,node,idx}
+let hover = null, selected = null, query = '';
+
+function layout(){
+  nodes = [];
+  let y = PAD;
+  const maxW = 6 * (BOX_W + GAP_X);
+  for (const L of LAYERS){
+    if (!visible[L.id]) continue;
+    const perRow = Math.max(2, Math.min(6, L.nodes.length));
+    const rows = Math.ceil(L.nodes.length / perRow);
+    const bandH = HEAD + rows * (BOX_H + GAP_Y) + PAD;
+    L._band = { x: PAD/2, y, w: maxW + PAD, h: bandH };
+    L.nodes.forEach((n, i) => {
+      const r = Math.floor(i / perRow), c = i % perRow;
+      const rect = {
+        x: PAD/2 + 70 + c * (BOX_W + GAP_X),
+        y: y + HEAD + r * (BOX_H + GAP_Y),
+        w: BOX_W, h: BOX_H
+      };
+      n._rect = rect;
+      nodes.push({ rect, L, n, idx: nodes.length });
+    });
+    y += bandH;
+  }
+  return y;
+}
+let worldH = layout();
+
+function fit(){
+  const cw = cv.clientWidth, ch = cv.clientHeight;
+  const w = 6 * (BOX_W + GAP_X) + PAD * 2 + 70;
+  const k = Math.min(cw / w, ch / (worldH + PAD)) * 0.98;
+  view.k = Math.max(0.25, Math.min(1.2, k));
+  view.x = (cw - w * view.k) / 2;
+  view.y = 8;
+  draw();
+}
+function toWorld(px, py){ return { x:(px - view.x)/view.k, y:(py - view.y)/view.k }; }
+function toScreen(wx, wy){ return { x: wx*view.k + view.x, y: wy*view.k + view.y }; }
+
+function statusColor(st){
+  return st === 'ok' ? '#3ddc97' : st === 'opt' ? '#b48cff'
+       : st === 'warn' ? '#ffc857' : '#4f5f8a';
+}
+function statusText(st){
+  return st === 'ok' ? '已验证' : st === 'opt' ? '默认关闭'
+       : st === 'warn' ? '边界' : '稳定';
+}
+function matches(n){
+  if (!query) return true;
+  const q = query.toLowerCase();
+  return (n.label + ' ' + (n.files||[]).join(' ') + ' ' + (n.role||'') + ' ' + (n.cfg||''))
+    .toLowerCase().includes(q);
+}
+
+function roundRect(c, x, y, w, h, r){
+  c.beginPath();
+  c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r);
+  c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath();
+}
+
+function draw(){
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = cv.clientWidth * dpr; cv.height = cv.clientHeight * dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,cv.clientWidth,cv.clientHeight);
+  ctx.save();
+  ctx.translate(view.x, view.y); ctx.scale(view.k, view.k);
+
+  for (const L of LAYERS){
+    if (!visible[L.id] || !L._band) continue;
+    const b = L._band;
+    // 层背景
+    ctx.fillStyle = 'rgba(18,26,51,0.55)';
+    roundRect(ctx, b.x, b.y, b.w, b.h, 12); ctx.fill();
+    ctx.strokeStyle = L.color + '55'; ctx.lineWidth = 1; ctx.stroke();
+    // 层标题竖排色条
+    ctx.fillStyle = L.color;
+    roundRect(ctx, b.x, b.y, 6, b.h, 3); ctx.fill();
+    ctx.fillStyle = L.color;
+    ctx.font = '600 15px "Segoe UI","Microsoft YaHei"';
+    ctx.fillText(L.id + ' · ' + L.name, b.x + 18, b.y + 21);
+    ctx.fillStyle = '#8fa0c8';
+    ctx.font = '11px "Segoe UI"';
+    ctx.fillText(L.nodes.length + ' modules', b.x + 18 + ctx.measureText(L.id+' · '+L.name).width + 14, b.y + 21);
+  }
+
+  for (const item of nodes){
+    const {rect:r, L, n} = item;
+    const vis = matches(n);
+    const isSel = selected === item;
+    const isHov = hover === item;
+    let alpha = vis ? 1 : 0.16;
+    ctx.globalAlpha = alpha;
+
+    // 卡片
+    const grad = ctx.createLinearGradient(r.x, r.y, r.x, r.y+r.h);
+    grad.addColorStop(0, isSel ? '#22315e' : (isHov ? '#1b2749' : '#141d38'));
+    grad.addColorStop(1, '#101730');
+    ctx.fillStyle = grad;
+    roundRect(ctx, r.x, r.y, r.w, r.h, 9); ctx.fill();
+    ctx.strokeStyle = isSel ? '#ffffff' : (isHov ? L.color : L.color + '77');
+    ctx.lineWidth = isSel ? 2 : 1; ctx.stroke();
+
+    // 状态点
+    ctx.fillStyle = statusColor(n.st);
+    ctx.beginPath(); ctx.arc(r.x + 12, r.y + 14, 3.6, 0, 7); ctx.fill();
+
+    // 标题（超出裁剪）
+    ctx.save();
+    ctx.beginPath(); roundRect(ctx, r.x+20, r.y+4, r.w-26, 20, 4); ctx.clip();
+    ctx.fillStyle = '#e8eeff';
+    ctx.font = '600 12.5px "Segoe UI","Microsoft YaHei"';
+    ctx.fillText(n.label, r.x + 22, r.y + 18);
+    ctx.restore();
+
+    // 文件摘要
+    const f0 = (n.files && n.files.length) ? n.files[0] : '（无独立文件·实现在共享 TU）';
+    const extra = (n.files && n.files.length > 1) ? ('  +' + (n.files.length-1)) : '';
+    ctx.save();
+    ctx.beginPath(); roundRect(ctx, r.x+10, r.y+26, r.w-20, 16, 3); ctx.clip();
+    ctx.fillStyle = '#7f92bb';
+    ctx.font = '10.5px Consolas,monospace';
+    ctx.fillText(f0 + extra, r.x + 12, r.y + 38);
+    ctx.restore();
+
+    // 职责前 12 字
+    ctx.save();
+    ctx.beginPath(); roundRect(ctx, r.x+10, r.y+42, r.w-20, 16, 3); ctx.clip();
+    ctx.fillStyle = '#65799f';
+    ctx.font = '10.5px "Segoe UI","Microsoft YaHei"';
+    ctx.fillText((n.role||'').slice(0, 26), r.x + 12, r.y + 54);
+    ctx.restore();
+
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+}
+
+/* ------------- 交互 ------------- */
+let drag = null;
+cv.addEventListener('mousedown', e => {
+  drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false };
+  cv.classList.add('dragging');
+});
+cv.addEventListener('mousemove', e => {
+  if (drag){
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    view.x = drag.vx + dx; view.y = drag.vy + dy;
+    draw(); return;
+  }
+  const w = toWorld(e.clientX - cv.getBoundingClientRect().left,
+                    e.clientY - cv.getBoundingClientRect().top);
+  hover = null;
+  for (const it of nodes)
+    if (w.x >= it.rect.x && w.x <= it.rect.x+it.rect.w &&
+        w.y >= it.rect.y && w.y <= it.rect.y+it.rect.h){ hover = it; break; }
+  cv.style.cursor = hover ? 'pointer' : 'grab';
+  draw();
+  if (hover) showTip(hover, e); else hideTip();
+});
+cv.addEventListener('mouseup', e => {
+  cv.classList.remove('dragging');
+  if (drag && !drag.moved){
+    const r = cv.getBoundingClientRect();
+    const w = toWorld(e.clientX - r.left, e.clientY - r.top);
+    let hit = null;
+    for (const it of nodes)
+      if (w.x >= it.rect.x && w.x <= it.rect.x+it.rect.w &&
+          w.y >= it.rect.y && w.y <= it.rect.y+it.rect.h){ hit = it; break; }
+    selected = hit; draw(); if (hit) showPanel(hit);
+  }
+  drag = null;
+});
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r = cv.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  const before = toWorld(mx, my);
+  view.k *= (e.deltaY < 0 ? 1.12 : 1/1.12);
+  view.k = Math.max(0.2, Math.min(2.6, view.k));
+  const after = toWorld(mx, my);
+  view.x += (after.x - before.x) * view.k;
+  view.y += (after.y - before.y) * view.k;
+  draw();
+}, {passive:false});
+cv.addEventListener('dblclick', () => fit());
+
+let tipEl = null;
+function showTip(it, e){
+  if (!tipEl){
+    tipEl = document.createElement('div');
+    tipEl.style.cssText = 'position:fixed;z-index:9;max-width:320px;padding:7px 10px;'+
+      'background:#0a1226ee;border:1px solid #26325c;border-radius:7px;font-size:11.5px;'+
+      'color:#cfe0ff;pointer-events:none;box-shadow:0 6px 20px #0008';
+    document.body.appendChild(tipEl);
+  }
+  tipEl.innerHTML = '<b>' + it.n.label + '</b><br><span style="color:#8fa0c8">'
+    + (it.n.role||'').slice(0,90) + '…</span>';
+  tipEl.style.left = (e.clientX + 14) + 'px';
+  tipEl.style.top  = (e.clientY + 14) + 'px';
+  tipEl.style.display = 'block';
+}
+function hideTip(){ if (tipEl) tipEl.style.display = 'none'; }
+
+function showPanel(it){
+  const n = it.n, L = it.L;
+  const files = (n.files||[]).length
+    ? (n.files||[]).map(f => '<span class="file">'+f+'</span>').join('')
+    : '<span class="empty">该节点没有独立文件：能力实现在共享编译单元内（见右侧配置与职责）。</span>';
+  panel.innerHTML =
+    '<h3>'+n.label+'</h3>'+
+    '<div class="sub">'+L.id+' · '+L.name+
+      ' &nbsp;<span class="badge" style="color:'+statusColor(n.st)+'">'+statusText(n.st)+'</span></div>'+
+    '<div class="sec">职责</div><p>'+(n.role||'—')+'</p>'+
+    '<div class="sec">文件 ('+ (n.files||[]).length +')</div><div class="files">'+files+'</div>'+
+    '<div class="sec">配置 / 开关</div><p><code>'+(n.cfg||'—')+'</code></p>';
+}
+
+/* ------------- 左侧层次开关 ------------- */
+function renderLayers(){
+  layersEl.innerHTML = '';
+  for (const L of LAYERS){
+    const d = document.createElement('div');
+    d.className = 'layerToggle';
+    d.innerHTML = '<span class="sw" style="background:'+L.color+'"></span>'+
+      '<span class="n">'+L.id+' '+L.name+'</span><span class="c">'+L.nodes.length+'</span>';
+    d.onclick = () => {
+      visible[L.id] = !visible[L.id];
+      d.style.opacity = visible[L.id] ? 1 : .38;
+      worldH = layout(); fit();
+    };
+    layersEl.appendChild(d);
+  }
+}
+
+/* ------------- 覆盖检查 ------------- */
+function audit(){
+  const totalNodes = LAYERS.reduce((a,L)=>a+L.nodes.length,0);
+  const allFiles = new Set();
+  LAYERS.forEach(L=>L.nodes.forEach(n=>(n.files||[]).forEach(f=>allFiles.add(f))));
+  const byLayer = LAYERS.map(L=>L.id+':'+L.nodes.length).join(' · ');
+  const okN = LAYERS.reduce((a,L)=>a+L.nodes.filter(n=>n.st==='ok').length,0);
+  const optN = LAYERS.reduce((a,L)=>a+L.nodes.filter(n=>n.st==='opt').length,0);
+  auditEl.innerHTML =
+    '<b>'+LAYERS.length+'</b> 层 / <b>'+totalNodes+'</b> 节点 / <b>'+allFiles.size+'</b> 文件条目<br>'+
+    '<span class="k">'+byLayer+'</span><br>'+
+    '<span style="color:#3ddc97">已验证 '+okN+'</span> · '+
+    '<span style="color:#b48cff">默认关闭 '+optN+'</span>';
+  statEl.textContent = LAYERS.length+' 层 · '+totalNodes+' 模块 · '+allFiles.size+' 文件';
+}
+
+/* ------------- 全量文件索引 ------------- */
+const indexEl = document.getElementById('index');
+let indexOpen = false;
+document.getElementById('indexBtn').onclick = () => {
+  indexOpen = !indexOpen;
+  if (!indexOpen){ indexEl.style.display = 'none'; return; }
+  indexEl.innerHTML = '<h4>全量文件索引（按层，覆盖画布中出现的每个条目）</h4>' +
+    LAYERS.map(L => '<div class="g"><b>'+L.id+' '+L.name+'</b><br>' +
+      L.nodes.map(n => (n.files||[]).map(f=>'<span>'+f+'</span>').join('')).join('') +
+      '</div>').join('');
+  indexEl.style.display = 'block';
+};
+
+/* ------------- 搜索 ------------- */
+const searchEl = document.getElementById('search');
+let t = null;
+searchEl.addEventListener('input', () => {
+  clearTimeout(t);
+  t = setTimeout(() => {
+    query = searchEl.value.trim();
+    draw();
+    if (query){
+      const hits = nodes.filter(it => matches(it.n));
+      if (hits.length === 1){ selected = hits[0]; draw(); showPanel(hits[0]); }
+    }
+  }, 120);
+});
+window.addEventListener('keydown', e => {
+  if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'k'){ e.preventDefault(); searchEl.focus(); }
+  if (e.key === 'Escape'){ query=''; searchEl.value=''; selected=null; draw(); }
+});
+document.getElementById('fitBtn').onclick = () => fit();
+window.addEventListener('resize', () => { draw(); });
+
+/* ------------- 启动 ------------- */
+renderLayers();
+audit();
+requestAnimationFrame(() => { fit(); });
+</script>
+</body>
+</html>

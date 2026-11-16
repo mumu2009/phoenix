@@ -43,7 +43,7 @@ index 607f2786..742195eb 100644
  #include <cstring>
  #include <ctime>
  #include <functional>
-@@ -435,6 +436,20 @@ llama_expert_gating_func_type gating_op,
+@@ -435,5 +436,19 @@ llama_expert_gating_func_type gating_op,
      int64_t n_embd = cur->ne[0];
      int64_t n_tokens = cur->ne[1];
  

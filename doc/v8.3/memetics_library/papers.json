@@ -179,6 +179,106 @@
       "venue": "bibliographic details to be completed; the cutoffs are the ones theory.md definition 9.1 implements",
       "formula": "copying: stepwise fidelity >= 0.75 in both halves of the run; convergent: first half <= 0.55 and the second-half mean rises by >= 0.25; otherwise undetermined.",
       "use": "theory.md definition 9.1 regime cutoffs, fixed on 2026-10-24; the identifier does not imply the cutoffs were read off Acerbi et al. - the exact source page must be confirmed before publication."
+    },
+    {
+      "id": "cybernetic-persona-2025",
+      "authors": "Smeenk, Kim",
+      "year": 2025,
+      "title": "The Cybernetic Persona and the Algorithmic Selector: Revisiting Memetic Science in the Age of Generative AI",
+      "venue": "Zenodo (December 2025)",
+      "formula": "memetic transmission re-examined with the generative-AI selector as the algorithmic environment",
+      "use": "related work for the v10.1 model-fusion / memetic direction",
+      "url": "https://zenodo.org/records/17823032"
+    },
+    {
+      "id": "appreddit-2022",
+      "authors": "(APPReddit authors)",
+      "year": 2022,
+      "title": "APPReddit: a Corpus of Reddit Posts Annotated for Appraisal",
+      "venue": "arXiv 2205.15627",
+      "formula": "appraisal-theory annotation scheme over Reddit posts (the training corpus candidate for the emotion modulation matrix)",
+      "use": "v10.1 emotion matrix training corpus",
+      "url": "https://ar5iv.labs.arxiv.org/html/2205.15627"
+    },
+    {
+      "id": "openbench-2025",
+      "authors": "openbench maintainers",
+      "year": 2025,
+      "title": "OpenBench: an open benchmark for generative-AI evaluation",
+      "venue": "PyPI package",
+      "formula": "task suite for GenAI capability measurement",
+      "use": "v10.1 large-scale test suite candidate",
+      "url": "https://pypi.org/project/openbench/"
+    },
+    {
+      "id": "moe-lpr-2025",
+      "authors": "(MoE-LPR authors)",
+      "year": 2025,
+      "title": "MoE-LPR: Multilingual extension of large language models through mixture-of-experts with low-rank projection",
+      "venue": "(cited via Google Scholar)",
+      "formula": "MoE extension via low-rank projection (a fusion-adjacent technique)",
+      "use": "v10.1 fusion direction related work",
+      "url": "https://scholar.google.fr/scholar?oi=bibs&hl=vi&cites=5756396377706569686"
+    },
+    {
+      "id": "llm-financial-affect-2025",
+      "authors": "(NTU LOPE authors)",
+      "year": 2025,
+      "title": "How LLM financial agents respond to stated affect depends on their assigned role",
+      "venue": "(paper.pdf, NTU LOPE)",
+      "formula": "classifier-based affect on top of the VAD lexicon (the lexicon cannot distinguish alarm from urgency)",
+      "use": "v10.1 emotion: the matrix replaces the lexicon, so the alarm/urgency distinction moves into the trained matrix",
+      "url": "https://lope.linguistics.ntu.edu.tw/publications/how-llm-financial-agents-respond-to-stated-affect-depends-on-their-assigned-role/paper.pdf"
+    },
+    {
+      "id": "darwinian-evolver-2025",
+      "authors": "Bihruze / NousResearch",
+      "year": 2025,
+      "title": "darwinian-evolver v1.0: evolutionary optimizer platform (Hermes agent PR #12719)",
+      "venue": "GitHub PR",
+      "formula": "LLM-agent evolution with parallel candidates",
+      "use": "v10.1 evolution-efficiency direction related work",
+      "url": "https://github.com/NousResearch/hermes-agent/pull/12719"
+    },
+    {
+      "id": "prefix-cache-retention-2025",
+      "authors": "(Zenodo authors)",
+      "year": 2025,
+      "title": "A Hit Rate Is a Retention Policy: Prefix-Cache Reuse in Agentic Coding Traces",
+      "venue": "Zenodo",
+      "formula": "the cache hit rate is determined by the eviction/retention policy, not the workload alone",
+      "use": "v10.1 hot-path hidden-condition direction",
+      "url": "https://zenodo.org/records/23519028/files/a-hit-rate-is-a-retention-policy.pdf"
+    },
+    {
+      "id": "unicache-2025",
+      "authors": "(UniCache authors)",
+      "year": 2025,
+      "title": "UniCache: Unifying Prefix Cache Eviction for Heterogeneous LLM Serving Workloads",
+      "venue": "ACM (dlnext)",
+      "formula": "workload-variant-aware cache eviction",
+      "use": "v10.1 hot-path slot policy related work",
+      "url": "https://dlnext.acm.org/doi/pdf/10.1145/3801489.3806861"
+    },
+    {
+      "id": "mergeme-2025",
+      "authors": "(MergeME authors)",
+      "year": 2025,
+      "title": "MergeME: Model Merging Techniques for Homogeneous and Heterogeneous MoEs",
+      "venue": "arXiv 2502.00997",
+      "formula": "expert merging across homogeneous and heterogeneous MoEs (dimension alignment)",
+      "use": "v10.1 fusion direction related work",
+      "url": "https://arxiv.org/abs/2502.00997"
+    },
+    {
+      "id": "model-fusion-review-2025",
+      "authors": "(review authors)",
+      "year": 2025,
+      "title": "Democratizing AI through model fusion: A comprehensive review and future directions",
+      "venue": "ScienceDirect S295016012500049X",
+      "formula": "vocabulary and structural mismatch handling in model fusion",
+      "use": "v10.1 fusion direction related work",
+      "url": "https://www.sciencedirect.com/science/article/pii/S295016012500049X"
     }
   ]
 }

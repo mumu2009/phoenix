@@ -18,6 +18,7 @@ OnlineResearcher::normalizeKey(const std::vector<std::string> &words) const {
   return oss.str();
 }
 
+/* Caller holds cacheMu_ (only remember() calls this). */
 void OnlineResearcher::pruneCache() {
   if ((int)cache_.size() <= cacheSize_)
     return;
@@ -32,6 +33,7 @@ void OnlineResearcher::pruneCache() {
 }
 
 void OnlineResearcher::remember(const std::string &key, const json &payload) {
+  std::lock_guard<std::mutex> lk(cacheMu_);
   cache_[key] =
       CacheEntry{(int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::system_clock::now().time_since_epoch())
@@ -41,6 +43,7 @@ void OnlineResearcher::remember(const std::string &key, const json &payload) {
 }
 
 std::optional<json> OnlineResearcher::fromCache(const std::string &key) {
+  std::lock_guard<std::mutex> lk(cacheMu_);
   auto it = cache_.find(key);
   if (it == cache_.end())
     return std::nullopt;

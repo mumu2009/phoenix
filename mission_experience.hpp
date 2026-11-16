@@ -17,6 +17,8 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "retrieval_diversity.hpp"
+#include "phoenix_config.hpp"
 
 namespace phoenix {
 namespace mission {
@@ -140,12 +142,33 @@ inline std::vector<ExperienceEntry> experienceTop(const std::string &storePath,
         scored.push_back({experienceOverlap(goal, e.goal), e});
     std::sort(scored.begin(), scored.end(),
               [](const auto &a, const auto &b) { return a.first > b.first; });
+    /* v10.2 width: greedy top-k let three near-identical recipes fill every
+       slot.  MMR keeps them only if they are also DIFFERENT from each other;
+       lambda comes from mission.recallDiversity (1.0 = old behaviour). */
+    double lambda = 0.7;
+    try {
+        lambda = phoenix::cfgOr<double>("mission.recallDiversity", 0.7);
+    } catch (...) {
+    }
     std::vector<ExperienceEntry> out;
-    for (const auto &s : scored) {
+    if (scored.empty()) return out;
+    std::vector<double> rel;
+    rel.reserve(scored.size());
+    for (const auto &s : scored) rel.push_back(s.first);
+    auto sim = [&scored](size_t a, size_t b) -> double {
+        return experienceOverlap(scored[a].second.summary,
+                                 scored[b].second.summary);
+    };
+    /* Ask for more than k so the relevance gate can still reject entries. */
+    const size_t want = std::min(scored.size(), k * 3 + 3);
+    const auto chosen = phoenix::retrieval::mmrSelect(
+        scored.size(),
+        [&rel](size_t i) { return rel[i]; }, sim, want, lambda);
+    for (const int idx : chosen) {
         if (out.size() >= k) break;
-        if (s.first < kMinGoalOverlap) break;
-        if (!experienceRelevantToGoal(goal, s.second.summary))
-            continue;
+        const auto &s = scored[static_cast<size_t>(idx)];
+        if (s.first < kMinGoalOverlap) continue;
+        if (!experienceRelevantToGoal(goal, s.second.summary)) continue;
         out.push_back(s.second);
     }
     return out;

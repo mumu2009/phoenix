@@ -36,10 +36,17 @@ nlohmann::json PopulationLayer::configureLocked(const nlohmann::json &payload) {
     }
     bool reseed = false;
     if (p.contains("inputDim") || p.contains("hidden") || p.contains("outputDim")) {
-        inputDim_ = std::max(1, std::min(16, p.value("inputDim", inputDim_)));
-        hidden_ = std::max(1, std::min(16, p.value("hidden", hidden_)));
-        outputDim_ = std::max(1, std::min(8, p.value("outputDim", outputDim_)));
-        reseed = true;
+        const int newIn = std::max(1, std::min(16, p.value("inputDim", inputDim_)));
+        const int newHid = std::max(1, std::min(16, p.value("hidden", hidden_)));
+        const int newOut = std::max(1, std::min(8, p.value("outputDim", outputDim_)));
+        /* v10.2: reseed only on an ACTUAL shape change.  Re-sending the same
+           dims on every startup (the config always carries them now) used to
+           wipe the population each time, so it could never accumulate. */
+        if (newIn != inputDim_ || newHid != hidden_ || newOut != outputDim_)
+            reseed = true;
+        inputDim_ = newIn;
+        hidden_ = newHid;
+        outputDim_ = newOut;
     }
     if (p.contains("n")) {
         const int requested = p.value("n", n_);

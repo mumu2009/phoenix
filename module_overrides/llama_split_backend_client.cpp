@@ -1268,5 +1268,63 @@ json llamaSplitChat(const std::string &baseUrl, int timeoutMs,
   return out;
 }
 
+/* Text-only completion: same causal prompt as the split pipeline, posted to
+   the stock /completion endpoint.  See the header for why the old
+   `return chatWithLlamaCpp(...)` redirect was a slot-leaking recursion. */
+json llamaTextChat(const std::string &baseUrl, int timeoutMs,
+                   const std::string &model, const std::string &text,
+                   const std::string &graphContext, int maxTokens,
+                   const json &inferenceOptions) {
+  json out;
+  out["provider"] = "llamacpp";
+  out["model"] = model.empty() ? std::string("llamacpp") : model;
+  out["reply"] = "";
+
+  std::string host;
+  int port = 8082;
+  splitHostPort(baseUrl.empty() ? std::string("http://127.0.0.1:8082") : baseUrl,
+                host, port);
+
+  json opts = inferenceOptions.is_object() ? inferenceOptions : json::object();
+  int effectiveMaxTokens = std::max(minPredictTokens(), maxTokens);
+  if (opts.contains("num_predict") && opts["num_predict"].is_number_integer())
+    effectiveMaxTokens =
+        std::max(minPredictTokens(), opts["num_predict"].get<int>());
+
+  int callTimeoutMs = timeoutMs;
+  if (opts.contains("timeoutMs") && opts["timeoutMs"].is_number_integer())
+    callTimeoutMs = std::max(1000, opts["timeoutMs"].get<int>());
+  callTimeoutMs = resolveGenerateTimeoutMs(callTimeoutMs, effectiveMaxTokens, opts);
+
+  /* Interactive short asks keep memory/GNN units off the causal string,
+     exactly like llamaSplitChat. */
+  std::string ctx = phoenix::inference::selectCausalPrefix(opts, graphContext);
+  if (effectiveMaxTokens <= 32) ctx.clear();
+
+  const std::string cleanCtx = cleanGraphContextForSystem(ctx, text);
+  std::string prompt = assembleCausalText(cleanCtx, text);
+  if (opts.contains("resume_suffix") && opts["resume_suffix"].is_string()) {
+    const std::string resume = opts["resume_suffix"].get<std::string>();
+    if (!resume.empty()) prompt = assembleCausalText(prompt, resume);
+  }
+  if (prompt.empty()) {
+    out["ok"] = false;
+    out["error"] = "empty causal text";
+    return out;
+  }
+  std::cerr << "[llama] text_path=completion prompt_chars=" << prompt.size()
+            << " n_predict=" << effectiveMaxTokens
+            << " timeout_ms=" << callTimeoutMs << std::endl;
+
+  const json r = textCompletionFallback(host, port, prompt, effectiveMaxTokens,
+                                        callTimeoutMs, opts);
+  out["ok"] = r.value("ok", false);
+  if (out["ok"].get<bool>())
+    out["reply"] = r.value("reply", std::string());
+  else
+    out["error"] = r.value("error", std::string("completion failed"));
+  return out;
+}
+
 }  // namespace v7
 }  // namespace phoenix

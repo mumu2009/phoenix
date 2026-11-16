@@ -40,6 +40,31 @@ TEST_F(AgiActionDispatchTest, DefaultActionsAreRegistered) {
     EXPECT_TRUE(names.count("goal_advance"));
     EXPECT_TRUE(names.count("replicate"));
     EXPECT_TRUE(names.count("script"));
+    /* The symbolic tool is OPT-IN (`logic.enabled`, default false): it has not
+       passed the research/evaluation gate yet, so the planner must not be able
+       to select it by default.  See doc/v10.1/logic_engine.md section 0. */
+    EXPECT_FALSE(names.count("logic"));
+}
+
+TEST_F(AgiActionDispatchTest, ExecuteLogicTool) {
+    /* The logic action is dispatched before the addon manager, so it works
+       with no plugin mounted: facts + rules + query in, exact bindings out. */
+    nlohmann::json ctx{{"arguments",
+                        nlohmann::json{{"facts", nlohmann::json::array({"parent(tom,bob)"})},
+                                       {"rules",
+                                        nlohmann::json::array(
+                                            {nlohmann::json{{"head", "ancestor(X,Y)"},
+                                                            {"body", nlohmann::json::array({"parent(X,Y)"})}}})},
+                                       {"query", "ancestor(tom,Who)"}}}};
+    auto res = manager_->executeAgiActionByName("logic", ctx);
+    /* Opt-in tool: with logic.enabled=false the action is not registered, so
+       dispatch must refuse it (fail closed).  Set logic.enabled and rebuild
+       the fixture to exercise the engine itself; the engine has its own suite
+       (tests/gtest/unit/logic/test_logic_engine.cpp). */
+    EXPECT_FALSE(res.value("ok", false));
+    EXPECT_NE(res.value("error", std::string()).find("not found"),
+              std::string::npos)
+        << res.dump();
 }
 
 TEST_F(AgiActionDispatchTest, ExecuteMathTool) {
