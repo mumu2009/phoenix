@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "vendor": "outsides/llamacpp",
+  "head": "733dd8dfc0b4446d653977723c26d2c895b4687d",
+  "headShort": "733dd8df",
+  "baseDescription": "llama.cpp upstream merge commit 733dd8df (Merge branch ggml-org:master into master)",
+  "eol": "worktree files checked out with core.autocrlf=true (CRLF); sha256 values are raw worktree bytes",
+  "canonicalPatch": "llama_server_mods/phoenix_vendor_733dd8df.patch",
+  "capturedAt": "2026-11-17T23:22:23.2967542+08:00",
+  "files": [
+    {
+      "path": "examples/server/server.cpp",
+      "sha256": "dd16e6ff792868847f1512bc4278dd70fe94a0ca6ee04a29268e797114257361",
+      "bytes": 216874
+    },
+    {
+      "path": "ggml/src/ggml-cpu/ggml-cpu.c",
+      "sha256": "c8f94210c8d8d8ee5954af9997243ecf9966f3e355d340bf048082ccc501603d",
+      "bytes": 509945
+    },
+    {
+      "path": "include/llama.h",
+      "sha256": "ae28e7a3f8e347776f8e447911ba911133dfa52a03b82ce74228576937ed76ba",
+      "bytes": 73785
+    },
+    {
+      "path": "src/llama-context.cpp",
+      "sha256": "a7181c439fdcb30bfcd0ddfa5c453e519739eb2a8dcfea7a4886a027d5785476",
+      "bytes": 77310
+    },
+    {
+      "path": "src/llama-context.h",
+      "sha256": "c338d4969efde9999a309f150ee079fca274ec46870c8687219f4e4eb4ccfcc7",
+      "bytes": 6145
+    },
+    {
+      "path": "src/llama-mmap.cpp",
+      "sha256": "91ba78fd353dcfee58a734447c048f889075e068357da2acc766404fdf20410e",
+      "bytes": 19571
+    },
+    {
+      "path": "src/llama-model.cpp",
+      "sha256": "c33b73d99d9c31b4b9f5b4348e26753b42cdbc4225b5c722c8b391877c0f78c3",
+      "bytes": 225953
+    },
+    {
+      "path": "src/llama-vocab.cpp",
+      "sha256": "55eb6b51e22b15ff562379f482b4caac870a28030ee8527e154bcbace2c247d7",
+      "bytes": 130376
+    },
+    {
+      "path": "src/llama.cpp",
+      "sha256": "c4f950c45dade625fdb30a70308079459b5094e22eedaec32bc9f45f59d866ab",
+      "bytes": 409879
+    },
+    {
+      "path": "src/unicode.cpp",
+      "sha256": "6a57cb51a7dbae1da64fdbfb1d2442cf51b773a0bd47c153273359a2643e2637",
+      "bytes": 33960
+    }
+  ]
+}
