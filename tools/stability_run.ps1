@@ -392,7 +392,7 @@ function Find-PersistedMission($snap, [string]$missionId) {
         state = Get-Prop $mission 'state'
         deliverableLen = $dl.Length
         deliverable = $dl
-        pressure = Get-Prop (Get-Prop $stats 'pressure') 0
+        pressure = Get-Prop $stats 'pressure' 0
         startMs = Get-Prop $mission 'startMs'
         endMs = Get-Prop $mission 'endMs'
       }
@@ -466,15 +466,31 @@ function Find-CrashDump($crash) {
   $apps = @($crash.appName)
   if ($crash.appName -and $crash.appName -ne '') { } else { $apps = Get-WatchedAppNames }
   $pidDec = $crash.faultingPid
-  $since = (Get-Date).AddMinutes(-30)
+  $since = if ($script:G.RunStart) { $script:G.RunStart.AddMinutes(-5) } else { (Get-Date).AddMinutes(-30) }
   $dirs = @(
     (Join-Path $env:LOCALAPPDATA 'CrashDumps'),
     (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportQueue'),
     (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportArchive'),
     (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\WER\ReportQueue'),
-    (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\WER\ReportArchive')
+    (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\WER\ReportArchive'),
+    # project-local dump locations (WER LocalDumps target + the gateway's own
+    # MiniDumpWriteDump path used by its unhandled-exception filter)
+    (Join-Path $script:G.Repo 'build\tmp\dumps'),
+    (Join-Path $script:G.Repo 'runtime_store\dumps'),
+    (Join-Path $script:G.Repo 'runtime_store\logs')
   )
   $candidates = @()
+  # the in-process handler writes runtime_store/logs/crash.dmp directly; it is
+  # usually 0 bytes (MiniDumpWriteDump fails in the corrupted process) but a
+  # non-empty file is a usable dump.
+  $ownDump = Join-Path $script:G.Repo 'runtime_store\logs\crash.dmp'
+  if (Test-Path $ownDump) {
+    $oi = Get-Item $ownDump
+    $search.searched += $ownDump
+    if ($oi.Length -gt 0 -and $oi.LastWriteTime -ge $since) {
+      $candidates += [pscustomobject]@{ path = $oi.FullName; mtime = $oi.LastWriteTime; pid = $null }
+    }
+  }
   foreach ($d in $dirs) {
     if (-not (Test-Path $d)) { continue }
     $search.searched += $d
@@ -531,7 +547,8 @@ function Invoke-Forensics($crash) {
   $rec = [ordered]@{
     time = $crash.time; appName = $crash.appName; appPath = $crash.appPath
     module = $crash.module; exceptionCode = $crash.exceptionCode; faultingPid = $crash.faultingPid
-    recordId = $crash.recordId
+    recordId = $crash.recordId; kind = $(if ($crash.PSObject.Properties['kind']) { $crash.kind } else { 'wer_application_error' })
+    severity = $(if ($crash.PSObject.Properties['severity']) { $crash.severity } else { 'crash' })
     dumpPath = ''; dumpSearched = @(); werReport = ''; resolveReport = ''; resolveExit = $null
     resolved = $false; gap = ''
   }
@@ -542,7 +559,15 @@ function Invoke-Forensics($crash) {
     try { Copy-Item -Path $d.reportWer -Destination (Join-Path $base 'Report.wer') -Force; $rec.werReport = (Join-Path $base 'Report.wer') } catch { }
   }
   if (-not $rec.dumpPath) {
-    $rec.gap = "no minidump found for $($crash.appName) pid=$($crash.faultingPid) (WER LocalDumps not configured for this binary?) - searched: " + ($d.searched -join '; ')
+    if ($rec.kind -eq 'fatal_runtime_seh') {
+      # The gateway installs SetUnhandledExceptionFilter and returns
+      # EXCEPTION_EXECUTE_HANDLER, so an ordinary SEH fault (e.g. 0xC0000005)
+      # is swallowed: WER never records it and no minidump is written.
+      # runtime_store/logs/fatal_runtime.log is then the ONLY evidence.
+      $rec.gap = "fatal_runtime.log unhandled exception (SEH swallowed by the in-process filter): no WER event and no minidump by design; crash.dmp is usually 0-byte. Evidence line recorded in event.txt. Enable LocalDumps only helps fail-fast codes (e.g. 0xC0000374)."
+    } else {
+      $rec.gap = "no minidump found for $($crash.appName) pid=$($crash.faultingPid) (WER LocalDumps not configured for this binary?) - searched: " + ($d.searched -join '; ')
+    }
     Log "forensics: $($rec.gap)" 'WARN'
   } else {
     $resolver = Join-Path $script:G.Repo 'tools\dump_stack_resolve.py'
@@ -599,9 +624,53 @@ function Scan-NewCrashes {
   return $found
 }
 
-# --------------------------------------------------------------------------
-# sidecar instance management
-# --------------------------------------------------------------------------
+# The gateway installs its own unhandled-exception filter that returns
+# EXCEPTION_EXECUTE_HANDLER: ordinary SEH faults (typically 0xC0000005) are
+# swallowed and WER never sees them.  The ONLY evidence is a line in
+# runtime_store/logs/fatal_runtime.log (plus a usually-0-byte crash.dmp), and
+# the process exits with the exception code.  A 0xC0000374 fail-fast bypasses
+# the filter and DOES produce WER event 1000 + a full dump.  Scan both.
+function Scan-FatalRuntime {
+  $found = @()
+  $sources = @()
+  $liveLog = Join-Path $script:G.Repo 'runtime_store\logs\fatal_runtime.log'
+  $sources += [pscustomobject]@{ path = $liveLog; key = 'fatal_runtime.log'; app = 'phoenix_main.exe' }
+  if ($script:G.Sidecar -and $script:G.Sidecar.dir) {
+    $scLog = Join-Path $script:G.Sidecar.dir 'runtime_store\logs\fatal_runtime.log'
+    $sources += [pscustomobject]@{ path = $scLog; key = 'sidecar_fatal_runtime.log'; app = $script:G.Sidecar.exeName }
+  }
+  $idx = 0
+  foreach ($src in $sources) {
+    $lines = Read-AppendedLines $src.path $src.key
+    foreach ($ln in $lines) {
+      if ($ln -notmatch 'unhandled exception') { continue }
+      if ($ln -notmatch 'code=0x([0-9a-fA-F]+)') { continue }
+      $idx++
+      $key = "fatal|$($src.key)|$($ln)"
+      if ($script:G.FatalRuntimeSeen.ContainsKey($key)) { continue }
+      $script:G.FatalRuntimeSeen[$key] = $true
+      $code = '0x' + $Matches[1]
+      $addr = ''; $offset = ''; $rip = ''; $target = ''
+      if ($ln -match 'addr=(\S+)') { $addr = $Matches[1] }
+      if ($ln -match 'offset=(\S+)') { $offset = $Matches[1] }
+      if ($ln -match 'rip=(\S+)') { $rip = $Matches[1] }
+      if ($ln -match 'target=(\S+)') { $target = $Matches[1] }
+      # fatal_runtime.log lines start with "yyyy-MM-dd HH:mm:ss | ..."
+      $ts = (Get-Date)
+      if ($ln -match '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)') { try { $ts = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', $null) } catch { } }
+      $found += [pscustomobject]@{
+        recordId = "fatal-$($src.key)-$($ts.ToString('HHmmss'))-$idx"
+        time = $ts.ToString('o'); timeLocal = $ts.ToString('yyyy-MM-dd HH:mm:ss')
+        provider = 'runtime_store/logs/fatal_runtime.log'; appName = $src.app; appPath = ''
+        module = 'in-process SEH filter (setUnhandledExceptionFilter)'
+        exceptionCode = $code; faultingPid = $null; faultingPidHex = ''
+        message = $ln.Trim(); kind = 'fatal_runtime_seh'; severity = 'crash'
+        addr = $addr; offset = $offset; rip = $rip; target = $target
+      }
+    }
+  }
+  return $found
+}
 function Save-CleanupRecord {
   $p = Join-Path $script:G.Bundle 'cleanup.json'
   $rec = [ordered]@{
@@ -775,15 +844,48 @@ function Get-TrackedMission {
     return $null
   } else {
     $snap = Read-AutonomySnapshot
-    if (-not $snap.ok) { return $null }
-    $m = Find-PersistedMission $snap $L.missionId
-    if ($m -and $m.state -ne $null) {
-      $dl = $m.deliverable
-      if ($wsText.Length -gt $dl.Length) { $dl = $wsText }
-      return [pscustomobject]@{ id = $m.id; state = $m.state; deliverableLen = $dl.Length; deliverable = $dl; pressure = $m.pressure; source = 'persisted autonomy_state+workspace' }
+    if ($snap.ok) {
+      $m = Find-PersistedMission $snap $L.missionId
+      if ($m -and $m.state -ne $null) {
+        $dl = $m.deliverable
+        if ($wsText.Length -gt $dl.Length) { $dl = $wsText }
+        return [pscustomobject]@{ id = $m.id; state = $m.state; deliverableLen = $dl.Length; deliverable = $dl; pressure = $m.pressure; source = 'persisted autonomy_state+workspace' }
+      }
     }
-    return $null
+    # the persisted snapshot keeps only the last-64 FINISHED missions, keyed by
+    # map order (id-sorted), so a finished probe can be pruned out of the file.
+    # Fall back to the authoritative in-memory container (throttled).
+    return (Find-MissionAuthoritative $L.baseUrl $L.missionId)
   }
+}
+
+function Find-MissionAuthoritative([string]$baseUrl, [string]$missionId) {
+  $now = Get-Date
+  if ($script:G.LastAuthMissionLookup -and (($now - [datetime]$script:G.LastAuthMissionLookup).TotalSeconds -lt 15)) {
+    return $script:G.LastAuthMissionResult
+  }
+  $script:G.LastAuthMissionLookup = $now
+  $ac = Get-AuthoritativeMissionCounts $baseUrl
+  if (-not $ac.ok) { $script:G.LastAuthMissionResult = $null; return $null }
+  $script:G.LastAuthoritative = $ac
+  $result = $null
+  foreach ($m in $ac.missions) {
+    if ([string](Get-Prop $m 'id') -eq $missionId) {
+      $stats = Get-Prop $m 'stats'
+      $mission = Get-Prop $stats 'mission'
+      $dl = [string](Get-Prop $mission 'deliverable' '')
+      $wsText = Get-WorkspaceDeliverable $missionId
+      if ($wsText.Length -gt $dl.Length) { $dl = $wsText }
+      $result = [pscustomobject]@{
+        id = $missionId; state = Get-Prop $mission 'state'
+        deliverableLen = $dl.Length; deliverable = $dl
+        pressure = Get-Prop $stats 'pressure'; source = 'live/api/mission/status (authoritative)'
+      }
+      break
+    }
+  }
+  $script:G.LastAuthMissionResult = $result
+  return $result
 }
 
 function Start-Lifecycle {
@@ -967,7 +1069,7 @@ function Get-Sample([int]$seq) {
     gwPid = 0; gwRssMB = $null; gwThreads = $null; gwCpuPct = $null; gwTick = $false; gwListenerZombie = $false
     zombieCount = 0
     llamaProcCount = 0; llamaRssMB = 0
-    crashesTotal = 0; restartsTotal = 0; pidChangesTotal = 0
+    crashesTotal = 0; werCrashesTotal = 0; fatalRuntimeCrashesTotal = 0; restartsTotal = 0; pidChangesTotal = 0
     slotBusyTotal = 0; slotBusyDelta = 0; logRotations = 0
     missionRunning = $null; missionFinishedRecent = $null; missionCompletedExact = $null; missionCountsSource = ''
     expertAgeMin = $null; expertChanged = $false
@@ -1032,13 +1134,22 @@ function Get-Sample([int]$seq) {
   $s.logRotations = $G.LogRotations.Count
 
   # --- crashes / restarts -------------------------------------------------
-  $newCrashes = Scan-NewCrashes
+  # Two evidence channels, because the gateway SEH filter swallows ordinary
+  # faults before WER (see Scan-FatalRuntime):
+  #   (a) WER Application Error Id=1000 -> fail-fast codes (e.g. heap corruption)
+  #   (b) runtime_store/logs/fatal_runtime.log "unhandled exception" -> SEH faults
+  $newCrashes = @()
+  $newCrashes += Scan-NewCrashes
+  $newCrashes += Scan-FatalRuntime
   foreach ($c in $newCrashes) {
-    Log "CRASH DETECTED: $($c.appName) pid=$($c.faultingPid) code=$($c.exceptionCode) at $($c.timeLocal)" 'ERROR'
+    $kindLabel = if ($c.PSObject.Properties['kind']) { $c.kind } else { 'wer' }
+    Log "CRASH DETECTED ($kindLabel): $($c.appName) code=$($c.exceptionCode) at $($c.timeLocal)" 'ERROR'
     $notes += 'CRASH'
     Invoke-Forensics $c | Out-Null
   }
   $s.crashesTotal = $G.Crashes.Count
+  $s.werCrashesTotal = @($G.Crashes | Where-Object { $_.kind -eq 'wer_application_error' }).Count
+  $s.fatalRuntimeCrashesTotal = @($G.Crashes | Where-Object { $_.kind -eq 'fatal_runtime_seh' }).Count
   $s.restartsTotal = $G.Counters.wrapperStarted
   $s.pidChangesTotal = $G.PidChanges
 
@@ -1188,10 +1299,12 @@ function Build-Criteria {
   $lifecycleSteps = @($L.steps | ForEach-Object { $_.stage })
   $stepsOk = (@('assign', 'running', 'work', 'report', 'completed') | Where-Object { $lifecycleSteps -notcontains $_ }).Count -eq 0
   $gpuOkSamples = @($samples | Where-Object { $_.gpuOk }).Count
+  $werCrashCount = @($script:G.Crashes | Where-Object { $_.kind -eq 'wer_application_error' }).Count
+  $fatalRuntimeCount = @($script:G.Crashes | Where-Object { $_.kind -eq 'fatal_runtime_seh' }).Count
   $checks = @()
   $checks += [ordered]@{
-    id = 'C1_no_crash'; ok = ($crashes -eq 0); value = "crashEvents=$crashes"; threshold = '0 WER crash events during run'
-    note = 'WER Application Error (Id 1000) for phoenix_main/llama-server/sidecar during the run window'
+    id = 'C1_no_crash'; ok = ($crashes -eq 0); value = "crashEvents=$crashes (wer=$werCrashCount fatalRuntime=$fatalRuntimeCount)"; threshold = '0 crash events: WER Id=1000 + fatal_runtime.log unhandled exceptions'
+    note = 'WER Application Error Id=1000 AND runtime_store/logs/fatal_runtime.log unhandled-exception lines for phoenix_main/llama-server/sidecar'
   }
   $checks += [ordered]@{
     id = 'C2_up_rate'; ok = ($upRate -ge 0.99); value = "$($upCount)/$n = $upRate"; threshold = '>= 0.99'
@@ -1329,6 +1442,8 @@ function Write-Summary {
       llamaRssMBLast = if ($n -gt 0) { $samples[-1].llamaRssMB } else { $null }
       zombieImages = [ordered]@{ min = $zombieMin; max = $zombieMax; last = @($G.LastZombies); note = 'WS<100MB and 0 threads; excluded from gateway identity/up-rate' }
       crashEvents = $G.Crashes.Count
+      crashEventsWer = @($G.Crashes | Where-Object { $_.kind -eq 'wer_application_error' }).Count
+      crashEventsFatalRuntime = @($G.Crashes | Where-Object { $_.kind -eq 'fatal_runtime_seh' }).Count
       restartEvents = $G.RestartEvents.Count; wrapperRestarts = $G.Counters.wrapperStarted; pidChanges = $G.PidChanges
       slotBusyEvents = $G.Counters.slotBusy
       missionLlmFailures = $G.Counters.missionLlmFail
@@ -1337,7 +1452,15 @@ function Write-Summary {
         persistedRunningAtEnd = if ($n -gt 0) { $samples[-1].missionRunning } else { $null }
         persistedRecentlyFinishedAtEnd = if ($n -gt 0) { $samples[-1].missionFinishedRecent } else { $null }
         authoritativeCompletedAtEnd = $crit.lifecycleCompleted
-        authoritativeLast = $G.LastAuthoritative
+        # counts only: the raw /api/mission/status container holds ~10k missions
+        # and must never be embedded in summary.json (it would be tens of MB)
+        authoritativeLast = if ($G.LastAuthoritative) {
+          [ordered]@{
+            running = $G.LastAuthoritative.running; completed = $G.LastAuthoritative.completed
+            failed = $G.LastAuthoritative.failed; idle = $G.LastAuthoritative.idle
+            total = $G.LastAuthoritative.total; httpMs = $G.LastAuthoritative.ms; sampledAt = NowIso
+          }
+        } else { $null }
       }
       expertWeights = [ordered]@{ path = 'runtime_store/experts/study_tiny/weights.json'; lastMtime = $G.ExpertMtime; updatesDuringRun = $G.ExpertChanges }
       population = [ordered]@{ goalsRunStart = $G.GoalsRunStart; goalsRunEnd = $G.GoalsRunEnd; goalsRunDelta = $G.GoalsRunDelta }
@@ -1422,7 +1545,7 @@ function Write-Summary {
   $md += "| gateway RSS first / last / max | $(if ($gwRss.Count) { $gwRss[0] }) / $(if ($gwRss.Count) { $gwRss[-1] }) / $(if ($gwRss.Count) { ($gwRss | Measure-Object -Maximum).Maximum }) MB | growth is a watch item, not a criterion |"
   $md += "| llama-server RSS (last) | $($samples[-1].llamaRssMB) MB over $($samples[-1].llamaProcCount) procs | 8B + coder + granite |"
   $md += "| zombie phoenix_main images | min $zombieMin / max $zombieMax | 0-thread ~32KB images; excluded from identity/up-rate |"
-  $md += "| WER crash events | $($G.Crashes.Count) | 0 required |"
+  $md += "| crash events (WER + fatal_runtime) | $($G.Crashes.Count) (wer=$(($G.Crashes | Where-Object { $_.kind -eq 'wer_application_error' }).Count) fatalRuntime=$(($G.Crashes | Where-Object { $_.kind -eq 'fatal_runtime_seh' }).Count)) | 0 required; two channels (see Forensics hook) |"
   $md += "| wrapper restarts / pid changes | $($G.Counters.wrapperStarted) / $($G.PidChanges) | restarts reset the exposure clock |"
   $md += "| llama slot-wait failures (`llama-slot-busy`) | $($G.Counters.slotBusy) | informational; expected under slot contention |"
   $md += "| mission LLM failures | $($G.Counters.missionLlmFail) | informational |"
@@ -1441,7 +1564,7 @@ function Write-Summary {
   $md += ''
   $md += "### Why these criteria"
   $md += ''
-  $md += "- **C1 0 crashes**: a crash is the only unambiguous stability failure. WER Application Error (Id 1000) for phoenix_main / llama-server / the sidecar inside the run window. Zero events bounds the rate (lambda 95% upper = 3/exposure) - it never proves absence."
+  $md += "- **C1 0 crashes**: a crash is the only unambiguous stability failure. Two channels are required because the gateway's in-process SEH filter swallows ordinary access violations: WER Application Error Id=1000 (fail-fast codes such as 0xC0000374) AND ``runtime_store/logs/fatal_runtime.log`` unhandled-exception lines (0xC0000005 etc.). Zero events bounds the rate (lambda 95% upper = 3/exposure) - it never proves absence."
   $md += "- **C2 up-rate >= 99%**: the gateway must serve almost every 60s probe. 99% allows ~1 missed sample per 100 (~1.8 in a 3h run) for a legitimate stall, while a dead gateway shows immediately. Identity is the :port listener only when RSS>=100MB; the ~7 zero-thread 32KB zombie images are excluded."
   $md += "- **C3 no >2 consecutive misses**: the gateway_loop only kills an unresponsive gateway after 5 consecutive unhealthy minutes, so a 3-miss (>=3 min at default interval) run would be relying on the wrapper to mask a dead gateway."
   $md += "- **C4 >=1 mission Completed**: proves the mission state machine reaches Completed through the harness-driven lifecycle (assign -> work -> report/complete). If it cannot, the summary states why."
@@ -1485,13 +1608,15 @@ function Write-Summary {
   $md += ''
   $md += "## Forensics hook"
   $md += ''
+  $md += "Two crash-evidence channels are scanned every sample: WER ``Application`` Id=1000 (fail-fast codes such as 0xC0000374) and ``runtime_store/logs/fatal_runtime.log`` unhandled-exception lines (ordinary SEH faults such as 0xC0000005 are swallowed by the gateway's own in-process filter and never reach WER)."
+  $md += ''
   if ($G.Crashes.Count -eq 0) {
-    $md += "No WER crash events during this run, so the dump resolver was not invoked."
+    $md += "No crash events on either channel during this run, so the dump resolver was not invoked."
   } else {
-    $md += "| crash | app / pid | exception | dump path | resolve report |"
+    $md += "| crash (channel) | app / pid | exception | dump path | resolve report |"
     $md += "|---|---|---|---|---|"
     foreach ($c in $G.Crashes) {
-      $md += "| $($c.time) | $($c.appName) / $($c.faultingPid) | $($c.exceptionCode) | $(if ($c.dumpPath) { $c.dumpPath } else { '(none)' }) | $(if ($c.resolveReport) { $c.resolveReport } else { '(none)' }) |"
+      $md += "| $($c.time) ($($c.kind)) | $($c.appName) / $($c.faultingPid) | $($c.exceptionCode) | $(if ($c.dumpPath) { $c.dumpPath } else { '(none)' }) | $(if ($c.resolveReport) { $c.resolveReport } else { '(none)' }) |"
     }
   }
   if ($G.ForensicsGaps.Count -gt 0) {
@@ -1592,7 +1717,7 @@ $G = @{
   JsonlPath = (Join-Path $bundle 'samples.jsonl')
   Samples = [System.Collections.Generic.List[object]]::new()
   Errors = @()
-  Crashes = @(); CrashIds = @{}; RestartEvents = @(); ForensicsGaps = @()
+  Crashes = @(); CrashIds = @{}; FatalRuntimeSeen = @{}; RestartEvents = @(); ForensicsGaps = @()
   LogOffsets = @{}; LogRotations = @(); Counters = [ordered]@{
     slotBusy = 0; missionLlmFail = 0; wrapperStarted = 0; wrapperExited = 0; wrapperUnresponsive = 0
     supGatewayRestarts = 0; supLlamaRestarts = 0; trainRounds = 0; mmluRuns = 0
@@ -1602,6 +1727,7 @@ $G = @{
   PidChanges = 0
   LastZombies = @()
   LastSnapshot = $null; LastAuthoritative = $null; NextAuthoritativeAt = (Get-Date)
+  LastAuthMissionLookup = $null; LastAuthMissionResult = $null
   ExpertMtime = $null; ExpertChanges = 0; GoalsRunStart = $null; GoalsRunEnd = $null; GoalsRunDelta = 0
   MmluBaselineLines = 0
   Build = [ordered]@{}
@@ -1692,6 +1818,11 @@ try {
     $fp = Join-Path $runDir $f
     if (Test-Path $fp) { $G.LogOffsets[$f] = (Get-Item $fp).Length } else { $G.LogOffsets[$f] = 0 }
   }
+  # crash channel (b): the gateway's SEH-swallowed faults are only visible here
+  $fatalLog = Join-Path $G.Repo 'runtime_store\logs\fatal_runtime.log'
+  $G.LogOffsets['fatal_runtime.log'] = if (Test-Path $fatalLog) { (Get-Item $fatalLog).Length } else { 0 }
+  $G.FatalOffsetBaseline = $G.LogOffsets['fatal_runtime.log']
+  Log "baseline log offsets: gateway.log=$($G.LogOffsets['gateway.log']) fatal_runtime.log=$($G.LogOffsets['fatal_runtime.log'])"
   $ac0 = Get-AuthoritativeMissionCounts $G.LiveUrl
   if ($ac0.ok) {
     $G.LastAuthoritative = $ac0
@@ -1705,12 +1836,18 @@ try {
   Start-Lifecycle
 
   # ---- sampling loop ---------------------------------------------------
+  # Schedule is drift-corrected: samples are taken at t0 + (seq-1)*interval,
+  # and if a lifecycle HTTP call delays a sample the next one is taken
+  # immediately. The loop runs until the EXPECTED sample count is collected
+  # (hard-capped at planned + grace) so the evidence density stays honest even
+  # when the gateway makes one call slow.
   $G.SamplingStart = Get-Date
   $G.PrevSampleAt = $G.SamplingStart
-  Log "sampling: interval=${IntervalSec}s minutes=$Minutes expected=$([int][math]::Floor($Minutes * 60 / $IntervalSec) + 1) samples"
-  $deadline = $G.SamplingStart.AddMinutes($Minutes)
+  $expectedSamples = [int][math]::Floor($Minutes * 60 / $IntervalSec) + 1
+  $hardStop = $G.SamplingStart.AddMinutes($Minutes).AddSeconds([math]::Max(120, $IntervalSec * 2))
+  Log "sampling: interval=${IntervalSec}s minutes=$Minutes expected=$expectedSamples samples (hard stop $($hardStop.ToString('HH:mm:ss')))"
   $seq = 0
-  while ((Get-Date) -lt $deadline) {
+  while ($G.Samples.Count -lt $expectedSamples -and (Get-Date) -lt $hardStop) {
     $seq++
     $expectedAt = $G.SamplingStart.AddSeconds(($seq - 1) * $IntervalSec)
     $waitMs = [int](($expectedAt - (Get-Date)).TotalMilliseconds)
@@ -1730,14 +1867,19 @@ try {
       Log "sample $($seq) failed: $($_.Exception.Message)" 'ERROR'
     }
     $G.PrevSampleAt = Get-Date
-    if ((Get-Date) -ge $deadline) { break }
   }
-  Log "sampling complete: $($G.Samples.Count) samples"
+  Log "sampling complete: $($G.Samples.Count)/$expectedSamples samples"
 
   # ---- finalize --------------------------------------------------------
   Finalize-Lifecycle
-  # one last crash scan (events between the last sample and now)
-  foreach ($c in (Scan-NewCrashes)) { Log "CRASH DETECTED at finalize: $($c.appName) pid=$($c.faultingPid)" 'ERROR'; Invoke-Forensics $c | Out-Null }
+  # one last crash scan (events between the last sample and now), both channels
+  $finalCrashes = @()
+  $finalCrashes += Scan-NewCrashes
+  $finalCrashes += Scan-FatalRuntime
+  foreach ($c in $finalCrashes) {
+    Log "CRASH DETECTED at finalize: $($c.appName) code=$($c.exceptionCode)" 'ERROR'
+    Invoke-Forensics $c | Out-Null
+  }
   $acEnd = Get-AuthoritativeMissionCounts $G.LiveUrl
   if ($acEnd.ok) { $G.LastAuthoritative = $acEnd; Log "final missions: running=$($acEnd.running) completed=$($acEnd.completed) failed=$($acEnd.failed) total=$($acEnd.total)" }
   $snapEnd = Read-AutonomySnapshot
@@ -1769,7 +1911,7 @@ try {
             gpuUtilMean = $_.gpuUtilMean; gpuUtilMax = $_.gpuUtilMax; gpuMemUsedMB = $_.gpuMemUsedMB; gpuTempC = $_.gpuTempC
             gwPid = $_.gwPid; gwRssMB = $_.gwRssMB; gwThreads = $_.gwThreads; gwCpuPct = $_.gwCpuPct; gwTick = $_.gwTick
             zombieCount = $_.zombieCount; llamaProcCount = $_.llamaProcCount; llamaRssMB = $_.llamaRssMB
-            crashesTotal = $_.crashesTotal; restartsTotal = $_.restartsTotal; pidChangesTotal = $_.pidChangesTotal
+            crashesTotal = $_.crashesTotal; werCrashesTotal = $_.werCrashesTotal; fatalRuntimeCrashesTotal = $_.fatalRuntimeCrashesTotal; restartsTotal = $_.restartsTotal; pidChangesTotal = $_.pidChangesTotal
             slotBusyTotal = $_.slotBusyTotal; slotBusyDelta = $_.slotBusyDelta; logRotations = $_.logRotations
             missionRunning = $_.missionRunning; missionFinishedRecent = $_.missionFinishedRecent
             missionCompletedExact = $_.missionCompletedExact; missionCountsSource = $_.missionCountsSource
