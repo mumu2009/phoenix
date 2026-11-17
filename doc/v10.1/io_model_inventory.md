@@ -6,12 +6,32 @@ Status: verified 2026-11-17 against the **live** tree `E:\079\v6.0Alixander\phoe
 August copies and were not used).
 Line references are `file:line` inside `phoenix/`.
 
+> **Naming correction (user directive, 2026-11-17).** These are **llava / ResNet-modified
+> in-house models, NOT the Meta I-JEPA series**. The directory names `additive_jepa/` and
+> `ijepa/` are **legacy labels** kept for path compatibility; they do not identify the model
+> family. "I-JEPA" below refers only to (a) a legacy directory name, or (b) historical
+> variant ids in `video_model.hpp` that have **no local weights and are never used**.
+> What each shipped checkpoint actually is:
+
+| Artifact | What it actually is (verified from I/O + manifests) |
+|---|---|
+| `additive_jepa/vision_encoder/best.onnx` (54.6 MB) | in-house vision concept encoder, `pixel_values [1,3,224,224] → concept [1,128,1,1]` (128-d). Legacy directory name only. |
+| `additive_jepa/vision_decoder/best.onnx` (10.4 MB) | in-house image decoder, `concept [1,128,1,1] → reconstruction [1,3,224,224]` |
+| `additive_jepa/speech_encoder/best.onnx` (4.9 MB) | in-house 1D speech/audio concept encoder, `waveform [batch,1,1,16000] → concept [batch,128,1,1]` (16 kHz) |
+| `additive_jepa/speech_decoder/best.onnx` (15.0 MB) | in-house 1D speech/audio decoder, `concept [128] → reconstruction [15872]` |
+| `ijepa/resnet18_224/model_encoder.onnx` (32.1 MB) | in-house **ResNet18-modified** encoder, `pixel_values [1,3,224,224] → pooled [1,512,1,1]` |
+| `ijepa/resnet18_224/encoder_head.json` (1.46 MB) | linear projection head **of the ResNet18-modified encoder**, 512→128 (`W[128,512]+b[128]`) |
+| `ijepa/resnet18_224/model_decoder.onnx` (13.4 MB) | 128-d concept image decoder (ResNet pipeline companion) |
+| `ijepa/speech_16k/*` | in-house 1D speech autoencoder pair, 16 kHz, 128-d concept (legacy directory name) |
+| `multimodal_enc_src/llava-1.5-7b-hf`, `Qwen2-Audio-7B-Instruct` | **llava-based** in-house integration weights (partial 7B downloads, unused) |
+| Meta I-JEPA ViT-H/G variant ids (`ijepa_vith14_1k`, …) | historical registry entries only — no local weights, never loaded |
+
 ## 0. Executive summary (the honest version)
 
 | # | Finding | Consequence |
 |---|---------|-------------|
-| 1 | The **live image IO path** is the additive-JEPA pair `runtime_store/models/additive_jepa/vision_encoder/best.onnx` (128-d concept) + `.../vision_decoder/best.onnx`. It is reached through `VideoLocalOnnxModel` because `config/phoenix.json` pins `model_deployment.vision.localBackend="cpu"`. | This ONNX encoder (not the I-JEPA ViT checkpoints, not the BPU `.bin` files) is what actually runs on this host. |
-| 2 | The **live audio IO path** is `runtime_store/models/additive_jepa/speech_encoder/best.onnx` (16 kHz, 16 000 samples → 128-d) + `.../speech_decoder/best.onnx` (128 → 15 872 samples), through `AudioLocalOnnxModel`. | Same: ONNX + one-shot python runner, not the BPU engine. |
+| 1 | The **live image IO path** is the in-house vision concept-encoder pair (`runtime_store/models/additive_jepa/vision_encoder/best.onnx`, 128-d + `.../vision_decoder/best.onnx`; `additive_jepa/` is a **legacy directory name**). It is reached through `VideoLocalOnnxModel` because `config/phoenix.json` pins `model_deployment.vision.localBackend="cpu"`. | This ONNX encoder (not the registered Meta-I-JEPA variant ids, not the BPU `.bin` files) is what actually runs on this host. |
+| 2 | The **live audio IO path** is the in-house 1D speech concept-encoder pair (`additive_jepa/speech_encoder/best.onnx`, 16 kHz, 16 000 samples → 128-d + `speech_decoder/best.onnx`, 128 → 15 872 samples), through `AudioLocalOnnxModel`. | Same: ONNX + one-shot python runner, not the BPU engine. |
 | 3 | The **`encoder_head.json` (512→128) artifact is dead code**. It is exported by `.remote_ref/train_video.py` / `.remote_ref/export_multimodal.py` together with `model_encoder_head.onnx`, but **no file in the current source tree reads it** (verified by scanning all `.cpp/.hpp/.inc/.py/.ps1/.sh/.bat` under `phoenix/` excluding `build/`, `outsides/`, `runtime_store/`). It belongs to the `resnet18_224` pipeline. | Training a "head" therefore has to be *new* work on the live 128-d concept space; the old artifact is only useful as a format precedent. |
 | 4 | The `resnet18_224` pipeline is **unreachable in the current source**: `resolveOnnxModelPath()` only looks for `best.onnx` / `model.onnx`, but that directory ships `model_encoder.onnx` / `model_decoder.onnx` (`video_model.cpp:89-105`). The files are otherwise intact. | `resnet18_224` is an archive/reference pipeline; do not claim it is live. |
 | 5 | The local **video HBDNN/BPU encode is a stub** (`VideoHbdnnModel::encode()` returns `"BPU image encoder preprocessing is not implemented in this build"`, `video_model.cpp:732-743`). The audio HBDNN path **is** implemented via `rdk_x5_bpu::execute()` (`audio_model.cpp:473-527`). | On RDK X5 the audio path can use BPU; the image BPU path would still need preprocessing code. On this host `hbDNN` is unavailable, so both fall back to ONNX/CPU. |
@@ -24,23 +44,23 @@ Line references are `file:line` inside `phoenix/`.
 
 | Artifact | Path under `runtime_store/models/` | Format | Input → Output (fp32) | Bytes | Loaded by current source? |
 |---|---|---|---|---|---|
-| Additive-JEPA vision encoder | `additive_jepa/vision_encoder/best.onnx` | ONNX opset 11 | `pixel_values [1,3,224,224]` → `concept [1,128,1,1]` | 54 612 965 | **YES** – `VideoLocalOnnxModel` (`video_model.cpp:457-503`) via `resolveOnnxModelPath("encoder", "vision_encoder")` |
-| Additive-JEPA vision decoder | `additive_jepa/vision_decoder/best.onnx` | ONNX | `concept [1,128,1,1]` → `reconstruction [1,3,224,224]` | 10 444 866 | **YES for `decode()`** – bridge decode path (`autonomy_stack.cpp:4349`); `VideoLocalOnnxModel::decode` at `video_model.cpp:530-549` |
-| Additive-JEPA vision encoder (BPU) | `additive_jepa/vision_encoder/best.bin` | Horizon `.bin` (`hb_mapper`, bayes-e) | same 3×224×224 → 128 | 14 358 479 | Only on RDK X5 and only if `detectLocalBackend()` returns Bpu; encode stub prevents actual use (`video_model.cpp:807-832`, `:732-743`) |
-| Additive-JEPA vision decoder (BPU) | `additive_jepa/vision_decoder/best.bin` | Horizon `.bin` | 128 → 3×224×224 | 6 939 747 | Same as above |
-| ResNet18 encoder | `ijepa/resnet18_224/model_encoder.onnx` | ONNX opset 11 | `pixel_values [1,3,224,224]` → `pooled [1,512,1,1]` | 32 146 521 | **NO** – not matched by `resolveOnnxModelPath` names `{best.onnx, model.onnx}` |
-| ResNet18 projection head | `ijepa/resnet18_224/model_encoder_head.onnx` | ONNX (1× Conv2d 1×1) | `pooled [1,512,1,1]` → `concept [1,128,1,1]` | 262 951 | **NO** – no reader in source |
-| ResNet18 head weights | `ijepa/resnet18_224/encoder_head.json` | JSON `{inDim:512, outDim:128, W:65536 floats, b:128}` | linear 512→128 | 1 456 019 | **NO** – exported by `extract_head.py` for a BPU-era loader that no longer exists | 
-| ResNet18 decoder | `ijepa/resnet18_224/model_decoder.onnx` | ONNX | `concept [1,128,1,1]` → `reconstruction [1,3,224,224]` | 13 381 131 | **NO** |
-| ResNet18 decoder (trained variant) | `ijepa/resnet18_224/model_decoder_trained.onnx` | ONNX | same | 13 380 761 | **NO** |
-| ResNet18 BPU encoder/decoder | `ijepa/resnet18_224/model_encoder.bin`, `model_decoder.bin` | Horizon `.bin` | 224 → 512 / 128 → 224 | 8 325 447 / 3 606 699 | Only as `jepa.image.horizonModel` override on a BPU box; encode stub again makes this non-functional |
+| In-house vision concept encoder (legacy dir `additive_jepa/`) | `additive_jepa/vision_encoder/best.onnx` | ONNX opset 11 | `pixel_values [1,3,224,224]` → `concept [1,128,1,1]` | 54 612 965 | **YES** – `VideoLocalOnnxModel` (`video_model.cpp:457-503`) via `resolveOnnxModelPath("encoder", "vision_encoder")` |
+| In-house vision decoder | `additive_jepa/vision_decoder/best.onnx` | ONNX | `concept [1,128,1,1]` → `reconstruction [1,3,224,224]` | 10 444 866 | **YES for `decode()`** – bridge decode path (`autonomy_stack.cpp:4349`); `VideoLocalOnnxModel::decode` at `video_model.cpp:530-549` |
+| In-house vision encoder (BPU) | `additive_jepa/vision_encoder/best.bin` | Horizon `.bin` (`hb_mapper`, bayes-e) | same 3×224×224 → 128 | 14 358 479 | Only on RDK X5 and only if `detectLocalBackend()` returns Bpu; encode stub prevents actual use (`video_model.cpp:807-832`, `:732-743`) |
+| In-house vision decoder (BPU) | `additive_jepa/vision_decoder/best.bin` | Horizon `.bin` | 128 → 3×224×224 | 6 939 747 | Same as above |
+| In-house ResNet18-modified encoder | `ijepa/resnet18_224/model_encoder.onnx` | ONNX opset 11 | `pixel_values [1,3,224,224]` → `pooled [1,512,1,1]` | 32 146 521 | **NO** – not matched by `resolveOnnxModelPath` names `{best.onnx, model.onnx}` |
+| ResNet18-modified projection head | `ijepa/resnet18_224/model_encoder_head.onnx` | ONNX (1× Conv2d 1×1) | `pooled [1,512,1,1]` → `concept [1,128,1,1]` | 262 951 | **NO** – no reader in source |
+| ResNet18-modified head weights | `ijepa/resnet18_224/encoder_head.json` | JSON `{inDim:512, outDim:128, W:65536 floats, b:128}` | linear 512→128 | 1 456 019 | **NO** – exported by `extract_head.py` for a BPU-era loader that no longer exists | 
+| ResNet18-modified image decoder | `ijepa/resnet18_224/model_decoder.onnx` | ONNX | `concept [1,128,1,1]` → `reconstruction [1,3,224,224]` | 13 381 131 | **NO** |
+| ResNet18-modified decoder (trained variant) | `ijepa/resnet18_224/model_decoder_trained.onnx` | ONNX | same | 13 380 761 | **NO** |
+| ResNet18-modified BPU encoder/decoder | `ijepa/resnet18_224/model_encoder.bin`, `model_decoder.bin` | Horizon `.bin` | 224 → 512 / 128 → 224 | 8 325 447 / 3 606 699 | Only as `jepa.image.horizonModel` override on a BPU box; encode stub again makes this non-functional |
 | ResNet18 head export script | `ijepa/resnet18_224/extract_head.py` | Python | reads `model_encoder_head.onnx` → writes `encoder_head.json` | 638 | tool only |
 
 ### 1.2 Variant registry and factory selection (code truth)
 
 - Official variant list: `video_model.hpp:143-157`. Note that the first two entries are
-  **not** Meta I-JEPA checkpoints: `resnet18_224` (timm ResNet18, 224 px) and
-  `video-encoder` (additive-JEPA, `best.onnx` in `additive_jepa/vision_encoder`).
+  **not** Meta I-JEPA checkpoints: `resnet18_224` (in-house ResNet18-modified, 224 px) and
+  `video-encoder` (in-house concept encoder, `best.onnx` in `additive_jepa/vision_encoder`).
   The Meta ViT-H/G entries (`ijepa_vith14_1k`, `ijepa_vith16_448`, `ijepa_vith14_22k`,
   `ijepa_vitg16_22k`) have **no local weights** in this tree.
 - Live config: `config/phoenix.json:773-780` → `jepa.image.variant="video-encoder"`,
@@ -91,13 +111,13 @@ The one-shot python runner is a per-call process spawn
 
 | Artifact | Path under `runtime_store/models/` | Format | Input → Output (fp32) | Bytes | Loaded by current source? |
 |---|---|---|---|---|---|
-| Additive-JEPA speech encoder | `additive_jepa/speech_encoder/best.onnx` | ONNX | `waveform [batch,1,1,16000]` → `concept [batch,128,1,1]` | 4 936 265 | **YES** – `AudioLocalOnnxModel` (`audio_model.cpp:1101-1139`) via `variant "audio-encoder"` → `speech_encoder` (`audio_model.cpp:41-48`) |
-| Additive-JEPA speech decoder | `additive_jepa/speech_decoder/best.onnx` | ONNX | `concept [batch,128,1,1]` → `reconstruction [batch,1,1,15872]` | 15 012 860 | **YES for `decode()`** (`audio_model.cpp:1181+`) |
-| Additive-JEPA speech encoder (BPU) | `additive_jepa/speech_encoder/best.bin` | Horizon `.bin` | 16 000 → 128 | 1 378 652 | RDK X5 only (`AudioHbdnnModel`, `audio_model.cpp:134-527`) |
-| Additive-JEPA speech decoder (BPU) | `additive_jepa/speech_decoder/best.bin` | Horizon `.bin` | 128 → 15 872 | 8 034 486 | RDK X5 only |
-| Legacy speech JEPA encoder | `ijepa/speech_16k/model_encoder.onnx` | ONNX | `waveform [1,1,1,16000]` → `concept [1,128]` | 823 873 | Variant `audio-16k` → `speech_16k`; `resolveOnnxModelPath` would need `best.onnx`/`model.onnx`, so **NO** in current source (same naming trap as ResNet18) |
-| Legacy speech JEPA decoder | `ijepa/speech_16k/model_decoder.onnx` | ONNX | `concept [1,128,1,1]` → `reconstruction [1,1,1,15872]` | 8 883 222 | **NO** (name not matched) |
-| Legacy speech JEPA BPU pair | `ijepa/speech_16k/model_encoder.bin`, `model_decoder.bin` | Horizon `.bin` | 16 000 → 128 / 128 → 15 872 | 527 195 / 8 651 378 | RDK X5 only, via `jepa.speech.horizonModel` (`config/phoenix.json:785-790`); `AudioHbdnnModel` is implemented and would run it there |
+| In-house speech concept encoder (legacy dir `additive_jepa/`) | `additive_jepa/speech_encoder/best.onnx` | ONNX | `waveform [batch,1,1,16000]` → `concept [batch,128,1,1]` | 4 936 265 | **YES** – `AudioLocalOnnxModel` (`audio_model.cpp:1101-1139`) via `variant "audio-encoder"` → `speech_encoder` (`audio_model.cpp:41-48`) |
+| In-house speech decoder | `additive_jepa/speech_decoder/best.onnx` | ONNX | `concept [batch,128,1,1]` → `reconstruction [batch,1,1,15872]` | 15 012 860 | **YES for `decode()`** (`audio_model.cpp:1181+`) |
+| In-house speech encoder (BPU) | `additive_jepa/speech_encoder/best.bin` | Horizon `.bin` | 16 000 → 128 | 1 378 652 | RDK X5 only (`AudioHbdnnModel`, `audio_model.cpp:134-527`) |
+| In-house speech decoder (BPU) | `additive_jepa/speech_decoder/best.bin` | Horizon `.bin` | 128 → 15 872 | 8 034 486 | RDK X5 only |
+| In-house speech encoder (legacy dir `ijepa/speech_16k/`) | `ijepa/speech_16k/model_encoder.onnx` | ONNX | `waveform [1,1,1,16000]` → `concept [1,128]` | 823 873 | Variant `audio-16k` → `speech_16k`; `resolveOnnxModelPath` would need `best.onnx`/`model.onnx`, so **NO** in current source (same naming trap as ResNet18) |
+| In-house speech decoder (legacy dir `ijepa/speech_16k/`) | `ijepa/speech_16k/model_decoder.onnx` | ONNX | `concept [1,128,1,1]` → `reconstruction [1,1,1,15872]` | 8 883 222 | **NO** (name not matched) |
+| In-house speech BPU pair (legacy dir `ijepa/speech_16k/`) | `ijepa/speech_16k/model_encoder.bin`, `model_decoder.bin` | Horizon `.bin` | 16 000 → 128 / 128 → 15 872 | 527 195 / 8 651 378 | RDK X5 only, via `jepa.speech.horizonModel` (`config/phoenix.json:785-790`); `AudioHbdnnModel` is implemented and would run it there |
 | Manifest | `ijepa/speech_16k/model.manifest.json` | JSON | documents `waveform [1,1,1,16000]`, `concept [1,128]`, rate 16 kHz, 15 872 decoder samples | 1 825 | read only for metadata, by tools |
 
 There is **no separate audio projection head artifact** in any variant: the audio
@@ -144,9 +164,9 @@ WAV bytes -> preprocessAudio (resample 16k mono, audio_model.cpp:413-445)
 | Service log | `runtime_store/logs/multimodal_encdec_server.log` (151 B, last written 2026-08-11) | stale |
 
 The bridge (`MixedModalConceptBridge`) does **not** call these classes; its image/audio
-branches call the additive-JEPA `VideoModel`/`AudioModel` interfaces instead
+branches call the in-house `VideoModel`/`AudioModel` interfaces instead
 (`external_mixed_modal_io.cpp:956-985`). The doc comment in `external_mixed_modal_io.cpp:915-918`
-still says "external LLaVA-based image world model" – stale comment, code is additive-JEPA.
+still says "external LLaVA-based image world model" – stale comment; the code path is the in-house concept encoder (legacy dir `additive_jepa/`).
 
 ## 4. Other model artifacts in the tree (not IO runtime)
 

@@ -4,6 +4,14 @@ Status: implemented and executed 2026-11-17 22:12–22:17 (+08:00) on the live h
 **without touching the live gateway, the 3 llama-servers, or `compile.bat`**.
 Inventory that this document builds on: `doc/v10.1/io_model_inventory.md`.
 
+> **Naming correction (user directive, 2026-11-17).** The shipped models are
+> **llava / ResNet-modified in-house models, NOT the Meta I-JEPA series**. The
+> `additive_jepa/` and `ijepa/` directory names are **legacy path labels**. In this
+> document "encoder" means the in-house 128-d vision concept encoder /
+> in-house 1D speech concept encoder (both under the legacy `additive_jepa/` prefix),
+> and "resnet" means the in-house ResNet18-modified 512-d encoder under the legacy
+> `ijepa/resnet18_224/` prefix. See inventory §0 for the per-checkpoint identity table.
+
 - Trainer: `tools/io_train_head.py`
 - Run/checkpoints: `runtime_store/models/io_train/20261117_2220/`
 - Verification log: `runtime_store/models/io_train/20261117_2220_train.log`
@@ -15,7 +23,7 @@ see inventory). What it does **not** have is a place where a small learnable
 projection can be trained and versioned independently of the agent runtime:
 
 - the runtime only *reads* model files at factory time and keeps no training state,
-- the shipped `ijepa/resnet18_224/encoder_head.json` (512→128) is an artifact of a
+- the shipped `ijepa/resnet18_224/encoder_head.json` (512→128, head of the in-house ResNet18-modified encoder) is an artifact of a
   pipeline the current source cannot load (inventory §0 finding 3/4),
 - `x5_online_learner.cpp` proves the right *shape* of training (small SGD MLP over
   frozen features) but only runs on the X5 / from a C++ binary.
@@ -139,7 +147,7 @@ marginally up; the head is a genuine but modest improvement and is safe to itera
 | ridge-probe MSE | 0.16259 | 0.16563 | +0.00303 |
 
 **Honest negative result: do not ship the audio head.** The 3-class MUSAN proxy task is
-too easy and already almost linearly separable in the frozen 128-d speech-JEPA space;
+too easy and already almost linearly separable in the frozen 128-d in-house speech-concept space;
 the extra 128×128 layer (1106 train windows) overfits (train CE 1.049 → 0.596 while
 internal-val CE improves only 1.028 → 0.825) and loses a little held-out retrieval.
 The audio *loop* itself is functional and reproducible; the audio *objective* needs a
