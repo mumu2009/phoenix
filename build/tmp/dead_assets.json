@@ -1,0 +1,627 @@
+{
+  "generated_at": "2026-11-17T23:20:00+08:00",
+  "tree": "E:\\079\\v6.0Alixander\\phoenix",
+  "git_head": "4f4bbd7",
+  "audit_doc": "doc/v10.1/dead_assets_audit.md",
+  "provenance_doc": "doc/v10.1/model_provenance.md",
+  "schema": {
+    "verdict": "delete | keep | review | unknown  (machine-readable alias)",
+    "classification": "DELETE-SAFE | REUSE | KEEP | UNCLEAR-needs-user  (report label)",
+    "delete_batch": "1 = no precondition; 2 = needs quiesce/restart/config edit; null = not proposed for deletion"
+  },
+  "scan_meta": {
+    "code_config_files_scanned": 1709,
+    "tools_scripts_files_scanned": 1275,
+    "patterns": [
+      "large_vision_encoder", "llava_features", "llava_images",
+      "llava_unit_feature_cache", "vjepa2_1_vitb", "image_decoder",
+      "encoder_head", "model_encoder_head", "multimodal_enc_src",
+      "multimodal_dec", "qwen_audio", "Qwen2-Audio",
+      "multimodal_world_model", "MultimodalImageWorldModel",
+      "MultimodalAudioWorldModel", "model_encoder.onnx", "model_decoder.onnx",
+      "additive_jepa", "speech_16k", "multimodal_enc", "best.onnx", "best.bin",
+      "resolveOnnxModelPath", "resolveBpuModelPath", "localBackend"
+    ],
+    "note": "tools/ and runtime_store/ are gitignored in phoenix/.gitignore, so scans used explicit Get-ChildItem enumeration, not gitignore-aware ripgrep.",
+    "onnx_probe": "onnxruntime 1.31.1 / Python314",
+    "npy_probe": "numpy 2.5.4 (header/mmap only)",
+    "hard_rules": "read-only on product sources; nothing deleted/moved; no git ops; live gateway pid 23920 :5097 and llama-servers untouched"
+  },
+  "assets": [
+    {
+      "id": "A1",
+      "path": "runtime_store/models/large_vision_encoder/",
+      "kind": "dir",
+      "size_bytes": 24531414006,
+      "sha256_sample": "572DDE5F9D751F9D203BCF63BC1497349F7E4C2F14F4C8DE3AF91998FC03CFB8 (llava_features.npy)",
+      "verdict": "keep",
+      "classification": "REUSE",
+      "reason": "LLaVA-1.5-7B feature caches over Tiny-ImageNet-200 (not ViT-g/H weights). Reusable training pool for the in-house LLaVA unit tokenizer+decoder; see audit R1.",
+      "delete_batch": null
+    },
+    {
+      "id": "A1a",
+      "path": "runtime_store/models/large_vision_encoder/llava_features.npy",
+      "kind": "dataset",
+      "size_bytes": 2415919232,
+      "shape": [512, 576, 4096],
+      "dtype": "float16",
+      "sha256_sample": "572DDE5F9D751F9D203BCF63BC1497349F7E4C2F14F4C8DE3AF91998FC03CFB8",
+      "verdict": "keep",
+      "classification": "REUSE",
+      "reason": "512-image LLaVA vision-tower features; 0 code readers (output cache, not a model). Reuse via tools/train_multimodal_decoders.py / distillation.",
+      "delete_batch": null
+    },
+    {
+      "id": "A1b",
+      "path": "runtime_store/models/large_vision_encoder/llava_images.npy",
+      "kind": "dataset",
+      "size_bytes": 77070464,
+      "shape": [512, 3, 224, 224],
+      "dtype": "uint8",
+      "sha256_sample": "0440CAF25A6D10E7917CAF4287F3A4C736B3CBA2F0205FC7F77105E23C1BDD2A",
+      "verdict": "keep",
+      "classification": "REUSE",
+      "reason": "Pixel ground truth paired with A1a.",
+      "delete_batch": null
+    },
+    {
+      "id": "A1c",
+      "path": "runtime_store/models/large_vision_encoder/llava_features_more.npy",
+      "kind": "dataset",
+      "size_bytes": 18874368128,
+      "shape": [4000, 576, 4096],
+      "dtype": "float16",
+      "sha256_sample": "446E1909FB5F0D92EB75C2C9DA38FB5B5CA3686356DF7E73B4BF56A3D3C05C27",
+      "verdict": "review",
+      "classification": "REUSE",
+      "reason": "Large LLaVA feature pool (4k images). Reuse for retraining; NOT regenerable from disks as-is because the LLaVA-1.5-7B HF download is incomplete (B1). If disk pressure wins, drop this row (with A1d) — flagged for Lead/user decision.",
+      "delete_batch": null
+    },
+    {
+      "id": "A1d",
+      "path": "runtime_store/models/large_vision_encoder/llava_images_more.npy",
+      "kind": "dataset",
+      "size_bytes": 602112128,
+      "shape": [4000, 3, 224, 224],
+      "dtype": "uint8",
+      "sha256_sample": "53568D2EA6378023B043070D9BC52FC9B3F45BD986B6AABD45792DC7EA77EC0D",
+      "verdict": "review",
+      "classification": "REUSE",
+      "reason": "Paired images for A1c; same decision as A1c.",
+      "delete_batch": null
+    },
+    {
+      "id": "A1e",
+      "path": "runtime_store/models/large_vision_encoder/llava_unit_feature_cache.pt",
+      "kind": "dataset",
+      "size_bytes": 2493052589,
+      "sha256_sample": "71DC9042BD2B196371DD7290E2E76CD24C1AF619C8323911AB42C4F07199CF8E",
+      "verdict": "keep",
+      "classification": "REUSE",
+      "reason": "Self-contained cache (features_fp16 + images_uint8_224 + paths). Overlaps A1a/A1b; keep this OR the npy pair, not both.",
+      "delete_batch": null
+    },
+    {
+      "id": "A1f",
+      "path": "runtime_store/models/large_vision_encoder/image_decoder.pt",
+      "kind": "model",
+      "size_bytes": 51841575,
+      "sha256_sample": "68E3B1F560764B7B7EBB8A975FD3D33B7EA0848B76F61A1DAAF9ACC4994698C5",
+      "verdict": "keep",
+      "classification": "REUSE",
+      "reason": "Trained LLaVA-image decoder weights (state_dict fc+blocks); export source for multimodal_dec/image_decoder.onnx. Trainer writes the same filename pattern (tools/train_multimodal_decoders.py:511).",
+      "delete_batch": null
+    },
+    {
+      "id": "A1g",
+      "path": "runtime_store/models/large_vision_encoder/llava_forward_sample.pt",
+      "kind": "dataset",
+      "size_bytes": 9455821,
+      "sha256_sample": "26EE23DBF006EDD66293205D0DC5D7B680DDC2D83371779451D2533E18017DF6",
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "9 MB one-image forward specimen; provenance evidence for model_provenance.md (model=llava-hf/llava-1.5-7b-hf).",
+      "delete_batch": null
+    },
+    {
+      "id": "A1h",
+      "path": "runtime_store/models/large_vision_encoder/vjepa2_1_vitb_features.pt",
+      "kind": "model",
+      "size_bytes": 7079698,
+      "sha256_sample": "F65338B4BBB786B8B1F0315ACB5FC2065A1F3083FDFF252F30F989BB7C0D9F84",
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "V-JEPA2 ViT-B feature probe output only (single 'features' tensor + input_shape, 7 MB); no code/config reader. Would have provided nothing: a one-off probe result, not weights.",
+      "delete_batch": 1
+    },
+    {
+      "id": "A1i",
+      "path": "runtime_store/models/large_vision_encoder/llava_more_paths.json",
+      "kind": "dataset",
+      "size_bytes": 499114,
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "Path/label mapping required to use A1c/A1d; without it the 4000-image features have no image correspondence.",
+      "delete_batch": null
+    },
+    {
+      "id": "A1j",
+      "path": "runtime_store/models/large_vision_encoder/{llava_cache_more_progress.json, llava_decoder_result.json, llava_gpu_train.json, llava_vision_multimodal.json, qwen_audio_forward.json, result.json, vjepa2_1_vitb_forward.json}",
+      "kind": "file",
+      "size_bytes": 15257,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "One-off run status/progress JSONs, no readers; contents summarised in the audit. Functionality: none (status output).",
+      "delete_batch": 1
+    },
+    {
+      "id": "B1",
+      "path": "runtime_store/models/multimodal_enc_src/llava-1.5-7b-hf/",
+      "kind": "model",
+      "size_bytes": 4997125113,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Incomplete HF download: model.safetensors.index.json declares 3 shards, only model-00001-of-00003.safetensors present. Cannot load; no runtime reader; the prepare script's output dir (models/multimodal_enc) was never produced.",
+      "delete_batch": 1
+    },
+    {
+      "id": "B2",
+      "path": "runtime_store/models/multimodal_enc_src/Qwen2-Audio-7B-Instruct/",
+      "kind": "model",
+      "size_bytes": 3926676547,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Incomplete HF download: index declares 5 shards, only shard 1 + a 2.99 MiB .incomplete fragment present. Cannot load; never wired (no :8085 listener).",
+      "delete_batch": 1
+    },
+    {
+      "id": "B3",
+      "path": "runtime_store/models/multimodal_dec/llava_unit_tokenizer.onnx",
+      "kind": "model",
+      "size_bytes": 33625788,
+      "sha256_sample": "3A280BBC738F600711362CF1683178382E8F5CFF86FD27F7BB39EB5543BBF72C",
+      "verdict": "keep",
+      "classification": "REUSE",
+      "reason": "Complete loadable ONNX: image_features [batch,576,4096] -> unit_query [batch,4096]. Only reader is tools/multimodal_encdec_server.py (service not running). Reuse candidate R1.",
+      "delete_batch": null
+    },
+    {
+      "id": "B4",
+      "path": "runtime_store/models/multimodal_dec/image_decoder.onnx",
+      "kind": "model",
+      "size_bytes": 51833682,
+      "sha256_sample": "DD0952CA57D7EDD0091B54CE7D1B04C48510A5367C3C7E74EB448D912540A635",
+      "verdict": "keep",
+      "classification": "REUSE",
+      "reason": "Complete loadable ONNX: unit_query [batch,4096] -> output [batch,3,224,224]. Reuse candidate R1.",
+      "delete_batch": null
+    },
+    {
+      "id": "B5",
+      "path": "runtime_store/models/multimodal_dec/{llava_unit_tokenizer.pt,image_decoder.pt}",
+      "kind": "model",
+      "size_bytes": 85466452,
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "Source training checkpoints the ONNX files were exported from; needed for re-export/retrain.",
+      "delete_batch": null
+    },
+    {
+      "id": "B6",
+      "path": "runtime_store/models/multimodal_dec/{image_decoder_prev512.pt,llava_unit_tokenizer_prev512.pt}",
+      "kind": "model",
+      "size_bytes": 85467348,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Superseded 512-d-bottleneck variant; no artifact or script references the prev512 names. Functionality (image decode) is provided by B4 / A1f.",
+      "delete_batch": 1
+    },
+    {
+      "id": "B7",
+      "path": "runtime_store/models/multimodal_dec/continue_gpu_train.json",
+      "kind": "file",
+      "size_bytes": 34966,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "One-off training resume status; no reader.",
+      "delete_batch": 1
+    },
+    {
+      "id": "B8",
+      "path": "multimodal_world_model.{hpp,cpp}",
+      "kind": "source",
+      "size_bytes": 0,
+      "verdict": "review",
+      "classification": "DELETE-SAFE (code, needs Lead decision)",
+      "reason": "MultimodalImageWorldModel/MultimodalAudioWorldModel are defined but never instantiated (all grep hits inside their own TU); HTTP client targets :8085 where nothing listens. Not a data dependency.",
+      "delete_batch": null
+    },
+    {
+      "id": "C1",
+      "path": "runtime_store/models/ijepa/resnet18_224/model_encoder.onnx",
+      "kind": "model",
+      "size_bytes": 32146521,
+      "sha256_sample": "BB96F89F99FF7D92A919137E5C166B5351A16446BFEE98484BEA8438243C088F",
+      "verdict": "keep",
+      "classification": "REUSE",
+      "reason": "ResNet18-modified encoder [1,3,224,224]->pooled[1,512,1,1]; unreachable by the runtime resolver (name mismatch) but loadable and already used by tools/io_scaleup.py encoder-swap rung. Reuse R2.",
+      "delete_batch": null
+    },
+    {
+      "id": "C2",
+      "path": "runtime_store/models/ijepa/resnet18_224/model_encoder_head.onnx",
+      "kind": "model",
+      "size_bytes": 262951,
+      "sha256_sample": "A6148DF5104F9F04552A9656A97F4DAB0596DEAFDB92EBE8DFB308395AB7B6CA",
+      "verdict": "keep",
+      "classification": "REUSE",
+      "reason": "512->128 projection companion to C1; complete and loadable.",
+      "delete_batch": null
+    },
+    {
+      "id": "C3",
+      "path": "runtime_store/models/ijepa/resnet18_224/encoder_head.json",
+      "kind": "model",
+      "size_bytes": 1456019,
+      "sha256_sample": "871AF9F64114F3942A81F265A45092B55FF1C14614AABBBE51C8A6D79DFD394F",
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "512->128 linear head exported by .remote_ref/train_video.py / export_multimodal.py / export_runtime_models.py; ZERO C++/config readers (0 hits in 1709 files). Functionality it would have provided: BPU-era runtime head; the loader is gone and the equivalent ONNX head (C2) + deterministic hash projection provide the live path. Regenerable from export scripts.",
+      "delete_batch": 1
+    },
+    {
+      "id": "C4",
+      "path": "runtime_store/models/ijepa/resnet18_224/model_decoder.onnx",
+      "kind": "model",
+      "size_bytes": 13381131,
+      "sha256_sample": "9127D58AD9353E9321BEC1904F00FC67FD833A5F01C1F43BC663C55049E6968A",
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Superseded by model_decoder_trained.onnx (C5; the manifest's declared decoder). No resolver match (resolveOnnxModelPath wants best.onnx/model.onnx). Functionality provided by C5.",
+      "delete_batch": 1
+    },
+    {
+      "id": "C5",
+      "path": "runtime_store/models/ijepa/resnet18_224/model_decoder_trained.onnx",
+      "kind": "model",
+      "size_bytes": 13380761,
+      "sha256_sample": "B2E851413553156A2DC82147F5EDAC7A5D061166E2ABD47F5514131BFC30C2BF",
+      "verdict": "keep",
+      "classification": "REUSE",
+      "reason": "Complete trained 128->224 decoder (100 calibration pairs per manifest); companion for R2.",
+      "delete_batch": null
+    },
+    {
+      "id": "C6",
+      "path": "runtime_store/models/ijepa/resnet18_224/{model_encoder.bin,model_decoder.bin}",
+      "kind": "model",
+      "size_bytes": 11932146,
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "Config-referenced (config/phoenix.json:778-779) BPU archive; cannot run today because VideoHbdnnModel::encode is a stub. Keep unless Lead approves config cleanup (delete_batch 2).",
+      "delete_batch": null
+    },
+    {
+      "id": "C7",
+      "path": "runtime_store/models/ijepa/resnet18_224/{calibration_encoder,calibration_decoder}/",
+      "kind": "dataset",
+      "size_bytes": 59768832,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "hb_mapper calibration inputs (100+100 raw NCHW files); only needed to recompile C6, which is already compiled. If Lead wants to re-tune the BPU build later, keep them.",
+      "delete_batch": 1
+    },
+    {
+      "id": "C8",
+      "path": "runtime_store/models/ijepa/resnet18_224/{model_encoder_hb_mapper_config.yaml,model_decoder_hb_mapper_config.yaml,hb_mapper_checker.log,model_decoder_hb_mapper_checker.log}",
+      "kind": "file",
+      "size_bytes": 32000,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "BPU compile logs/config of a compile that already produced C6; no reader.",
+      "delete_batch": 1
+    },
+    {
+      "id": "C9",
+      "path": "runtime_store/models/ijepa/resnet18_224/extract_head.py",
+      "kind": "source",
+      "size_bytes": 638,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "One-off helper that writes C3; same logic exists in .remote_ref/train_video.py and export scripts.",
+      "delete_batch": 1
+    },
+    {
+      "id": "D1",
+      "path": "runtime_store/models/ijepa/speech_16k/model_encoder.onnx",
+      "kind": "model",
+      "size_bytes": 823873,
+      "sha256_sample": "472D71479E766E0ABECDF7C728F5BB1DCF195B734DE01AAE35A91DB140275C5E",
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Legacy 1-D speech encoder ONNX; runtime resolver only matches best.onnx/model.onnx (audio_model.cpp:91-107). Functionality provided by additive_jepa/speech_encoder/best.onnx (live) and by D3 (.bin).",
+      "delete_batch": 1
+    },
+    {
+      "id": "D2",
+      "path": "runtime_store/models/ijepa/speech_16k/model_decoder.onnx",
+      "kind": "model",
+      "size_bytes": 8883222,
+      "sha256_sample": "0E01EA7EF2242A339B1F0A05559204D8EFE11688C03B2374F34FD23EBAA21330",
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Legacy 1-D speech decoder ONNX; same name-mismatch; live decoder is additive_jepa/speech_decoder/best.onnx.",
+      "delete_batch": 1
+    },
+    {
+      "id": "D3",
+      "path": "runtime_store/models/ijepa/speech_16k/{model_encoder.bin,model_decoder.bin}",
+      "kind": "model",
+      "size_bytes": 9178573,
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "Config-referenced (config/phoenix.json:788-789); AudioHbdnnModel implements the X5 BPU path (audio_model.cpp:134-527, 473-527). Only working BPU audio pair.",
+      "delete_batch": null
+    },
+    {
+      "id": "D4",
+      "path": "runtime_store/models/ijepa/speech_16k/{calibration_encoder,calibration_decoder}/",
+      "kind": "dataset",
+      "size_bytes": 6400000,
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "Cheap recompile inputs for D3; keep while D3 is kept.",
+      "delete_batch": null
+    },
+    {
+      "id": "E1",
+      "path": "runtime_store/models/additive_jepa/vision_encoder/best.onnx",
+      "kind": "model",
+      "size_bytes": 54612965,
+      "sha256_sample": "18E31191F68D28094A93164E9FA9EA109C564FCA9EBEACF7745A131206750F25",
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "LIVE image concept encoder loaded by VideoLocalOnnxModel (video_model.cpp:461-503) via model_deployment.vision.localBackend=cpu.",
+      "delete_batch": null
+    },
+    {
+      "id": "E2",
+      "path": "runtime_store/models/additive_jepa/vision_decoder/best.onnx",
+      "kind": "model",
+      "size_bytes": 10444866,
+      "sha256_sample": "720BED0CD6668B90E839548B6213E316E9428F70E582F19A09C55697339D2108",
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "LIVE image decoder (video_model.cpp:530-549).",
+      "delete_batch": null
+    },
+    {
+      "id": "E3",
+      "path": "runtime_store/models/additive_jepa/speech_encoder/best.onnx",
+      "kind": "model",
+      "size_bytes": 4936265,
+      "sha256_sample": "ECAADC84D50E811B4713DAD6FFAD151D386A4801B7EBFB393A7E74E1381695D4",
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "LIVE 16 kHz speech encoder (AudioLocalOnnxModel, audio_model.cpp:1101-1139).",
+      "delete_batch": null
+    },
+    {
+      "id": "E4",
+      "path": "runtime_store/models/additive_jepa/speech_decoder/best.onnx",
+      "kind": "model",
+      "size_bytes": 15012860,
+      "sha256_sample": "A5E684355730DD9DE3240027E36C2516111841484B71061281B5543FDE0FC636",
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "LIVE speech decoder (audio_model.cpp:1181+).",
+      "delete_batch": null
+    },
+    {
+      "id": "E5",
+      "path": "runtime_store/models/additive_jepa/speech_encoder/model_encoder.onnx",
+      "kind": "model",
+      "size_bytes": 4936265,
+      "sha256_sample": "29F2AF011D6D0C1F3C59058A179C78973B06B828405E2B6EDD6296F55AF6B07D",
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Unreachable intermediate export from tools/export_audio_onnx.py (resolver only looks for best.onnx/model.onnx). Same I/O as E3 but not byte-identical; E3 is the live fused file.",
+      "delete_batch": 1
+    },
+    {
+      "id": "E6",
+      "path": "runtime_store/models/additive_jepa/speech_decoder/model_decoder.onnx",
+      "kind": "model",
+      "size_bytes": 15012860,
+      "sha256_sample": "9B2FC9BCCD8B67A26157F5D97F7972BAA2E3BB737D3A70C7E1A9A7049D5F95B0",
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Decoder twin of E5; unreachable; E4 is live.",
+      "delete_batch": 1
+    },
+    {
+      "id": "E7",
+      "path": "runtime_store/models/additive_jepa/{vision_encoder,vision_decoder,speech_encoder,speech_decoder}/best.bin",
+      "kind": "model",
+      "size_bytes": 30711364,
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "RDK X5 BPU fallback, matched by resolveBpuModelPath (video_model.cpp:62-87, audio_model.cpp:65-89). Audio BPU path is implemented; image encode is a stub but the files are the deployment archive.",
+      "delete_batch": null
+    },
+    {
+      "id": "F4",
+      "path": "process:phoenix_main.exe pids 46520,48252,47604,44932,37916,19460,38228",
+      "kind": "process",
+      "size_bytes": 0,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE (terminate)",
+      "reason": "7 zombie phoenix_main.exe with empty CommandLine and RSS 0.0 MB, started 2026-11-16 13:58..2026-11-17 08:15, no port, no children. Live gateway = pid 23920 (127.0.0.1:5097) + child 13032 (--frontend-only=1) MUST NOT be touched.",
+      "delete_batch": 2
+    },
+    {
+      "id": "G1",
+      "path": "runtime_store/mission_workspace/ (38,001 dirs) + autonomy_state.json mission history",
+      "kind": "dir",
+      "size_bytes": 8726767,
+      "verdict": "review",
+      "classification": "ACTIVE-CHURN-BY-DESIGN (legacy tail prunable)",
+      "reason": "9,750 Failed missions are created by an external self-mod candidate harness (assign/report pairs per candidate; gateway.log scope=tr-10148-14; goals '[iter N-M]' match build/tmp/growth_loop.ps1). Not a mission-state bug: the only Failed code path is reportMissionOutcome(goalAchieved=false) via the public API; no C++ loop. Churn is live (newest dir tr-10065-29 at 23:27:20). Prune rule: after stopping the harness, keep ids present in autonomy_state.json + dirs modified in last 24h + runtime_store/selfmod/tree.json; delete the rest. Do not edit the state file while the gateway runs.",
+      "delete_batch": 2
+    },
+    {
+      "id": "G2",
+      "path": "runtime_store/autonomy_state.json (live state)",
+      "kind": "file",
+      "size_bytes": 908440,
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "Live agent state (66 persisted missions: 2 Running + 64 Failed; export caps finished at 64 per autonomy_stack.cpp:2284). Do not edit/delete while pid 23920 runs.",
+      "delete_batch": null
+    },
+    {
+      "id": "H1",
+      "path": "runtime_store/logs/runtime_debug.log",
+      "kind": "file",
+      "size_bytes": 36713664000,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE (truncate/rotate at restart)",
+      "reason": "35,011.10 MiB unbounded Debug-mode log, append-only with no rotation (loggerCXX.cpp:91-93). Functionality: historical debug trace only; crash forensics uses fatal_runtime.log (keep). Cannot be truncated safely while pid 23920 holds it open on Windows; rename at next restart, keep <=100 MB tail.",
+      "delete_batch": 2
+    },
+    {
+      "id": "H2",
+      "path": "runtime_store/logs/ (37 stale logs except fatal_runtime.log)",
+      "kind": "dir",
+      "size_bytes": 1900000,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Historical session logs (<=2026-10-18) incl. runtime_release.log, llama_8082.err.log; keep fatal_runtime.log (crash channel used by stability_run.ps1).",
+      "delete_batch": 2
+    },
+    {
+      "id": "H3",
+      "path": "runtime_store/autonomy_state*.json backups (106 files)",
+      "kind": "dir",
+      "size_bytes": 43000000,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Snapshot/backup files from old tests; keep live autonomy_state.json + 2 newest pre/after snapshots. Prune rule in audit H3.",
+      "delete_batch": 2
+    },
+    {
+      "id": "H4",
+      "path": "phoenix_main.exe.dupfix, phoenix_main.exe.dupfix2, phoenix_main.exe.dupfix3",
+      "kind": "binary",
+      "size_bytes": 171419393,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "One-off duplicate-handle debug binaries from 2026-07-09; superseded by phoenix_main.exe.",
+      "delete_batch": 1
+    },
+    {
+      "id": "H5",
+      "path": "gtest_new_runner.exe, gtest_mixed_modal_patched.exe, phoenix_main_edge_disabled.exe, gtest_emotion_speak.exe, world_model_prompt_tests.exe, world_model_scene_brain_tests.exe",
+      "kind": "binary",
+      "size_bytes": 245781444,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Stale test binaries older than 2026-08-01 with no references; current test runner is gtest_runner.exe (2026-11-16).",
+      "delete_batch": 1
+    },
+    {
+      "id": "H6",
+      "path": "runtime_store/large_vision_encoder/ (data/{beans,librispeech_dummy})",
+      "kind": "dir",
+      "size_bytes": 41410000,
+      "verdict": "delete",
+      "classification": "DELETE-SAFE",
+      "reason": "Demo dataset leftovers for the large-vision experiment; 0 code refs; real corpora are under runtime_store/datasets/.",
+      "delete_batch": 1
+    },
+    {
+      "id": "H7",
+      "path": "build/ (build/tmp 14.84 GiB, conan caches, rdk-sysroot, obj_gtest)",
+      "kind": "dir",
+      "size_bytes": 24595600000,
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "Active build caches/toolchain needed to rebuild; cleanup is a separate change after the build freeze.",
+      "delete_batch": null
+    },
+    {
+      "id": "H8",
+      "path": "runtime_store/tmp/ (858 files)",
+      "kind": "dir",
+      "size_bytes": 3009930000,
+      "verdict": "review",
+      "classification": "UNCLEAR-needs-user",
+      "reason": "One-off probe scripts/results from earlier sessions; ownership/intent unclear. Needs human decision.",
+      "delete_batch": null
+    },
+    {
+      "id": "H9",
+      "path": "runtime_store/models/granite-3.1-1b-a400m-instruct/",
+      "kind": "model",
+      "size_bytes": 2673990159,
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "Used by tools/intent_carrier_lora.py, intent_carrier_train.py, intent_meaning_train.py, meme_pair_train.py, intent_signal_trace.py.",
+      "delete_batch": null
+    },
+    {
+      "id": "H10",
+      "path": "runtime_store/models/io_train/ + io_train2/",
+      "kind": "dir",
+      "size_bytes": 35383188,
+      "verdict": "keep",
+      "classification": "KEEP",
+      "reason": "Active 2026-11-17 head-training runs (tools/io_train_head.py, tools/io_scaleup.py) by another teammate.",
+      "delete_batch": null
+    }
+  ],
+  "processes": {
+    "live_gateway": {"pid": 23920, "port": 5097, "note": "must not be touched"},
+    "live_frontend_child": {"pid": 13032, "args": "--frontend-only=1", "note": "must not be touched"},
+    "llama_servers": {"count": 3, "note": "must not be touched"},
+    "zombies": {
+      "pids": [46520, 48252, 47604, 44932, 37916, 19460, 38228],
+      "evidence": "empty CommandLine, RSS 0.0 MB, no listener, no children; started 2026-11-16 13:58 .. 2026-11-17 08:15",
+      "verdict": "delete",
+      "classification": "DELETE-SAFE (terminate)"
+    }
+  },
+  "mission_state": {
+    "verdict": "ACTIVE-CHURN-BY-DESIGN",
+    "escalate_to_lead": false,
+    "state_file": "runtime_store/autonomy_state.json",
+    "state_file_bytes": 908440,
+    "persisted_missions": 66,
+    "persisted_running": 2,
+    "persisted_failed": 64,
+    "persisted_completed": 0,
+    "persisted_cap_finished": 64,
+    "persisted_cap_evidence": "autonomy_stack.cpp:2284 (kKeepFinished = 64)",
+    "in_memory_reported": {"running": 6, "completed": 2, "failed": 9750, "total": 9758},
+    "in_memory_evidence": "tools/stability_run.ps1:409-426 reads GET /api/mission/status -> result.missions[].stats.mission.state",
+    "failed_code_path": "reportMissionOutcome(payload.goalAchieved=false) -> markFailed, autonomy_stack.cpp:3195-3215; only in-tree C++ callers pass true (111_class_gatewayserver.inc:919-921, 3458-3459); route forwards client payload (116_section_tail.inc:5058). No failure loop in C++.",
+    "churn_evidence": "gateway.log shows POST /api/mission/assign + /api/mission/report pairs for tr-10148-14; mission dirs 38,001, newest tr-10065-29 at 2026-11-17T23:27:20; goal text '[iter N-M]' matches external harness build/tmp/growth_loop.ps1:23-28",
+    "prune_rule": "After the self-mod harness stops: in runtime_store/mission_workspace keep ids present in autonomy_state.json.missions[].id, dirs modified in last 24h, and runtime_store/selfmod/tree.json; delete the rest. Do not edit autonomy_state.json while pid 23920 runs.",
+    "separate_findings": [
+      "missions_ in-memory map is not pruned (only exportState snapshot is bounded) - autonomy_stack.cpp:2267-2291; ~9,758 retained entries (~>100 MB).",
+      "runtime_store/logs/runtime_debug.log is 35 GB and unbounded (loggerCXX.cpp:91-93)."
+    ]
+  },
+  "summary": {
+    "delete": 22,
+    "keep": 25,
+    "review": 5,
+    "unknown": 0,
+    "delete_batch_1_bytes": 9579304606,
+    "delete_batch_1_gib": 8.92,
+    "delete_batch_2_bytes_approx": 36713664000,
+    "delete_batch_2_gib_approx": 34.2,
+    "comment": "Counts are JSON rows, not distinct paths (directory rows expand to many files). Batch-1 bytes exclude the optional C6 .bin row and H8 (unclear)."
+  }
+}
