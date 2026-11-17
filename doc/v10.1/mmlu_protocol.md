@@ -274,6 +274,18 @@ python tools/eval_mmlu_protocol.py --mode paired \
 - `supervisor.log` 正常继续（22:12:31 的 `mmlu baseline` 与 22:14/22:16 的两次 dry run 并存）；
 - 本工具**不写** `runtime_store/long_run/mmlu_history.jsonl`（该文件只由 supervisor 追加，本轮行数未因工具改变）；
 - 未运行 `compile.bat`、未启动/停止任何 `phoenix_main`/`llama-server`。
+- supervisor 的周期未变慢：`22:12:31 mmlu baseline` 之后 `22:18:15 train phase complete`，间隔 **6.0 min**，
+  与前一周期（22:03:40 → 22:10:04，6.4 min）持平；我们两次 dry run 的窗口是 22:14:55–22:17:14（含 2 次
+  40 题请求），未造成可测的周期延迟。
+
+### 7.6 Sidecar 端口 smoke（3 题，证明可指向非生产端点）
+
+- 命令：`--mode stratified --n 3 --seed 20261117 --base-url http://127.0.0.1:8100/v1 --tag sidecar-smoke`
+  （8100 = 本机 granite-1b CPU llama-server，与生产 8082/8B 完全不同的端口与模型）
+- 结果：0/3 = 0.0000，0 error，7.4 s；产物
+  `build/tmp/mmlu_protocol/sidecar-smoke-stratified-n3-seed20261117-20261117T141928Z.{json,csv}`。
+- 说明：3 题 + 1B 模型的分数**没有意义**；本条只证明"`--base-url` 可指向任意 sidecar 端口/模型"，
+  以及产物/元数据（endpoint/model/sha256）会如实记录目标。真实对比必须用 §4 的配对协议 + 同题集。
 
 ---
 
@@ -301,4 +313,7 @@ python tools/eval_mmlu_protocol.py --mode paired \
 - 替代 `tools/mmlu_subset_eval.py` 作为评测入口（后者保留不动，作为历史脚本）；
 - `doc/v10.1/methods_backlog.md` M8 = 本文件的方法论；M7 的记忆层题库可直接复用 §4 的配对协议与 §3 的表；
 - `doc/v10.1/artifact_contract.md` 的产物契约不受影响：本工具只读 CSV、只写 `build/tmp/`；
+- **提交注意**：`.gitignore` 第 4 行是 `tools/`，所以 `tools/eval_mmlu_protocol.py` 默认**不会**被
+  `git add -A` 收录；Lead 提交时需要 `git add -f tools/eval_mmlu_protocol.py`（或给 .gitignore 加例外）。
+  `doc/v10.1/mmlu_protocol.md` 与 `methods_backlog.md` 不受此影响。
 - 与 `stability-harness` 的稳定性报告并列：MMLU 是"能力口径"，稳定性是"运行口径"，两者都必须带 n/exposure 与 CI。
