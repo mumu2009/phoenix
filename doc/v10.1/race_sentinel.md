@@ -1,8 +1,9 @@
 # RaceSentinel-MinGW — Phase 1 (test-only race detector)
 
-Status: **Phase 1 complete, PASS.** Phase 2 (pointing it at the product's
-online-research / graph path) is specified in §8 and starts only after Lead
-approval (it needs product-source instrumentation, which Phase 1 forbids).
+Status: **Phase 1 complete, PASS. Phase 2 first soak executed** (see §11;
+instrumentation sidecar, 30 min, 8 missions: 0 detector reports on all
+instrumented targets). Phase 2 needs Lead approval for the product-source
+instrumentation edit set (macro-sealed behind PHOENIX_RACE_SENTINEL, see §11.2).
 
 Owner: sub-agent `race-sentinel` (direction: M1 in `doc/v10.1/methods_backlog.md`).
 Method spec: `doc/v10.1/methods_backlog.md` §M1 (lines 71–118).
@@ -507,3 +508,133 @@ It reuses the conan gtest package already installed under
       gateway).
 - [x] Each control run ≤ 2.5 s (total experiment ~70 s).
 - [x] Detector is test-only; when `RACE_SENTINEL` is unset it is a pass-through.
+
+---
+
+## 11. Phase 2 executed: first product-path soak (2026-11-17/18)
+
+This section records what was actually built and run after the Phase-1 report.
+All instrumentation is compiled only with `-DPHOENIX_RACE_SENTINEL=1` and is
+macro-sealed, so the normal shipping build is unchanged.
+
+### 11.1 What was instrumented (product edits, macro-sealed)
+
+| Target | Mechanism | Lock annotation | Product edit |
+|---|---|---|---|
+| `CognitionAutonomyManager::mcpActionMap_` | `RaceTrack<std::map<...>>` (`autonomy_stack.hpp`) | `ShadowZone("CognitionAutonomyManager::mu_")` right after the `mu_` guards in `executeAgiAction`'s mcp branch and `configureMcp()` (`autonomy_stack.cpp`) | 2 hunks (`#ifdef PHOENIX_RACE_SENTINEL`) |
+| `ScopedTrainableMemory::live_` | `RaceTrack<unordered_map<...>>` | `ShadowZone` at all 9 `mu_` lock sites + 1 `fieldMu` site (`scoped_trainable_memory.hpp`) | `#ifdef` blocks |
+| Scoped bucket fields (`gnnSummary`, `lastBenefitHarmBias`, `agiLatent`, `residual`, `graphHint`) | `fieldTouch(obj, field, write, tag)` at product write sites that write through `hot()` without taking `fieldMu` (`scoped_trainable_memory.hpp`, `autonomy_stack.cpp`, `065_class_runtimestate.inc`, `111_class_gatewayserver.inc`) | write sites are intentionally unannotated (that is the residual hazard); the locked `setGnnSummary()` path carries the `fieldMu` zone | `#ifdef` blocks |
+| `OnlineResearcher::cache_` (regression negative) | `RaceTrack<unordered_map<...>>` (`031_class_onlineresearcher.inc`) | `ShadowZone("OnlineResearcher::cacheMu_")` in `remember()`, `fromCache()`, `pruneCache()` (`068_section_before_crawlitem.inc`) | `#ifdef` blocks |
+| `GatewayServer::missionOutlineCache_` (mission-static family) | `RaceTrack<unordered_map<...>>` (`111_class_gatewayserver.inc`) | `ShadowZone` after both `outlineMu_` guards (read + write, `116_section_tail.inc`) | `#ifdef` block |
+| Report export | debug HTTP routes `/api/debug/race/{reports,reset,probe}` and a periodic JSON dump (`RACE_SENTINEL_DUMP`, 10 s) | — | `#ifdef` block in `116_section_tail.inc` |
+
+`ShadowZone` is an *annotation* guard: it does not block; correctness relies on
+being placed immediately after the real lock acquisition. This avoided changing
+any product mutex type (several are used with `std::condition_variable`), which
+keeps the instrumentation diff small and reversible.
+
+Build: `build/tmp/compile_race_phase2.bat` (copy of `compile_next.bat` plus
+`-DPHOENIX_RACE_SENTINEL=1`, output `build/tmp/phoenix_main.race.exe`, map
+`build/tmp/phoenix_main.race.map`). Built at 23:13:24 with 0 errors
+(`build/tmp/race_sentinel/build_race.log`, `EXIT=0`). Note: crash-fix's final
+`autonomy_stack.hpp` edit (removing temporary perf timing, `state_guard` kept)
+landed at 23:31, i.e. after the build; every Phase-2 target lives outside
+`state_guard` and its TUs are unchanged, so the binary remains representative
+for these targets (documented rather than rebuilding for 20+ min).
+
+### 11.2 Soak protocol
+
+- Separate binary `build/tmp/phoenix_main.race.exe`, isolated workdir
+  `build/tmp/race_sentinel/soak_run`, gateway port **5109** (5097 live gateway
+  untouched), `AI_BASE_DIR`/`AI_DB_PATH`/`AI_SNAPSHOT_DIR`/`LMDB_DIR`/`AI_PID_FILE`
+  redirected under the workdir, `AI_AUTH_ENABLED=false`,
+  `AI_FRONTEND_ENABLED=false`, `AI_RESEARCH_PROFILE=race_soak`
+  (overlay `config/research/race_soak.json`, untracked), the `raceprobe` MCP
+  stdio server configured, detector `RACE_SENTINEL=1`,
+  `RACE_SENTINEL_SAMPLE=16`, dump every 10 s.
+- Workload: 8 concurrent missions (goals mention the `raceprobe` tool and
+  research), autonomy loop interval 6 s, plus 19 rounds each of the memory probe
+  (same-scope `setGnnSummary` + `hot()` reads, 4 threads x 40 loops), the
+  research probe (`addon::invokeAddonOnlineLookup`, 2 threads x 4 queries) and a
+  chat request. Duration 30 min (31.0 min measured), 19 chats OK / 0 failed,
+  0 crashes.
+- One extra 5-minute run `build/tmp/race_sentinel/soak_mcp_active` with the MCP
+  server actually live (one python child confirmed) proved the MCP subsystem can
+  start and the gateway survives normal traffic (0 detector reports, no crash).
+
+### 11.3 Results (30-min soak)
+
+| Target | Reports | Verdict |
+|---|---|---|
+| `autonomy_stack::mcpActionMap_` | 0 | silent |
+| `OnlineResearcher::cache_` | 0 | silent (regression negative holds) |
+| `GatewayServer::missionOutlineCache_` | 0 | silent |
+| `ScopedTrainableMemory::live_` | 0 | silent |
+| `ScopedTrainableMemory::bucket` (5 fields) | 0 | no findings in this workload |
+| unknown tags | 0 | — |
+
+1,307 sampled detector accesses, 0 stored reports, 0 unknown tags. Phase-1
+controls were re-run after the header additions: **80/80 detection, 0 FP over
+200 s, overhead 2.43x geomean, 20/20 harness tests** — the detector itself is
+unchanged in behaviour. Machine-readable report:
+`build/tmp/race_sentinel/phase2/report.{json,md}`.
+
+### 11.4 Findings
+
+1. **The mcp map fix is correct (static review).** In the new
+   `executeAgiAction` mcp branch the `find()` runs inside
+   `std::lock_guard(mu_)`, only the `mcpServer`/`mcpTool` copies escape the
+   block, and `mcpManager_.callTool()` runs outside it (deliberate: holding
+   `mu_` across a network tool would serialise every mission tick). No `it`
+   escapes; no dereference after unlock.
+2. **Debug-probe crash on the MCP configure+dispatch path (not a detector
+   finding, not caused by the detector).** A probe that called
+   `configureMcp()` and then dispatched an mcp.* action kills the sidecar with
+   an unhandled C++ exception (`0x20474343`) followed by `0xC0000005`, even
+   with one probe thread and with the detector *disarmed*. Same rip in 4
+   independent runs (fatal logs under
+   `build/tmp/race_sentinel/{soak_smoke2,isolate_all,mcp_verify_sequential}/`).
+   After separating the harness trigger (the debug probe called product code
+   from an unguarded `std::thread`; production callers of `executeAgiAction`
+   do wrap it in try/catch), two product observations remain:
+   - `phoenix::mcp::McpManager::startAll()` appends new `McpClient`s to
+     `clients_` without clearing/stopping existing ones, so a runtime
+     `configureMcp()` (config hot-update) spawns a duplicate MCP server and
+     leaks the old client — a structural bug visible in `mcp_client.cpp`;
+   - the MCP dispatch path can throw; `CognitionAutonomyManager::executeAgiAction`
+     does not itself catch, so the try/catch discipline at call sites is
+     load-bearing.
+3. **No new races on the residual bucket-field writes** in this workload: chat
+   and mission ticks write different scopes (`chat:<session>` vs
+   `mission:<id>`), so the same-slot window did not open. Memory-probe traffic
+   used one shared scope and stayed silent (the probe goes through
+   `setGnnSummary`, which is fieldMu-guarded; the unguarded `hot().field =`
+   sites all live on chat/mission paths with disjoint scopes).
+
+### 11.5 Coverage gaps / next round
+
+- The fixed mcp **read path was not dispatched** during the soak: the 8B
+  deliberator does not emit tool-JSON without schema advertising, so
+  `mcpActionMap_.find` was likely never hit. A dispatch-only debug probe
+  (resolve the action name, call `executeAgiActionByName` in a try/catch, do
+  **not** call `configureMcp`) is the missing piece; recommend adding it next
+  round.
+- `OnlineResearcher::cache_` was exercised via 152 research-probe loops with 0
+  reports (regression negative holds). crash-fix's `fallback()` `stateMu_` guard
+  was compiled in but is *outside* the detector's coverage (RuntimeState
+  internals are not instrumented); it can only be validated by crash evidence,
+  not by race reports.
+- Fields written through `hot()` in the remaining sites and the `archived_` map
+  are not instrumented; vector clocks / site symbolisation stay on the §8.5
+  list.
+
+### 11.6 Cleanup
+
+- No `phoenix_main.race` / MCP python child processes left; port 5109 free.
+- No PageHeap/IFEO/WER settings were enabled (the pre-existing
+  `Image File Execution Options\phoenix_main.exe` key still has empty
+  `GlobalFlag`/`PageHeapFlags`).
+- Live gateway (PID 23920, port 5097) and the 3 llama-server processes were not
+  touched; no `compile.bat` / `compile_gtest.bat` was run.
+- Reproduce (binary: `build/tmp/compile_race_phase2.bat`):
+  `powershell -NoProfile -ExecutionPolicy Bypass -File build\tmp\race_sentinel\soak\run_soak.ps1 -DurationMin 30 -Port 5109 -OutDir build\tmp\race_sentinel\soak_run`

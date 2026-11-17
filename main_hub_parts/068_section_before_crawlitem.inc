@@ -20,6 +20,9 @@ OnlineResearcher::normalizeKey(const std::vector<std::string> &words) const {
 
 /* Caller holds cacheMu_ (only remember() calls this). */
 void OnlineResearcher::pruneCache() {
+#ifdef PHOENIX_RACE_SENTINEL
+  race_sentinel::ShadowZone rs_zone_cache_prune("OnlineResearcher::cacheMu_");
+#endif
   if ((int)cache_.size() <= cacheSize_)
     return;
   std::vector<std::pair<std::string, CacheEntry>> items(cache_.begin(),
@@ -34,6 +37,9 @@ void OnlineResearcher::pruneCache() {
 
 void OnlineResearcher::remember(const std::string &key, const json &payload) {
   std::lock_guard<std::mutex> lk(cacheMu_);
+#ifdef PHOENIX_RACE_SENTINEL
+  race_sentinel::ShadowZone rs_zone_cache_remember("OnlineResearcher::cacheMu_");
+#endif
   cache_[key] =
       CacheEntry{(int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::system_clock::now().time_since_epoch())
@@ -44,6 +50,9 @@ void OnlineResearcher::remember(const std::string &key, const json &payload) {
 
 std::optional<json> OnlineResearcher::fromCache(const std::string &key) {
   std::lock_guard<std::mutex> lk(cacheMu_);
+#ifdef PHOENIX_RACE_SENTINEL
+  race_sentinel::ShadowZone rs_zone_cache_from("OnlineResearcher::cacheMu_");
+#endif
   auto it = cache_.find(key);
   if (it == cache_.end())
     return std::nullopt;
@@ -508,40 +517,57 @@ json OnlineResearcher::fallback(const std::vector<std::string> &words) {
         {"ok", false}, {"source", "local"}, {"reason", "runtime-missing"}};
   if (words.empty())
     return json{{"ok", false}, {"source", "local"}, {"reason", "empty-query"}};
-  auto mapping = runtime_->mapWordsToMemesOrdered(words);
-  auto seeds = mapping.seeds;
-  if (seeds.empty()) {
-    return json{{"ok", false}, {"source", "local"}, {"reason", "no-memes"}};
-  }
-  auto result =
-      runtime_->runPropagation(seeds, json{{"seedOrder", mapping.order}});
-  json suggestions = json::array();
-  int limit = std::min<int>(10, (int)result.windowInfo.ids.size());
-  for (int i = 0; i < limit; i++) {
-    std::string memeId = result.windowInfo.ids[i];
-    double strength = (i < (int)result.activation.size() &&
-                       std::isfinite(result.activation[i]))
-                          ? result.activation[i]
-                          : 0.0;
-    std::vector<std::string> wordsForMeme;
-    for (auto &w : runtime_->kvm().getMemeWords(memeId)) {
-      wordsForMeme.push_back(w);
-      if (wordsForMeme.size() >= 6)
-        break;
-    }
-    suggestions.push_back(json{
-        {"memeId", memeId}, {"strength", strength}, {"words", wordsForMeme}});
-  }
-  std::ostringstream oss;
-  for (size_t i = 0; i < words.size(); i++) {
-    if (i)
-      oss << " ";
-    oss << words[i];
-  }
-  return json{{"ok", true},
-              {"source", "local"},
-              {"query", oss.str()},
-              {"suggestions", suggestions}};
+  /* 2026-11-17 heap-corruption fix (0xC0000374, ntdll+0xff489).
+     This fallback re-enters the SAME RuntimeState research state that
+     processInput()/learnFromDialog() use: mapWordsToMemesOrdered() mutates
+     graph_/kvm_ and runPropagation() rebuilds pattern_ (PatternMatrix::rebuild
+     -> GraphTensorBridge::buildMultiOrderCSR, both writing nlohmann::json
+     trees).  Those helpers require the caller to hold RuntimeState::stateMu_;
+     this call site held nothing, so with autonomyLoop.parallelMissions several
+     mission threads ran PatternMatrix::rebuild() concurrently.  The 08:12,
+     08:14 and 08:15 dumps each show 2-3 threads inside it via
+     collectAddonOffers -> invokeAddonOnlineLookup -> onlineLookup -> lookup ->
+     fallback, and the heap checker fired on one of them.
+     Run the whole fallback under the shared mutex. */
+  return phoenix::state_guard::withResearchStateLock(
+      runtime_->researchStateMutex(), [&]() -> json {
+        auto mapping = runtime_->mapWordsToMemesOrdered(words);
+        auto seeds = mapping.seeds;
+        if (seeds.empty()) {
+          return json{
+              {"ok", false}, {"source", "local"}, {"reason", "no-memes"}};
+        }
+        auto result = runtime_->runPropagation(
+            seeds, json{{"seedOrder", mapping.order}});
+        json suggestions = json::array();
+        int limit = std::min<int>(10, (int)result.windowInfo.ids.size());
+        for (int i = 0; i < limit; i++) {
+          std::string memeId = result.windowInfo.ids[i];
+          double strength = (i < (int)result.activation.size() &&
+                             std::isfinite(result.activation[i]))
+                                ? result.activation[i]
+                                : 0.0;
+          std::vector<std::string> wordsForMeme;
+          for (auto &w : runtime_->kvm().getMemeWords(memeId)) {
+            wordsForMeme.push_back(w);
+            if (wordsForMeme.size() >= 6)
+              break;
+          }
+          suggestions.push_back(json{{"memeId", memeId},
+                                     {"strength", strength},
+                                     {"words", wordsForMeme}});
+        }
+        std::ostringstream oss;
+        for (size_t i = 0; i < words.size(); i++) {
+          if (i)
+            oss << " ";
+          oss << words[i];
+        }
+        return json{{"ok", true},
+                    {"source", "local"},
+                    {"query", oss.str()},
+                    {"suggestions", suggestions}};
+      });
 }
 
 json OnlineResearcher::crawl(const std::string &startUrl, const json &crawlReq,

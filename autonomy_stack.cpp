@@ -1131,16 +1131,36 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
     }
 
     if (spec.category == "mcp") {
-        /* MCP tool: dispatch through the running server session. */
-        auto it = mcpActionMap_.find(spec.name);
-        if (it == mcpActionMap_.end()) {
-            return json{{"ok", false}, {"error", "mcp action not registered: " + spec.name}};
+        /* MCP tool: dispatch through the running server session.
+           v10.2 race fix (RaceSentinel Phase 2 target): mcpActionMap_ is
+           written under mu_ (configureMcp: clear/insert) but this read used to
+           run with no lock while mission threads call executeAgiAction from
+           iterate() with mu_ RELEASED.  Copy the target under a short lock and
+           call the network tool OUTSIDE it - holding mu_ across an MCP call
+           would serialise every mission tick. */
+        std::string mcpServer;
+        std::string mcpTool;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+#ifdef PHOENIX_RACE_SENTINEL
+            /* Phase-2 annotation: this scope is protected by mu_ (the same
+               guard configureMcp() uses for the writes). */
+            race_sentinel::ShadowZone rs_zone_mcp_read(
+                "CognitionAutonomyManager::mu_");
+#endif
+            auto it = mcpActionMap_.find(spec.name);
+            if (it == mcpActionMap_.end()) {
+                return json{{"ok", false},
+                            {"error", "mcp action not registered: " + spec.name}};
+            }
+            mcpServer = it->second.first;
+            mcpTool = it->second.second;
         }
         nlohmann::json args = nlohmann::json::object();
         if (context.contains("mcpArguments") && context["mcpArguments"].is_object()) {
             args = context["mcpArguments"];
         }
-        nlohmann::json out = mcpManager_.callTool(it->second.first, it->second.second, args);
+        nlohmann::json out = mcpManager_.callTool(mcpServer, mcpTool, args);
         /* flatten MCP text content into a reply for the prompt pipeline */
         std::string reply;
         if (out.contains("content") && out["content"].is_array()) {
@@ -1152,8 +1172,8 @@ nlohmann::json CognitionAutonomyManager::executeAgiAction(
             }
         }
         return json{{"ok", out.value("ok", false)},
-                    {"result", json{{"server", it->second.first},
-                                    {"tool", it->second.second},
+                    {"result", json{{"server", mcpServer},
+                                    {"tool", mcpTool},
                                     {"reply", reply},
                                     {"mcp", out}}}};
     }
@@ -1901,9 +1921,14 @@ json CognitionAutonomyManager::iterate(const json &payload, const json &worldSta
     lastBenefitHarmBias_ = driveWeights;  /* process mirror of the latest tick */
     /* Per-scope copy: A's appraisal must not overwrite the bias B reads back. */
     try {
-        phoenix::memory::ScopedTrainableMemory::instance()
-            .hot(iterMemScope)
-            .lastBenefitHarmBias = driveWeights;
+        auto &bhHot =
+            phoenix::memory::ScopedTrainableMemory::instance().hot(iterMemScope);
+#ifdef PHOENIX_RACE_SENTINEL
+        /* Phase-2 field-level probe: written through hot() without fieldMu. */
+        race_sentinel::fieldTouch(&bhHot, "lastBenefitHarmBias", true,
+                                  "ScopedTrainableMemory::bucket");
+#endif
+        bhHot.lastBenefitHarmBias = driveWeights;
     } catch (...) {
     }
 
@@ -2639,6 +2664,10 @@ json CognitionAutonomyManager::ingestAgiTransition(const json &payload) {
         scope, agiController_);
     auto &hot = phoenix::memory::ScopedTrainableMemory::instance().hot(scope);
     const double surprise = scopeAgi.observe(z, a, zNext);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::fieldTouch(&hot, "agiLatent", true,
+                              "ScopedTrainableMemory::bucket");
+#endif
     hot.agiLatent = zNext;
     return json{{"ok", true},
                 {"result", json{{"surprise", surprise},
@@ -3440,6 +3469,9 @@ json CognitionAutonomyManager::resetMissionLineage() {
 
 json CognitionAutonomyManager::configureMcp(const json &payload) {
     std::lock_guard<std::mutex> lock(mu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_mcp_write("CognitionAutonomyManager::mu_");
+#endif
     const json &p = payload.is_null() ? json::object() : payload;
     std::string err;
     mcpManager_.configure(p, err);

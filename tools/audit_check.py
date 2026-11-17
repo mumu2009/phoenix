@@ -34,6 +34,7 @@ import ctypes
 import datetime
 import fnmatch
 import glob
+import hashlib
 import json
 import os
 import re
@@ -491,82 +492,166 @@ def r13_cuda(ctx: Ctx):
     return findings, stats
 
 
+def sha256_file(path: Path):
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def git_status_paths(text: str):
+    """Parse `git status --porcelain` into a set of worktree paths."""
+    out = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        rest = line[3:] if len(line) >= 3 else line
+        if " -> " in rest:
+            rest = rest.split(" -> ", 1)[1]
+        rest = rest.strip()
+        if rest.startswith('"') and rest.endswith('"'):
+            rest = rest[1:-1]
+        if rest:
+            out.append(rest.replace("\\", "/"))
+    return out
+
+
 @rule("R1.4", "R1", "error",
-      "llama.cpp vendored commit vs llama_server_mods/*.patch applicability",
-      "The gateway's split backend depends on patches applied to outsides/llamacpp. "
-      "If a patch no longer applies (upstream merge / partial hand-edit), the rebuilt "
-      "binary silently loses the /phx features - the exact 'patch defect' incident where "
-      "the enc-dec split path leaked template tokens and GGML_ASSERT'ed under load.")
+      "llama.cpp vendor reproducibility (canonical patch + hash truth + dirty-file set)",
+      "The gateway's split backend depends on 10 hand-modified llama.cpp files.  The old "
+      "per-feature patch chain drifted (2 corrupt patches, 5 conflicting) and could not "
+      "reproduce the live tree - the same class as the 'patch defect' incident where the "
+      "enc-dec split path leaked template tokens and GGML_ASSERT'ed under load. "
+      "Authoritative truth is now llama_server_mods/phoenix_vendor_733dd8df.patch + "
+      "vendor_733dd8df.sha256.json (doc/v10.1/vendor_patch_stack.md).")
 def r14_llamacpp_patches(ctx: Ctx):
     findings, stats = [], {}
-    repo = ctx.root / "outsides" / "llamacpp"
+    root = ctx.root
+    mod = root / "llama_server_mods"
+    repo = root / "outsides" / "llamacpp"
+    truth_path = mod / "vendor_733dd8df.sha256.json"
+    truth = load_json(truth_path) or {}
+    canonical_rel = truth.get("canonicalPatch") or "llama_server_mods/phoenix_vendor_733dd8df.patch"
+    canonical = root / canonical_rel
+    recorded = sorted({f.get("path") for f in truth.get("files", [])
+                       if isinstance(f, dict) and f.get("path")})
+    stats["truth_file"] = rel(ctx, truth_path)
+    stats["truth_head"] = truth.get("head")
+    stats["recorded_files"] = len(recorded)
+    stats["canonical_patch"] = rel(ctx, canonical) if canonical.exists() else (canonical_rel + " (MISSING)")
+    if canonical.exists():
+        stats["canonical_bytes"] = canonical.stat().st_size
+        stats["canonical_sha256"] = sha256_file(canonical)
     if not (repo / ".git").exists():
         return findings, {"skipped": "outsides/llamacpp is not a git repo"}
-    rc, out, err = run(ctx, ["git", "-C", str(repo), "rev-parse", "HEAD"], timeout=20)
+
+    # superseded per-feature patches (kept until Lead approves deletion) are exempt
+    sup_text = read_text(mod / "SUPERSEDED.md")
+    superseded = set()
+    for m in re.finditer(r"`([A-Za-z0-9_./-]+\.patch)`", sup_text):
+        name = m.group(1)
+        if "/" not in name:  # root-level old patches; regenerated/ is not part of the gate
+            superseded.add(name)
+    stats["superseded_patches"] = sorted(superseded)
+
+    rc, out, err = runv(ctx, ["git", "-C", str(repo), "rev-parse", "HEAD"], timeout=20)
     if rc != 0:
         return findings, {"skipped": "git rev-parse failed: %s" % (err.strip()[:120])}
-    head = out.strip()
-    stats["llamacpp_head"] = head
-    rc, out, _err = run(ctx, ["git", "-C", str(repo), "log", "-1",
-                              "--format=%h|%cd|%s", "--date=short"], timeout=20)
-    stats["llamacpp_head_info"] = out.strip()
-    rc, out, _err = run(ctx, ["git", "-C", str(repo), "status", "--porcelain"], timeout=20)
-    dirty = [l for l in out.splitlines() if l.strip()]
-    stats["dirty_files"] = len(dirty)
-    patches = sorted((ctx.root / "llama_server_mods").glob("*.patch"))
-    stats["patch_count"] = len(patches)
-    applied, applicable, conflicts, errors = [], [], [], []
-    details = {}
-    for patch in patches:
-        try:
-            relp = os.path.relpath(str(patch), str(repo))
-        except ValueError:
-            relp = str(patch)
-        fwd = run(ctx, ["git", "-C", str(repo), "apply", "--check",
-                        "--ignore-space-change", "--ignore-whitespace", relp], timeout=20)
-        rev = run(ctx, ["git", "-C", str(repo), "apply", "--check", "--reverse",
-                        "--ignore-space-change", "--ignore-whitespace", relp], timeout=20)
-        if fwd is None or rev is None:
-            stats.setdefault("skipped_reason", "no subprocess mode")
-            continue
-        f_rc, f_out, f_err = fwd
-        r_rc, r_out, r_err = rev
-        if f_rc == 0 and r_rc != 0:
-            applicable.append(patch.name)
-        elif f_rc != 0 and r_rc == 0:
-            applied.append(patch.name)
-        elif f_rc == 0 and r_rc == 0:
-            details[patch.name] = "ambiguous (applies both ways)"
-            conflicts.append(patch.name)
-        elif f_rc == 128 or r_rc == 128:
-            first = (f_err or r_err or "").strip().splitlines()
-            details[patch.name] = "git error: " + (first[0][:180] if first else "unknown")
-            errors.append(patch.name)
+    stats["live_vendor_head"] = out.strip()
+
+    # --- R1.4a: canonical patch applies to pristine base and reproduces hash truth ---
+    verify_script = root / "tools" / "vendor_patch_verify.ps1"
+    last_path = root / "build" / "tmp" / "vendor_patch_verify" / "last_result.json"
+    last = load_json(last_path)
+    verify = "unknown"
+    if not ctx.args.no_subprocess and verify_script.is_file():
+        sw_start = time.monotonic()
+        vrc, vout, verr = runv(ctx, ["pwsh", "-NoProfile", "-File", str(verify_script)],
+                               timeout=240)
+        stats["verify_exit"] = vrc
+        stats["verify_elapsed_s"] = round(time.monotonic() - sw_start, 2)
+        vm = re.search(r"RESULT:\s*(PASS|FAIL)", vout)
+        verify = vm.group(1) if vm else ("PASS" if vrc == 0 else "FAIL")
+        result_lines = [l.strip() for l in vout.splitlines() if "RESULT:" in l or "sha256" in l]
+        stats["verify_source"] = rel(ctx, verify_script)
+        if verify != "PASS":
+            findings.append(dict(
+                severity="error",
+                message="R1.4a FAIL: canonical patch does not reproduce the recorded vendor tree",
+                evidence=[(result_lines[-1] if result_lines else (vout or verr).strip()[-300:]),
+                          rel(ctx, truth_path)]))
+    elif last is not None:
+        verify = "PASS" if last.get("pass") else "FAIL"
+        stats["verify_source"] = rel(ctx, last_path) + " (cached; --no-subprocess)"
+        if verify != "PASS":
+            findings.append(dict(severity="error",
+                                 message="R1.4a FAIL: cached vendor verification result is not PASS",
+                                 evidence=[rel(ctx, last_path)]))
+    else:
+        stats["verify_source"] = "not run"
+        findings.append(dict(severity="warn",
+                             message="R1.4a could not run: tools/vendor_patch_verify.ps1 unavailable and "
+                                     "no cached result (use pwsh, not --no-subprocess)",
+                             evidence=[rel(ctx, verify_script)]))
+    stats["verify"] = verify
+
+    # --- R1.4b: non-superseded *.patch files must still apply cleanly ---
+    exempt = superseded | {Path(canonical_rel).name}
+    checked, needs_fix, details = [], [], {}
+    if not ctx.args.no_subprocess:
+        for patch in sorted(mod.glob("*.patch")):
+            if patch.name in exempt:
+                continue
+            checked.append(patch.name)
+            try:
+                relp = os.path.relpath(str(patch), str(repo))
+            except ValueError:
+                relp = str(patch)
+            fwd = runv(ctx, ["git", "-C", str(repo), "apply", "--check",
+                             "--ignore-space-change", "--ignore-whitespace", relp], timeout=20)
+            rev = runv(ctx, ["git", "-C", str(repo), "apply", "--check", "--reverse",
+                             "--ignore-space-change", "--ignore-whitespace", relp], timeout=20)
+            f_rc, _f_out, f_err = fwd
+            r_rc, _r_out, _r_err = rev
+            if f_rc != 0 and r_rc != 0:
+                needs_fix.append(patch.name)
+                first = (f_err or "").strip().splitlines()
+                details[patch.name] = first[0][:180] if first else "does not apply either way"
+    stats["checked_non_superseded"] = checked
+    stats["needs_fix"] = needs_fix
+    if needs_fix:
+        findings.append(dict(
+            severity="error",
+            message="R1.4b FAIL: %d non-superseded patch(es) do not apply cleanly (add to "
+                    "SUPERSEDED.md only if they are truly obsolete)" % len(needs_fix),
+            evidence=[p + ": " + details.get(p, "") for p in needs_fix[:10]]))
+
+    # --- R1.4c: dirty file set must equal the recorded set ---
+    if not ctx.args.no_subprocess:
+        src, sout, serr = runv(ctx, ["git", "-C", str(repo), "status", "--porcelain"], timeout=20)
+        if src != 0:
+            findings.append(dict(severity="warn",
+                                 message="R1.4c could not read git status: %s" % serr.strip()[:120],
+                                 evidence=[str(repo)]))
         else:
-            first = (f_err or "").strip().splitlines()
-            details[patch.name] = "conflict: " + (first[0][:180] if first else "does not apply")
-            conflicts.append(patch.name)
-    stats.update(applied=applied, applicable_not_applied=applicable,
-                 conflicting=conflicts, unreadable=errors)
-    if errors:
-        findings.append(dict(severity="error",
-                             message="%d patch(es) cannot be tested by git apply (corrupt/path-invalid)" % len(errors),
-                             evidence=[p + ": " + details.get(p, "") for p in errors[:8]]))
-    if conflicts:
-        findings.append(dict(severity="error",
-                             message="%d patch(es) no longer apply cleanly to llama.cpp @ %s"
-                                     % (len(conflicts), head[:12]),
-                             evidence=[p + ": " + details.get(p, "") for p in conflicts[:8]]))
-    if applicable:
-        findings.append(dict(severity="warn",
-                             message="%d patch(es) apply cleanly but are NOT currently applied (drift)"
-                                     % len(applicable),
-                             evidence=["not applied: " + ", ".join(applicable[:10])]))
-    if dirty:
-        findings.append(dict(severity="warn",
-                             message="outsides/llamacpp has %d modified file(s) (hand edits on top of patches?)"
-                                     % len(dirty),
-                             evidence=[l[:140] for l in dirty[:10]]))
+            actual = set(git_status_paths(sout))
+            missing = sorted(set(recorded) - actual)
+            extra = sorted(actual - set(recorded))
+            stats["dirty_files"] = len(actual)
+            stats["missing_from_worktree"] = missing
+            stats["unexpected_dirty"] = extra
+            if missing or extra:
+                findings.append(dict(
+                    severity="error",
+                    message="R1.4c FAIL: live dirty-file set differs from vendor_733dd8df.sha256.json "
+                            "(%d missing, %d unexpected)" % (len(missing), len(extra)),
+                    evidence=(["missing: " + p for p in missing[:8]] +
+                              ["unexpected: " + p for p in extra[:8]] +
+                              [rel(ctx, truth_path)])))
     return findings, stats
 
 

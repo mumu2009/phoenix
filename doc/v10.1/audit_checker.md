@@ -54,7 +54,7 @@ cannot hide the rest.
 | R1.1 | error | actual `g++` version (resolved from PATH/MSYS2) vs `build/conan_home/profiles/default` `compiler.version/libcxx/cppstd`; samples 400 `conaninfo.txt` for corroboration | Conan prebuilts (drogon/opencv/sqlite3/...) are linked into the same exe. A different compiler/ABI is the same failure class as the `_GLIBCXX_DEBUG` link failure that killed the debug sidecar (`debug_protocol.md` §7.4) |
 | R1.2 | warn | `conanfile.txt` requirements vs `conan list '*'` cache refs (+ CMakeDeps version files) | `conanfile.txt` is the dependency contract; a silently different resolved version is a rebuild change nobody reviewed |
 | R1.3 | error | `nvcc --version` toolkit vs `nvidia-smi` CUDA UMD version (and GPU arch note) | Toolkit newer than the driver compiles kernels that fail at runtime ("no kernel image available"); CUDA >=13 dropped sm_50/60/70, GTX 1660 is sm_75 |
-| R1.4 | error | vendored `outsides/llamacpp` HEAD/status vs every `llama_server_mods/*.patch`: `git apply --check` (applicable?) and `--reverse --check` (already applied?) | The split/enc-dec patch path is where template-token leakage + `GGML_ASSERT` crashed under load; if a patch no longer applies, a rebuild silently loses or changes `/phx` behaviour |
+| R1.4 | error | **R1.4a** `tools/vendor_patch_verify.ps1` → canonical `llama_server_mods/phoenix_vendor_733dd8df.patch` applied to pristine `733dd8df` must reproduce `vendor_733dd8df.sha256.json` byte-for-byte; **R1.4b** every root `*.patch` NOT in `SUPERSEDED.md` must apply cleanly (canonical patch and superseded per-feature patches exempt); **R1.4c** live `git status --porcelain` file set must equal the recorded 10-file set | The old per-feature patch chain drifted (2 corrupt, 5 conflicting, 1 not applied) and could not reproduce the live tree — same failure class as the patch-defect incident where the enc-dec split path leaked template tokens / `GGML_ASSERT`'ed under load. Authoritative truth: `doc/v10.1/vendor_patch_stack.md` + hash file + canonical patch |
 | R1.5 | error | `Python314/include/patchlevel.h` `PY_VERSION` vs `python314.dll` version resource vs `Python314/python.exe --version` vs `python314.lib` | 3.14.3 headers with a different DLL patch level corrupt PyObject layouts; this box also has a second Python 3.11 on PATH |
 | R1.6 | warn | `local_onnx.cpp` bridge mode (Python subprocess, no C API) + embedded `onnxruntime` package version queried through `Python314/python.exe` | A missing/old onnxruntime silently degrades every audio/video model to the deterministic fallback |
 | R1.7 | warn | `version.hpp` (10.0.0 "Gareth") vs newest `doc/v*` shelf, README title, manifest, doc index | `/api/system/status` reports `version.hpp`; humans/scripts read README/doc. Divergence is the "which build am I running?" trap |
@@ -80,48 +80,54 @@ cannot hide the rest.
 | R3.4 | warn | `#if 0` blocks, commented-out `#include` lines (main.cpp hub), `if (false)`/`if (0)` branches | Disabled code is invisible to build checks and reviewers; main.cpp has hub includes "disabled due to pre-existing compilation errors", which are latent feature gaps |
 | R3.5 | warn | lock site with a network/tool/LLM call inside the same brace scope (`generate(`, `tcpExchange`, `invokeAddonTool`, `callMcpTool`, `subprocess`, HTTP...) | Coarse locks around IO serialised the gateway; the unified-pipeline refactor had to move file IO outside mutexes. Holding a lock over an LLM/tool call risks priority inversion/deadlock |
 
-## Baseline (2026-11-17 23:0x, current tree)
+## Baseline (2026-11-17 23:35, current tree)
 
-Command: `python tools\audit_check.py` — 18 rules, ~20 s.
+Command: `python tools\audit_check.py` — 18 rules, ~20 s (R1.4 runs the 4 s vendor verify).
 
 | group | status | rules | PASS | WARN | FAIL | findings |
 |---|---|---|---|---|---|---|
-| R1 | **FAIL** | 8 | 4 | 1 | 3 | 7 |
+| R1 | **FAIL** | 8 | 5 | 1 | 2 | 3 |
 | R2 | **WARN** | 5 | 2 | 3 | 0 | 4 |
 | R3 | **FAIL** | 5 | 1 | 2 | 2 | 5 |
-| total | — | 18 | 7 | 6 | 5 | 16 |
+| total | — | 18 | 8 | 6 | 4 | 12 |
 
 Per-rule baseline (status / findings):
 
 ```
-R1.1 FAIL 1   R1.2 PASS 0   R1.3 PASS 0   R1.4 FAIL 4
+R1.1 FAIL 1   R1.2 PASS 0   R1.3 PASS 0   R1.4 PASS 0
 R1.5 PASS 0   R1.6 PASS 0   R1.7 WARN 1   R1.8 FAIL 1
 R2.0 PASS 0   R2.1 WARN 2   R2.2 WARN 1   R2.3 PASS 0   R2.4 WARN 1
 R3.1 FAIL 1   R3.2 PASS 0   R3.3 FAIL 1   R3.4 WARN 2   R3.5 WARN 1
 ```
+
+R1.4 now PASSes on the authoritative vendor truth: verify script result PASS in
+~4 s, 10/10 recorded files byte-identical, canonical patch 66,112 B sha256
+`95ae6a367aed65a89e7628f288f3d1a8805789550eba197555525c97e98a6ceb`, dirty set ==
+recorded set.  The 12 superseded per-feature patches are exempt (they stay until
+the Lead approves deletion; `regenerated/` is outside the gate).
 
 Top findings at baseline (from `build/tmp/audit_check.json`):
 
 1. **R1.1 (error)** conan packages pinned to gcc 13, compiling with g++ 16.1.0 —
    `build/conan_home/profiles/default` says `compiler.version=13
    libcxx=libstdc++11 cppstd=gnu17`; actual `g++.exe (Rev5…) 16.1.0`.
-2. **R1.4 (error)** 2 patches unreadable (`phx_chunked_encode.patch: corrupt
-   patch at line 87`, `phx_generate_cancel.patch: corrupt patch at line 58`).
-3. **R1.4 (error)** 5 patches no longer apply to llama.cpp @ `733dd8df`
-   (`enc_dec_separation`, `existing_mods`, `phoenix_combined`,
-   `phx_generate_unit_query_sides`, `phx_unit_loop`); 1 applies but is not
-   applied (`phx_generate_kv_clear`); tree has 10 modified files.
-4. **R1.8 (error)** 7 persisted state switches mirror config switches:
+   (An isolated `build/conan_home_16` gcc16 home is being staged; R1.1 flips to
+   PASS only when the Lead swaps the production home — see
+   `doc/v10.1/conan_abi_gcc16.md`.)
+2. **R1.8 (error)** 7 persisted state switches mirror config switches:
    `agiEnabled→agi.enabled`, `missionEnabled→mission.enabled`,
    `selfMind.enabled→selfMind.enabled`, `studyExpert.enabled→study.expert.enabled`,
    `studyPopulation.enabled→study.population.enabled`,
    `studyUnitLearn.enabled→study.unitLearn.enabled`,
    `subconsciousEnabled→subconscious.enabled`.
-5. **R3.1 (error)** 36 mutable static containers, e.g.
+3. **R3.1 (error)** 36 mutable static containers, e.g.
    `external_mixed_modal_io.cpp:107 static std::unordered_map<int,
    std::unique_ptr<VideoModel>> cache;`, `frontend_server.cpp:204
    gLocalAuthSessions`, `memetic_existence.cpp:1019 unitsCache`,
    `main_hub_parts/060_section_before_lemmaworkerpool.inc:7 gLemmaCache`.
+4. **R3.3 (error)** 1 enabled-like switch restored in a real `fromJson` body:
+   `mcp_client.cpp:47 c.enabled = j.value("enabled", true);`.
+5. **R1.7 (warn)** `version.hpp` says 10.0.0 but newest doc shelf is `v10.1`.
 
 Other baseline facts: R1.3 PASS (nvcc 13.5 == driver UMD 13.5, driver 621.24,
 GTX 1660 sm_75 ok), R1.5 PASS (Python headers 3.14.3 == embedded python.exe
@@ -193,10 +199,13 @@ PASSes with `state: not published yet` and R2's own rules stay advisory.
 * R2.1/R2.2/R2.3/R3.2/R3.5 are heuristics.  They are deliberately worded with
   "heuristic" and carry evidence so a human can overrule quickly.  Never delete
   code/data just because a rule fired — confirm reachability/runtime use first.
-* R1.4's patch classification uses `git apply --check`/`--reverse --check`; a
-  patch can legitimately conflict because a combined patch already applied it.
-  Treat the list as "the dirty tree is not reproducible from clean vendor +
-  patch scripts", which is the actionable fact.
+* R1.4a shells out to `tools/vendor_patch_verify.ps1` (creates a temporary pristine
+  worktree, ~4 s; use `pwsh`).  Without subprocess it falls back to the cached
+  `build/tmp/vendor_patch_verify/last_result.json` and says so.  R1.4b only
+  judges patches NOT listed in `SUPERSEDED.md`; the superseded old chain is
+  intentionally exempt until the Lead approves deletion.  R1.4c compares the
+  live dirty set to the tracked 10-file set — an intentional vendor change must
+  be re-captured into the canonical patch + hash truth, not hand-waved.
 * R1.2/R1.6/R1.3/R1.5 depend on local tools (conan/nvcc/nvidia-smi/embedded
   Python).  `--no-subprocess` turns those probes off and reports SKIP/PASS with
   missing stats instead of lying.

@@ -10,6 +10,18 @@
 #include "hierarchical_memory.hpp"
 #include "memory_scope.hpp"
 
+#ifdef PHOENIX_RACE_SENTINEL
+#include "tests/gtest/support/race_track.hpp"
+#endif
+
+#ifdef PHOENIX_RACE_SENTINEL
+#include "tests/gtest/support/race_track.hpp"
+#endif
+
+#ifdef PHOENIX_RACE_SENTINEL
+#include "tests/gtest/support/race_track.hpp"
+#endif
+
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -165,6 +177,9 @@ class ScopedTrainableMemory {
       const phoenix::agi::ActiveInferenceController &tmpl) {
     const std::string k = scope.key();
     std::lock_guard<std::mutex> lock(mu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_stm_agiFor("ScopedTrainableMemory::mu_");
+#endif
     auto it = live_.find(k);
     if (it == live_.end()) {
       auto bucket = std::make_unique<TrainableMemoryBucket>();
@@ -179,6 +194,9 @@ class ScopedTrainableMemory {
   TrainableMemoryBucket &hot(const MemoryScope &scope) {
     const std::string k = scope.key();
     std::lock_guard<std::mutex> lock(mu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_stm_hot("ScopedTrainableMemory::mu_");
+#endif
     auto it = live_.find(k);
     if (it == live_.end()) {
       auto bucket = std::make_unique<TrainableMemoryBucket>();
@@ -195,6 +213,9 @@ class ScopedTrainableMemory {
     TrainableMemoryBucket *b = nullptr;
     {
       std::lock_guard<std::mutex> lock(mu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_stm_summary("ScopedTrainableMemory::mu_");
+#endif
       const std::string k = scope.key();
       auto it = live_.find(k);
       if (it == live_.end()) {
@@ -204,17 +225,28 @@ class ScopedTrainableMemory {
       b = it->second.get();
     }
     std::lock_guard<std::mutex> fieldLock(b->fieldMu);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_stm_field("ScopedTrainableMemory::fieldMu");
+    race_sentinel::fieldTouch(b, "gnnSummary", true,
+                              "ScopedTrainableMemory::bucket");
+#endif
     b->gnnSummary = text;
   }
 
   const TrainableMemoryBucket *peek(const MemoryScope &scope) const {
     const std::string k = scope.key();
     std::lock_guard<std::mutex> lock(mu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_stm_peek("ScopedTrainableMemory::mu_");
+#endif
     auto it = live_.find(k);    return it == live_.end() ? nullptr : it->second.get();
   }
 
   bool hasLive(const MemoryScope &scope) const {
     std::lock_guard<std::mutex> lock(mu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_stm_has("ScopedTrainableMemory::mu_");
+#endif
     return live_.count(scope.key()) != 0;
   }
 
@@ -222,6 +254,9 @@ class ScopedTrainableMemory {
   void release(const MemoryScope &scope, bool keepArchive = true) {
     const std::string k = scope.key();
     std::lock_guard<std::mutex> lock(mu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_stm_release("ScopedTrainableMemory::mu_");
+#endif
     auto it = live_.find(k);
     if (it == live_.end())
       return;
@@ -245,18 +280,27 @@ class ScopedTrainableMemory {
 
   size_t liveCount() const {
     std::lock_guard<std::mutex> lock(mu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_stm_count("ScopedTrainableMemory::mu_");
+#endif
     return live_.size();
   }
 
   /** Test helper: wipe every bucket (does not touch cold stores). */
   void resetForTest() {
     std::lock_guard<std::mutex> lock(mu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_stm_reset("ScopedTrainableMemory::mu_");
+#endif
     live_.clear();
     archived_.clear();
   }
 
   nlohmann::json status() const {
     std::lock_guard<std::mutex> lock(mu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_stm_status("ScopedTrainableMemory::mu_");
+#endif
     nlohmann::json keys = nlohmann::json::array();
     for (const auto &kv : live_)
       keys.push_back(kv.first);
@@ -268,7 +312,25 @@ class ScopedTrainableMemory {
  private:
   ScopedTrainableMemory() = default;
   mutable std::mutex mu_;
+#ifdef PHOENIX_RACE_SENTINEL
+  race_sentinel::RaceTrack<
+      std::unordered_map<std::string, std::unique_ptr<TrainableMemoryBucket>>>
+      live_{"ScopedTrainableMemory::live_"};
+#else
+#ifdef PHOENIX_RACE_SENTINEL
+  race_sentinel::RaceTrack<
+      std::unordered_map<std::string, std::unique_ptr<TrainableMemoryBucket>>>
+      live_{"ScopedTrainableMemory::live_"};
+#else
+#ifdef PHOENIX_RACE_SENTINEL
+  race_sentinel::RaceTrack<
+      std::unordered_map<std::string, std::unique_ptr<TrainableMemoryBucket>>>
+      live_{"ScopedTrainableMemory::live_"};
+#else
   std::unordered_map<std::string, std::unique_ptr<TrainableMemoryBucket>> live_;
+#endif
+#endif
+#endif
   std::unordered_map<std::string, std::unique_ptr<TrainableMemoryBucket>>
       archived_;
 };

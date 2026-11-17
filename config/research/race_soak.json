@@ -1,0 +1,69 @@
+{
+  "_comment": "RaceSentinel Phase-2 soak overlay (AI_RESEARCH_PROFILE=race_soak). Instrumentation sidecar only. Delete after the soak.",
+  "agi": {
+    "enabled": true,
+    "learningRate": 0.05,
+    "discount": 0.9,
+    "consolidateEvery": 8,
+    "actions": ["research", "search"]
+  },
+  "mission": {
+    "enabled": true,
+    "maxReplicas": 2,
+    "maxReplicaDepth": 0,
+    "deliberateMaxTokens": 32,
+    "childDeliberateMaxTokens": 24,
+    "pressureMode": "logarithmic",
+    "pressureHorizonSec": 7200,
+    "minDeliverableChars": 120,
+    "childMinDeliverableChars": 40,
+    "autoChildDoneChars": 40,
+    "workspaceDir": "./runtime_store/mission_workspace",
+    "outlineEnabled": true,
+    "outlineSize": 6,
+    "cacheSim": 0.98,
+    "maxSelfPauseTicks": 2
+  },
+  "autonomyLoop": {
+    "enabled": true,
+    "intervalSec": 6,
+    "maxStepsPerTick": 2,
+    "maxMissionsPerTick": 8,
+    "maxChildrenPerTick": 0,
+    "parallelMissions": true,
+    "missionDelibLock": true,
+    "persistEveryTicks": 0
+  },
+  "mcp": {
+    "enabled": true,
+    "servers": [
+      {
+        "name": "raceprobe",
+        "command": "C:\\WINDOWS\\system32\\cmd.exe",
+        "args": ["/c", "E:\\079\\v6.0Alixander\\phoenix\\build\\tmp\\race_sentinel\\soak\\mcp_launch.bat"],
+        "startupMs": 20000,
+        "timeoutMs": 20000
+      }
+    ]
+  },
+  "main": {
+    "frontendEnabled": false,
+    "frontendSubprocess": false,
+    "disableWatchdog": true,
+    "sigintForceExitMs": 5000,
+    "inference": {
+      "llamaUseSplitBackend": false,
+      "tinyllamaEnabled": false,
+      "usingOllama": false
+    }
+  },
+  "auth": {
+    "enabled": false
+  },
+  "world_model": {
+    "storage": {
+      "redisUrl": "redis://127.0.0.1:6399",
+      "redisDb": 9
+    }
+  }
+}

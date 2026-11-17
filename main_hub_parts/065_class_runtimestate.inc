@@ -949,6 +949,13 @@ public:
 
   MemeGraph &graph() { return graph_; }
   KVMStore &kvm() { return kvm_; }
+  /* Mutex that serialises the mutable research state (graph_/tensor_/
+     pattern_/params_).  Exposed ONLY so a collaborator declared as a friend
+     of RuntimeState (OnlineResearcher) can enter the protected region through
+     phoenix::state_guard::withResearchStateLock() - every member of this class
+     touching that state already locks it.  See the 2026-11-17 heap-corruption
+     fix note in autonomy_stack.hpp. */
+  std::mutex &researchStateMutex() { return stateMu_; }
   MemeSurfaceLexicon &surfaceLexicon() { return *surfaceLexicon_; }
   DialogMemory &dialogMemory() { return *dialogMemory_; }
   const Config &config() const override { return config_; }
@@ -1683,6 +1690,10 @@ public:
         auto &hotRes = phoenix::memory::ScopedTrainableMemory::instance()
                            .hot(phoenix::memory::currentMemoryScope())
                            .residual;
+#ifdef PHOENIX_RACE_SENTINEL
+        race_sentinel::fieldTouch(&hotRes, "residual", true,
+                                  "ScopedTrainableMemory::bucket");
+#endif
         hotRes.count += 1;
         hotRes.last = residual;
         if (hotRes.count == 1)

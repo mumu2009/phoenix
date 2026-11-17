@@ -4725,7 +4725,12 @@ private:
   /* v8.3 mission outline cache: the GNN graph is long-lived, so the outline
      for a goal is built once and reused every deliberator tick. */
   mutable std::mutex outlineMu_;
+#ifdef PHOENIX_RACE_SENTINEL
+  mutable race_sentinel::RaceTrack<std::unordered_map<std::string, std::string>>
+      missionOutlineCache_{"GatewayServer::missionOutlineCache_"};
+#else
   mutable std::unordered_map<std::string, std::string> missionOutlineCache_;
+#endif
   /* v10.1: serializes the whole mission-deliberator critical section.  Parallel
      missions are scheduled on separate threads by loopRun (std::async), but the
      deliberator touches non-thread-safe shared state (llama channel, workspace
@@ -4962,6 +4967,10 @@ private:
               chatScope, diffSummary.summaryText);
           auto &chatHot =
               phoenix::memory::ScopedTrainableMemory::instance().hot(chatScope);
+#ifdef PHOENIX_RACE_SENTINEL
+          race_sentinel::fieldTouch(&chatHot, "graphHint", true,
+                                    "ScopedTrainableMemory::bucket");
+#endif
           chatHot.graphHint = diffSummary.summaryText;
         }
       }

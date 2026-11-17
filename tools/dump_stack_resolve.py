@@ -18,6 +18,29 @@ corrupted block.  This tool:
 Usage:
   python tools/dump_stack_resolve.py <dump> [--map phoenix_main.map]
                                     [--module phoenix_main.exe]
+
+MAP PROVENANCE - IMPORTANT (2026-11-17):
+  phoenix_main.map is NOT trustworthy just because it exists: the sidecar
+  -D_GLIBCXX_DEBUG experiment (build\\tmp\\compile_dbg.bat) overwrote it at
+  20:13 even though its link failed, so its addresses belong to a different
+  (debug-ABI) layout and resolving a normal-build dump against it silently
+  attributes frames to the wrong functions.
+
+  The MinGW exe keeps its COFF symbol table, so regenerate a map that is
+  guaranteed to match the binary that produced the dump, from that binary:
+    (in E:\\079\\v6.0Alixander\\phoenix; nm.exe is C:\\msys64\\mingw64\\bin\\nm.exe)
+    & nm -C --defined-only phoenix_main.exe |
+        ForEach-Object {
+          if ($_ -match '^([0-9a-fA-F]{16})\\s+\\S\\s+(.+)$') {
+            '0x{0} {1}' -f $matches[1].ToLower(), $matches[2]
+          }
+        } | Set-Content build\\tmp\\phoenix_nm.map -Encoding utf8
+    python tools/dump_stack_resolve.py <dump> --map build\\tmp\\phoenix_nm.map
+
+  Verify the dump really came from that binary: the minidump module entry
+  (base, size, checksum) must match phoenix_main.exe, e.g.
+  build/tmp/all_thread_stacks.py prints them.  Keep the generated map under
+  build\\tmp\\phoenix_main.map.<epoch> and record the exe SHA-256 next to it.
 """
 import argparse
 import bisect

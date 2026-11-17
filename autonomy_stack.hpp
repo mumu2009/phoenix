@@ -27,6 +27,11 @@
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <condition_variable>
+
+#ifdef PHOENIX_RACE_SENTINEL
+#include "tests/gtest/support/race_track.hpp"
+#endif
+
 #include <deque>
 #include <mutex>
 #include <string>
@@ -34,6 +39,63 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+/* ---------------------------------------------------------------------------
+   phoenix::state_guard - serialised entry into RuntimeState's research state.
+   ---------------------------------------------------------------------------
+   2026-11-17 heap-corruption fix (0xC0000374, ntdll+0xff489).
+
+   RuntimeState owns ONE mutex (stateMu_) that serialises every read/write of
+   its mutable research state: MemeGraph graph_, TensorEngine tensor_,
+   PatternMatrix pattern_ and Params params_.  The raw helpers
+   RuntimeState::mapWordsToMemesOrdered() / RuntimeState::runPropagation()
+   assume the caller already holds that mutex - processInput() and
+   learnFromDialog() do.
+
+   OnlineResearcher::fallback() lives outside RuntimeState and re-enters that
+   same state (it maps query words and runs a propagation to suggest memes).
+   It used to do so with NO lock at all, so with autonomyLoop.parallelMissions
+   several mission threads executed PatternMatrix::rebuild() /
+   GraphTensorBridge::buildMultiOrderCSR() - both of which mutate the matrix /
+   bridge nlohmann::json trees - at the same time and corrupted the heap.  The
+   2026-11-17 08:12, 08:14 and 08:15 dumps each show 2-3 threads simultaneously
+   inside PatternMatrix::rebuild() reached through this fallback.
+
+   ResearchStateGuard/withResearchStateLock is the only sanctioned way for a
+   collaborator outside RuntimeState to enter the region, and it shares the
+   RuntimeState mutex (no second lock, so it also excludes processInput()'s
+   propagation).  Kept header-only so the gtest can pin its mutual-exclusion
+   and exception-safety contract without linking the main.cpp unity TU. */
+namespace phoenix {
+namespace state_guard {
+
+class ResearchStateGuard {
+public:
+  explicit ResearchStateGuard(std::mutex &mu) : lock_(mu) {}
+  ResearchStateGuard(const ResearchStateGuard &) = delete;
+  ResearchStateGuard &operator=(const ResearchStateGuard &) = delete;
+  ResearchStateGuard(ResearchStateGuard &&) = delete;
+  ResearchStateGuard &operator=(ResearchStateGuard &&) = delete;
+
+  bool owns_lock() const { return lock_.owns_lock(); }
+  void unlock() { lock_.unlock(); }
+
+private:
+  std::unique_lock<std::mutex> lock_;
+};
+
+/* Runs `fn` while holding the RuntimeState research-state mutex.  Callback
+   form keeps the region exception-safe: the guard releases the mutex on every
+   exit path, so a throwing propagation cannot wedge every other research /
+   chat path. */
+template <class Fn>
+auto withResearchStateLock(std::mutex &mu, Fn &&fn) -> decltype(fn()) {
+  ResearchStateGuard guard(mu);
+  return fn();
+}
+
+} // namespace state_guard
+} // namespace phoenix
 
 namespace autonomy {
 
@@ -433,8 +495,13 @@ size_t missionMaxReplicas_{4};            /* guardrail on free replication */
     /* v7.0 MCP compatibility (optional) */
     bool mcpEnabled_{false};
     phoenix::mcp::McpManager mcpManager_;
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::RaceTrack<
+        std::map<std::string, std::pair<std::string, std::string>>>
+        mcpActionMap_{"autonomy_stack::mcpActionMap_"};
+#else
     std::map<std::string, std::pair<std::string, std::string>> mcpActionMap_;
-
+#endif
     /* v7.0 AGI action space: real capabilities beyond the instinct verbs. */
     phoenix::agi::AgiActionRegistry agiActionRegistry_;
     AgiActionExecutor agiActionExecutor_;

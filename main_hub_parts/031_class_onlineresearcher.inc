@@ -2,6 +2,10 @@
    Segment: class_OnlineResearcher
    Original lines: 3497-3565 */
 
+#ifdef PHOENIX_RACE_SENTINEL
+#include "tests/gtest/support/race_track.hpp"
+#endif
+
 class OnlineResearcher {
 public:
   OnlineResearcher(RuntimeState *runtime, const std::string &endpoint,
@@ -47,7 +51,12 @@ private:
   int cooldownMs_{5 * 60 * 1000};
   int cacheSize_{128};
   bool enabled_{true};
+#ifdef PHOENIX_RACE_SENTINEL
+  race_sentinel::RaceTrack<std::unordered_map<std::string, CacheEntry>> cache_{
+      "OnlineResearcher::cache_"};
+#else
   std::unordered_map<std::string, CacheEntry> cache_;
+#endif
   std::unordered_map<std::string, DocEntry> docs_;
   std::unordered_map<std::string, std::unordered_set<std::string>>
       invertedIndex_;

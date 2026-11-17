@@ -78,10 +78,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -108,6 +110,7 @@ struct Report {
     const char* label_b = "";       ///< thread label, current accessor
     const char* op_a = "";          ///< operation, previous accessor
     const char* op_b = "";          ///< operation, current accessor
+    const char* tag = "";           ///< instrumented container/field label
     double since_reset_ms = 0.0;    ///< ms since last resetAll()
 };
 
@@ -134,6 +137,7 @@ struct AccessRec {
 struct Slot {
     AccessRec writer{};
     AccessRec reader{};
+    const char* tag = "";
     bool reported = false;
 };
 
@@ -218,8 +222,10 @@ inline ThreadState& tls() {
     return ts;
 }
 
-inline void record_report(std::uint64_t elem, const AccessRec& prev,
-                          const AccessRec& cur) {
+inline void maybeStartDumpThread();  // defined below
+
+inline void record_report(std::uint64_t elem, const char* tag,
+                          const AccessRec& prev, const AccessRec& cur) {
     GlobalState& g = state();
     if (g.total_reports.load(std::memory_order_relaxed) >= 4096) {
         g.total_reports.fetch_add(1, std::memory_order_relaxed);
@@ -238,6 +244,7 @@ inline void record_report(std::uint64_t elem, const AccessRec& prev,
     r.label_b = cur.label;
     r.op_a = prev.op;
     r.op_b = cur.op;
+    r.tag = tag ? tag : "";
     r.since_reset_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                   g.reset_time)
@@ -247,14 +254,17 @@ inline void record_report(std::uint64_t elem, const AccessRec& prev,
 }
 
 /// Core instrumentation hook: called for every (sampled) element/meta access.
-inline void touch(std::uint64_t elem, bool is_write, const char* op) {
+inline void touch(std::uint64_t elem, bool is_write, const char* op,
+                  const char* tag = nullptr) {
     GlobalState& g = state();
     ThreadState& ts = tls();
     if ((++ts.counter % g.sampling) != 0) return;
     g.sampled_accesses.fetch_add(1, std::memory_order_relaxed);
+    maybeStartDumpThread();
 
     Shard& sh = g.shards[elem & 15u];
     AccessRec prev;
+    const char* slot_tag = nullptr;
     bool conflict = false;
     {
         // The shard lock is held only for the slot update; report recording is
@@ -267,6 +277,7 @@ inline void touch(std::uint64_t elem, bool is_write, const char* op) {
             it = sh.slots.emplace(elem, Slot{}).first;
         }
         Slot& s = it->second;
+        if (s.tag == nullptr) s.tag = tag;
 
         // Any pair of accesses to the same element where at least one is a
         // write, the threads differ, neither happened-before the other and no
@@ -291,6 +302,7 @@ inline void touch(std::uint64_t elem, bool is_write, const char* op) {
             s.reported = true;
             conflict = true;
             prev = *other;
+            slot_tag = s.tag;
         }
 
         AccessRec& self = is_write ? s.writer : s.reader;
@@ -310,12 +322,115 @@ inline void touch(std::uint64_t elem, bool is_write, const char* op) {
         cur.locks = ts.cur;
         cur.label = ts.label;
         cur.op = op;
-        record_report(elem, prev, cur);
+        record_report(elem, slot_tag, prev, cur);
     }
 }
 
-// ---- container traits -----------------------------------------------------
+// ---- report serialisation + periodic dump (Phase 2 soak support) ----------
+//
+// A live product run cannot be stopped to read reports, so under
+// RACE_SENTINEL_DUMP the detector writes a JSON snapshot every
+// RACE_SENTINEL_DUMP_SEC seconds (default 15).  The soak driver polls the file;
+// a hard crash loses at most one interval.
 
+inline std::string jsonEscape(const char* s) {
+    std::string out;
+    if (!s) return out;
+    for (const char* p = s; *p; ++p) {
+        switch (*p) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out += *p; break;
+        }
+    }
+    return out;
+}
+
+inline std::string reportsJson() {
+    GlobalState& g = state();
+    std::vector<Report> snapshot;
+    {
+        std::lock_guard<std::mutex> lk(g.report_mu);
+        snapshot = g.reports;
+    }
+    std::ostringstream os;
+    os << "{\"active\":"
+       << (g.active.load(std::memory_order_relaxed) ? "true" : "false")
+       << ",\"sampling\":" << g.sampling
+       << ",\"sampled_accesses\":"
+       << g.sampled_accesses.load(std::memory_order_relaxed)
+       << ",\"report_count\":"
+       << g.total_reports.load(std::memory_order_relaxed)
+       << ",\"stored_reports\":" << snapshot.size() << ",\"reports\":[";
+    bool first = true;
+    for (const auto& r : snapshot) {
+        if (!first) os << ",";
+        first = false;
+        os << "{\"element_id\":" << r.element_id << ",\"tag\":\"" << jsonEscape(r.tag)
+           << "\",\"op_a\":\"" << jsonEscape(r.op_a) << "\",\"op_b\":\""
+           << jsonEscape(r.op_b) << "\",\"label_a\":\"" << jsonEscape(r.label_a)
+           << "\",\"label_b\":\"" << jsonEscape(r.label_b) << "\",\"tid_a\":"
+           << r.tid_a << ",\"tid_b\":" << r.tid_b << ",\"hb_a\":" << r.hb_a
+           << ",\"hb_b\":" << r.hb_b << ",\"locks_a\":" << r.locks_a
+           << ",\"locks_b\":" << r.locks_b
+           << ",\"since_reset_ms\":" << r.since_reset_ms << "}";
+    }
+    os << "]}";
+    return os.str();
+}
+
+inline void writeReportsFile(const std::string& path) {
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f.good()) return;
+    f << reportsJson();
+}
+
+inline void maybeStartDumpThread() {
+    static std::atomic<bool> started{false};
+    if (started.exchange(true, std::memory_order_relaxed)) return;
+    const char* envPath = std::getenv("RACE_SENTINEL_DUMP");
+    if (!envPath || !*envPath) return;
+    const std::string path(envPath);
+    const char* secEnv = std::getenv("RACE_SENTINEL_DUMP_SEC");
+    int sec = secEnv ? std::atoi(secEnv) : 15;
+    if (sec < 1) sec = 1;
+    writeReportsFile(path);
+    std::thread([path, sec] {
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::seconds(sec));
+            writeReportsFile(path);
+        }
+    }).detach();
+}
+
+inline std::uint64_t fnv1a(const char* s) {
+    std::uint64_t h = 1469598103934665603ull;
+    if (!s) return h;
+    for (const char* p = s; *p; ++p) {
+        h ^= static_cast<unsigned char>(*p);
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+/// Stable lock-set id for a *named* guard (Phase-2 annotation mode).  Unlike
+/// TrackedMutex ids these are never recycled: the name->id table is stable for
+/// the process lifetime, so recorded locksets stay meaningful.
+inline std::uint64_t zoneId(const char* name) {
+    static std::mutex mu;
+    static std::unordered_map<std::string, std::uint64_t> ids;
+    std::lock_guard<std::mutex> lk(mu);
+    auto it = ids.find(name ? name : "");
+    if (it != ids.end()) return it->second;
+    const std::uint64_t id = allocLockId(state());  // never released: stable
+    ids.emplace(name ? name : "", id);
+    return id;
+}
+
+// ---- container traits -----------------------------------------------------
 template <class C, class = void>
 struct has_key_type : std::false_type {};
 template <class C>
@@ -357,6 +472,22 @@ inline std::uint64_t sampledAccesses() {
 /// Number of reported races since reset (cheap poll target).
 inline std::uint64_t reportCount() {
     return detail::state().total_reports.load(std::memory_order_relaxed);
+}
+
+/// Snapshot of the reports as a JSON object (Phase-2 soak driver / debug route).
+inline std::string reportsJsonSnapshot() { return detail::reportsJson(); }
+
+/// Phase-2 field-level annotation: two writes to the same (object, field) by
+/// different threads without a common annotated lock are a race.  Used for the
+/// plain struct fields inside ScopedTrainableMemory buckets, which are not
+/// containers and therefore cannot be wrapped by RaceTrack.
+inline void fieldTouch(const void* object, const char* field, bool write,
+                       const char* tag) {
+    if (!active()) return;
+    const std::uint64_t id =
+        detail::mix64(detail::mix64(reinterpret_cast<std::uint64_t>(object)) ^
+                      detail::fnv1a(field));
+    detail::touch(id, write, field, tag);
 }
 
 /// Snapshot of the reports collected since reset.
@@ -443,6 +574,33 @@ private:
     std::uint64_t id_;
 };
 
+/// Annotation-mode guard: declares "this thread currently holds the lock that
+/// protects the instrumented object(s) named by `zone`".  Phase 2 uses it where
+/// the product mutex type must not change (e.g. because std::condition_variable
+/// waits on it).  It does NOT block; correctness relies on the annotation being
+/// placed after the real lock acquisition.
+class ShadowZone {
+public:
+    explicit ShadowZone(const char* zone)
+        : id_(detail::zoneId(zone)) {
+        if (!active() || id_ == 0) return;
+        detail::ThreadState& ts = detail::tls();
+        if (ts.depth[id_]++ == 0) ts.cur.set(id_);
+        marked_ = true;
+    }
+    ~ShadowZone() {
+        if (!marked_) return;
+        detail::ThreadState& ts = detail::tls();
+        if (ts.depth[id_] != 0 && --ts.depth[id_] == 0) ts.cur.reset(id_);
+    }
+    ShadowZone(const ShadowZone&) = delete;
+    ShadowZone& operator=(const ShadowZone&) = delete;
+
+private:
+    std::uint64_t id_ = 0;
+    bool marked_ = false;
+};
+
 /// Start a group of concurrent threads: returns the shared happens-before
 /// epoch that every member of the group must inherit via `spawnWith`.
 inline std::uint64_t beginConcurrent() {
@@ -484,6 +642,10 @@ public:
 
     RaceTrack()
         : cid_(detail::state().next_container_id.fetch_add(1,
+                                                          std::memory_order_relaxed)) {}
+    explicit RaceTrack(const char* tag)
+        : tag_(tag),
+          cid_(detail::state().next_container_id.fetch_add(1,
                                                           std::memory_order_relaxed)) {}
     explicit RaceTrack(Container&& c)
         : c_(std::move(c)),
@@ -621,6 +783,9 @@ public:
                                              typename Container::iterator>;
         using iterator_category = std::forward_iterator_tag;
         using value_type = typename Container::value_type;
+        using difference_type = std::ptrdiff_t;
+        using reference = std::conditional_t<Const, const value_type &, value_type &>;
+        using pointer = std::conditional_t<Const, const value_type *, value_type *>;
 
         basic_iterator() = default;
         basic_iterator(base_iter it, const RaceTrack* owner)
@@ -638,6 +803,7 @@ public:
         }
         bool operator==(const basic_iterator& o) const { return it_ == o.it_; }
         bool operator!=(const basic_iterator& o) const { return it_ != o.it_; }
+        base_iter base() const { return it_; }
 
     private:
         base_iter it_{};
@@ -683,6 +849,21 @@ public:
         return const_iterator(c_.find(k), this);
     }
 
+    /// Insert-by-iteration variant (live_ map in ScopedTrainableMemory).
+    iterator erase(iterator pos) {
+        if (active()) writeMeta("erase(iterator).structure");
+        return iterator(c_.erase(pos.base()), this);
+    }
+    /// Emplace variant used by the product's scope map.  The element key is not
+    /// statically visible, so this records the structural slot (find() readers
+    /// touch the same slot, which is enough to catch insert-vs-read races).
+    template <class... Args>
+    std::pair<iterator, bool> emplace(Args&&... args) {
+        if (active()) writeMeta("emplace.structure");
+        auto r = c_.emplace(std::forward<Args>(args)...);
+        return std::pair<iterator, bool>(iterator(r.first, this), r.second);
+    }
+
 private:
     std::uint64_t metaId() const {
         return detail::mix64(cid_ ^ 0xD1B54A32D192ED03ull);
@@ -700,19 +881,19 @@ private:
 
     void readMeta(const char* op) const {
         if (!active()) return;
-        detail::touch(metaId(), false, op);
+        detail::touch(metaId(), false, op, tag_);
     }
     void writeMeta(const char* op) const {
         if (!active()) return;
-        detail::touch(metaId(), true, op);
+        detail::touch(metaId(), true, op, tag_);
     }
     void readElem(std::uint64_t id, const char* op) const {
         if (!active()) return;
-        detail::touch(id, false, op);
+        detail::touch(id, false, op, tag_);
     }
     void writeElem(std::uint64_t id, const char* op) const {
         if (!active()) return;
-        detail::touch(id, true, op);
+        detail::touch(id, true, op, tag_);
     }
 
     template <class BaseIter>
@@ -729,6 +910,7 @@ private:
     }
 
     Container c_{};
+    const char* tag_ = nullptr;
     std::uint64_t cid_ = 0;
 };
 

@@ -4872,6 +4872,121 @@
        judge completion from OUTSIDE the process (completionTimeMs is the
        human selection signal), summon a mutated successor on demand, and stay
        in charge via the interject/loop/estop routes above. */
+
+
+#ifdef PHOENIX_RACE_SENTINEL
+    /* ---- RaceSentinel Phase-2 probes (instrumentation sidecar only) ---- */
+    drogon::app().registerHandler(
+        "/api/debug/race/reports",
+        [](const drogon::HttpRequestPtr &,
+           std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          auto resp = drogon::HttpResponse::newHttpResponse();
+          resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+          resp->setBody(race_sentinel::reportsJsonSnapshot());
+          cb(resp);
+        },
+        {drogon::Get});
+
+    drogon::app().registerHandler(
+        "/api/debug/race/reset",
+        [this](const drogon::HttpRequestPtr &,
+           std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          race_sentinel::resetAll();
+          respondJson(cb, json{{"ok", true}});
+        },
+        {drogon::Get, drogon::Post});
+
+    drogon::app().registerHandler(
+        "/api/debug/race/probe",
+        [this](const drogon::HttpRequestPtr &req,
+               std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+          bool payloadOk = true;
+          json payload = parseRequestBody(req, payloadOk);
+          if (!payloadOk)
+            return badRequest(cb, "invalid json");
+          const std::string mode = payload.value("mode", std::string("mcp"));
+          const int n = std::max(1, std::min(2000, payload.value("n", 30)));
+          const int nThreads =
+              std::max(1, std::min(16, payload.value("threads", 4)));
+          json detail = json::object();
+          json actions = cognitionManager_.listAgiActions();
+          std::string actionName;
+          if (actions.contains("result") && actions["result"].is_array()) {
+            for (const auto &a : actions["result"]) {
+              const std::string nm = a.value("name", std::string());
+              if (nm.empty()) continue;
+              if (mode == "mcp" && nm.rfind("mcp.", 0) == 0) {
+                actionName = nm;
+                break;
+              }
+              if (mode == "research" &&
+                  (nm.find("research") != std::string::npos ||
+                   nm.find("search") != std::string::npos)) {
+                actionName = nm;
+                break;
+              }
+            }
+          }
+          detail["action"] = actionName;
+          std::atomic<int> done{0};
+          std::vector<std::thread> workers;
+          if (mode == "mcp") {
+            json cfg{{"enabled", true},
+                     {"servers", phoenix::cfgOr<json>("mcp.servers",
+                                                       json::array())}};
+            for (int t = 0; t < nThreads; ++t) {
+              workers.emplace_back([&, t] {
+                for (int i = 0; i < n; ++i) {
+                  if ((i % 10) == 0) {
+                    cognitionManager_.configureMcp(cfg);
+                  } else if (!actionName.empty()) {
+                    cognitionManager_.executeAgiActionByName(
+                        actionName,
+                        json{{"mcpArguments", json{{"text", "race-ping"}}}});
+                  }
+                  done.fetch_add(1, std::memory_order_relaxed);
+                }
+              });
+            }
+          } else if (mode == "research") {
+            for (int t = 0; t < nThreads; ++t) {
+              workers.emplace_back([&, t] {
+                for (int i = 0; i < n; ++i) {
+                  json out;
+                  addon::invokeAddonOnlineLookup(
+                      json("race sentinel probe " + std::to_string(t) + ":" +
+                           std::to_string(i)),
+                      json{{"limit", 3}}, out);
+                  done.fetch_add(1, std::memory_order_relaxed);
+                }
+              });
+            }
+          } else if (mode == "memory") {
+            auto scope =
+                phoenix::memory::makeMissionScope(std::string("race-probe-shared"));
+            for (int t = 0; t < nThreads; ++t) {
+              workers.emplace_back([&, t] {
+                for (int i = 0; i < n; ++i) {
+                  phoenix::memory::ScopedTrainableMemory::instance().setGnnSummary(
+                      scope, "race-probe-summary-" + std::to_string(t) + ":" +
+                                 std::to_string(i));
+                  auto &hot =
+                      phoenix::memory::ScopedTrainableMemory::instance().hot(scope);
+                  (void)hot.gnnSummary.size();
+                  done.fetch_add(1, std::memory_order_relaxed);
+                }
+              });
+            }
+          }
+          for (auto &w : workers) w.join();
+          respondJson(cb, json{{"ok", true},
+                               {"mode", mode},
+                               {"loops", done.load()},
+                               {"detail", detail}});
+        },
+        {drogon::Post});
+#endif
+
     drogon::app().registerHandler(
         "/api/mission/status",
         [this](const drogon::HttpRequestPtr &req,
@@ -7829,6 +7944,16 @@
   }
 };
 
+#ifdef PHOENIX_RACE_SENTINEL
+/* Phase-2 RaceSentinel: declared here because main's TU does not include
+   addon.hpp directly; the definition lives in addon.cpp. */
+namespace addon {
+bool invokeAddonOnlineLookup(const nlohmann::json &input,
+                             const nlohmann::json &options,
+                             nlohmann::json &out);
+}  // namespace addon
+#endif
+
 /* v8.3: out-of-line so GatewayServer's constructor lambda can call a prior
    declaration without a duplicate in-class definition (C++ forbids both). */
 inline int GatewayServer::seedGnnGraphFromRobotsCorpus(int maxDocs,
@@ -7969,6 +8094,10 @@ inline int GatewayServer::seedGnnGraphFromRobotsCorpus(int maxDocs,
 inline std::string GatewayServer::buildMissionOutline(const std::string &goal) {
   {
     std::lock_guard<std::mutex> lock(outlineMu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_outline(
+        "GatewayServer::missionOutlineCache_");
+#endif
     auto it = missionOutlineCache_.find(goal);
     if (it != missionOutlineCache_.end())
       return it->second;
@@ -8104,6 +8233,10 @@ inline std::string GatewayServer::buildMissionOutline(const std::string &goal) {
   }
   {
     std::lock_guard<std::mutex> lock(outlineMu_);
+#ifdef PHOENIX_RACE_SENTINEL
+    race_sentinel::ShadowZone rs_zone_outline_write(
+        "GatewayServer::missionOutlineCache_");
+#endif
     missionOutlineCache_[goal] = outline;
   }
   return outline;
