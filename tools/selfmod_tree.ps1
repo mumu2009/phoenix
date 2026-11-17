@@ -574,8 +574,9 @@ function New-NodeBuildScript {
   [void]$cmd.Append('-O3 ')
   [void]$cmd.Append(('> "{0}" 2>&1' -f $logRel))
   [void]$sb.AppendLine($cmd.ToString())
-  [void]$sb.AppendLine(('echo EXIT=%errorlevel% >> "{0}"' -f $logRel))
-  [void]$sb.AppendLine('endlocal')
+  [void]$sb.AppendLine(('set "RC=%errorlevel%"'))
+  [void]$sb.AppendLine(('echo EXIT=%RC% >> "{0}"' -f $logRel))
+  [void]$sb.AppendLine('endlocal & exit /b %RC%')
 
   $batPath = Join-Path $tmpDir ("compile_node_{0}.bat" -f $N.id)
   $utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -664,8 +665,9 @@ function New-NodeGtestBuildScript {
   [void]$cmd.Append('-O0 -g1 -Wl,--no-keep-memory ')
   [void]$cmd.Append(('> "{0}" 2>&1' -f $logRel))
   [void]$sb.AppendLine($cmd.ToString())
-  [void]$sb.AppendLine(('echo EXIT=%errorlevel% >> "{0}"' -f $logRel))
-  [void]$sb.AppendLine('endlocal')
+  [void]$sb.AppendLine(('set "RC=%errorlevel%"'))
+  [void]$sb.AppendLine(('echo EXIT=%RC% >> "{0}"' -f $logRel))
+  [void]$sb.AppendLine('endlocal & exit /b %RC%')
   $batPath = Join-Path $tmpDir ("compile_gtest_node_{0}.bat" -f $N.id)
   [System.IO.File]::WriteAllText($batPath, $sb.ToString(), $utf8)
   return [pscustomobject]@{
