@@ -1,3 +1,25 @@
+## What this is (EN)
+
+Phoenix is a self-hosted agent runtime written in C++20 around llama.cpp (CUDA).
+It keeps the LLM process, the scheduler and the memory scopes in one runtime so
+that many missions can share one small GPU: mission lifecycle with deadline
+pressure and self-verdict, helper "boxes" working bounded sub-tasks, a
+meme-graph memory used for outline/recall, an optional EFE/MPC planner, a
+latching E-stop and per-mission sandboxes.
+
+Operational bits that are part of the design, not an afterthought: detached
+supervisor with health loops, sidecar builds (rebuild a 47 MB binary without
+stopping the long run), hot configuration reload, and crash forensics via WER
+minidumps resolved against the linker map.
+
+Requirements: Windows 10/11, MinGW g++ 16, CUDA 13.5, ~6 GB VRAM for the 8B Q4
+model. Build: `compile.bat` (produces phoenix_main.exe); tests:
+`compile_gtest.bat` then `gtest_runner.exe --gtest_filter=*`. Most docs are in
+Chinese under `doc/`; `doc/architecture_v10.2.html` is an interactive map of all
+10 layers, and `doc/v10.1/*.md` records the design decisions and the honest
+limitations (Windows-only, the symbolic-reasoning layer is gated off because a
+demand probe measured 10.8% of tasks needing proofs, below the 20% threshold).
+
 # Phoenix v10.0 "Gareth"
 
 A set of facilities based on LLM, which can efficiently boost the speed and accuracy of LLM in long context, making it more like a person.
