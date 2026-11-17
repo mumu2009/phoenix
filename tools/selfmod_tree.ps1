@@ -562,6 +562,7 @@ function New-NodeBuildScript {
   [void]$cmd.Append(('-I"{0}\outsides\BitNet\include" ' -f $mainRoot))
   [void]$cmd.Append(('-I"{0}\outsides\BitNet\src" ' -f $mainRoot))
   [void]$cmd.Append(('-I"{0}" ' -f $wt))
+  [void]$cmd.Append(('-I"{0}" ' -f $mainRoot))
   [void]$cmd.Append('main.cpp ')
   [void]$cmd.Append(('@"{0}" ' -f $sources))
   [void]$cmd.Append(('-Wl,--start-group @"{0}" -Wl,--end-group ' -f $libs))
@@ -647,6 +648,7 @@ function New-NodeGtestBuildScript {
   [void]$cmd.Append('-DPHOENIX_EDGE_IMAGE_ENABLED=1 -DPHOENIX_EDGE_SPEECH_ENABLED=1 ')
   [void]$cmd.Append(('@"{0}" ' -f $cflags))
   [void]$cmd.Append(('-I"{0}" ' -f $wt))
+  [void]$cmd.Append(('-I"{0}" ' -f $mainRoot))
   [void]$cmd.Append(('-I"{0}\poppler-25.12.0\Library\include" ' -f $mainRoot))
   [void]$cmd.Append(('-I"{0}\Python314\include" ' -f $mainRoot))
   [void]$cmd.Append(('-I"{0}\outsides\llamacpp\include" ' -f $mainRoot))
@@ -886,12 +888,27 @@ function Invoke-NodeSoak {
   Remove-Item -LiteralPath $stdout, $stderr, $csv -Force -ErrorAction SilentlyContinue
 
   $gwBefore = Get-LiveGateway
+  # Shared read-only corpora/models stay in the main tree; the node gateway reads
+  # them through env overrides (relative config paths otherwise resolve against
+  # the worktree and fail validation). Never junction/delete them.
+  $sharedEnv = [ordered]@{
+    AI_GGUF_MODELS_DIR = (Join-Path $script:RepoRoot 'GGUF_models')
+    AI_ROBOTS_DIR      = (Join-Path $script:RepoRoot 'robots')
+    AI_LEMMA_CSV       = (Join-Path $script:RepoRoot 'lemma.csv')
+  }
   $envNames = @('CONTROLLER_PORT', 'AI_GATEWAY_HOST', 'AI_BASE_DIR', 'AI_FRONTEND_ENABLED',
-    'AI_HTTP_LOG', 'AI_PID_FILE', 'AI_SELFMOD_NODE')
+    'AI_HTTP_LOG', 'AI_PID_FILE', 'AI_SELFMOD_NODE', 'PATH')
+  foreach ($k in $sharedEnv.Keys) { if (Test-Path -LiteralPath $sharedEnv[$k]) { $envNames += $k } }
   $savedEnv = @{}
   foreach ($name in $envNames) {
     $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
   }
+  # The worktree exe needs the main tree's runtime DLLs (python314.dll, poppler.dll,
+  # mingw runtime); scope that to the soak child only, never to the session.
+  $dllDirs = @($script:RepoRoot, (Join-Path $script:RepoRoot 'Python314'),
+    (Join-Path $script:RepoRoot 'poppler-25.12.0\Library\bin'), 'C:\msys64\mingw64\bin') |
+    Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+  [Environment]::SetEnvironmentVariable('PATH', (($dllDirs -join ';') + ';' + $savedEnv['PATH']), 'Process')
   [Environment]::SetEnvironmentVariable('CONTROLLER_PORT', [string]$soakPort, 'Process')
   [Environment]::SetEnvironmentVariable('AI_GATEWAY_HOST', '127.0.0.1', 'Process')
   [Environment]::SetEnvironmentVariable('AI_BASE_DIR', $runtimeDir, 'Process')
@@ -899,6 +916,16 @@ function Invoke-NodeSoak {
   [Environment]::SetEnvironmentVariable('AI_HTTP_LOG', 'false', 'Process')
   [Environment]::SetEnvironmentVariable('AI_PID_FILE', (Join-Path $runtimeDir 'phoenix_main.pid'), 'Process')
   [Environment]::SetEnvironmentVariable('AI_SELFMOD_NODE', [string]$N.id, 'Process')
+  foreach ($k in $sharedEnv.Keys) {
+    if (Test-Path -LiteralPath $sharedEnv[$k]) { [Environment]::SetEnvironmentVariable($k, $sharedEnv[$k], 'Process') }
+  }
+  # runtime config was copied into the worktree at expand time; make sure it is there
+  $cfgLocal = Join-Path $N.worktree 'config\phoenix.json'
+  $cfgMain = Join-Path $script:RepoRoot 'config\phoenix.json'
+  if ((-not (Test-Path -LiteralPath $cfgLocal)) -and (Test-Path -LiteralPath $cfgMain)) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $cfgLocal) | Out-Null
+    Copy-Item -LiteralPath $cfgMain -Destination $cfgLocal -Force
+  }
   $proc = $null
   $windowStart = $null
   try {
@@ -967,6 +994,19 @@ function Invoke-NodeSoak {
   if (Test-Path -LiteralPath $stderr) {
     $fatalHits = @(Select-String -LiteralPath $stderr -Pattern $fatalPatterns -ErrorAction SilentlyContinue).Count
   }
+  $startupExitCode = $null
+  $startupErrTail = ''
+  if (-not $healthy) {
+    try {
+      if ($proc -and $proc.HasExited) { $startupExitCode = $proc.ExitCode }
+    } catch { }
+    if (Test-Path -LiteralPath $stderr) {
+      $startupErrTail = ((Get-Content -LiteralPath $stderr -Tail 6 -ErrorAction SilentlyContinue) -join "`n")
+    }
+    if (-not $startupErrTail -and (Test-Path -LiteralPath $stdout)) {
+      $startupErrTail = ((Get-Content -LiteralPath $stdout -Tail 6 -ErrorAction SilentlyContinue) -join "`n")
+    }
+  }
   $latAvg = 0
   if ($latencies.Count -gt 0) { $latAvg = [math]::Round(($latencies | Measure-Object -Average).Average, 1) }
 
@@ -992,6 +1032,8 @@ function Invoke-NodeSoak {
     latencyAvgMs     = $latAvg
     stability        = $stability
     durationSec      = $DurationSec
+    startupExitCode  = $startupExitCode
+    startupErrTail   = $startupErrTail
     csv              = $csv
     stdout           = $stdout
     stderr           = $stderr

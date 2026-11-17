@@ -317,16 +317,35 @@ The ablation below is the recorded result of the dry run.
 
 | step | node | result |
 |---|---|---|
-| `expand main` | n0001 (probe A, +3 lines) | worktree `build/tmp/selfmod/n0001` + branch `selfmod/<ts>-n0001-dryrun-probe-a`, one commit |
-| `expand main` | n0002 (probe B, +7 lines) | worktree + branch, one commit; deliberately larger diff to exercise the tie-break |
-| `build` | n0001, n0002 | sidecar `phoenix_main.<id>.exe` built from each worktree (parallel, no compile.bat, gateway stayed up) |
-| `score` | n0001, n0002 | targeted 63/63 + wide 268/268; soak on rotated sidecar port; equal score → shorter diff wins |
-| `prune -K 1` | n0001 | kept; n0002 pruned (worktree + branch removed) |
-| `select` | n0001 | best path `main -> n0001`, per-node scores + adoption commands printed |
-| `cleanup -Force` | all | every harness worktree/branch removed; `git status --short` empty |
+| `selfcheck` | — | live gateway port 5097 pid 23920 healthy; main clean at start; toolchain/conan/source-list OK |
+| hard-rail probe | — | patch touching `build/evil.cpp` rejected **before** any worktree creation (`deny path: build/`); no node, no branch, main untouched |
+| `expand main -NoBuild` | n0001 (probe A, +3 lines) | worktree `build/tmp/selfmod/n0001` + branch `selfmod/20261117-140055-n0001-dryrun-probe-a`, one commit `5e8c55a` |
+| `expand main -NoBuild` | n0002 (probe B, +7 lines) | worktree + branch `selfmod/20261117-140102-n0002-dryrun-probe-b`, one commit `945da12`; deliberately larger diff to exercise the tie-break |
+| `build` | n0001 | sidecar `phoenix_main.n0001.exe` (44.9 MB) built in **22.0 min** from the worktree; `compile.bat` never run; gateway stayed up |
+| `build` | n0002 | sidecar `phoenix_main.n0002.exe` (44.9 MB) built in **22.3 min**; both builds ran in parallel, main tree untouched |
+| `score` | n0001 | targeted **63/63** + wide **268/268** (shared main runner, sound because the diff is non-product); soak on rotated port 5196, healthy after 34 s, 12/12 samples up, no crash → **0.8** |
+| `score` | n0002 | targeted **63/63** + wide **268/268**; soak port 5196, 12/12 samples up → **0.8** (equal score → shorter-diff tie-break decides) |
+| `prune -K 1` | n0001 | kept (diff 3 lines); **n0002 pruned**: worktree `build/tmp/selfmod/n0002` + branch `selfmod/...n0002...` removed |
+| `select` | n0001 | best path `main -> n0001`, per-node score/evidence + adoption commands printed; no merge executed |
+| `cleanup -Force` | all | every harness worktree/branch removed; `git worktree list` left only main; `git branch --list 'selfmod/*'` empty; `build/tmp/selfmod/` empty; harness paths clean in `git status` |
 
-> Dry-run soak used an abbreviated window (`-SoakSeconds`), documented in the
-> node evidence; the real `score` default is 25 min (`-SoakMinutes 25`).
+Dry-run soak used an abbreviated window (`-SoakSeconds 120`) because it is a
+mechanics proof; the real `score` default is 25 min (`-SoakMinutes 25`). The
+recorded sidecar run reached `/api/health` in 34 s and stayed up for the whole
+window, so the real 25-minute soak uses the same proven launch path.
+
+Two build/soak issues surfaced and were fixed during the dry run (kept here as
+operational knowledge):
+
+1. node sources resolve `python314/include/Python.h` through the repo-root
+   include dir → the generated sidecar build adds `-I<main-root>` **after**
+   `-I<worktree>`, so node headers still shadow main;
+2. the worktree exe needs `python314.dll`/`poppler.dll` and the shared model
+   corpus → the soak child gets a scoped `PATH` (main root, `Python314`,
+   poppler `bin`, mingw `bin`) plus `AI_GGUF_MODELS_DIR` / `AI_ROBOTS_DIR` /
+   `AI_LEMMA_CSV` overrides pointing at the main tree. The node's own
+   `AI_BASE_DIR` and pid file stay inside `runtime_store/selfmod/nodes/<id>/`,
+   so no runtime state is shared with the live long run.
 
 ---
 
