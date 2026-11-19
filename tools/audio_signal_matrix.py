@@ -6,38 +6,63 @@ not labels. The audio contract in `multimodal_world_model.hpp:35-47` is:
     one 4096-d unit query per 40 ms frame  ->  matrix [F, 4096]
 128 is only the projected interface view; classification accuracy is not the headline.
 
-FRONT-ENDS (checked locally, 2026-11-18):
-  qwen  = E:\\079\\v6.0Alixander\\runtime_store\\models\\multimodal_enc\\qwen2_audio_connector.onnx
-          + qwen2_audio_feature_extractor/ (WhisperFeatureExtractor, 128 mels).
-          Verified ONNX I/O: input_features [batch,128,3000] -> audio_features [batch,750,4096]
-          => 750 frames / 30 s = 40 ms/frame, TRUE 4096-d frame space (the .data is 2.57 GB
-          and contains the Qwen2-Audio acoustic encoder itself, not just a linear connector).
-  live  = runtime_store/models/additive_jepa/speech_encoder/best.onnx (16 kHz, 1 s -> 128-d).
-          This CANNOT produce a 4096-d 40 ms frame space: it is a 1 s pooled concept encoder.
-          Fallback = sliding 1 s window every 40 ms -> [F,128], then a deterministic random
-          projection 128->4096 to satisfy the storage contract. Flagged true_frame_space=False;
-          the 4096 view is an arbitrary projection, NOT the Qwen space.
+MODES
+-----
+  --mode single   one wav -> <out>.npz with, per requested frontend:
+                    M_qwen  [F,4096] float32  (true 40 ms frame space; 25 fps)
+                    M_live  [F,128]  float32  (true 1 s-pooled sliding view; 25 fps)
+                    meta    JSON string: wav, duration, per-frontend
+                            {true_frame_space, frame_dim, n_frames, frames_per_second,
+                             dtype, projected_4096}
+                  Default output goes to build/tmp/audio_signal_matrix/ so the FSC
+                  corpus directory is never polluted.
+  --mode metrics  FSC test subset -> matrices for clean / 10 dB / 0 dB MUSAN noise
+                  conditions + time-reversed utterances, then U1-U4:
+                    U1 next-frame predictability (3-step rollout MSE vs identity/mean)
+                    U2 environment separability (KMeans on pooled stats -> ARI/NMI for
+                       speaker identity and for clean/noise10/noise0 condition)
+                    U3 time-arrow (forward vs reversed, ridge-direction balanced accuracy,
+                       want > 0.55)
+                    U4 meme-space alignment (PROXY; see below)
+                  Writes <run-dir>/manifest.json, fsc_subset_stats.npz and an incremental
+                  matrices.pkl.npy cache (a crash mid-run no longer loses completed work).
 
-UNDERSTANDING METRICS (no classification accuracy headline):
-  U1 next-frame predictability: 1-step (and 3-step) rollout MSE vs identity + mean baselines,
-     learned in a PCA-64 space; held-out utterances are speaker-disjoint.
-  U2 environment separability: KMeans on pooled frame statistics; ARI/NMI against speaker
-     identity and against synthetic noise conditions (clean / 10 dB / 0 dB MUSAN).
-  U3 time-arrow: forward vs time-reversed audio, logistic-regression balanced accuracy (5-fold),
-     want > 0.55 (0.5 = chance).
-  U4 meme-space alignment (PROXY): cosine between projected matrix statistics and hashed
-     meme-node vectors reproduced from runtime_store/gnn_meme_serial.json via the
-     textToMiniEmbedding hash scheme (main_hub_parts/014_...inc:18-45). The learned
-     alignment projections W_t/W_g (doc/math/transformer_math_proof.md:37-40) are not
-     available offline, so this is a proxy and is reported as such.
+FRONT-ENDS (verified 2026-11-19 on this box)
+  qwen = <stale tree>\\multimodal_enc\\qwen2_audio_connector.onnx (+2.57 GB .data)
+         + qwen2_audio_feature_extractor/ (WhisperFeatureExtractor, 128 mels).
+         ONNX I/O: input_features [batch,128,3000] -> audio_features [batch,750,4096]
+         => 750 frames / 30 s = 40 ms/frame, TRUE 4096-d frame space (verified shape
+         [F,4096] float32, 25 fps, ~0.13 s/frame CPU).
+  live = runtime_store/models/additive_jepa/speech_encoder/best.onnx (16 kHz, 1 s -> 128-d).
+         It CANNOT produce a 4096-d 40 ms frame space: it is a 1 s pooled concept encoder.
+         `matrix()` returns the HONEST [F,128] sliding-window view (true_frame_space=False);
+         a 4096-d shape is only ever produced by the explicit `--live-projection random4096`
+         deterministic random projection, which is labelled and off by default.
+         SILENT FAKE FRAMES ARE FORBIDDEN (audit fix 2026-11-19).
 
-Usage (from the phoenix root):
-  # single wav -> matrix .npz
+AUDIT FIXES (2026-11-19, unverified author died mid-task)
+  1. all relative paths resolve against the repo root (the script used to require CWD=phoenix)
+  2. live frontend no longer fakes 4096-d; native [F,128] is emitted and flagged
+  3. single mode writes honest metadata (shape/dtype/fps/true_frame_space) per frontend
+  4. default single output moved out of the dataset dir into build/tmp/audio_signal_matrix/
+  5. incremental matrices cache (atomic) so Qwen inference survives an interruption
+
+U4 SEAM (why this is a proxy)
+  The trained alignment projections W_t/W_g (`doc/math/transformer_math_proof.md:37-40`)
+  are not available offline. Meme-side vectors are reproduced from the serialized GNN
+  meme graph `runtime_store/gnn_meme_serial.json` (written by the C++ side from
+  `KvmStore::getMemeWords`, `main_hub_parts/039_class_kvmstore.inc:26`, used by
+  `GraphTensorBridge::computeNodeEmbeddings`, `main_hub_parts/045_*inc`). There is NO
+  Python accessor for `memetic_existence`'s α matrix; the exact seam is the serialized
+  graph + `memetic_existence.hpp` (MappingWordHit/memeId). This script therefore hashes
+  audio pooled stats and meme words into one space and reports the cosine as a PROXY.
+
+Usage (from anywhere; paths resolve to the repo root):
   runtime_store\\venvs\\vision-cu111\\Scripts\\python.exe tools\\audio_signal_matrix.py ^
-      --mode single --frontend qwen --wav some.wav --out matrix.npz
-  # full understanding measurement on FSC
-  ... --mode metrics --frontend both --n-per-speaker 2 --rev-n 16 ^
-      --out-dir runtime_store/models/audio_signal_matrix/<ts>
+      --mode single --frontend both --wav <fsc.wav> --out build\\tmp\\x.npz
+  runtime_store\\venvs\\vision-cu111\\Scripts\\python.exe tools\\audio_signal_matrix.py ^
+      --mode metrics --frontend both --n-per-speaker 3 --rev-n 16 --threads 16 ^
+      --out-dir runtime_store/models/audio_signal_matrix --run-name <name>
 """
 
 import argparse
@@ -56,13 +81,23 @@ import numpy as np
 SAMPLES = 16000
 HOP_MS = 40
 
+# All relative paths resolve against the phoenix repo root, NOT the process CWD
+# (fix 2026-11-19: the script used to fail with NoSuchFile whenever it was started
+# from anywhere except the repo root).
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _abs(p):
+    return p if os.path.isabs(p) else os.path.join(ROOT, p)
+
+
 STALE = r"E:\079\v6.0Alixander\runtime_store\models\multimodal_enc"
 QWEN_ONNX = os.path.join(STALE, "qwen2_audio_connector.onnx")
 QWEN_CFG = os.path.join(STALE, "qwen2_audio_feature_extractor")
-LIVE_ENC = "runtime_store/models/additive_jepa/speech_encoder/best.onnx"
-FSC = "runtime_store/datasets/audio/fluent_speech_commands/extracted"
-MUSAN_NOISE = "runtime_store/datasets/musan_extracted/musan/noise"
-MEME_SERIAL = "runtime_store/gnn_meme_serial.json"
+LIVE_ENC = _abs("runtime_store/models/additive_jepa/speech_encoder/best.onnx")
+FSC = _abs("runtime_store/datasets/audio/fluent_speech_commands/extracted")
+MUSAN_NOISE = _abs("runtime_store/datasets/musan_extracted/musan/noise")
+MEME_SERIAL = _abs("runtime_store/gnn_meme_serial.json")
 
 
 def log(msg):
@@ -131,11 +166,22 @@ class QwenFrontend:
 # live front-end fallback: 1 s pooled 128-d concept, sliding every 40 ms
 # --------------------------------------------------------------------------
 class LiveFrontend:
+    """1 s pooled 128-d speech concept -> sliding windows every 40 ms.
+
+    HONESTY RULE (2026-11-19): this encoder CANNOT produce a 4096-d 40 ms frame
+    space. `matrix()` therefore returns the *true* [F,128] frame matrix and
+    `true_frame_space=False`. A 4096-d shape is only ever produced by the
+    explicitly-labelled deterministic random projection (`matrix_4096`), which
+    the CLI exposes behind --live-projection random4096 (default: off). No fake
+    frames are emitted silently.
+    """
+
     name = "live_speech_encoder_sliding_window"
     true_frame_space = False
-    frame_dim = 4096          # storage contract shape; actual encoder dim = 128
+    frame_dim = 128            # actual encoder output dim; 4096 is NOT native
     actual_dim = 128
     hop_ms = 40
+    window_samples = 16000
 
     def __init__(self, threads=32, seed=20261118):
         import onnxruntime as ort
@@ -145,7 +191,7 @@ class LiveFrontend:
         self.in_name = self.sess.get_inputs()[0].name
         self.out_name = self.sess.get_outputs()[0].name
         rng = np.random.RandomState(seed)
-        self.P = (rng.randn(self.actual_dim, self.frame_dim) /
+        self.P = (rng.randn(self.actual_dim, 4096) /
                   np.sqrt(self.actual_dim)).astype(np.float32)
 
     def raw_frames(self, wav):
@@ -153,34 +199,55 @@ class LiveFrontend:
         starts = list(range(0, max(1, len(wav) - 1), hop))
         out = []
         for s in starts:
-            chunk = wav[s:s + 16000]
-            if chunk.size < 16000:
-                chunk = np.pad(chunk, (0, 16000 - chunk.size))
-            x = chunk.reshape(1, 1, 1, 16000)
+            chunk = wav[s:s + self.window_samples]
+            if chunk.size < self.window_samples:
+                chunk = np.pad(chunk, (0, self.window_samples - chunk.size))
+            x = chunk.reshape(1, 1, 1, self.window_samples)
             out.append(np.asarray(self.sess.run([self.out_name], {self.in_name: x})[0],
                                   np.float32).reshape(-1))
         return np.stack(out)  # [F,128]
 
     def matrix(self, wav):
-        raw = self.raw_frames(wav)
-        proj = raw @ self.P
+        """TRUE frame matrix: [F, 128]. Never a fake 4096-d space."""
+        return self.raw_frames(wav).astype(np.float32)
+
+    def matrix_4096(self, wav):
+        """Explicit deterministic random projection 128->4096 (NOT Qwen space)."""
+        proj = self.raw_frames(wav) @ self.P
         n = np.linalg.norm(proj, axis=1, keepdims=True)
         return (proj / np.maximum(n, 1e-8)).astype(np.float32)
 
-    def describe(self):
-        return {"frontend": self.name, "true_frame_space": False,
-                "hop_ms": self.hop_ms, "frame_dim": self.frame_dim,
-                "actual_encoder_dim": self.actual_dim,
-                "onnx": LIVE_ENC, "onnx_bytes": os.path.getsize(LIVE_ENC),
-                "why_not_true": "the live encoder is a 1 s pooled 128-d concept model; it has no "
-                                "40 ms / 4096-d frame output. The matrix is built by sliding a 1 s "
-                                "window every 40 ms and projecting 128->4096 with a deterministic "
-                                "random matrix; the 4096 view is arbitrary, NOT the Qwen space."}
+    def describe(self, projected=False):
+        d = {"frontend": self.name, "true_frame_space": False,
+             "hop_ms": self.hop_ms, "frame_dim": self.actual_dim,
+             "native_frame_dim": self.actual_dim,
+             "actual_encoder_dim": self.actual_dim,
+             "onnx": LIVE_ENC, "onnx_bytes": os.path.getsize(LIVE_ENC),
+             "why_not_true": "the live encoder is a 1 s pooled 128-d concept model; it has no "
+                             "40 ms / 4096-d frame output. matrix() returns the TRUE [F,128] "
+                             "frame matrix; a 4096-d view is only an arbitrary deterministic "
+                             "random projection and is never emitted unless explicitly requested."}
+        if projected:
+            d["projected_4096"] = True
+            d["projection"] = "deterministic RandomState(20261118) N(0,1)/sqrt(128) 128->4096"
+            d["projection_is_qwen_space"] = False
+        else:
+            d["projected_4096"] = False
+        return d
 
 
 # --------------------------------------------------------------------------
 # U1-U4 metrics
 # --------------------------------------------------------------------------
+def _save_cache(cache_path, data, rev, chosen):
+    """Atomic incremental cache save (fix 2026-11-19: a crash mid-run used to lose all
+    Qwen inference because nothing was written before the very end)."""
+    tmp = cache_path + ".tmp"
+    with open(tmp, "wb") as f:
+        np.save(f, {"data": data, "rev": rev, "chosen": chosen}, allow_pickle=True)
+    os.replace(tmp, cache_path)
+
+
 def pooled_stats(M):
     """Per-utterance summary: mean and std over frames (+ mean |delta|)."""
     d = np.abs(np.diff(M, axis=0)).mean(0) if M.shape[0] > 1 else np.zeros(M.shape[1], np.float32)
@@ -478,40 +545,90 @@ def main(argv=None):
     ap.add_argument("--n-per-speaker", type=int, default=2)
     ap.add_argument("--rev-n", type=int, default=16)
     ap.add_argument("--threads", type=int, default=32)
+    ap.add_argument("--live-projection", choices=["none", "random4096"], default="none",
+                    help="live frontend: 'none' (default, honest [F,128]) or 'random4096' "
+                         "(explicit deterministic random 128->4096 view; NOT Qwen space)")
     args = ap.parse_args(argv)
-    root = os.getcwd()
+    root = ROOT
     ts = args.run_name or _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if args.mode == "single":
+        # Single-utterance mode: write the matrix + honest metadata. The Qwen frontend is a
+        # TRUE [F,4096] 40 ms frame space; the live frontend is a TRUE [F,128] 1 s-pooled
+        # sliding view. A 4096-d live view is only written when explicitly requested.
         if not args.wav:
             raise SystemExit("--mode single needs --wav")
-        wav = read_wav(args.wav)
+        wav_path = _abs(args.wav)
+        wav = read_wav(wav_path)
+        dur = len(wav) / 16000.0
         outs = {}
+        metas = {}
         if args.frontend in ("qwen", "both"):
             q = QwenFrontend(args.threads)
-            outs["qwen"] = q.matrix(wav)
+            M = q.matrix(wav)
+            if M.ndim != 2 or M.shape[1] != 4096:
+                raise SystemExit("qwen frontend contract violated: expected [F,4096], got %s" % (M.shape,))
+            outs["qwen"] = M
+            metas["qwen"] = q.describe()
+            metas["qwen"].update({"n_frames": int(M.shape[0]), "frame_dim": int(M.shape[1]),
+                                  "dtype": str(M.dtype), "duration_sec": round(dur, 4),
+                                  "frames_per_second": round(M.shape[0] / max(dur, 1e-9), 3)})
         if args.frontend in ("live", "both"):
             lv = LiveFrontend(args.threads)
-            outs["live"] = lv.matrix(wav)
-        out_path = args.out or (os.path.splitext(args.wav)[0] + ".matrix.npz")
-        np.savez_compressed(out_path, **{("M_" + k): v for k, v in outs.items()})
-        log("wrote %s (%s)" % (out_path, {k: v.shape for k, v in outs.items()}))
+            M = lv.matrix(wav)
+            outs["live"] = M                     # TRUE [F,128] — never faked to 4096
+            metas["live"] = lv.describe(projected=(args.live_projection == "random4096"))
+            metas["live"].update({"n_frames": int(M.shape[0]), "frame_dim": int(M.shape[1]),
+                                  "dtype": str(M.dtype), "duration_sec": round(dur, 4),
+                                  "frames_per_second": round(M.shape[0] / max(dur, 1e-9), 3)})
+            log("live frontend: HONEST [F,%d] frame space (true_frame_space=False); "
+                "it cannot produce 4096-d" % M.shape[1])
+            if args.live_projection == "random4096":
+                P = lv.matrix_4096(wav)
+                if P.ndim != 2 or P.shape[1] != 4096:
+                    raise SystemExit("live projection contract violated: %s" % (P.shape,))
+                outs["live_4096_random_projection"] = P
+                metas["live_4096_random_projection"] = {
+                    "is_qwen_space": False,
+                    "note": "explicit deterministic random 128->4096 projection; NOT the Qwen space",
+                    "n_frames": int(P.shape[0]), "frame_dim": 4096, "dtype": str(P.dtype)}
+        out_path = args.out or os.path.join(
+            ROOT, "build", "tmp", "audio_signal_matrix",
+            os.path.splitext(os.path.basename(wav_path))[0] + ".matrix.npz")
+        out_path = _abs(out_path)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        payload = {("M_" + k): v for k, v in outs.items()}
+        payload["meta"] = json.dumps({"wav": wav_path, "duration_sec": round(dur, 4),
+                                      "frontends": metas, "contract":
+                                      "qwen: [F,4096] @40ms true space; live: [F,128] 1s-pooled "
+                                      "sliding view (true_frame_space=False)"})
+        np.savez_compressed(out_path, **payload)
+        log("wrote %s (%s)" % (out_path, {k: (v.shape, str(v.dtype)) for k, v in outs.items()}))
         return 0
 
-    run_dir = os.path.join(root, args.out_dir, ts)
+    out_base = args.out_dir if os.path.isabs(args.out_dir) else os.path.join(ROOT, args.out_dir)
+    run_dir = os.path.join(out_base, ts)
     os.makedirs(run_dir, exist_ok=True)
     log("run dir: %s" % run_dir)
     rng = random.Random(20261118)
-
-    cache_path = os.path.join(run_dir, "matrices.pkl.npy")
-    t0_metrics = time.time()
     q = QwenFrontend(args.threads) if args.frontend in ("qwen", "both") else None
     lv = LiveFrontend(args.threads) if args.frontend in ("live", "both") else None
+    cache_path = os.path.join(run_dir, "matrices.pkl.npy")
+    t0_metrics = time.time()
 
     if os.path.isfile(cache_path):
         z = np.load(cache_path, allow_pickle=True).item()
-        data, rev, chosen = z["data"], z["rev"], z["chosen"]
-        log("loaded cached matrices from %s" % cache_path)
+        want = [n for n, o in (("qwen", q), ("live", lv)) if o is not None]
+        conds = ("clean", "noise10", "noise0")
+        complete = (isinstance(z.get("data"), dict)
+                    and all(f in z["data"] for f in want)
+                    and all(all(c in z["data"][f] for c in conds) for f in want)
+                    and all(f in (z.get("rev") or {}) for f in want))
+        if complete:
+            data, rev, chosen = z["data"], z["rev"], z["chosen"]
+            log("loaded cached matrices from %s" % cache_path)
+        else:
+            log("partial cache at %s (frontends/conditions missing) -> recomputing" % cache_path)
     else:
         test = fsc_split("test")
         by_spk = {}
@@ -545,6 +662,7 @@ def main(argv=None):
                     stats.append(pooled_stats(M))
                 data[fe_name][cond] = {"mats": mats, "speakers": spks,
                                        "stats": np.stack(stats)}
+                _save_cache(cache_path, data, {}, chosen)
                 log("%s/%s: %d matrices, shapes %s..%s (%.0fs total)" %
                     (fe_name, cond, len(mats), mats[0].shape, mats[-1].shape,
                      time.time() - t0))
@@ -559,8 +677,9 @@ def main(argv=None):
                 wav = read_wav(r["wav"])[::-1].copy()
                 stats.append(pooled_stats(fe.matrix(wav)))
             rev[fe_name] = np.stack(stats)
+            _save_cache(cache_path, data, rev, chosen)
             log("%s: reversed matrices for %d utterances" % (fe_name, len(rev_chosen)))
-        np.save(cache_path, {"data": data, "rev": rev, "chosen": chosen}, allow_pickle=True)
+        _save_cache(cache_path, data, rev, chosen)
         log("cached matrices -> %s" % cache_path)
     speakers = sorted({r["speaker"] for r in chosen})
     conditions = [("clean", None), ("noise10", 10.0), ("noise0", 0.0)]
@@ -611,9 +730,20 @@ def main(argv=None):
         "tool": "tools/audio_signal_matrix.py",
         "createdUtc": _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "design_doc": "doc/v10.1/io_signal_matrix_design.md",
-        "contract": "audio = 40 ms/frame x 4096 (multimodal_world_model.hpp:35-47); "
-                    "128 is only the projected interface view",
-        "frontends": {"qwen": q.describe() if q else None, "live": lv.describe() if lv else None},
+        "contract": "audio = 40 ms/frame x 4096 (multimodal_world_model.hpp:35-47): the Qwen frontend "
+                    "is the TRUE [F,4096] space; the live encoder CANNOT produce it and is measured "
+                    "honestly in its native [F,128] space (no fake frames)",
+        "frontends": {"qwen": q.describe() if q else None,
+                      "live": lv.describe(projected=False) if lv else None},
+        "honesty": {
+            "qwen_true_frame_space": True if q else None,
+            "qwen_frame_dim": 4096 if q else None,
+            "live_true_frame_space": False if lv else None,
+            "live_frame_dim": 128 if lv else None,
+            "live_4096_projection_emitted": False,
+            "note": "the live speech encoder is a 1 s pooled 128-d concept model; this run uses its "
+                    "native frame dimension and never writes a 4096-d live matrix",
+        },
         "fsc_subset": {"split": "test (official, 10 unseen speakers)",
                        "n_per_speaker": args.n_per_speaker,
                        "utterances": len(chosen), "speakers": speakers,
@@ -621,11 +751,10 @@ def main(argv=None):
         "metrics": results,
         "runtime_seconds_total": round(time.time() - t0_metrics, 1),
         "limitations": [
-            "Qwen front-end verified as a TRUE 40 ms x 4096 frame space (I/O and 750/30s rate); "
-            "the live speech encoder CANNOT produce it (1 s pooled 128-d; fallback 4096 is an "
-            "arbitrary projection).",
+            "Qwen front-end verified as a TRUE 40 ms x 4096 frame space (ONNX I/O 750/30 s); the "
+            "live speech encoder CANNOT produce it (1 s pooled 128-d, measured in [F,128]).",
             "FSC subset is small (n_per_speaker x 10 speakers) because Qwen2-Audio encoder "
-            "inference is ~9 s/utterance on CPU (95M+635M params); metrics are indicative.",
+            "inference is ~6.6 s/utterance on CPU; metrics are indicative, not final.",
             "U4 is a PROXY: learned alignment projections W_t/W_g are unavailable offline; "
             "meme vectors are hash-based node embeddings reproduced from gnn_meme_serial.json "
             "(12 groups), and audio stats are hash-projected to 512-d.",
@@ -647,3 +776,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
+
