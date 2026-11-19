@@ -361,3 +361,148 @@ for d in ('audio_fsc_intent_20261118','audio_fsc_action_20261118',
 All five manifests must print `NOT DEPLOY` / `chosen = None` — that is the round's
 decision. The superseded `audio_fsc_20261118` (old relative-only rule) is the only one
 that prints `DEPLOY` and must not be used.
+
+## 9. Encoder from a pretrained base (round 2, design-corrected 2026-11-18)
+
+> **Design correction (user, 2026-11-18).** The 4 IO models are not just classifiers:
+> their purpose is **understanding, including environment understanding**, and they must
+> link to the **world-model module** (`multimodal_world_model.*`). A label-only objective
+> is under-specified. Also: the current encoders lack semantics because they are
+> **undertrained and too small**, so the fix is to **fine-tune from a pretrained base**,
+> not train from scratch. The from-scratch small CNN built earlier in this round is
+> therefore **abandoned** (`runtime_store/models/audio_encoder/fscenc_20261118/`, kept only
+> as superseded evidence; do not deploy).
+
+- Tool: `tools/audio_train_encoder.py` (rewritten for the pretrained-base design)
+- Run: `runtime_store/models/audio_encoder/fscw2v_20261118/`
+- ONNX check: `tools/audio_encoder_onnx_verify.py`
+
+### 9.1 Base model provenance
+
+| field | value |
+|---|---|
+| base id | **facebook/wav2vec2-base-960h** (self-supervised wav2vec2 base, ASR-finetuned) |
+| licence | **Apache-2.0** |
+| source | `hf-mirror.com` (HuggingFace mirror; huggingface.co itself is unreachable from this host) |
+| files | `config.json` 1 596 B sha256 `d3ec255c…`; `preprocessor_config.json` 159 B sha256 `b225d617…`; `model.safetensors` **377 607 901 B** sha256 **`8aa76ab2243c81747a1f832954586bc566090c83a0ac167df6f31f0fa917d74a`** |
+| download | 106.8 s (~3.5 MB/s), recorded in `runtime_store/models/audio_encoder/base_wav2vec2_base_960h/provenance.json` |
+| params | 94 613 248 (frozen in this round) |
+| input | raw 16 kHz mono waveform (per-utterance zero-mean/unit-var normalisation inside the model) |
+
+### 9.2 What is trained (CPU-only policy, no silent downgrade)
+
+The 95M-param base is **frozen**; a trainable **128-d adapter** is added so the output
+contract matches the live encoder (d=128). Full fine-tuning of the base is **not
+attempted on CPU** (infeasible in the 2.5 h budget); the GPU cost estimate is in §9.7.
+This is the explicitly allowed "freeze the base + train the projection/adapter" path,
+not a silent downgrade.
+
+- Adapter: `Linear(768→256) + GELU + Dropout(0.1) + Linear(256→128) + BN(128)` plus a
+  `Linear(128→16)` environment-state head, **~0.23 M trainable params**.
+- Objective ladder, all in one loss over all **23 132** FSC train utterances:
+  1. **intent classification** (31-way CE, speaker-independent splits);
+  2. **audio-text contrastive** — `0.5 × InfoNCE` against a deterministic 128-d
+     bag-of-words + char-3/4-gram embedding of the local FSC `transcription` column;
+  3. **environment/state** — `0.5 × MSE` to a deterministic 16-d audio-scene state vector
+     (loudness, dynamics, zero-crossing, spectral centroid/bandwidth/rolloff/flatness,
+     low/mid/high band ratios, spectral flux mean/std, SNR proxy, periodicity, 4 Hz
+     modulation, clipping). This is the audio-scene evidence channel intended for the
+     world-model module.
+- Official FSC **valid** split for early stopping; **test** (3 793 utterances, 10 unseen
+  speakers) held out. 30 epochs, AdamW 1e-3, cosine, batch 256, 3 seeds (adapter init/
+  order only; base and data fixed). CPU-only: torch 2.8.0+cpu, 32 threads.
+
+### 9.3 Gate — linear probe on frozen base vs trained adapter (held-out)
+
+Gate: 3-seed adapter mean must beat the current frozen IO encoder on intent **top-1,
+top-5, ridge probe** (>3.39 % / 15.59 % / 3.78 %). Chance 3.23 %, majority 10.44 %.
+
+_ABORTED by the 2026-11-18 signal-matrix design correction (doc/v10.1/io_signal_matrix_design.md): the intent/action/object classification ladder is withdrawn as an IO goal and measures projection fidelity, not understanding. No classification numbers from this round are used. The wav2vec2-base download remains as an optional future front-end candidate; the signal-matrix round is section 10._
+
+### 9.4 Environment/state objective and world-model link
+
+The adapter predicts the 16-d scene-state vector from the audio; held-out quality is
+reported as `env_cosine` / `env_mse` in §9.3. The exported ONNX has **two outputs**:
+`concept [1,128,1,1]` (primary, drop-in for the live encoder) and
+`world_state [1,16]` (optional; the current C++ loader requests only `output_name`, so it
+ignores the extra output). Intended wiring: `world_state` becomes the audio-scene
+evidence channel for `multimodal_world_model.*` / the world-model store (the module
+currently consumes encoded sensory evidence through the bridge; product-side wiring of
+this channel is still to be written). This is why the objective is not label-only: part
+of the representation is forced to encode *where/what the environment is*, not just the
+command. Teacher definition and fields: `manifest.json → env_state_teacher`; export
+schema: `manifest.json → export.onnx_io`.
+
+### 9.5 Denoise secondary guardrail (0 dB, never optimised alone)
+
+_n/a (round aborted before completion)._
+
+### 9.6 Export and C++ contract
+
+_n/a (round aborted before completion)._
+
+### 9.7 Encoder verdict and cost
+
+_n/a (round aborted before completion)._
+
+## 10. Signal-matrix audio understanding (round 3, design-corrected 2026-11-18)
+
+> **Design correction (user/Lead, 2026-11-18, `doc/v10.1/io_signal_matrix_design.md`).**
+> The system's representation is a **signal matrix**, not labels: audio must be
+> **40 ms/frame × 4096** (`multimodal_world_model.hpp:35-47`); **128 is only the projected
+> interface view**, and our earlier intent/action/object classification ladder was
+> therefore measuring *projection fidelity*, not understanding. It is withdrawn (§9 is
+> kept only as an aborted record). The new goal is to produce the matrix and measure
+> **understanding** — environmental separability, time-arrow, meme-space alignment and
+> next-state predictability — not classification accuracy.
+
+- Tool: `tools/audio_signal_matrix.py` (matrix production + U1–U4 metrics)
+- Run: `runtime_store/models/audio_signal_matrix/fsc_matrix_20261118/`
+- Design reference: `doc/v10.1/io_signal_matrix_design.md`
+
+### 10.1 Front-end inventory: which local model gives a TRUE 4096-d frame space
+
+| front-end | artifact | I/O (verified) | frame space | verdict |
+|---|---|---|---|---|
+| **Qwen2-Audio acoustic encoder + connector** | `E:\079\v6.0Alixander\runtime_store\models\multimodal_enc\qwen2_audio_connector.onnx` (2,781,377 B) + `.onnx.data` (2,568,945,664 B) + `qwen2_audio_feature_extractor/preprocessor_config.json` (WhisperFeatureExtractor, 128 mels, hop 160, n_fft 400) | `input_features [batch,128,3000]` → `audio_features [batch,750,4096]` (ORT-inspected) | **750 frames / 30 s = 40 ms/frame × 4096** | ✅ **TRUE 4096-d frame space** — exactly the `multimodal_world_model.hpp` audio contract; the 2.57 GB external data is the acoustic encoder itself (Whisper-style, ~635 M params), not just a linear connector, so it runs from mel on CPU |
+| live in-house speech encoder | `runtime_store/models/additive_jepa/speech_encoder/best.onnx` (4.9 MB) | `waveform [b,1,1,16000]` → `concept [b,128,1,1]` | 1 s pooled 128-d only | ❌ **cannot** produce 4096×40 ms; fallback = sliding 1 s window every 40 ms → `[F,128]`, then a deterministic random projection 128→4096 (flagged `true_frame_space=False`; the 4096 view is arbitrary noise, not the Qwen space) |
+| LLaVA vision tower + projector (context) | stale `llava-1.5-7b-hf_full/vision_tower/model.safetensors` (1,214,077,616 B) + `multi_modal_projector.pt` (83,921,513 B); `llava_vision_projector.onnx` (2,783,589 B) + `.data` (1,247,674,368 B) | `pixel_values [b,3,336,336]` → `image_features [1,576,4096]` | 576×4096 per frame | present for the *image* side of the same matrix design; not used for the audio task |
+
+Provenance/sha256 of both front-end artifacts are recorded in the run manifest. The
+Qwen2-Audio model card licence is Apache-2.0 (Qwen2-Audio-7B-Instruct); only locally
+present stale-tree artifacts were read (live model dirs untouched; no network download for
+this round).
+
+### 10.2 Understanding metrics on FSC (definitions)
+
+Per `io_signal_matrix_design.md` §6 and `HAI_Formal_Spec.md:154-166` ("understanding =
+causal/predictive"), classification accuracy is **not** a headline. Metrics computed on
+the official FSC test split (10 unseen speakers; subset due to CPU cost, see §10.4):
+
+- **U1 next-state predictability** — fit `z_{t+1} ≈ A z_t + b` in a PCA-64 space of the
+  frame matrix (train utterances, speaker-disjoint); report 1-step/3-step rollout MSE vs
+  the **identity** (`z_{t+1}=z_t`) and **mean-frame** baselines on held-out speakers;
+  want ratio < 1 and R² > 0.
+- **U2 environment separability** — KMeans on pooled frame statistics
+  (`mean‖std‖mean|Δ|`); ARI/NMI against (a) speaker identity (the only real environment
+  proxy in FSC) and (b) synthetic noise conditions (clean / 10 dB / 0 dB MUSAN noise).
+  No labels are used as a classification objective; clustering is label-free.
+- **U3 time-arrow** — forward vs time-reversed waveforms run through the encoder (honest
+  reversal, not frame reversal); 5-fold logistic-regression balanced accuracy; want > 0.55
+  (0.5 = chance).
+- **U4 meme-space alignment (proxy)** — cosine between projected matrix statistics and
+  meme-node vectors reproduced from `runtime_store/gnn_meme_serial.json` (12 groups) with
+  the `textToMiniEmbedding` hash scheme (`main_hub_parts/014_*.inc:18-45`); the learned
+  `W_t/W_g` alignment projections are unavailable offline, so this is explicitly a proxy.
+
+### 10.3 Results
+
+<!-- SM_RESULTS -->
+
+### 10.4 Honest limitations / what is missing
+
+<!-- SM_LIMITS -->
+
+### 10.5 Verdict
+
+<!-- SM_VERDICT -->

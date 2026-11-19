@@ -64,7 +64,7 @@ cannot hide the rest.
 
 | id | severity | checks | notes |
 |---|---|---|---|
-| R2.0 | info | consumes `build/tmp/dead_assets.json` from `deadcode-audit` when present: counts verdicts, flags paths that no longer exist | owner: deadcode-audit; this rule is the integration point (schema below) |
+| R2.0 | info | consumes `build/tmp/dead_assets.json` from `deadcode-audit` when present: 52 rows / 22 delete / 25 keep / 5 review (batch-1 ≈ 8.92 GiB); counts verdicts, records advisory path-existence stats | owner: deadcode-audit; this rule is the integration point and never deletes. Path rows may be prose/pseudo-paths, so existence is stats-only |
 | R2.1 | warn | root `*.cpp` not reachable from `build/compile_sources.txt`, `compile.bat COMMON_SOURCES`, `main.cpp`, `compile_gtest.bat` or the RDK script; root `*.hpp` never `#include`d by any product source | heuristic: deliberate stubs (RDK), separate binaries and generated lists are excluded/marked; verify with deadcode-audit before deleting |
 | R2.2 | info | config dot-paths whose leaf identifier never appears in product sources (identifier-set scan of `.cpp/.hpp/.inc/.addons/.module_overrides`) | heuristic: dynamic paths/env-only reads can be false positives; the v8.0 config audit found hundreds of dead keys |
 | R2.3 | info | large (>=32 MiB) `runtime_store` model/data files whose basename appears in no config, manifest.json or nearby `*.json`; bounded depth/time because runtime_store is ~200 GB | advisory only; deadcode-audit owns deletion |
@@ -80,7 +80,7 @@ cannot hide the rest.
 | R3.4 | warn | `#if 0` blocks, commented-out `#include` lines (main.cpp hub), `if (false)`/`if (0)` branches | Disabled code is invisible to build checks and reviewers; main.cpp has hub includes "disabled due to pre-existing compilation errors", which are latent feature gaps |
 | R3.5 | warn | lock site with a network/tool/LLM call inside the same brace scope (`generate(`, `tcpExchange`, `invokeAddonTool`, `callMcpTool`, `subprocess`, HTTP...) | Coarse locks around IO serialised the gateway; the unified-pipeline refactor had to move file IO outside mutexes. Holding a lock over an LLM/tool call risks priority inversion/deadlock |
 
-## Baseline (2026-11-17 23:35, current tree)
+## Baseline (2026-11-18 01:05, current tree; after conan-gcc16 gate + vendor truth)
 
 Command: `python tools\audit_check.py` — 18 rules, ~20 s (R1.4 runs the 4 s vendor verify).
 
@@ -105,6 +105,11 @@ R1.4 now PASSes on the authoritative vendor truth: verify script result PASS in
 `95ae6a367aed65a89e7628f288f3d1a8805789550eba197555525c97e98a6ceb`, dirty set ==
 recorded set.  The 12 superseded per-feature patches are exempt (they stay until
 the Lead approves deletion; `regenerated/` is outside the gate).
+
+R2.0 consumes the published `build/tmp/dead_assets.json` (52 rows; 22 delete /
+25 keep / 5 review; batch-1 ≈ 8.92 GiB, batch-2 ≈ 34.2 GiB pending Lead
+approval).  It counts verdicts and reports path-existence as stats only; no
+deletion is performed or planned by this checker.
 
 Top findings at baseline (from `build/tmp/audit_check.json`):
 
