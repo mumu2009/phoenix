@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -460,6 +461,15 @@ class VideoLocalOnnxModel : public VideoModel {
       : cfg_(std::move(cfg)), targetDim_(targetDim > 0 ? targetDim : kDefaultConceptDim), gpu_(gpu),
         modelPath_(resolveOnnxModelPath("encoder", imageWeightsDir(cfg_.id))),
         decoderPath_(resolveOnnxModelPath("decoder", imageWeightsDir(cfg_.id))) {
+    /* Guard (2026-11 io-head): resolveOnnxModelPath() rewrites only the
+       "_encoder"/"_decoder" part of the directory name.  A variant whose
+       directory has neither (e.g. vision_resnet50_a1_in1k_adapter) makes the
+       decoder lookup resolve to the SAME best.onnx as the encoder: status
+       would claim decoderReady while decode() feeds a 128-d concept into an
+       image encoder.  Never let the decoder be the encoder. */
+    if (!decoderPath_.empty() && decoderPath_ == modelPath_) {
+      decoderPath_.clear();
+    }
     loadManifest("encoder", encoderInputName_, encoderOutputName_, encoderInputShape_, encoderOutputShape_, conceptDim_);
     loadManifest("decoder", decoderInputName_, decoderOutputName_, decoderInputShape_, decoderOutputShape_, conceptDim_);
     if (conceptDim_ <= 0) conceptDim_ = kDefaultConceptDim;
@@ -910,6 +920,74 @@ std::unique_ptr<VideoDecoder> createVideoDecoder(
   auto model = createVideoModel(variantId, targetDim, backend);
   if (model) model->kind_ = "video-decoder";
   return model;
+}
+
+namespace {
+
+constexpr const char *kShippedImageEncoderVariant = "video-encoder";
+
+/* Classify WHY `variant` cannot be used, in operator-facing terms:
+   unknown-variant-registry | onnx-missing:<detail> | status-not-ready:<detail>.
+   Returns an empty string when the variant is usable. */
+std::string imageEncoderUnavailableReason(const std::string &variant) {
+  if (findVideoModelVariant(variant) == nullptr) {
+    return "unknown-variant-registry";
+  }
+  auto probe = createVideoModel(variant, 0, "auto");
+  if (!probe) return "status-not-ready:model creation failed";
+  const nlohmann::json status = probe->status();
+  if (status.value("ready", false)) return {};
+  std::string detail = status.value("error", std::string());
+  if (detail.empty()) detail = "model not ready";
+  const bool looksMissing =
+      detail.find("missing") != std::string::npos ||
+      detail.find("not configured") != std::string::npos;
+  return std::string(looksMissing ? "onnx-missing: " : "status-not-ready: ") +
+         detail;
+}
+
+void logImageEncoderSelected(const ImageEncoderChoice &choice) {
+  const nlohmann::json status =
+      choice.model ? choice.model->status() : nlohmann::json::object();
+  std::cout << "[io-head] image encoder variant=" << choice.variant
+            << " conceptDim=" << status.value("conceptDim", 0)
+            << " targetDim=" << status.value("targetDim", 0)
+            << " backend=" << status.value("backend", std::string("unknown"))
+            << std::endl;
+}
+
+}  // namespace
+
+ImageEncoderChoice createImageEncoderWithFallback(
+    const std::string &requestedVariant, int targetDim,
+    const std::string &backend) {
+  ImageEncoderChoice choice;
+  choice.requestedVariant = requestedVariant;
+  choice.variant = requestedVariant.empty()
+                       ? std::string(kShippedImageEncoderVariant)
+                       : requestedVariant;
+
+  if (choice.variant != kShippedImageEncoderVariant) {
+    const std::string reason = imageEncoderUnavailableReason(choice.variant);
+    if (reason.empty()) {
+      choice.model = createVideoModel(choice.variant, targetDim, backend);
+      if (choice.model) {
+        logImageEncoderSelected(choice);
+        return choice;
+      }
+    }
+    choice.fellBack = true;
+    choice.reason = reason.empty() ? "status-not-ready:model creation failed"
+                                   : reason;
+    std::cout << "[io-head] image encoder fallback requested=" << choice.variant
+              << " reason=" << choice.reason
+              << " selected=" << kShippedImageEncoderVariant << std::endl;
+    choice.variant = kShippedImageEncoderVariant;
+  }
+
+  choice.model = createVideoModel(choice.variant, targetDim, backend);
+  logImageEncoderSelected(choice);
+  return choice;
 }
 
 }  // namespace io

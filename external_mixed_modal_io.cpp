@@ -102,6 +102,39 @@ std::vector<float> normalizeConcept(std::vector<float> value) {
     return phoenix::multimodal::normalizeVector(value);
 }
 
+/* 2026-11 io-head wiring: the image encoder variant is operator-selected by
+   jepa.image.variant / JEPA_IMAGE_VARIANT instead of being hardcoded.  The
+   shipped default stays "video-encoder", so a plain restart never changes
+   behaviour; the new "vision_resnet50_a1_in1k_adapter" is opt-in via env.
+   createImageEncoderWithFallback() fails open to the shipped encoder and logs
+   every decision with [io-head]. */
+std::string configuredImageEncoderVariant() {
+    static const std::string variant = phoenix::resolveConfig<std::string>(
+        "jepa.image.variant", std::string("video-encoder"), "JEPA_IMAGE_VARIANT");
+    return variant;
+}
+
+std::string configuredImageEncoderBackend() {
+    static const std::string backend = phoenix::resolveConfig<std::string>(
+        "jepa.image.backend", std::string("auto"), "JEPA_IMAGE_BACKEND");
+    return backend;
+}
+
+/* Selected (possibly fallback) variant; imageVariantFromMetadata() reports the
+   encoder that actually produced the concept, not the requested one. */
+std::mutex gSelectedImageEncoderMu;
+std::string gSelectedImageEncoder = "video-encoder";
+
+void setSelectedImageEncoder(const std::string &variant) {
+    std::lock_guard<std::mutex> lock(gSelectedImageEncoderMu);
+    gSelectedImageEncoder = variant;
+}
+
+std::string selectedImageEncoder() {
+    std::lock_guard<std::mutex> lock(gSelectedImageEncoderMu);
+    return gSelectedImageEncoder;
+}
+
 VideoModel &videoEncoder(size_t targetDim = 0) {
     static std::mutex mu;
     static std::unordered_map<int, std::unique_ptr<VideoModel>> cache;
@@ -109,7 +142,14 @@ VideoModel &videoEncoder(size_t targetDim = 0) {
     int key = static_cast<int>(targetDim);
     auto it = cache.find(key);
     if (it != cache.end()) return *it->second;
-    auto model = createVideoEncoder("video-encoder", static_cast<int>(targetDim));
+    auto choice = phoenix::io::createImageEncoderWithFallback(
+        configuredImageEncoderVariant(), static_cast<int>(targetDim),
+        configuredImageEncoderBackend());
+    setSelectedImageEncoder(choice.variant);
+    auto model = std::move(choice.model);
+    if (!model) {  // defensive: even the shipped encoder failed to construct
+        model = createVideoEncoder("video-encoder", static_cast<int>(targetDim));
+    }
     auto &ref = *model;
     cache.emplace(key, std::move(model));
     return ref;
@@ -122,6 +162,9 @@ VideoModel &videoDecoder(size_t targetDim = 0) {
     int key = static_cast<int>(targetDim);
     auto it = cache.find(key);
     if (it != cache.end()) return *it->second;
+    /* Decoder stays on the shipped additive decoder: the adapter variant is
+       encode-only (VideoLocalOnnxModel clears a decoder that resolves to the
+       same best.onnx as the encoder). */
     auto model = createVideoDecoder("video-encoder", static_cast<int>(targetDim));
     auto &ref = *model;
     cache.emplace(key, std::move(model));
@@ -130,7 +173,7 @@ VideoModel &videoDecoder(size_t targetDim = 0) {
 
 std::string imageVariantFromMetadata(const nlohmann::json &metadata) {
     (void)metadata;
-    return "video-encoder";
+    return selectedImageEncoder();
 }
 
 AudioModel &audioEncoder(size_t targetDim = 0) {

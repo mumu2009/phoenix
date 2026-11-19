@@ -146,6 +146,14 @@ inline std::vector<VideoModelConfig> videoOfficialVariants() {
        "timm/resnet18.a1_in1k",  16, 224, 11689512LL, "IN1K"},
       {"video-encoder",    "additive_resnet18",
        "runtime_store/models/additive_jepa/vision_encoder",  16, 224, 0, "additive", "best.onnx", "vision_encoder"},
+      /* 2026-11-18 io-head: frozen timm ResNet50 + linear(2048->128) adapter.
+         Self-contained ONNX (backbone+adapter inside), outputs 128-d directly;
+         installed under runtime_store/models/additive_jepa/<dir>/best.onnx so
+         resolveOnnxModelPath()/detectLocalBackend() find it without changes.
+         Selected only when jepa.image.variant/JEPA_IMAGE_VARIANT names it; the
+         default stays "video-encoder". */
+      {"vision_resnet50_a1_in1k_adapter", "resnet50_adapter",
+       "runtime_store/models/additive_jepa/vision_resnet50_a1_in1k_adapter", 16, 224, 0, "adapter", "best.onnx", "vision_resnet50_a1_in1k_adapter"},
       {"ijepa_vith14_1k",  "vit_h14",
        "facebook/ijepa_vith14_1k",  14, 224, 632000000LL, "IN1K"},
       {"ijepa_vith16_448", "vit_h16",
@@ -181,6 +189,39 @@ std::unique_ptr<VideoEncoder> createVideoEncoder(
 std::unique_ptr<VideoDecoder> createVideoDecoder(
     const std::string &variantId = "ijepa_vith14_1k",
     int targetDim = 0,
+    const std::string &backend = "auto");
+
+/**
+ * @brief Outcome of resolving the configured image encoder variant.
+ *
+ * The image encoder variant is operator-selected (jepa.image.variant /
+ * JEPA_IMAGE_VARIANT) but the image->concept path must fail OPEN to the
+ * shipped 128-d encoder: an unknown registry id, a missing ONNX or a model
+ * that is not ready must never turn image packets into empty concept vectors.
+ * Every decision is logged with the "[io-head]" prefix and carries the
+ * requested variant, the reason and the selected variant so the behaviour is
+ * observable in the gateway log (2026-11 image adapter wiring).
+ */
+struct ImageEncoderChoice {
+  std::string requestedVariant; /**< configured value; empty = shipped default */
+  std::string variant;          /**< variant actually selected */
+  bool fellBack = false;        /**< true if requestedVariant was not usable */
+  std::string reason;           /**< why the fallback happened (empty if none) */
+  std::unique_ptr<VideoModel> model;
+};
+
+/**
+ * @brief Create the image encoder for `requestedVariant`, failing open to the
+ *        shipped "video-encoder" (additive 128-d) encoder.
+ *
+ * Logs (stdout):
+ *   [io-head] image encoder variant=<v> conceptDim=<n> targetDim=<n> backend=<b>
+ *   [io-head] image encoder fallback requested=<v> reason=<r> selected=<v>
+ * `reason` is one of: unknown-variant-registry, onnx-missing:<detail>,
+ * status-not-ready:<detail>.
+ */
+ImageEncoderChoice createImageEncoderWithFallback(
+    const std::string &requestedVariant, int targetDim = 0,
     const std::string &backend = "auto");
 
 /**
